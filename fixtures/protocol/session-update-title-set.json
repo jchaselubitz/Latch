@@ -1,0 +1,19 @@
+{
+  "name": "session-update-title-set",
+  "protocol": 1,
+  "description": "Title set. The key is present with a string value.",
+  "frame": {
+    "type": "control",
+    "encoded": "100000003082a174ae73657373696f6e2e757064617465a57469746c65b741757468656e7469636174696f6e207265666163746f72",
+    "payload": "82a174ae73657373696f6e2e757064617465a57469746c65b741757468656e7469636174696f6e207265666163746f72",
+    "decoded": {
+      "t": "session.update",
+      "title": "Authentication refactor"
+    }
+  },
+  "merge": {
+    "state": "absent",
+    "attachments": "absent",
+    "title": "set"
+  }
+}

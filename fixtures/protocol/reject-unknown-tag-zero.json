@@ -1,0 +1,10 @@
+{
+  "name": "reject-unknown-tag-zero",
+  "protocol": 1,
+  "description": "Tag 0x00 with a well-formed length. The frame is otherwise perfectly readable, which is exactly why it must be refused: a decoder that skips an unknown frame is trusting a length field it has no schema for.",
+  "reject": {
+    "encoded": "0000000000",
+    "error": "unknown_type",
+    "layer": "frame"
+  }
+}

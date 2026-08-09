@@ -1,0 +1,10 @@
+{
+  "name": "terminal-input-keystroke",
+  "protocol": 1,
+  "description": "One keystroke. This is the frame the interactive path is judged on.",
+  "frame": {
+    "type": "terminal.input",
+    "encoded": "020000000161",
+    "payload": "61"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "name": "reject-control-unsupported-protocol",
+  "protocol": 1,
+  "description": "An attach naming protocol version 2. Version negotiation rides attach and has exactly one failure outcome: an error frame and a close, never a downgrade to a version the peer did not offer.",
+  "reject": {
+    "encoded": "100000005786a174a6617474616368a870726f746f636f6c02a46d6f6465a7636f6e74726f6ca5737465616cc2a6636c69656e7482a46b696e64a3636c69a46e616d65a5697465726da473697a6582a4636f6c73ccc8a4726f777332",
+    "error": "unsupported_protocol",
+    "layer": "control"
+  }
+}

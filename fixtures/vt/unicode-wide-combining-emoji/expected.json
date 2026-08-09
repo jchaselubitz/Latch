@@ -1,0 +1,107 @@
+{
+  "description": "Wide characters occupy two cells with an explicit continuation, a combining mark stays in its base character's cell, and a wide character that will not fit in the last column wraps rather than splitting.",
+  "size": {
+    "cols": 100,
+    "rows": 30
+  },
+  "alternate_screen": false,
+  "cursor": {
+    "row": 12,
+    "col": 0,
+    "visible": true
+  },
+  "scroll_region": {
+    "top": 0,
+    "bottom": 29
+  },
+  "modes": {
+    "autowrap": true
+  },
+  "pen": "default",
+  "rows": {
+    "0": "ascii baseline",
+    "1": "cjk: 你好世界 wide",
+    "2": "combining: é à ö ñ",
+    "6": "mixed: [你a好b]",
+    "7": "even: 漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢",
+    "8": "漢漢",
+    "9": "odd: 漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢",
+    "10": "漢漢",
+    "11": "done",
+    "12": ""
+  },
+  "cells": [
+    {
+      "row": 1,
+      "col": 5,
+      "text": "你",
+      "width": 2
+    },
+    {
+      "row": 1,
+      "col": 6,
+      "text": "",
+      "width": 0
+    },
+    {
+      "row": 1,
+      "col": 7,
+      "text": "好",
+      "width": 2
+    },
+    {
+      "row": 2,
+      "col": 11,
+      "text": "é",
+      "width": 1
+    },
+    {
+      "row": 2,
+      "col": 12,
+      "text": " ",
+      "width": 1
+    },
+    {
+      "row": 7,
+      "col": 6,
+      "text": "漢",
+      "width": 2
+    },
+    {
+      "row": 7,
+      "col": 98,
+      "text": "漢",
+      "width": 2
+    },
+    {
+      "row": 7,
+      "col": 99,
+      "text": "",
+      "width": 0
+    },
+    {
+      "row": 9,
+      "col": 97,
+      "text": "漢",
+      "width": 2
+    },
+    {
+      "row": 9,
+      "col": 98,
+      "text": "",
+      "width": 0
+    },
+    {
+      "row": 9,
+      "col": 99,
+      "text": " ",
+      "width": 1
+    },
+    {
+      "row": 10,
+      "col": 0,
+      "text": "漢",
+      "width": 2
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "name": "control-state-released",
+  "protocol": 1,
+  "description": "The controller's socket closed and nobody replaced it. Both fields null.",
+  "frame": {
+    "type": "control",
+    "encoded": "100000003283a174ad636f6e74726f6c2e7374617465ad636f6e74726f6c6c65725f6964c0b0636f6e74726f6c6c65725f6c6162656cc0",
+    "payload": "83a174ad636f6e74726f6c2e7374617465ad636f6e74726f6c6c65725f6964c0b0636f6e74726f6c6c65725f6c6162656cc0",
+    "decoded": {
+      "t": "control.state",
+      "controller_id": null,
+      "controller_label": null
+    }
+  }
+}

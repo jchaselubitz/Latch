@@ -1,0 +1,10 @@
+{
+  "name": "reject-control-resize-out-of-range",
+  "protocol": 1,
+  "description": "A column count above u16. Truncating it would silently resize the session to 4464 columns.",
+  "reject": {
+    "encoded": "100000001a83a174a6726573697a65a4636f6c73ce00011170a4726f777332",
+    "error": "invalid_field",
+    "layer": "control"
+  }
+}

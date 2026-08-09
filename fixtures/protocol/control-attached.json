@@ -1,0 +1,43 @@
+{
+  "name": "control-attached",
+  "protocol": 1,
+  "description": "The worker accepts an attach: session identity, who holds control, and the full presence list. The screen snapshot is not in here — it follows as ordinary terminal.output frames.",
+  "frame": {
+    "type": "control",
+    "encoded": "100000011185a174a86174746163686564a870726f746f636f6c01a773657373696f6e85a26964aa7365735f30314a5a5a5aa46e616d65a96c617463682d617069a57469746c65b741757468656e7469636174696f6e207265666163746f72a57374617465a772756e6e696e67a473697a6582a4636f6c73ccc8a4726f777332aa636f6e74726f6c6c6572aa6174745f30314a414141ab6174746163686d656e74739283a26964aa6174745f30314a414141a46d6f6465a7636f6e74726f6ca6636c69656e7482a46b696e64a3636c69a46e616d65a5697465726d83a26964aa6174745f30314a424242a46d6f6465a57761746368a6636c69656e7482a46b696e64a66d6f62696c65a46e616d65a77465726d697573",
+    "payload": "85a174a86174746163686564a870726f746f636f6c01a773657373696f6e85a26964aa7365735f30314a5a5a5aa46e616d65a96c617463682d617069a57469746c65b741757468656e7469636174696f6e207265666163746f72a57374617465a772756e6e696e67a473697a6582a4636f6c73ccc8a4726f777332aa636f6e74726f6c6c6572aa6174745f30314a414141ab6174746163686d656e74739283a26964aa6174745f30314a414141a46d6f6465a7636f6e74726f6ca6636c69656e7482a46b696e64a3636c69a46e616d65a5697465726d83a26964aa6174745f30314a424242a46d6f6465a57761746368a6636c69656e7482a46b696e64a66d6f62696c65a46e616d65a77465726d697573",
+    "decoded": {
+      "t": "attached",
+      "protocol": 1,
+      "session": {
+        "id": "ses_01JZZZ",
+        "name": "latch-api",
+        "title": "Authentication refactor",
+        "state": "running",
+        "size": {
+          "cols": 200,
+          "rows": 50
+        }
+      },
+      "controller": "att_01JAAA",
+      "attachments": [
+        {
+          "id": "att_01JAAA",
+          "mode": "control",
+          "client": {
+            "kind": "cli",
+            "name": "iterm"
+          }
+        },
+        {
+          "id": "att_01JBBB",
+          "mode": "watch",
+          "client": {
+            "kind": "mobile",
+            "name": "termius"
+          }
+        }
+      ]
+    }
+  }
+}

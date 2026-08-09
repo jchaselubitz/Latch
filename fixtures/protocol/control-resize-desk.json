@@ -1,0 +1,15 @@
+{
+  "name": "control-resize-desk",
+  "protocol": 1,
+  "description": "The controller's terminal changed size; the session follows it.",
+  "frame": {
+    "type": "control",
+    "encoded": "100000001783a174a6726573697a65a4636f6c73ccc8a4726f777332",
+    "payload": "83a174a6726573697a65a4636f6c73ccc8a4726f777332",
+    "decoded": {
+      "t": "resize",
+      "cols": 200,
+      "rows": 50
+    }
+  }
+}

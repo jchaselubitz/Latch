@@ -1,0 +1,15 @@
+{
+  "name": "error-control-busy",
+  "protocol": 1,
+  "description": "Another attachment holds input control and steal was not set.",
+  "frame": {
+    "type": "control",
+    "encoded": "100000004b83a174a56572726f72a4636f6465ac636f6e74726f6c5f62757379a76d657373616765d926616e6f74686572206174746163686d656e7420686f6c647320696e70757420636f6e74726f6c",
+    "payload": "83a174a56572726f72a4636f6465ac636f6e74726f6c5f62757379a76d657373616765d926616e6f74686572206174746163686d656e7420686f6c647320696e70757420636f6e74726f6c",
+    "decoded": {
+      "t": "error",
+      "code": "control_busy",
+      "message": "another attachment holds input control"
+    }
+  }
+}

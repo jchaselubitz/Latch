@@ -1,0 +1,10 @@
+{
+  "name": "reject-trailing-garbage",
+  "protocol": 1,
+  "description": "A complete terminal.output frame followed by bytes that are not a frame. Decoded as one exact frame this is trailing_bytes; the extra bytes are not quietly folded into the payload and not quietly dropped.",
+  "reject": {
+    "encoded": "010000000568656c6c6fdeadbeef",
+    "error": "trailing_bytes",
+    "layer": "frame"
+  }
+}

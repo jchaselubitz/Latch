@@ -1,0 +1,15 @@
+{
+  "name": "control-resize-maximum",
+  "protocol": 1,
+  "description": "u16 saturation on both axes, the largest size the field can carry.",
+  "frame": {
+    "type": "control",
+    "encoded": "100000001a83a174a6726573697a65a4636f6c73cdffffa4726f7773cdffff",
+    "payload": "83a174a6726573697a65a4636f6c73cdffffa4726f7773cdffff",
+    "decoded": {
+      "t": "resize",
+      "cols": 65535,
+      "rows": 65535
+    }
+  }
+}

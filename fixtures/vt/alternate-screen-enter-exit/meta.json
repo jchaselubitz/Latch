@@ -1,0 +1,20 @@
+{
+  "name": "alternate-screen-enter-exit",
+  "description": "less enters the alternate screen, is paged, then exits back to the primary screen with output after it.",
+  "size": {
+    "cols": 100,
+    "rows": 30
+  },
+  "recorded": {
+    "command": [
+      "bash",
+      "--norc",
+      "--noprofile",
+      "-c",
+      "printf 'before the pager\\n'; less /tmp/latch-vt-pager.txt; printf 'back on the primary screen\\n'"
+    ],
+    "term": "xterm-256color",
+    "platform": "linux",
+    "bytes": 6414
+  }
+}

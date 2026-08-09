@@ -1,0 +1,18 @@
+{
+  "name": "session-update-all-absent",
+  "protocol": 1,
+  "description": "Every optional field absent: a well-formed no-op merge. A decoder that requires at least one field rejects a legal message, and an encoder that emits nulls for absent fields turns this into a message that wipes the client's title.",
+  "frame": {
+    "type": "control",
+    "encoded": "100000001281a174ae73657373696f6e2e757064617465",
+    "payload": "81a174ae73657373696f6e2e757064617465",
+    "decoded": {
+      "t": "session.update"
+    }
+  },
+  "merge": {
+    "state": "absent",
+    "attachments": "absent",
+    "title": "absent"
+  }
+}

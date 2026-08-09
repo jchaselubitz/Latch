@@ -1,0 +1,29 @@
+{
+  "description": "After a submitted turn: the prompt was echoed, the spinner ran, and the result frame replaced it.",
+  "size": {
+    "cols": 100,
+    "rows": 30
+  },
+  "alternate_screen": true,
+  "cursor": {
+    "row": 27,
+    "col": 2,
+    "visible": true
+  },
+  "scroll_region": {
+    "top": 0,
+    "bottom": 29
+  },
+  "modes": {
+    "bracketed_paste": true,
+    "focus_reporting": true,
+    "mouse_tracking": "any_event",
+    "mouse_encoding": "sgr",
+    "autowrap": true,
+    "origin": false
+  },
+  "title": "✳ Claude Code",
+  "contains": [
+    "? for shortcuts"
+  ]
+}

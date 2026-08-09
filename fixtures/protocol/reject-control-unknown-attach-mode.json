@@ -1,0 +1,10 @@
+{
+  "name": "reject-control-unknown-attach-mode",
+  "protocol": 1,
+  "description": "A mode outside {watch, control}. Neither reading is safe: treating it as watch silently downgrades a client that expects to type, and treating it as control admits a second writer.",
+  "reject": {
+    "encoded": "100000005886a174a6617474616368a870726f746f636f6c01a46d6f6465a8726561646f6e6c79a5737465616cc2a6636c69656e7482a46b696e64a3636c69a46e616d65a5697465726da473697a6582a4636f6c73ccc8a4726f777332",
+    "error": "invalid_field",
+    "layer": "control"
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "name": "claude-code-resize-alt-screen",
+  "description": "Claude Code resized from 100x30 to 72x20 while the alternate screen is active; it redraws in response.",
+  "size": {
+    "cols": 100,
+    "rows": 30
+  },
+  "recorded": {
+    "command": [
+      "claude"
+    ],
+    "term": "xterm-256color",
+    "platform": "linux",
+    "bytes": 2403
+  },
+  "resizes": [
+    {
+      "at_byte": 1293,
+      "cols": 72,
+      "rows": 20
+    }
+  ]
+}

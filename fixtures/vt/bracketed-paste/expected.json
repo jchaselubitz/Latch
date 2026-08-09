@@ -1,0 +1,31 @@
+{
+  "description": "readline enabled bracketed paste, echoed the pasted lines in reverse video, disabled it to run them, and left it disabled after exit.",
+  "size": {
+    "cols": 100,
+    "rows": 30
+  },
+  "alternate_screen": false,
+  "cursor": {
+    "row": 6,
+    "col": 0,
+    "visible": true
+  },
+  "scroll_region": {
+    "top": 0,
+    "bottom": 29
+  },
+  "modes": {
+    "bracketed_paste": false,
+    "autowrap": true
+  },
+  "pen": "default",
+  "rows": {
+    "0": "bash-5.2$ echo one",
+    "1": "echo two",
+    "2": "one",
+    "3": "two",
+    "4": "bash-5.2$ exit",
+    "5": "exit",
+    "6": ""
+  }
+}

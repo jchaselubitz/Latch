@@ -1,0 +1,14 @@
+{
+  "name": "control-request-steal",
+  "protocol": 1,
+  "description": "The same request with steal set: the current controller is demoted and notified by a control.state broadcast.",
+  "frame": {
+    "type": "control",
+    "encoded": "100000001a82a174af636f6e74726f6c2e72657175657374a5737465616cc3",
+    "payload": "82a174af636f6e74726f6c2e72657175657374a5737465616cc3",
+    "decoded": {
+      "t": "control.request",
+      "steal": true
+    }
+  }
+}

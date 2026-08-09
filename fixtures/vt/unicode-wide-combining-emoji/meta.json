@@ -1,0 +1,21 @@
+{
+  "name": "unicode-wide-combining-emoji",
+  "description": "Wide CJK, combining marks, emoji including ZWJ sequences and variation selectors, and a wide character straddling the right margin. The `even:` line divides the remaining width exactly; the `odd:` line does not, so a wide character has to wrap and leave the final column blank.",
+  "size": {
+    "cols": 100,
+    "rows": 30
+  },
+  "recorded": {
+    "command": [
+      "bash",
+      "--norc",
+      "--noprofile",
+      "-c",
+      "\nprintf 'ascii baseline\\n'\nprintf 'cjk: \\344\\275\\240\\345\\245\\275\\344\\270\\226\\347\\225\\214 wide\\n'\nprintf 'combining: e\\314\\201 a\\314\\200 o\\314\\210 n\\314\\203\\n'\nprintf 'emoji: \\360\\237\\232\\200 \\342\\234\\205 \\360\\237\\216\\211\\n'\nprintf 'zwj: \\360\\237\\221\\251\\342\\200\\215\\360\\237\\221\\251\\342\\200\\215\\360\\237\\221\\247\\n'\nprintf 'vs16: \\342\\235\\244\\357\\270\\217 vs15: \\342\\235\\244\\357\\270\\216\\n'\nprintf 'mixed: [\\344\\275\\240a\\345\\245\\275b]\\n'\nprintf 'even: '\nprintf '\\346\\274\\242%.0s' $(seq 1 49)\nprintf '\\n'\nprintf 'odd: '\nprintf '\\346\\274\\242%.0s' $(seq 1 49)\nprintf '\\n'\nprintf 'done\\n'\n"
+    ],
+    "term": "xterm-256color",
+    "platform": "linux",
+    "bytes": 476
+  },
+  "notes": "Rows 4 and 5 (a ZWJ family sequence and variation selectors) carry no row or cell expectation on purpose: how many cells a ZWJ cluster occupies is a real difference between emulators, and pinning one answer here would decide the M1 backend evaluation by fixture rather than on merit. They are still fed, and the snapshot round-trip still has to reproduce whatever the chosen emulator does with them."
+}

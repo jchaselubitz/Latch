@@ -1,0 +1,19 @@
+{
+  "name": "session-update-title-cleared",
+  "protocol": 1,
+  "description": "Title cleared. The key is PRESENT and null — which must not decode the same as the absent case above. Conflating them is how a cleared title silently comes back on the next merge.",
+  "frame": {
+    "type": "control",
+    "encoded": "100000001982a174ae73657373696f6e2e757064617465a57469746c65c0",
+    "payload": "82a174ae73657373696f6e2e757064617465a57469746c65c0",
+    "decoded": {
+      "t": "session.update",
+      "title": null
+    }
+  },
+  "merge": {
+    "state": "absent",
+    "attachments": "absent",
+    "title": "cleared"
+  }
+}

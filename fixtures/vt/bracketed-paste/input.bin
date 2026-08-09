@@ -1,0 +1,7 @@
+[?2004hbash-5.2$ [7mecho one[27m
+[7mecho two[27m[A[C[Cecho one
+echo two
+[?2004lone
+two
+[?2004hbash-5.2$ exit
+[?2004lexit

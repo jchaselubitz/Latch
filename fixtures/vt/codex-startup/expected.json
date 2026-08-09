@@ -1,0 +1,27 @@
+{
+  "description": "Codex paints its full viewport on the primary screen, not the alternate one, and hides the cursor after each frame.",
+  "size": {
+    "cols": 100,
+    "rows": 30
+  },
+  "alternate_screen": false,
+  "cursor": {
+    "row": 14,
+    "col": 21,
+    "visible": false
+  },
+  "scroll_region": {
+    "top": 0,
+    "bottom": 29
+  },
+  "modes": {
+    "bracketed_paste": true,
+    "focus_reporting": true,
+    "mouse_tracking": "off",
+    "autowrap": true
+  },
+  "pen": "default",
+  "contains": [
+    "Sign in with Device Code"
+  ]
+}

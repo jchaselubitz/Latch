@@ -1,0 +1,10 @@
+{
+  "name": "reject-control-missing-required-field",
+  "protocol": 1,
+  "description": "A resize with no rows. Half a resize is not a resize.",
+  "reject": {
+    "encoded": "100000001082a174a6726573697a65a4636f6c7350",
+    "error": "invalid_field",
+    "layer": "control"
+  }
+}

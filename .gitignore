@@ -1,0 +1,17 @@
+.overlord/tmp/
+.overlord/logs/
+
+# Rust
+/target/
+**/*.rs.bk
+
+# Node (packages/, M3 onward)
+node_modules/
+dist/
+*.tsbuildinfo
+
+# macOS
+.DS_Store
+
+# Python (scripts/)
+__pycache__/

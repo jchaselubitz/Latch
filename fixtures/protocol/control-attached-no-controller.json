@@ -1,0 +1,26 @@
+{
+  "name": "control-attached-no-controller",
+  "protocol": 1,
+  "description": "Nobody holds input control and nobody is attached yet. Null controller and an empty list are ordinary states, not error states — control is released by socket close, so an empty session is what a controller leaving produces.",
+  "frame": {
+    "type": "control",
+    "encoded": "100000007e85a174a86174746163686564a870726f746f636f6c01a773657373696f6e85a26964aa7365735f30314a5a5a5aa46e616d65a96c617463682d617069a57469746c65c0a57374617465a86372656174696e67a473697a6582a4636f6c73ccc8a4726f777332aa636f6e74726f6c6c6572c0ab6174746163686d656e747390",
+    "payload": "85a174a86174746163686564a870726f746f636f6c01a773657373696f6e85a26964aa7365735f30314a5a5a5aa46e616d65a96c617463682d617069a57469746c65c0a57374617465a86372656174696e67a473697a6582a4636f6c73ccc8a4726f777332aa636f6e74726f6c6c6572c0ab6174746163686d656e747390",
+    "decoded": {
+      "t": "attached",
+      "protocol": 1,
+      "session": {
+        "id": "ses_01JZZZ",
+        "name": "latch-api",
+        "title": null,
+        "state": "creating",
+        "size": {
+          "cols": 200,
+          "rows": 50
+        }
+      },
+      "controller": null,
+      "attachments": []
+    }
+  }
+}

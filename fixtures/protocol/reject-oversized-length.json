@@ -1,0 +1,10 @@
+{
+  "name": "reject-oversized-length",
+  "protocol": 1,
+  "description": "MAX_FRAME_PAYLOAD + 1 announced, no payload sent. The rejection must happen on the header alone: a decoder that allocates first and validates second hands a peer a 4 GiB allocation for five bytes of effort.",
+  "reject": {
+    "encoded": "0100400001",
+    "error": "oversized",
+    "layer": "frame"
+  }
+}

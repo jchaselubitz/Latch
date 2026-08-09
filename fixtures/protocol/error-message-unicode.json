@@ -1,0 +1,15 @@
+{
+  "name": "error-message-unicode",
+  "protocol": 1,
+  "description": "Multibyte UTF-8 in a human-readable error message.",
+  "frame": {
+    "type": "control",
+    "encoded": "100000006583a174a56572726f72a4636f6465ae73657373696f6e5f657869746564a76d657373616765d93ee382bbe38383e382b7e383a7e383b3e381afe7b582e4ba86e38197e381bee38197e3819f20e2809420696d706f737369626c652064276174746163686572",
+    "payload": "83a174a56572726f72a4636f6465ae73657373696f6e5f657869746564a76d657373616765d93ee382bbe38383e382b7e383a7e383b3e381afe7b582e4ba86e38197e381bee38197e3819f20e2809420696d706f737369626c652064276174746163686572",
+    "decoded": {
+      "t": "error",
+      "code": "session_exited",
+      "message": "セッションは終了しました — impossible d'attacher"
+    }
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "name": "cursor-rewrite-progress",
+  "description": "A progress bar and spinner rewriting in place with carriage returns, save/restore cursor, and absolute cursor addressing.",
+  "size": {
+    "cols": 100,
+    "rows": 30
+  },
+  "recorded": {
+    "command": [
+      "bash",
+      "--norc",
+      "--noprofile",
+      "-c",
+      "\nfor i in $(seq 1 40); do\n  printf '\\r[%-20s] %3d%%' \"$(printf '#%.0s' $(seq 1 $((i/2+1))))\" \"$((i*100/40))\"\ndone\nprintf '\\n'\nprintf '\\033[s'\nfor i in $(seq 1 30); do\n  printf '\\033[u\\033[Kspinner %s step %02d' \"$(printf '%s' '|/-\\' | cut -c$(( i % 4 + 1 )))\" \"$i\"\ndone\nprintf '\\n'\nfor i in $(seq 1 20); do\n  printf '\\033[%d;1Hrow %02d rewritten' \"$((i % 10 + 5))\" \"$i\"\ndone\nprintf '\\033[20;1H\\n'\n"
+    ],
+    "term": "xterm-256color",
+    "platform": "linux",
+    "bytes": 2277
+  }
+}

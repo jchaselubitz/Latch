@@ -1,0 +1,19 @@
+{
+  "name": "bracketed-paste",
+  "description": "An interactive readline shell enabling bracketed paste, receiving a multi-line paste, and disabling it on exit.",
+  "size": {
+    "cols": 100,
+    "rows": 30
+  },
+  "recorded": {
+    "command": [
+      "bash",
+      "--norc",
+      "--noprofile",
+      "-i"
+    ],
+    "term": "xterm-256color",
+    "platform": "linux",
+    "bytes": 143
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "name": "terminal-input-empty",
+  "protocol": 1,
+  "description": "The empty payload boundary on the input side as well; the two tags share no code path on the wire and should share none in the tests either.",
+  "frame": {
+    "type": "terminal.input",
+    "encoded": "0200000000",
+    "payload": ""
+  }
+}

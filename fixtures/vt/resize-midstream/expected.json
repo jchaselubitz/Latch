@@ -1,0 +1,28 @@
+{
+  "description": "The pager exited after the resize; the primary screen it restored is at the new size, with the pre-pager line still on it.",
+  "size": {
+    "cols": 72,
+    "rows": 18
+  },
+  "alternate_screen": false,
+  "cursor": {
+    "row": 2,
+    "col": 0,
+    "visible": true
+  },
+  "scroll_region": {
+    "top": 0,
+    "bottom": 17
+  },
+  "modes": {
+    "autowrap": true,
+    "application_cursor_keys": false,
+    "application_keypad": false
+  },
+  "pen": "default",
+  "rows": {
+    "0": "before the pager",
+    "1": "back at the new width",
+    "2": ""
+  }
+}

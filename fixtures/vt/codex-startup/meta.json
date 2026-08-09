@@ -1,0 +1,17 @@
+{
+  "name": "codex-startup",
+  "description": "Codex TUI startup: synchronized output brackets, kitty keyboard flags, DECRQM/DA queries, OSC 8 hyperlinks, full-viewport paint.",
+  "size": {
+    "cols": 100,
+    "rows": 30
+  },
+  "recorded": {
+    "command": [
+      "codex"
+    ],
+    "term": "xterm-256color",
+    "platform": "linux",
+    "bytes": 12259
+  },
+  "notes": "The recording machine has no Codex credentials, so startup lands on the sign-in screen. That screen is still a real full-viewport Codex paint and carries the sequences this suite exists to check."
+}

@@ -1,0 +1,10 @@
+{
+  "name": "reject-control-not-a-map",
+  "protocol": 1,
+  "description": "A MessagePack array where a map is required. Valid MessagePack, wrong shape.",
+  "reject": {
+    "encoded": "100000000992a661747461636801",
+    "error": "malformed_payload",
+    "layer": "control"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "name": "reject-control-unknown-discriminator-near-miss",
+  "protocol": 1,
+  "description": "`control.state` misspelled as `control.status`. A prefix or fuzzy match here would be a guess dressed as leniency.",
+  "reject": {
+    "encoded": "100000003383a174ae636f6e74726f6c2e737461747573ad636f6e74726f6c6c65725f6964c0b0636f6e74726f6c6c65725f6c6162656cc0",
+    "error": "unknown_message",
+    "layer": "control"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "name": "session-exited-signalled",
+  "protocol": 1,
+  "description": "Killed by a signal: no exit code exists, so code is null rather than 0. A codec that substitutes 0 reports a clean exit for a killed agent.",
+  "frame": {
+    "type": "control",
+    "encoded": "100000003f84a174ae73657373696f6e2e657869746564a4636f6465c0a67369676e616ca75349474b494c4ca26174b4323032362d30382d30355431373a32323a33315a",
+    "payload": "84a174ae73657373696f6e2e657869746564a4636f6465c0a67369676e616ca75349474b494c4ca26174b4323032362d30382d30355431373a32323a33315a",
+    "decoded": {
+      "t": "session.exited",
+      "code": null,
+      "signal": "SIGKILL",
+      "at": "2026-08-05T17:22:31Z"
+    }
+  }
+}

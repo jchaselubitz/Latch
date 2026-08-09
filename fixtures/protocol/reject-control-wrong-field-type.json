@@ -1,0 +1,10 @@
+{
+  "name": "reject-control-wrong-field-type",
+  "protocol": 1,
+  "description": "steal carries a string instead of a boolean. `\"false\"` is truthy in one of the two languages that implement this protocol, so a lenient decode here hands input control to a client that did not ask to steal it.",
+  "reject": {
+    "encoded": "100000005c86a174a6617474616368a870726f746f636f6c01a46d6f6465a7636f6e74726f6ca5737465616ca566616c7365a6636c69656e7482a46b696e64a3636c69a46e616d65a5697465726da473697a6582a4636f6c73ccc8a4726f777332",
+    "error": "invalid_field",
+    "layer": "control"
+  }
+}

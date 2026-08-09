@@ -1,0 +1,58 @@
+{
+  "description": "50000 lines through a 30-row screen: the visible screen is the tail, and the ring holds its limit with the oldest lines gone.",
+  "size": {
+    "cols": 100,
+    "rows": 30
+  },
+  "alternate_screen": false,
+  "cursor": {
+    "row": 29,
+    "col": 0,
+    "visible": true
+  },
+  "scroll_region": {
+    "top": 0,
+    "bottom": 29
+  },
+  "modes": {
+    "autowrap": true
+  },
+  "pen": "default",
+  "rows": {
+    "0": "49972",
+    "1": "49973",
+    "2": "49974",
+    "3": "49975",
+    "4": "49976",
+    "5": "49977",
+    "6": "49978",
+    "7": "49979",
+    "8": "49980",
+    "9": "49981",
+    "10": "49982",
+    "11": "49983",
+    "12": "49984",
+    "13": "49985",
+    "14": "49986",
+    "15": "49987",
+    "16": "49988",
+    "17": "49989",
+    "18": "49990",
+    "19": "49991",
+    "20": "49992",
+    "21": "49993",
+    "22": "49994",
+    "23": "49995",
+    "24": "49996",
+    "25": "49997",
+    "26": "49998",
+    "27": "49999",
+    "28": "50000",
+    "29": ""
+  },
+  "scrollback": {
+    "len": "at_limit",
+    "newest_text": "49971",
+    "dropped_at_least": 44971
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "name": "session-update-state-only",
+  "protocol": 1,
+  "description": "A merge carrying only state. attachments and title are absent, which means 'leave what you have' — not 'clear them'.",
+  "frame": {
+    "type": "control",
+    "encoded": "100000002182a174ae73657373696f6e2e757064617465a57374617465a873746f7070696e67",
+    "payload": "82a174ae73657373696f6e2e757064617465a57374617465a873746f7070696e67",
+    "decoded": {
+      "t": "session.update",
+      "state": "stopping"
+    }
+  },
+  "merge": {
+    "state": "set",
+    "attachments": "absent",
+    "title": "absent"
+  }
+}

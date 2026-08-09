@@ -1,0 +1,15 @@
+{
+  "name": "control-resize-minimum",
+  "protocol": 1,
+  "description": "A 1x1 terminal. Degenerate but legal; the codec has no opinion about geometry, and rejecting it here would be a policy decision in the wrong layer.",
+  "frame": {
+    "type": "control",
+    "encoded": "100000001683a174a6726573697a65a4636f6c7301a4726f777301",
+    "payload": "83a174a6726573697a65a4636f6c7301a4726f777301",
+    "decoded": {
+      "t": "resize",
+      "cols": 1,
+      "rows": 1
+    }
+  }
+}

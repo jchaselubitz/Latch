@@ -1,0 +1,10 @@
+{
+  "name": "terminal-output-escape-sequences",
+  "protocol": 1,
+  "description": "Alternate screen enter, clear, cursor home, SGR — the bytes a full-screen agent actually emits. They pass through the codec untouched.",
+  "frame": {
+    "type": "terminal.output",
+    "encoded": "01000000261b5b3f31303439681b5b324a1b5b481b5b313b33383b353b33396d4c617463681b5b306d0d0a",
+    "payload": "1b5b3f31303439681b5b324a1b5b481b5b313b33383b353b33396d4c617463681b5b306d0d0a"
+  }
+}

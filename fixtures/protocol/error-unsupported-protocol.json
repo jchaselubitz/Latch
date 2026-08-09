@@ -1,0 +1,15 @@
+{
+  "name": "error-unsupported-protocol",
+  "protocol": 1,
+  "description": "The error a version negotiation failure produces. It is followed by a close, never by a downgrade.",
+  "frame": {
+    "type": "control",
+    "encoded": "100000006083a174a56572726f72a4636f6465b4756e737570706f727465645f70726f746f636f6ca76d657373616765d933756e737570706f727465642070726f746f636f6c2076657273696f6e20323b2074686973206275696c6420737065616b732031",
+    "payload": "83a174a56572726f72a4636f6465b4756e737570706f727465645f70726f746f636f6ca76d657373616765d933756e737570706f727465642070726f746f636f6c2076657273696f6e20323b2074686973206275696c6420737065616b732031",
+    "decoded": {
+      "t": "error",
+      "code": "unsupported_protocol",
+      "message": "unsupported protocol version 2; this build speaks 1"
+    }
+  }
+}

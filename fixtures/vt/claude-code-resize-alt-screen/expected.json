@@ -1,0 +1,26 @@
+{
+  "description": "Resized to 72x20 while the alternate screen was active; Claude Code redrew at the new size and re-parked the cursor.",
+  "size": {
+    "cols": 72,
+    "rows": 20
+  },
+  "alternate_screen": true,
+  "cursor": {
+    "row": 17,
+    "col": 2,
+    "visible": true
+  },
+  "scroll_region": {
+    "top": 0,
+    "bottom": 19
+  },
+  "modes": {
+    "bracketed_paste": true,
+    "focus_reporting": true,
+    "mouse_tracking": "any_event",
+    "mouse_encoding": "sgr",
+    "autowrap": true,
+    "origin": false
+  },
+  "title": "✳ Claude Code"
+}

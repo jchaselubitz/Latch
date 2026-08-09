@@ -1,0 +1,10 @@
+{
+  "name": "reject-control-malformed-msgpack",
+  "protocol": 1,
+  "description": "0xc1 is the one byte MessagePack reserves as never valid. The frame is well-formed; its payload is not.",
+  "reject": {
+    "encoded": "1000000001c1",
+    "error": "malformed_payload",
+    "layer": "control"
+  }
+}

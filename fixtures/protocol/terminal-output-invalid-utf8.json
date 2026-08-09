@@ -1,0 +1,10 @@
+{
+  "name": "terminal-output-invalid-utf8",
+  "protocol": 1,
+  "description": "A lone continuation byte and an unpaired surrogate-range sequence. The payload is bytes, not text: a codec that validates UTF-8 here corrupts any session whose child emits binary, and a read boundary can split a valid multibyte character across two frames anyway.",
+  "frame": {
+    "type": "terminal.output",
+    "encoded": "0100000006fffe806f6bc3",
+    "payload": "fffe806f6bc3"
+  }
+}

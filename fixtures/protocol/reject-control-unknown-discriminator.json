@@ -1,0 +1,10 @@
+{
+  "name": "reject-control-unknown-discriminator",
+  "protocol": 1,
+  "description": "A `t` this build does not know. Not an error to log and continue past — the message's meaning is unknown by definition, and these messages move input control and session size.",
+  "reject": {
+    "encoded": "100000001d82a174b073657373696f6e2e736e617073686f74a464617461a3e280a6",
+    "error": "unknown_message",
+    "layer": "control"
+  }
+}

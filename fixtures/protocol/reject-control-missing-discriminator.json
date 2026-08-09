@@ -1,0 +1,10 @@
+{
+  "name": "reject-control-missing-discriminator",
+  "protocol": 1,
+  "description": "A well-formed map with no `t`. Its keys happen to match resize, which is the trap: a decoder that infers the message from its fields will guess, and guessing is what the discriminator exists to prevent.",
+  "reject": {
+    "encoded": "100000000d82a4636f6c7350a4726f777318",
+    "error": "missing_discriminator",
+    "layer": "control"
+  }
+}

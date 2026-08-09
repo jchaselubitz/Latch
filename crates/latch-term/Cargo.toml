@@ -1,0 +1,25 @@
+[package]
+name = "latch-term"
+description = "Headless screen model and snapshot serialization for Latch sessions."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+# This crate is a leaf. It must not depend on `latch`, `latch-protocol`, or any
+# Overlord type.
+#
+# The terminal-emulator backend. `vt100` was chosen over `wezterm-term` by
+# evaluation against `fixtures/vt/`; see `docs/DECISION_EMULATOR.md`. It stays
+# behind the `Screen` trait and is named only in `src/terminal.rs`.
+[dependencies]
+thiserror.workspace = true
+vt100.workspace = true
+
+[dev-dependencies]
+# The suite reads `fixtures/vt/` and holds the emulator to never panicking on
+# bytes a child process chose.
+proptest.workspace = true
+serde_json.workspace = true

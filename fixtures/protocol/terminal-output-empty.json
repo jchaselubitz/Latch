@@ -1,0 +1,10 @@
+{
+  "name": "terminal-output-empty",
+  "protocol": 1,
+  "description": "A zero-length payload is a well-formed frame, not an absent one. A decoder that treats length 0 as 'need more bytes' stalls the stream forever.",
+  "frame": {
+    "type": "terminal.output",
+    "encoded": "0100000000",
+    "payload": ""
+  }
+}

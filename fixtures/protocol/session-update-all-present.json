@@ -1,0 +1,38 @@
+{
+  "name": "session-update-all-present",
+  "protocol": 1,
+  "description": "Every optional field present at once, in wire order.",
+  "frame": {
+    "type": "control",
+    "encoded": "10000000be84a174ae73657373696f6e2e757064617465a57374617465a772756e6e696e67ab6174746163686d656e74739283a26964aa6174745f30314a414141a46d6f6465a7636f6e74726f6ca6636c69656e7482a46b696e64a3636c69a46e616d65a5697465726d83a26964aa6174745f30314a424242a46d6f6465a57761746368a6636c69656e7482a46b696e64a66d6f62696c65a46e616d65a77465726d697573a57469746c65b741757468656e7469636174696f6e207265666163746f72",
+    "payload": "84a174ae73657373696f6e2e757064617465a57374617465a772756e6e696e67ab6174746163686d656e74739283a26964aa6174745f30314a414141a46d6f6465a7636f6e74726f6ca6636c69656e7482a46b696e64a3636c69a46e616d65a5697465726d83a26964aa6174745f30314a424242a46d6f6465a57761746368a6636c69656e7482a46b696e64a66d6f62696c65a46e616d65a77465726d697573a57469746c65b741757468656e7469636174696f6e207265666163746f72",
+    "decoded": {
+      "t": "session.update",
+      "state": "running",
+      "attachments": [
+        {
+          "id": "att_01JAAA",
+          "mode": "control",
+          "client": {
+            "kind": "cli",
+            "name": "iterm"
+          }
+        },
+        {
+          "id": "att_01JBBB",
+          "mode": "watch",
+          "client": {
+            "kind": "mobile",
+            "name": "termius"
+          }
+        }
+      ],
+      "title": "Authentication refactor"
+    }
+  },
+  "merge": {
+    "state": "set",
+    "attachments": "set",
+    "title": "set"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "name": "reject-truncated-payload",
+  "protocol": 1,
+  "description": "A frame announcing 10 payload bytes and carrying 4. At end of stream this is a dropped frame, never a 4-byte frame.",
+  "reject": {
+    "encoded": "010000000a61626364",
+    "error": "incomplete",
+    "layer": "frame"
+  }
+}

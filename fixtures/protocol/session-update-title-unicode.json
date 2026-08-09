@@ -1,0 +1,19 @@
+{
+  "name": "session-update-title-unicode",
+  "protocol": 1,
+  "description": "Multibyte UTF-8 in the merged title.",
+  "frame": {
+    "type": "control",
+    "encoded": "100000003782a174ae73657373696f6e2e757064617465a57469746c65bee38387e38397e383ade382a420e2809420c3a974617065203320f09f9a80",
+    "payload": "82a174ae73657373696f6e2e757064617465a57469746c65bee38387e38397e383ade382a420e2809420c3a974617065203320f09f9a80",
+    "decoded": {
+      "t": "session.update",
+      "title": "デプロイ — étape 3 🚀"
+    }
+  },
+  "merge": {
+    "state": "absent",
+    "attachments": "absent",
+    "title": "set"
+  }
+}

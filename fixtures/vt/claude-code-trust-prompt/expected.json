@@ -1,0 +1,26 @@
+{
+  "description": "The trust dialog is drawn on the primary screen with the cursor hidden; no alternate screen and no mouse reporting.",
+  "size": {
+    "cols": 100,
+    "rows": 30
+  },
+  "alternate_screen": false,
+  "cursor": {
+    "visible": false
+  },
+  "scroll_region": {
+    "top": 0,
+    "bottom": 29
+  },
+  "modes": {
+    "bracketed_paste": true,
+    "focus_reporting": true,
+    "mouse_tracking": "off",
+    "autowrap": true
+  },
+  "title": null,
+  "contains": [
+    "Yes, I trust this folder",
+    "Enter to confirm"
+  ]
+}

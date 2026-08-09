@@ -1,0 +1,81 @@
+{
+  "description": "Claude Code on the alternate screen with its banner drawn, mouse and paste reporting on, and the cursor parked in the prompt box.",
+  "size": {
+    "cols": 100,
+    "rows": 30
+  },
+  "alternate_screen": true,
+  "cursor": {
+    "row": 27,
+    "col": 2,
+    "visible": true
+  },
+  "scroll_region": {
+    "top": 0,
+    "bottom": 29
+  },
+  "modes": {
+    "bracketed_paste": true,
+    "focus_reporting": true,
+    "mouse_tracking": "any_event",
+    "mouse_encoding": "sgr",
+    "autowrap": true,
+    "origin": false
+  },
+  "title": "✳ Claude Code",
+  "cells": [
+    {
+      "row": 1,
+      "col": 1,
+      "text": "▐",
+      "width": 1,
+      "fg": {
+        "indexed": 174
+      },
+      "bg": "default"
+    },
+    {
+      "row": 1,
+      "col": 2,
+      "text": "▛",
+      "width": 1,
+      "fg": {
+        "indexed": 174
+      },
+      "bg": {
+        "indexed": 16
+      }
+    },
+    {
+      "row": 1,
+      "col": 7,
+      "text": "▌",
+      "width": 1,
+      "fg": {
+        "indexed": 174
+      },
+      "bg": "default"
+    },
+    {
+      "row": 1,
+      "col": 11,
+      "text": "C",
+      "width": 1,
+      "fg": "default",
+      "bold": true
+    },
+    {
+      "row": 1,
+      "col": 23,
+      "text": "v",
+      "width": 1,
+      "fg": {
+        "indexed": 246
+      },
+      "bold": false
+    }
+  ],
+  "contains": [
+    "Claude Code"
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "name": "resize-midstream",
+  "description": "A pager resized from 100x30 to 72x18 partway through the stream.",
+  "size": {
+    "cols": 100,
+    "rows": 30
+  },
+  "recorded": {
+    "command": [
+      "bash",
+      "--norc",
+      "--noprofile",
+      "-c",
+      "printf 'before the pager\\n'; less /tmp/latch-vt-pager.txt; printf 'back at the new width\\n'"
+    ],
+    "term": "xterm-256color",
+    "platform": "linux",
+    "bytes": 6783
+  },
+  "resizes": [
+    {
+      "at_byte": 4262,
+      "cols": 72,
+      "rows": 18
+    }
+  ]
+}

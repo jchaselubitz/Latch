@@ -1,0 +1,10 @@
+{
+  "name": "reject-control-truncated-msgpack",
+  "protocol": 1,
+  "description": "A fixmap announcing two pairs and carrying one. Well-formed framing, truncated MessagePack inside it.",
+  "reject": {
+    "encoded": "100000000a82a174a6726573697a65",
+    "error": "malformed_payload",
+    "layer": "control"
+  }
+}

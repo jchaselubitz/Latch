@@ -1,0 +1,24 @@
+{
+  "name": "control-attach-watch",
+  "protocol": 1,
+  "description": "Attach in watch mode at 200x50. A watcher never resizes the session, so its size is reported but not authoritative.",
+  "frame": {
+    "type": "control",
+    "encoded": "100000005586a174a6617474616368a870726f746f636f6c01a46d6f6465a57761746368a5737465616cc2a6636c69656e7482a46b696e64a3636c69a46e616d65a5697465726da473697a6582a4636f6c73ccc8a4726f777332",
+    "payload": "86a174a6617474616368a870726f746f636f6c01a46d6f6465a57761746368a5737465616cc2a6636c69656e7482a46b696e64a3636c69a46e616d65a5697465726da473697a6582a4636f6c73ccc8a4726f777332",
+    "decoded": {
+      "t": "attach",
+      "protocol": 1,
+      "mode": "watch",
+      "steal": false,
+      "client": {
+        "kind": "cli",
+        "name": "iterm"
+      },
+      "size": {
+        "cols": 200,
+        "rows": 50
+      }
+    }
+  }
+}

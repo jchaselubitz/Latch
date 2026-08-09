@@ -1,0 +1,17 @@
+{
+  "name": "claude-code-turn",
+  "description": "A full Claude Code turn: prompt typed, submitted, spinner, status line, and the response frame.",
+  "size": {
+    "cols": 100,
+    "rows": 30
+  },
+  "recorded": {
+    "command": [
+      "claude"
+    ],
+    "term": "xterm-256color",
+    "platform": "linux",
+    "bytes": 2174
+  },
+  "notes": "Recorded in a container whose child processes have no Claude credentials, so the turn ends in a login-expired result frame rather than an assistant reply. Everything the emulator is being tested on is present and real — prompt echo, spinner frames, in-place status-line rewrites, OSC title updates, cursor save/restore. Re-record on an authenticated machine with `scripts/capture-vt.py claude-code-turn` to carry a model reply as well; no test needs to change."
+}

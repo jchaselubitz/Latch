@@ -1,0 +1,32 @@
+{
+  "description": "less exited the alternate screen, so the primary screen's contents from before the pager are back, with the post-pager line under them.",
+  "size": {
+    "cols": 100,
+    "rows": 30
+  },
+  "alternate_screen": false,
+  "cursor": {
+    "row": 2,
+    "col": 0,
+    "visible": true
+  },
+  "scroll_region": {
+    "top": 0,
+    "bottom": 29
+  },
+  "modes": {
+    "bracketed_paste": false,
+    "application_cursor_keys": false,
+    "application_keypad": false,
+    "autowrap": true,
+    "mouse_tracking": "off"
+  },
+  "title": null,
+  "pen": "default",
+  "rows": {
+    "0": "before the pager",
+    "1": "back on the primary screen",
+    "2": "",
+    "3": ""
+  }
+}

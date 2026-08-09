@@ -1,0 +1,28 @@
+{
+  "name": "session-update-attachments-only",
+  "protocol": 1,
+  "description": "Presence changed and nothing else did. A present attachments list replaces the client's list entirely; it is not a delta.",
+  "frame": {
+    "type": "control",
+    "encoded": "100000005782a174ae73657373696f6e2e757064617465ab6174746163686d656e74739183a26964aa6174745f30314a414141a46d6f6465a7636f6e74726f6ca6636c69656e7482a46b696e64a3636c69a46e616d65a5697465726d",
+    "payload": "82a174ae73657373696f6e2e757064617465ab6174746163686d656e74739183a26964aa6174745f30314a414141a46d6f6465a7636f6e74726f6ca6636c69656e7482a46b696e64a3636c69a46e616d65a5697465726d",
+    "decoded": {
+      "t": "session.update",
+      "attachments": [
+        {
+          "id": "att_01JAAA",
+          "mode": "control",
+          "client": {
+            "kind": "cli",
+            "name": "iterm"
+          }
+        }
+      ]
+    }
+  },
+  "merge": {
+    "state": "absent",
+    "attachments": "set",
+    "title": "absent"
+  }
+}

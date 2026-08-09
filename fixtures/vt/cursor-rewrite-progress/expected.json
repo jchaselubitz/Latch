@@ -1,0 +1,39 @@
+{
+  "description": "Every rewrite lands where it was aimed: the bar is only its final frame, the spinner line is only its 30th, and each addressed row holds only its last write.",
+  "size": {
+    "cols": 100,
+    "rows": 30
+  },
+  "alternate_screen": false,
+  "cursor": {
+    "row": 20,
+    "col": 0,
+    "visible": true
+  },
+  "scroll_region": {
+    "top": 0,
+    "bottom": 29
+  },
+  "modes": {
+    "autowrap": true,
+    "bracketed_paste": false
+  },
+  "pen": "default",
+  "rows": {
+    "0": "[#####################] 100%",
+    "1": "spinner - step 30",
+    "2": "",
+    "3": "",
+    "4": "row 20 rewritten",
+    "5": "row 11 rewritten",
+    "6": "row 12 rewritten",
+    "7": "row 13 rewritten",
+    "8": "row 14 rewritten",
+    "9": "row 15 rewritten",
+    "10": "row 16 rewritten",
+    "11": "row 17 rewritten",
+    "12": "row 18 rewritten",
+    "13": "row 19 rewritten",
+    "14": ""
+  }
+}

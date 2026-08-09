@@ -1,0 +1,46 @@
+[package]
+name = "latch"
+description = "Persistent terminal sessions: CLI and session worker in one binary."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "latch"
+path = "src/main.rs"
+
+# The worker lives behind a library target so the suite in `tests/` can exercise
+# it as an API and not only as a subprocess. Process behaviour — detachment,
+# signals, socket lifetime — still has to be tested against the real binary, and
+# those tests reach it through `CARGO_BIN_EXE_latch`.
+[lib]
+name = "latch"
+path = "src/lib.rs"
+
+# One binary contains both the CLI and the session worker (worker mode via an
+# internal subcommand) — decision D1. There is no Node.js in the local plane and
+# no separate worker binary to install.
+#
+# Dependencies here are held to what CLI startup can afford: with an iTerm
+# profile pointed at `latch`, every terminal window pays this cost.
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+latch-protocol.workspace = true
+latch-term.workspace = true
+libc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+# `libc` and `tempfile` are repeated here because an integration test is its own
+# crate: it links the library target, not the library's dependency graph. The
+# suite needs both directly — it signals process groups and builds throwaway
+# `~/.latch` roots.
+[dev-dependencies]
+libc.workspace = true
+proptest.workspace = true
+tempfile.workspace = true

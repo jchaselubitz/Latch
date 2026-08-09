@@ -1,0 +1,10 @@
+{
+  "name": "reject-unknown-tag-adjacent",
+  "protocol": 1,
+  "description": "Tag 0x11 — where a ninth control message would land if someone added one without updating both codecs.",
+  "reject": {
+    "encoded": "11000000026869",
+    "error": "unknown_type",
+    "layer": "frame"
+  }
+}

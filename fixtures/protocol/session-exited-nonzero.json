@@ -1,0 +1,16 @@
+{
+  "name": "session-exited-nonzero",
+  "protocol": 1,
+  "description": "A nonzero exit status, which is ordinary for an agent that was interrupted.",
+  "frame": {
+    "type": "control",
+    "encoded": "100000003884a174ae73657373696f6e2e657869746564a4636f646502a67369676e616cc0a26174b4323032362d30382d30355431373a32323a33315a",
+    "payload": "84a174ae73657373696f6e2e657869746564a4636f646502a67369676e616cc0a26174b4323032362d30382d30355431373a32323a33315a",
+    "decoded": {
+      "t": "session.exited",
+      "code": 2,
+      "signal": null,
+      "at": "2026-08-05T17:22:31Z"
+    }
+  }
+}

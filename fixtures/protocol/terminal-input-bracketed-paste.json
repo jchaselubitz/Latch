@@ -1,0 +1,10 @@
+{
+  "name": "terminal-input-bracketed-paste",
+  "protocol": 1,
+  "description": "A bracketed paste carrying multibyte UTF-8, arriving as one input frame.",
+  "frame": {
+    "type": "terminal.input",
+    "encoded": "02000000201b5b3230307ee697a5e69cace8aa9e20636166c3a920f09f99821b5b3230317e",
+    "payload": "1b5b3230307ee697a5e69cace8aa9e20636166c3a920f09f99821b5b3230317e"
+  }
+}

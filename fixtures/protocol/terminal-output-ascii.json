@@ -1,0 +1,10 @@
+{
+  "name": "terminal-output-ascii",
+  "protocol": 1,
+  "description": "Ordinary agent output. Raw bytes, no structured decode.",
+  "frame": {
+    "type": "terminal.output",
+    "encoded": "010000000768656c6c6f0d0a",
+    "payload": "68656c6c6f0d0a"
+  }
+}

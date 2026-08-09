@@ -1,0 +1,27 @@
+{
+  "name": "terminal-output-max-payload",
+  "protocol": 1,
+  "description": "Exactly MAX_FRAME_PAYLOAD (4 MiB). The largest frame that must be accepted, immediately below the smallest that must be rejected.",
+  "frame": {
+    "type": "terminal.output",
+    "encoded_parts": [
+      {
+        "hex": "0100400000"
+      },
+      {
+        "repeat": {
+          "hex": "61",
+          "count": 4194304
+        }
+      }
+    ],
+    "payload_parts": [
+      {
+        "repeat": {
+          "hex": "61",
+          "count": 4194304
+        }
+      }
+    ]
+  }
+}

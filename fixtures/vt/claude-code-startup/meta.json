@@ -1,0 +1,16 @@
+{
+  "name": "claude-code-startup",
+  "description": "Claude Code TUI startup in a trusted directory.",
+  "size": {
+    "cols": 100,
+    "rows": 30
+  },
+  "recorded": {
+    "command": [
+      "claude"
+    ],
+    "term": "xterm-256color",
+    "platform": "linux",
+    "bytes": 1294
+  }
+}

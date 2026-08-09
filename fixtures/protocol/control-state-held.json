@@ -1,0 +1,15 @@
+{
+  "name": "control-state-held",
+  "protocol": 1,
+  "description": "Broadcast after a transfer. Every attachment learns who holds control, including the client that just lost it — two uncontrolled writers must be impossible rather than merely unlikely.",
+  "frame": {
+    "type": "control",
+    "encoded": "100000004b83a174ad636f6e74726f6c2e7374617465ad636f6e74726f6c6c65725f6964aa6174745f30314a424242b0636f6e74726f6c6c65725f6c6162656caf7465726d697573202870686f6e6529",
+    "payload": "83a174ad636f6e74726f6c2e7374617465ad636f6e74726f6c6c65725f6964aa6174745f30314a424242b0636f6e74726f6c6c65725f6c6162656caf7465726d697573202870686f6e6529",
+    "decoded": {
+      "t": "control.state",
+      "controller_id": "att_01JBBB",
+      "controller_label": "termius (phone)"
+    }
+  }
+}

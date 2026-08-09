@@ -1,0 +1,14 @@
+{
+  "name": "control-request-polite",
+  "protocol": 1,
+  "description": "A watcher asks for input control without stealing. If someone holds it, the answer is a control_busy error rather than a transfer.",
+  "frame": {
+    "type": "control",
+    "encoded": "100000001a82a174af636f6e74726f6c2e72657175657374a5737465616cc2",
+    "payload": "82a174af636f6e74726f6c2e72657175657374a5737465616cc2",
+    "decoded": {
+      "t": "control.request",
+      "steal": false
+    }
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "name": "control-resize-phone",
+  "protocol": 1,
+  "description": "Roughly a phone in Termius. For this product that is the ordinary configuration, not an edge case.",
+  "frame": {
+    "type": "control",
+    "encoded": "100000001683a174a6726573697a65a4636f6c7328a4726f777364",
+    "payload": "83a174a6726573697a65a4636f6c7328a4726f777364",
+    "decoded": {
+      "t": "resize",
+      "cols": 40,
+      "rows": 100
+    }
+  }
+}

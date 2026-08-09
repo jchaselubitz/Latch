@@ -1,0 +1,20 @@
+{
+  "name": "session-update-state-and-title-cleared",
+  "protocol": 1,
+  "description": "State set and title explicitly cleared in the same merge, with attachments absent. All three dispositions in one message.",
+  "frame": {
+    "type": "control",
+    "encoded": "100000002683a174ae73657373696f6e2e757064617465a57374617465a6657869746564a57469746c65c0",
+    "payload": "83a174ae73657373696f6e2e757064617465a57374617465a6657869746564a57469746c65c0",
+    "decoded": {
+      "t": "session.update",
+      "state": "exited",
+      "title": null
+    }
+  },
+  "merge": {
+    "state": "set",
+    "attachments": "absent",
+    "title": "cleared"
+  }
+}

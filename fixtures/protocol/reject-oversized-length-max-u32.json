@@ -1,0 +1,10 @@
+{
+  "name": "reject-oversized-length-max-u32",
+  "protocol": 1,
+  "description": "The largest length the field can express, announced with nothing behind it.",
+  "reject": {
+    "encoded": "10ffffffff",
+    "error": "oversized",
+    "layer": "frame"
+  }
+}

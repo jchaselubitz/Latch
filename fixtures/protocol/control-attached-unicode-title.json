@@ -1,0 +1,35 @@
+{
+  "name": "control-attached-unicode-title",
+  "protocol": 1,
+  "description": "Multibyte UTF-8 in the session title, which flows into terminal titles and latch list output.",
+  "frame": {
+    "type": "control",
+    "encoded": "10000000eb85a174a86174746163686564a870726f746f636f6c01a773657373696f6e85a26964aa7365735f30314a5a5a5aa46e616d65a96c617463682d617069a57469746c65d929e383aae38395e382a1e382afe382bfe383aae383b3e382b020e2809420c3a974617065203220e29c85a57374617465a772756e6e696e67a473697a6582a4636f6c7328a4726f777364aa636f6e74726f6c6c6572aa6174745f30314a424242ab6174746163686d656e74739183a26964aa6174745f30314a424242a46d6f6465a57761746368a6636c69656e7482a46b696e64a66d6f62696c65a46e616d65a77465726d697573",
+    "payload": "85a174a86174746163686564a870726f746f636f6c01a773657373696f6e85a26964aa7365735f30314a5a5a5aa46e616d65a96c617463682d617069a57469746c65d929e383aae38395e382a1e382afe382bfe383aae383b3e382b020e2809420c3a974617065203220e29c85a57374617465a772756e6e696e67a473697a6582a4636f6c7328a4726f777364aa636f6e74726f6c6c6572aa6174745f30314a424242ab6174746163686d656e74739183a26964aa6174745f30314a424242a46d6f6465a57761746368a6636c69656e7482a46b696e64a66d6f62696c65a46e616d65a77465726d697573",
+    "decoded": {
+      "t": "attached",
+      "protocol": 1,
+      "session": {
+        "id": "ses_01JZZZ",
+        "name": "latch-api",
+        "title": "リファクタリング — étape 2 ✅",
+        "state": "running",
+        "size": {
+          "cols": 40,
+          "rows": 100
+        }
+      },
+      "controller": "att_01JBBB",
+      "attachments": [
+        {
+          "id": "att_01JBBB",
+          "mode": "watch",
+          "client": {
+            "kind": "mobile",
+            "name": "termius"
+          }
+        }
+      ]
+    }
+  }
+}

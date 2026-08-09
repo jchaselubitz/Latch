@@ -1,0 +1,16 @@
+{
+  "name": "claude-code-trust-prompt",
+  "description": "Claude Code startup in an untrusted directory: primary screen, heavy wrapping and absolute column addressing, no alternate screen.",
+  "size": {
+    "cols": 100,
+    "rows": 30
+  },
+  "recorded": {
+    "command": [
+      "claude"
+    ],
+    "term": "xterm-256color",
+    "platform": "linux",
+    "bytes": 1210
+  }
+}

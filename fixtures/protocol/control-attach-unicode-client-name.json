@@ -1,0 +1,24 @@
+{
+  "name": "control-attach-unicode-client-name",
+  "protocol": 1,
+  "description": "Multibyte UTF-8 in a display field. The client name reaches other clients' presence lists and terminal titles, so its byte-for-byte survival through the codec is the precondition for sanitizing it at ingest rather than at each render site.",
+  "frame": {
+    "type": "control",
+    "encoded": "100000007386a174a6617474616368a870726f746f636f6c01a46d6f6465a7636f6e74726f6ca5737465616cc2a6636c69656e7482a46b696e64a76465736b746f70a46e616d65bd695465726d20e2809420436166c3a920e2989520e697a5e69cace8aa9ea473697a6582a4636f6c73ccc8a4726f777332",
+    "payload": "86a174a6617474616368a870726f746f636f6c01a46d6f6465a7636f6e74726f6ca5737465616cc2a6636c69656e7482a46b696e64a76465736b746f70a46e616d65bd695465726d20e2809420436166c3a920e2989520e697a5e69cace8aa9ea473697a6582a4636f6c73ccc8a4726f777332",
+    "decoded": {
+      "t": "attach",
+      "protocol": 1,
+      "mode": "control",
+      "steal": false,
+      "client": {
+        "kind": "desktop",
+        "name": "iTerm — Café ☕ 日本語"
+      },
+      "size": {
+        "cols": 200,
+        "rows": 50
+      }
+    }
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "name": "reject-truncated-header",
+  "protocol": 1,
+  "description": "Three bytes: not even a whole header, so the length is not yet known.",
+  "reject": {
+    "encoded": "010000",
+    "error": "incomplete",
+    "layer": "frame"
+  }
+}
