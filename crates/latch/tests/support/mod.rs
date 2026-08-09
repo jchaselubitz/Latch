@@ -236,6 +236,47 @@ impl Default for Harness {
     }
 }
 
+impl Drop for Harness {
+    fn drop(&mut self) {
+        let Ok(ids) = self.home.session_ids() else {
+            return;
+        };
+        let paths = ids
+            .iter()
+            .map(|id| self.home.session(id))
+            .collect::<Vec<_>>();
+
+        for session_paths in &paths {
+            let Ok(mut client) = Client::connect(session_paths) else {
+                continue;
+            };
+            let _ = client.send_control(&ControlMessage::Attach {
+                protocol: PROTOCOL_VERSION,
+                mode: AttachMode::Watch,
+                steal: false,
+                client: ClientInfo {
+                    kind: "cli".to_owned(),
+                    name: "test-harness-cleanup".to_owned(),
+                },
+                size: Size { cols: 80, rows: 24 },
+            });
+            let _ = client.send_control(&ControlMessage::SessionUpdate {
+                state: Some(SessionState::Stopping),
+                attachments: None,
+                title: None,
+                force: Some(true),
+            });
+        }
+
+        // Keep the temporary home present until its workers have written their
+        // exit records and removed their sockets. Dropping it first strands
+        // detached workers whose child processes outlive the test binary.
+        let _ = settled(SETTLE, || {
+            paths.iter().all(|paths| !paths.socket().exists())
+        });
+    }
+}
+
 /// A manifest that runs `script` under `/bin/sh`.
 ///
 /// `sh` rather than a purpose-built helper because a session is a shell in the
@@ -303,6 +344,7 @@ impl Session {
                 state: Some(SessionState::Stopping),
                 attachments: None,
                 title: None,
+                force: None,
             })
             .expect("the stop request should be delivered");
         // Held open until the worker acts on it: a client that closes
@@ -346,6 +388,7 @@ impl Drop for Session {
             state: Some(SessionState::Stopping),
             attachments: None,
             title: None,
+            force: None,
         });
         let _ = settled(SETTLE, || !self.is_live());
     }

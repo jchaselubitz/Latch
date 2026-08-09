@@ -72,6 +72,14 @@ pub enum JournalError {
 /// value that would make every append a full truncation.
 pub const MIN_JOURNAL_CAP_BYTES: u64 = 1024;
 
+/// How full the journal is left after an append crosses the hard cap.
+///
+/// Compacting to the cap exactly makes the next PTY read compact again. Under
+/// sustained output that turns every 8 KiB read into a rewrite and `fsync` of
+/// the whole 10 MiB journal, starving the worker's control loop. Leaving some
+/// headroom keeps the hard on-disk bound while amortizing compaction.
+const COMPACTION_FILL_PERCENT: u64 = 75;
+
 /// A capped, owner-only byte log.
 pub struct Journal {
     path: PathBuf,
@@ -109,7 +117,7 @@ impl Journal {
             .map_err(|source| journal.io(source))?
             .len();
         journal.len_bytes = current;
-        journal.trim()?;
+        journal.trim_to(config.cap_bytes)?;
         Ok(journal)
     }
 
@@ -128,7 +136,12 @@ impl Journal {
             .map_err(|source| self.io(source))?;
         file.write_all(bytes).map_err(|source| self.io(source))?;
         self.len_bytes = self.len_bytes.saturating_add(bytes.len() as u64);
-        self.trim()
+        if self.len_bytes > self.cap_bytes {
+            let target = self.cap_bytes.saturating_mul(COMPACTION_FILL_PERCENT) / 100;
+            self.trim_to(target)
+        } else {
+            Ok(())
+        }
     }
 
     /// Bytes currently retained. Never exceeds [`Journal::cap_bytes`].
@@ -187,11 +200,11 @@ impl Journal {
             .map_err(|source| self.io(source))
     }
 
-    fn trim(&mut self) -> Result<(), JournalError> {
-        if self.len_bytes <= self.cap_bytes {
+    fn trim_to(&mut self, target_bytes: u64) -> Result<(), JournalError> {
+        if self.len_bytes <= target_bytes {
             return Ok(());
         }
-        let drop_count = self.len_bytes - self.cap_bytes;
+        let drop_count = self.len_bytes - target_bytes;
         let mut source = fs::File::open(&self.path).map_err(|error| self.io(error))?;
         source
             .seek(SeekFrom::Start(drop_count))

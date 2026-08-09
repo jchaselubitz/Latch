@@ -167,7 +167,7 @@ pub const LIVENESS_PATIENCE: Duration = Duration::from_millis(500);
 ///
 /// Bounding the pass costs no throughput, because `poll` reports the PTY ready
 /// again on the next turn. It only stops one descriptor from starving the rest.
-const PTY_READS_PER_PASS: usize = 32;
+const PTY_READS_PER_PASS: usize = 1;
 
 /// Runs a worker to completion in the current process.
 ///
@@ -219,6 +219,7 @@ pub fn run(config: WorkerConfig, mut manifest: LaunchManifest) -> Result<ChildEx
         })?;
 
     let mut clients: Vec<Client> = Vec::new();
+    let mut output = queue::Fanout::new(config.queue);
 
     let mut pending_input = Vec::<u8>::new();
 
@@ -230,7 +231,7 @@ pub fn run(config: WorkerConfig, mut manifest: LaunchManifest) -> Result<ChildEx
     let exit = loop {
         wait_for_work(&listener, &child, &clients, !pending_input.is_empty());
 
-        let mut stop_requested = false;
+        let mut stop_requested = None;
         for index in 0..clients.len() {
             let received = clients[index].conn.receive();
             for frame in received.frames {
@@ -239,6 +240,7 @@ pub fn run(config: WorkerConfig, mut manifest: LaunchManifest) -> Result<ChildEx
                 // would otherwise see the second one's presence broadcast go out
                 // before the first one's `attached` — a client learning that it
                 // is in the session before being told it is in the session.
+                let was_attached = clients[index].id.is_some();
                 match handle_frame(index, frame, &mut clients, &mut registry) {
                     Handled::Effects(mut effects) => {
                         apply(
@@ -250,8 +252,15 @@ pub fn run(config: WorkerConfig, mut manifest: LaunchManifest) -> Result<ChildEx
                         )?;
                     }
                     Handled::Input(bytes) => queue_input(&mut pending_input, &bytes),
-                    Handled::Stop => stop_requested = true,
+                    Handled::Stop { force } => {
+                        stop_requested = Some(stop_requested.unwrap_or(false) || force)
+                    }
                     Handled::Nothing => {}
+                }
+                if !was_attached {
+                    if let Some(id) = clients[index].id.clone() {
+                        output.register(id);
+                    }
                 }
             }
             let departed = received.closed || received.fatal.is_some();
@@ -278,6 +287,7 @@ pub fn run(config: WorkerConfig, mut manifest: LaunchManifest) -> Result<ChildEx
             // this loop had already watched leave.
             if departed {
                 if let Some(id) = clients[index].id.take() {
+                    output.unregister(&id);
                     let mut effects = registry.detach(&id);
                     apply(
                         &mut effects,
@@ -298,16 +308,23 @@ pub fn run(config: WorkerConfig, mut manifest: LaunchManifest) -> Result<ChildEx
             &mut screen,
             &mut journal,
             &mut clients,
+            &mut output,
             &mut registry,
         )?;
-        deliver_output(&mut clients);
+        deliver_output(&mut clients, &mut output);
         // Catches the departures the read pass could not see: a client whose
         // socket failed on the way out rather than on the way in.
-        reap(&mut clients, &mut registry, &mut child, &mut screen)?;
+        reap(
+            &mut clients,
+            &mut output,
+            &mut registry,
+            &mut child,
+            &mut screen,
+        )?;
         // Arrivals are admitted last, so a connection accepted here has its
         // first message read on the next pass — after every departure already
         // visible to this one has been settled.
-        accept_new(&listener, &mut clients, config.queue);
+        accept_new(&listener, &mut clients);
 
         // A stop runs *through* the loop rather than instead of it.
         //
@@ -319,7 +336,7 @@ pub fn run(config: WorkerConfig, mut manifest: LaunchManifest) -> Result<ChildEx
         // a process group that can no longer be signalled. Keeping the loop
         // turning keeps the pty drained, so the child can die and be reaped by
         // the ordinary `try_wait` below.
-        if stop_requested && stopping.is_none() {
+        if let Some(force) = stop_requested.filter(|_| stopping.is_none()) {
             let mut announcement = registry.set_state(SessionState::Stopping);
             apply(
                 &mut announcement,
@@ -328,8 +345,14 @@ pub fn run(config: WorkerConfig, mut manifest: LaunchManifest) -> Result<ChildEx
                 &mut screen,
                 config.attach_history,
             )?;
-            child.signal_group(config.stop.graceful)?;
-            stopping = Some(Instant::now() + config.stop.grace);
+            if force {
+                child.signal_group(config.stop.forced)?;
+                stopping = Some(Instant::now());
+                escalated = true;
+            } else {
+                child.signal_group(config.stop.graceful)?;
+                stopping = Some(Instant::now() + config.stop.grace);
+            }
         }
         // The grace interval has run out with the child still there: escalate,
         // once, and go on draining until it is gone.
@@ -347,9 +370,10 @@ pub fn run(config: WorkerConfig, mut manifest: LaunchManifest) -> Result<ChildEx
                 &mut screen,
                 &mut journal,
                 &mut clients,
+                &mut output,
                 &mut registry,
             )?;
-            deliver_output(&mut clients);
+            deliver_output(&mut clients, &mut output);
             break exit;
         }
         flush(&mut clients, Duration::ZERO);
@@ -373,16 +397,13 @@ struct Client {
     /// `None` until `attach` succeeds. A connection that has not attached
     /// receives nothing: it is not in the registry, so no broadcast names it.
     id: Option<registry::AttachmentId>,
-    /// PTY output waiting for this attachment. This queue is separate from the
-    /// socket's encoded-frame buffer so stale output can be replaced safely.
-    output: queue::OutputQueue,
 }
 
 /// What one inbound frame asked the worker to do.
 enum Handled {
     Effects(Vec<Effect>),
     Input(Vec<u8>),
-    Stop,
+    Stop { force: bool },
     Nothing,
 }
 
@@ -472,19 +493,11 @@ fn wait_for_work(
 }
 
 /// Accepts everything waiting, refusing peers that are not the owner.
-fn accept_new(
-    listener: &socket::ControlListener,
-    clients: &mut Vec<Client>,
-    queue_config: queue::QueueConfig,
-) {
+fn accept_new(listener: &socket::ControlListener, clients: &mut Vec<Client>) {
     loop {
         match listener.accept() {
             Ok(accepted) => match socket::ClientConnection::new(accepted) {
-                Ok(conn) => clients.push(Client {
-                    conn,
-                    id: None,
-                    output: queue::OutputQueue::new(queue_config),
-                }),
+                Ok(conn) => clients.push(Client { conn, id: None }),
                 Err(_) => continue,
             },
             // Closed already, and answered with nothing. There is nothing to
@@ -576,9 +589,10 @@ fn handle_control(
                 }
             }
         }
-        ControlMessage::Resize { cols, rows } => match attached {
-            Some(id) => Handled::Effects(registry.resize(&id, Size { cols, rows })),
-            None => Handled::Nothing,
+        ControlMessage::Resize { cols, rows, pin } => match (attached, pin) {
+            (Some(_), Some(pin)) => Handled::Effects(registry.set_size(Size { cols, rows }, pin)),
+            (Some(id), None) => Handled::Effects(registry.resize(&id, Size { cols, rows })),
+            (None, _) => Handled::Nothing,
         },
         ControlMessage::ControlRequest { steal } => match attached {
             Some(id) => match registry.request_control(&id, steal) {
@@ -596,7 +610,9 @@ fn handle_control(
         },
         // `latch stop` is this and nothing else. There is no ninth control
         // message, and no pid is read from anywhere to serve it.
-        message if is_stop_request(&message) => Handled::Stop,
+        message if is_stop_request(&message) => Handled::Stop {
+            force: stop_request_force(&message).unwrap_or(false),
+        },
         // Everything else in the vocabulary is worker-to-client. A client that
         // sends one is ignored rather than disconnected.
         _ => Handled::Nothing,
@@ -684,6 +700,7 @@ fn pump_pty(
     screen: &mut Terminal,
     journal: &mut journal::Journal,
     clients: &mut [Client],
+    output: &mut queue::Fanout,
     registry: &mut Registry,
 ) -> Result<(), WorkerError> {
     let mut buffer = [0u8; 8192];
@@ -697,15 +714,12 @@ fn pump_pty(
                 // bytes already sent live.
                 screen.advance(bytes);
                 let _ = journal.append(bytes);
-                for client in clients.iter_mut().filter(|client| client.id.is_some()) {
-                    if client.output.push(bytes).overflowed() {
-                        // Output accepted by the socket but not its kernel is
-                        // stale as well. The snapshot that replaces it is taken
-                        // once, after the pass — see `resync_stalled_clients`.
+                for id in output.publish(bytes) {
+                    // Output accepted by the socket but not its kernel is stale
+                    // as well. The snapshot replacing it is taken once after
+                    // the pass — see `resync_stalled_clients`.
+                    if let Some(client) = find(clients, &id) {
                         client.conn.discard_pending_writes();
-                    }
-                    if let Some(id) = &client.id {
-                        registry.record_stats(id, client.output.stats());
                     }
                 }
             }
@@ -717,7 +731,8 @@ fn pump_pty(
     // Budget spent, or the pty drained. Either way the loop is handed back to
     // the control plane; `poll` reports the pty ready again immediately, so the
     // only thing given up is this pass, not the bytes.
-    resync_stalled_clients(screen, clients, registry);
+    resync_stalled_clients(screen, output);
+    record_queue_stats(clients, output, registry);
     Ok(())
 }
 
@@ -730,22 +745,21 @@ fn pump_pty(
 /// that should take milliseconds takes seconds. One snapshot at the end of the
 /// pass is also the *better* one: it is later, and the queue behind it was going
 /// to be discarded regardless.
-fn resync_stalled_clients(screen: &mut Terminal, clients: &mut [Client], registry: &mut Registry) {
-    let stalled = clients
-        .iter()
-        .any(|client| client.id.is_some() && client.output.needs_resync());
-    if !stalled {
+fn resync_stalled_clients(screen: &mut Terminal, output: &mut queue::Fanout) {
+    let stalled = output.pending_resyncs();
+    if stalled.is_empty() {
         return;
     }
     let snapshot = screen.snapshot();
-    for client in clients
-        .iter_mut()
-        .filter(|client| client.id.is_some() && client.output.needs_resync())
-    {
-        client.output.resynchronized();
-        let _ = client.output.push(&snapshot);
-        if let Some(id) = &client.id {
-            registry.record_stats(id, client.output.stats());
+    for id in stalled {
+        output.resynchronize(&id, snapshot.clone());
+    }
+}
+
+fn record_queue_stats(clients: &[Client], output: &queue::Fanout, registry: &mut Registry) {
+    for id in clients.iter().filter_map(|client| client.id.as_ref()) {
+        if let Some(stats) = output.stats(id) {
+            registry.record_stats(id, stats);
         }
     }
 }
@@ -755,10 +769,10 @@ fn resync_stalled_clients(screen: &mut Terminal, clients: &mut [Client], registr
 /// Moving every chunk into `ClientConnection` would simply recreate an
 /// unbounded queue below the bounded one. A client has at most its configured
 /// queue plus one encoded frame awaiting the kernel.
-fn deliver_output(clients: &mut [Client]) {
+fn deliver_output(clients: &mut [Client], output: &mut queue::Fanout) {
     for client in clients.iter_mut() {
         if client.id.is_some() && !client.conn.has_pending_writes() {
-            if let Some(chunk) = client.output.pop() {
+            if let Some(chunk) = client.id.as_ref().and_then(|id| output.pop(id)) {
                 client.conn.enqueue(FrameType::TerminalOutput, &chunk);
             }
         }
@@ -772,6 +786,7 @@ fn deliver_output(clients: &mut [Client]) {
 /// departure precisely, so a timer could only be wrong relative to it (D5).
 fn reap(
     clients: &mut Vec<Client>,
+    output: &mut queue::Fanout,
     registry: &mut Registry,
     child: &mut process::ChildProcess,
     screen: &mut Terminal,
@@ -790,6 +805,7 @@ fn reap(
         false
     });
     for id in departed {
+        output.unregister(&id);
         let mut effects = registry.detach(&id);
         // A departure produces broadcasts and possibly a resize, never a
         // snapshot: nobody arrived. `NONE` states that rather than threading a
@@ -869,7 +885,7 @@ fn finish(
     // very different things to be on the receiving end of.
     let deadline = std::time::Instant::now() + DRAIN_AFTER_EXIT;
     while std::time::Instant::now() < deadline {
-        accept_new(listener, clients, queue::QueueConfig::default());
+        accept_new(listener, clients);
         for client in clients.iter_mut() {
             let received = client.conn.receive();
             // Not decoded: the answer is the same whatever it asked for, and a
@@ -1016,19 +1032,25 @@ pub fn derive_state(paths: &SessionPaths) -> Result<SessionState, WorkerError> {
 /// on purpose — each one multiplies across the per-language fixture suites — and
 /// `session.update` already carries a lifecycle state. A client sending
 /// `session.update { state: stopping }` is asking this worker to stop its own
-/// child's process group; the worker answers by broadcasting the same state and,
-/// once the child is gone, `session.exited`.
+/// child's process group; `force: true` skips the graceful interval. The worker
+/// answers by broadcasting the same state and, once the child is gone,
+/// `session.exited`.
 ///
 /// A `session.update` that carries no `state` is presence or title metadata and
 /// is not a stop.
 pub fn is_stop_request(message: &ControlMessage) -> bool {
-    matches!(
-        message,
+    stop_request_force(message).is_some()
+}
+
+fn stop_request_force(message: &ControlMessage) -> Option<bool> {
+    match message {
         ControlMessage::SessionUpdate {
             state: Some(SessionState::Stopping),
+            force,
             ..
-        }
-    )
+        } => Some(force.unwrap_or(false)),
+        _ => None,
+    }
 }
 
 /// Converts a wire size into a screen-model size.

@@ -74,9 +74,11 @@ fn a_connection_from_an_unauthorized_uid_is_closed_and_the_session_survives() {
     let harness = Harness::new();
     // The session is owned by a uid that is not this test's, so every connection
     // this test makes is the "another user" case — reachable without a second
-    // account, which is what makes the rejection path testable at all.
+    // account, which is what makes the rejection path testable at all. The child
+    // exits on its own because the harness is intentionally unauthorized to send
+    // its usual cleanup request.
     let session = harness.spawn(support::tuned(
-        sh_manifest(ANNOUNCE_AND_WAIT, TerminalSize::new(200, 50)),
+        sh_manifest("echo PID:$$; sleep 0.5", TerminalSize::new(200, 50)),
         WorkerTuning {
             owner_uid: Some(current_uid().wrapping_add(1)),
             ..WorkerTuning::default()
@@ -113,6 +115,7 @@ fn a_connection_from_an_unauthorized_uid_is_closed_and_the_session_survives() {
         !session.paths().exit().exists(),
         "the child must be entirely unaffected by a connection it never saw"
     );
+    session.wait_until_gone(SETTLE);
 }
 
 // -- handshake -------------------------------------------------------------
@@ -429,6 +432,7 @@ fn a_title_change_carries_only_the_title() {
             state,
             attachments,
             title,
+            ..
         } => {
             assert_eq!(
                 title.clone(),
@@ -497,6 +501,7 @@ fn a_new_attachment_updates_everyone_elses_presence_list() {
                 attachments: Some(list),
                 state,
                 title,
+                ..
             } => Some((list.clone(), state.is_none(), title.is_none())),
             _ => None,
         })

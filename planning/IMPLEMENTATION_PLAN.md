@@ -201,10 +201,10 @@ suites (and Swift later, if it happens).
 ```text
 attach          { protocol, mode: watch|control, steal, client: {kind,name}, size }
 attached        { protocol, session, controller, attachments }
-resize          { cols, rows }
+resize          { cols, rows, pin? }                    // pin is management-only
 control.request { steal }
 control.state   { controller_id, controller_label }        // broadcast
-session.update  { state?, attachments?, title? }           // presence + state, merged
+session.update  { state?, attachments?, title?, force? }    // presence + state, merged
 session.exited  { code, signal, at }
 error           { code, message }
 ```

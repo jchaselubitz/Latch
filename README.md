@@ -20,9 +20,10 @@ than code.
 
 ## Status
 
-Early. The workspace scaffold is in place and the milestones are sequenced;
-`crates/` is being filled in from M1 outward. Commands exist in `latch --help`
-before they work.
+M1 is implemented and verified on macOS: local workers own persistent PTYs,
+iTerm-compatible clients can detach and reattach, and the management command
+surface is live. M2's SSH/phone path is implemented for dogfooding but remains
+explicitly non-shippable; see [`docs/M2_FIELD_REPORT.md`](docs/M2_FIELD_REPORT.md).
 
 ## Layout
 

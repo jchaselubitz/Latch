@@ -98,7 +98,10 @@ pub fn create_session(options: CreateOptions) -> anyhow::Result<CreateOutcome> {
 /// Builds the launch material for a shell session.
 pub fn shell_manifest(options: ManifestOptions) -> LaunchManifest {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned());
-    let mut manifest = LaunchManifest::new(vec![shell], options.cwd, options.size);
+    // iTerm's ordinary profile starts a login shell. The Latch profile must do
+    // the same or shell startup files, PATH setup, and other profile behavior
+    // differ before the user types the first command.
+    let mut manifest = LaunchManifest::new(vec![shell, "-l".to_owned()], options.cwd, options.size);
     manifest.display = options.display;
     manifest
 }

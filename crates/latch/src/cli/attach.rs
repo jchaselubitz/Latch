@@ -39,7 +39,7 @@ use std::io::Write;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context};
-use latch_protocol::control::{self, AttachMode, ClientInfo, ControlMessage, Size};
+use latch_protocol::control::{self, AttachMode, ClientInfo, ControlMessage};
 use latch_protocol::frame::FrameType;
 use latch_protocol::PROTOCOL_VERSION;
 
@@ -376,7 +376,7 @@ fn attach_once(
             kind: "cli".to_owned(),
             name: std::env::var("TERM").unwrap_or_else(|_| "terminal".to_owned()),
         },
-        size: terminal_size(),
+        size: term::terminal_size(libc::STDOUT_FILENO),
     };
     send(
         &mut stream,
@@ -491,7 +491,7 @@ fn run_interactive(
         .set_nonblocking(true)
         .map_err(|error| Interruption::transport(id, error))?;
 
-    let mut previous_size = terminal_size();
+    let mut previous_size = term::terminal_size(libc::STDOUT_FILENO);
     loop {
         // Anything the last read already decoded is dealt with before waiting
         // for the socket to become readable again. The snapshot in particular
@@ -537,7 +537,7 @@ fn run_interactive(
             )));
         }
 
-        let size = terminal_size();
+        let size = term::terminal_size(libc::STDOUT_FILENO);
         if size != previous_size {
             // Watchers never resize the session (D4). The worker enforces this
             // too, but a client that sends a resize it knows will be ignored is
@@ -550,6 +550,7 @@ fn run_interactive(
                     &control::encode(&ControlMessage::Resize {
                         cols: size.cols,
                         rows: size.rows,
+                        pin: None,
                     }),
                 )?;
             }
@@ -732,24 +733,4 @@ fn most_recent_session(home: &LatchHome) -> anyhow::Result<SessionId> {
         .into_iter()
         .last()
         .context("no sessions are available to attach")
-}
-
-fn terminal_size() -> Size {
-    let mut winsize = std::mem::MaybeUninit::<libc::winsize>::uninit();
-    // SAFETY: `winsize` is writable storage and stdout is a conventional
-    // terminal fd. A redirected stdout simply reports an error, falling back
-    // to the launch-safe default below.
-    let has_size =
-        unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, winsize.as_mut_ptr()) } != -1;
-    if has_size {
-        // SAFETY: a successful TIOCGWINSZ initialized `winsize`.
-        let winsize = unsafe { winsize.assume_init() };
-        if winsize.ws_col > 0 && winsize.ws_row > 0 {
-            return Size {
-                cols: winsize.ws_col,
-                rows: winsize.ws_row,
-            };
-        }
-    }
-    Size { cols: 80, rows: 24 }
 }

@@ -6,6 +6,9 @@ session. Closing the window leaves the process running; `exit` ends it.
 Reattach with `latch attach` (or bare `latch` from inside another Latch
 session, which attaches rather than nesting).
 
+The shell Latch starts is a login shell, matching iTerm's normal profile
+behavior so the same startup files and environment setup apply.
+
 No daemon, no account, and no network connection are required.
 
 ## Prerequisites

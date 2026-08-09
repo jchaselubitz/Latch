@@ -269,6 +269,7 @@ fn duplicate_frames_over_the_wire_are_harmless() {
     let resize = ControlMessage::Resize {
         cols: 120,
         rows: 40,
+        pin: None,
     };
     for _ in 0..5 {
         controller.send_control(&resize).expect("resize delivered");

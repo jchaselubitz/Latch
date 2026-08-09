@@ -21,6 +21,7 @@ mod support;
 
 use std::time::{Duration, Instant};
 
+use latch::cli::manage::{self, StopRequest};
 use latch::worker::meta;
 use latch::worker::paths::{EXIT_NAME, JOURNAL_NAME, META_NAME, SOCKET_NAME};
 use latch::worker::process::Signal;
@@ -247,20 +248,6 @@ fn the_exit_record_exists_before_the_socket_disappears() {
 /// because a worker that dies partway through its own shutdown also leaves a
 /// dead socket — and leaves no record of how the session ended.
 ///
-/// # Currently failing, deliberately recorded
-///
-/// The first half holds: the worker answers its socket throughout the flood and
-/// derives as `running`. The stop does not. With a client attached, the request
-/// is read and the graceful signal is issued — instrumentation confirmed
-/// `stop_requested` becoming true and no signal error — and the child is still
-/// alive a minute later, so the session never reaches `exited`.
-///
-/// Stopping the same flooding session with no client attached works
-/// (`latch stop` returns `exited` in well under a second), so the attached
-/// client is implicated and the fault is not the signalling path on its own.
-/// Ignored rather than deleted because the case is real and the diagnosis is
-/// half-finished; run it with `--ignored` when picking the thread back up.
-#[ignore = "known failure: a flooding session with a client attached does not stop"]
 #[test]
 fn a_flooding_child_leaves_the_session_answerable_and_stoppable() {
     let harness = Harness::new();
@@ -354,6 +341,38 @@ fn a_graceful_stop_escalates_to_a_forced_stop() {
         "a child that ignores the graceful signal must still be stopped; \
          a stop that can be refused is a session that cannot be stopped"
     );
+}
+
+#[test]
+fn force_stop_skips_the_grace_interval() {
+    let harness = Harness::new();
+    let session = harness.spawn_sh("trap '' TERM; echo READY; while :; do sleep 0.2; done");
+    let mut client = session.attach(
+        latch_protocol::control::AttachMode::Watch,
+        false,
+        latch_protocol::control::Size { cols: 80, rows: 24 },
+    );
+    client.wait_for_output("READY", SETTLE);
+    drop(client);
+
+    let started = Instant::now();
+    let report = manage::stop(StopRequest {
+        home: harness.home().clone(),
+        session: session.id().to_string(),
+        force: true,
+    })
+    .expect("force stop should reach the worker");
+    session.wait_until_gone(SETTLE);
+
+    assert_eq!(report.state, "exited");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "--force must not wait out the default five-second graceful interval"
+    );
+    let record = meta::read_exit(session.paths())
+        .expect("the exit record should be readable")
+        .expect("force stop records the child exit");
+    assert_eq!(record.signal.as_deref(), Some(Signal::Kill.name()));
 }
 
 #[test]

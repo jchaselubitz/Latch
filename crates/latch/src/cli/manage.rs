@@ -120,7 +120,6 @@ pub struct StopRequest {
 /// Never reads a PID from storage. A session whose socket does not answer
 /// cannot be stopped, because there is nothing left to stop.
 pub fn stop(request: StopRequest) -> anyhow::Result<StopReport> {
-    let _ = request.force;
     let id = resolve_existing(&request.home, &request.session)?;
     let paths = request.home.session(&id);
     if !socket::is_live_within(&paths.socket(), worker::LIVENESS_PATIENCE) {
@@ -136,6 +135,7 @@ pub fn stop(request: StopRequest) -> anyhow::Result<StopReport> {
             state: Some(SessionState::Stopping),
             attachments: None,
             title: None,
+            force: Some(request.force),
         }),
     )?;
     stream.flush()?;
@@ -206,8 +206,8 @@ pub fn resize(request: ResizeRequest) -> anyhow::Result<ResizeReport> {
     let mut stream = FrameStream::new(stream);
     let attach = ControlMessage::Attach {
         protocol: PROTOCOL_VERSION,
-        mode: AttachMode::Control,
-        steal: true,
+        mode: AttachMode::Watch,
+        steal: false,
         client: ClientInfo {
             kind: "cli".to_owned(),
             name: "resize".to_owned(),
@@ -239,6 +239,7 @@ pub fn resize(request: ResizeRequest) -> anyhow::Result<ResizeReport> {
         &control::encode(&ControlMessage::Resize {
             cols: request.cols,
             rows: request.rows,
+            pin: Some(request.pin),
         }),
     )?;
     stream.flush()?;

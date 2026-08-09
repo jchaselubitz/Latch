@@ -143,6 +143,18 @@ impl ResizeAuthority {
         self.changed(|authority| authority.base = size)
     }
 
+    /// Sets the base size and clears an explicit pin as one effective change.
+    ///
+    /// This is the unpinned form of `latch resize`. Keeping it atomic prevents
+    /// callers from losing the first of two changes when there was no pin, or
+    /// briefly applying the base before revealing a controller beneath a pin.
+    pub fn set_base_unpinned(&mut self, size: Size) -> Option<Size> {
+        self.changed(|authority| {
+            authority.base = size;
+            authority.pinned = None;
+        })
+    }
+
     /// Pins `size`, overriding controllers until it is unpinned.
     pub fn pin(&mut self, size: Size) -> Option<Size> {
         self.changed(|authority| authority.pinned = Some(size))

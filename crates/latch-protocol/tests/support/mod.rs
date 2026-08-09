@@ -335,6 +335,7 @@ fn control_from_json(v: &Value, path: &Path) -> ControlMessage {
         "resize" => ControlMessage::Resize {
             cols: u16_at(v, "cols", &ctx("cols")),
             rows: u16_at(v, "rows", &ctx("rows")),
+            pin: obj.get("pin").map(|_| bool_at(v, "pin", &ctx("pin"))),
         },
         "control.request" => ControlMessage::ControlRequest {
             steal: bool_at(v, "steal", &ctx("steal")),
@@ -360,6 +361,7 @@ fn control_from_json(v: &Value, path: &Path) -> ControlMessage {
                         .to_string(),
                 ),
             }),
+            force: obj.get("force").map(|_| bool_at(v, "force", &ctx("force"))),
         },
         "session.exited" => ControlMessage::SessionExited {
             code: match obj.get("code") {

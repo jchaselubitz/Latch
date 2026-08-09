@@ -113,7 +113,8 @@ fn any_control_message() -> impl Strategy<Value = ControlMessage> {
                     attachments,
                 }
             ),
-        (any::<u16>(), any::<u16>()).prop_map(|(cols, rows)| ControlMessage::Resize { cols, rows }),
+        (any::<u16>(), any::<u16>(), any::<Option<bool>>())
+            .prop_map(|(cols, rows, pin)| ControlMessage::Resize { cols, rows, pin }),
         any::<bool>().prop_map(|steal| ControlMessage::ControlRequest { steal }),
         (prop::option::of(any_text()), prop::option::of(any_text())).prop_map(
             |(controller_id, controller_label)| ControlMessage::ControlState {
@@ -125,12 +126,14 @@ fn any_control_message() -> impl Strategy<Value = ControlMessage> {
             prop::option::of(any_state()),
             prop::option::of(any_attachments()),
             prop::option::of(prop::option::of(any_text())),
+            any::<Option<bool>>(),
         )
             .prop_map(
-                |(state, attachments, title)| ControlMessage::SessionUpdate {
+                |(state, attachments, title, force)| ControlMessage::SessionUpdate {
                     state,
                     attachments,
                     title,
+                    force,
                 }
             ),
         (

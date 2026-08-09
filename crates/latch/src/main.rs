@@ -533,7 +533,8 @@ fn attach_created_session(session: &str) -> Result<()> {
 }
 
 fn terminal_size() -> TerminalSize {
-    TerminalSize::new(80, 24)
+    let size = latch::cli::term::terminal_size(libc::STDOUT_FILENO);
+    TerminalSize::new(size.cols, size.rows)
 }
 
 fn print_list_human(report: &latch::cli::json::ListReport) {

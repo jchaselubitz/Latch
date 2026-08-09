@@ -1,0 +1,16 @@
+{
+  "name": "control-resize-pinned",
+  "protocol": 1,
+  "description": "management resize pins the session at 132x43",
+  "frame": {
+    "type": "control",
+    "encoded": "100000001c84a174a6726573697a65a4636f6c73cc84a4726f77732ba370696ec3",
+    "payload": "84a174a6726573697a65a4636f6c73cc84a4726f77732ba370696ec3",
+    "decoded": {
+      "t": "resize",
+      "cols": 132,
+      "rows": 43,
+      "pin": true
+    }
+  }
+}

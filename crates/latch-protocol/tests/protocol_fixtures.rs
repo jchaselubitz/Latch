@@ -277,6 +277,7 @@ fn session_update_dispositions_are_what_the_fixture_says() {
             state,
             attachments,
             title,
+            ..
         }) = case.decoded.as_ref()
         else {
             panic!("{name}: a `merge` annotation belongs only on session.update");

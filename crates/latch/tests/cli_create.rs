@@ -264,26 +264,21 @@ fn clap_surface_accepts_name_and_title_and_create_json() {
     // Parsing must succeed even while the bodies are unimplemented — otherwise
     // the adoption commands the plan names cannot be typed.
     for args in [
-        vec!["shell", "--name", "backend", "--title", "API work"],
-        vec!["run", "--name", "auth", "--", "codex"],
-        vec!["create", "--manifest-file", "-", "--json"],
+        vec![
+            "shell", "--name", "backend", "--title", "API work", "--help",
+        ],
+        vec!["run", "--name", "auth", "--help"],
+        vec!["create", "--manifest-file", "-", "--json", "--help"],
     ] {
-        let output = if args[0] == "create" {
-            latch_cmd_with_stdin(
-                &Harness::new(),
-                &args.iter().map(|s| &**s).collect::<Vec<_>>(),
-                b"{}",
-            )
-        } else {
-            latch_cmd(
-                &Harness::new(),
-                &args.iter().map(|s| &**s).collect::<Vec<_>>(),
-            )
-        };
-        // Unimplemented is fine; an unrecognized argument is not.
+        let output = latch_cmd(
+            &Harness::new(),
+            &args.iter().map(|s| &**s).collect::<Vec<_>>(),
+        );
         let err = support::stderr_str(&output);
         assert!(
-            !err.contains("unexpected argument") && !err.contains("unrecognized subcommand"),
+            output.status.success()
+                && !err.contains("unexpected argument")
+                && !err.contains("unrecognized subcommand"),
             "clap must accept {:?}; stderr={err}",
             args
         );

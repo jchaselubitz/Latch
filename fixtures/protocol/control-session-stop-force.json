@@ -1,0 +1,15 @@
+{
+  "name": "control-session-stop-force",
+  "protocol": 1,
+  "description": "session update requests an immediate forced stop",
+  "frame": {
+    "type": "control",
+    "encoded": "100000002883a174ae73657373696f6e2e757064617465a57374617465a873746f7070696e67a5666f726365c3",
+    "payload": "83a174ae73657373696f6e2e757064617465a57374617465a873746f7070696e67a5666f726365c3",
+    "decoded": {
+      "t": "session.update",
+      "state": "stopping",
+      "force": true
+    }
+  }
+}

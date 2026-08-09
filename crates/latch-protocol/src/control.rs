@@ -215,7 +215,8 @@ pub enum ControlMessage {
         /// Everyone currently attached, including the new attachment.
         attachments: Vec<Attachment>,
     },
-    /// `resize` — the controller's terminal changed size.
+    /// `resize` — the controller's terminal changed size, or a management
+    /// client explicitly set the session's base or pinned size.
     ///
     /// From a watcher this is ignored: watchers never resize the session.
     Resize {
@@ -223,6 +224,10 @@ pub enum ControlMessage {
         cols: u16,
         /// Rows.
         rows: u16,
+        /// `None` for an ordinary controller resize. A present value marks an
+        /// explicit management resize: `true` pins it and `false` sets the base
+        /// size while clearing any prior pin.
+        pin: Option<bool>,
     },
     /// `control.request` — an attached watcher asks to take input control.
     ControlRequest {
@@ -256,6 +261,9 @@ pub enum ControlMessage {
         attachments: Option<Vec<Attachment>>,
         /// `None` — unchanged. `Some(None)` — cleared. `Some(Some(s))` — set.
         title: Option<Option<String>>,
+        /// Present only on a client-to-worker stop request. `true` skips the
+        /// graceful interval; absent/false uses the worker's stop policy.
+        force: Option<bool>,
     },
     /// `session.exited` — the child process ended.
     SessionExited {
@@ -447,11 +455,14 @@ impl Serialize for Wire<'_> {
                 map.serialize_entry("attachments", &WireAttachments(attachments))?;
                 map.end()
             }
-            ControlMessage::Resize { cols, rows } => {
-                let mut map = serializer.serialize_map(Some(3))?;
+            ControlMessage::Resize { cols, rows, pin } => {
+                let mut map = serializer.serialize_map(Some(3 + usize::from(pin.is_some())))?;
                 map.serialize_entry("t", "resize")?;
                 map.serialize_entry("cols", cols)?;
                 map.serialize_entry("rows", rows)?;
+                if let Some(pin) = pin {
+                    map.serialize_entry("pin", pin)?;
+                }
                 map.end()
             }
             ControlMessage::ControlRequest { steal } => {
@@ -478,9 +489,13 @@ impl Serialize for Wire<'_> {
                 state,
                 attachments,
                 title,
+                force,
             } => {
                 let len = 1 + usize::from(
-                    state.is_some() as u8 + attachments.is_some() as u8 + title.is_some() as u8,
+                    state.is_some() as u8
+                        + attachments.is_some() as u8
+                        + title.is_some() as u8
+                        + force.is_some() as u8,
                 );
                 let mut map = serializer.serialize_map(Some(len))?;
                 map.serialize_entry("t", "session.update")?;
@@ -494,6 +509,9 @@ impl Serialize for Wire<'_> {
                     // Inner `None` is the explicit clear, and it is written as
                     // a present null.
                     map.serialize_entry("title", title)?;
+                }
+                if let Some(force) = force {
+                    map.serialize_entry("force", force)?;
                 }
                 map.end()
             }
@@ -604,6 +622,7 @@ pub fn decode(payload: &[u8]) -> Result<ControlMessage, ControlError> {
         "resize" => Ok(ControlMessage::Resize {
             cols: u16_field(&fields, t, "cols")?,
             rows: u16_field(&fields, t, "rows")?,
+            pin: opt_bool_field(&fields, t, "pin")?,
         }),
         "control.request" => Ok(ControlMessage::ControlRequest {
             steal: bool_field(&fields, t, "steal")?,
@@ -715,11 +734,13 @@ fn decode_session_update(fields: &Fields<'_>, t: &str) -> Result<ControlMessage,
         Some(Value::Nil) => Some(None),
         Some(value) => Some(Some(as_str(value, t, "title".to_string())?.to_string())),
     };
+    let force = opt_bool_field(fields, t, "force")?;
 
     Ok(ControlMessage::SessionUpdate {
         state,
         attachments,
         title,
+        force,
     })
 }
 
@@ -834,6 +855,22 @@ fn bool_field(fields: &Fields<'_>, message: &str, key: &str) -> Result<bool, Con
         // protocol, so a coerced read here hands control to a client that did
         // not ask to steal it.
         other => Err(invalid(
+            message,
+            fields.name(key),
+            format!("expected a boolean, found {}", other.type_name()),
+        )),
+    }
+}
+
+fn opt_bool_field(
+    fields: &Fields<'_>,
+    message: &str,
+    key: &str,
+) -> Result<Option<bool>, ControlError> {
+    match fields.get(key) {
+        None => Ok(None),
+        Some(Value::Bool(value)) => Ok(Some(*value)),
+        Some(other) => Err(invalid(
             message,
             fields.name(key),
             format!("expected a boolean, found {}", other.type_name()),

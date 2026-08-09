@@ -453,7 +453,7 @@ impl Registry {
         let changed = if pin {
             self.resize.pin(size)
         } else {
-            self.resize.set_base(size)
+            self.resize.set_base_unpinned(size)
         };
         changed
             .map(|size| Effect::Resize { size })
@@ -482,6 +482,7 @@ impl Registry {
                 state: None,
                 attachments: None,
                 title: Some(title),
+                force: None,
             },
         }]
     }
@@ -494,6 +495,7 @@ impl Registry {
                 state: Some(state),
                 attachments: None,
                 title: None,
+                force: None,
             },
         }]
     }
@@ -617,6 +619,7 @@ impl Registry {
             state: None,
             attachments: Some(self.attachments()),
             title: None,
+            force: None,
         }
     }
 }

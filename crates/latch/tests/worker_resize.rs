@@ -20,6 +20,7 @@ use std::time::Duration;
 
 use latch_protocol::control::AttachMode;
 
+use latch::cli::manage::{self, ResizeRequest};
 use latch::worker::registry::{AttachmentId, Effect, Registry};
 use latch::worker::resize::ResizeAuthority;
 use support::{attach_request, resizes, size, Harness, SETTLE};
@@ -318,6 +319,34 @@ fn a_watcher_attaching_at_a_different_size_leaves_the_child_alone() {
     assert!(
         !text.contains(&format!("{} {}", PHONE.1, PHONE.0)),
         "a watcher must never resize the session: {text}"
+    );
+}
+
+#[test]
+fn the_resize_command_reaches_the_worker_and_pin_survives_a_takeover() {
+    let harness = Harness::new();
+    let session = harness.spawn(support::sh_manifest(
+        "while :; do stty size; sleep 0.1; done",
+        latch::worker::manifest::TerminalSize::new(DESK.0, DESK.1),
+    ));
+    let mut desk = session.attach(AttachMode::Control, false, size(DESK.0, DESK.1));
+
+    let report = manage::resize(ResizeRequest {
+        home: harness.home().clone(),
+        session: session.id().to_string(),
+        cols: 132,
+        rows: 43,
+        pin: true,
+    })
+    .expect("the management resize should be delivered");
+    assert!(report.pinned);
+    desk.wait_for_output("43 132", SETTLE);
+
+    let _phone = session.attach(AttachMode::Control, true, size(PHONE.0, PHONE.1));
+    let seen = desk.output_for(Duration::from_millis(600));
+    assert!(
+        !String::from_utf8_lossy(&seen).contains(&format!("{} {}", PHONE.1, PHONE.0)),
+        "a controller takeover must not override a management pin"
     );
 }
 
