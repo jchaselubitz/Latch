@@ -50,6 +50,7 @@ if [[ -n "${LATCH_CODESIGN_IDENTITY:-}" ]]; then
 fi
 
 mkdir -p "$output_dir"
+archive_path="$(cd "$output_dir" && pwd -P)/$archive_name"
 rm -f "$archive_path"
 (cd "$stage_dir" && /usr/bin/zip -q -X "$archive_path" latch)
 
