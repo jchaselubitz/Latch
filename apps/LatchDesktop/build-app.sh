@@ -20,12 +20,18 @@ fi
 
 # Build both slices explicitly so the one desktop download runs natively on
 # Apple Silicon and Intel. The CLI is a separate release asset and is never
-# copied into the application bundle.
-swift build --package-path "$desktop_dir" -c release --arch arm64
-swift build --package-path "$desktop_dir" -c release --arch x86_64
+# copied into the application bundle. SwiftPM uses one default build directory
+# regardless of --arch, so the second build otherwise replaces the first slice
+# and lipo receives two copies of the host architecture.
+arm64_build_dir="$desktop_dir/.build/arm64-release"
+x86_64_build_dir="$desktop_dir/.build/x86_64-release"
+rm -rf -- "$arm64_build_dir" "$x86_64_build_dir"
 
-arm64_bin_dir="$(swift build --package-path "$desktop_dir" -c release --arch arm64 --show-bin-path)"
-x86_64_bin_dir="$(swift build --package-path "$desktop_dir" -c release --arch x86_64 --show-bin-path)"
+swift build --package-path "$desktop_dir" -c release --arch arm64 --scratch-path "$arm64_build_dir"
+swift build --package-path "$desktop_dir" -c release --arch x86_64 --scratch-path "$x86_64_build_dir"
+
+arm64_bin_dir="$(swift build --package-path "$desktop_dir" -c release --arch arm64 --scratch-path "$arm64_build_dir" --show-bin-path)"
+x86_64_bin_dir="$(swift build --package-path "$desktop_dir" -c release --arch x86_64 --scratch-path "$x86_64_build_dir" --show-bin-path)"
 app_dir="$desktop_dir/.build/release/Latch.app"
 contents_dir="$app_dir/Contents"
 
