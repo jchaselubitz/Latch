@@ -82,11 +82,10 @@ jobs:
           merge-multiple: true
 
       - name: Combine and verify checksums
-        working-directory: dist
         run: |
           set -euo pipefail
-          cat latch-*.tar.gz.sha256 > checksums.txt
-          shasum -a 256 -c checksums.txt
+          cat dist/latch-*.tar.gz.sha256 > dist/checksums.txt
+          shasum -a 256 -c dist/checksums.txt
 
       - name: Create GitHub Release
         env:
