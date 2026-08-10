@@ -516,6 +516,7 @@ pub fn capabilities() -> CapabilitiesReport {
             open_viewer: cfg!(target_os = "macos"),
             local_attach: true,
             cloud_attach: false,
+            self_update: crate::cli::update::can_self_update(),
             extensions: Vec::new(),
         },
     }

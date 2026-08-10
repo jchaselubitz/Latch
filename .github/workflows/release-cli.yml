@@ -26,6 +26,7 @@ jobs:
     env:
       LATCH_RELEASE_TAG: ${{ github.ref_name }}
       LATCH_CODESIGN_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      LATCH_NOTARY_PROFILE: latch-cli-notary
 
     steps:
       - uses: actions/checkout@v4
@@ -39,12 +40,18 @@ jobs:
           APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -euo pipefail
           : "${APPLE_CERTIFICATE_BASE64:?Set the Apple signing certificate secret}"
           : "${APPLE_CERTIFICATE_PASSWORD:?Set the certificate password secret}"
           : "${KEYCHAIN_PASSWORD:?Set a temporary keychain password secret}"
           : "${LATCH_CODESIGN_IDENTITY:?Set the Developer ID Application signing identity secret}"
+          : "${APPLE_ID:?Set the Apple ID notarization secret}"
+          : "${APPLE_APP_SPECIFIC_PASSWORD:?Set the Apple app-specific password secret}"
+          : "${APPLE_TEAM_ID:?Set the Apple Developer Team ID secret}"
           certificate_path="$RUNNER_TEMP/latch-signing.p12"
           keychain_path="$RUNNER_TEMP/latch-signing.keychain-db"
           echo "$APPLE_CERTIFICATE_BASE64" | base64 -D > "$certificate_path"
@@ -54,6 +61,10 @@ jobs:
           security import "$certificate_path" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain_path"
           security list-keychain -d user -s "$keychain_path"
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$keychain_path"
+          xcrun notarytool store-credentials "$LATCH_NOTARY_PROFILE" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID"
 
       - name: Package signed CLI
         run: scripts/release-cli.sh ${{ matrix.target }}
@@ -61,7 +72,7 @@ jobs:
       - name: Attest release archive
         uses: actions/attest@v4
         with:
-          subject-path: dist/latch-*.tar.gz
+          subject-path: dist/latch-*.zip
 
       - uses: actions/upload-artifact@v4
         with:
@@ -84,14 +95,14 @@ jobs:
       - name: Combine and verify checksums
         run: |
           set -euo pipefail
-          cat dist/latch-*.tar.gz.sha256 > dist/checksums.txt
+          cat dist/latch-*.zip.sha256 > dist/checksums.txt
           shasum -a 256 -c dist/checksums.txt
 
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/latch-*.tar.gz dist/checksums.txt \
+          gh release create "$GITHUB_REF_NAME" dist/latch-*.zip dist/checksums.txt \
             --repo "$GITHUB_REPOSITORY" \
             --title "Latch $GITHUB_REF_NAME" \
             --generate-notes

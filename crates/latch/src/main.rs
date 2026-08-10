@@ -26,6 +26,7 @@ use latch::cli::manage::{
 };
 use latch::cli::nesting::{self, NestingDecision};
 use latch::cli::open::{self, OpenRequest};
+use latch::cli::update::{self, UpdateOptions};
 use latch::worker::manifest::{DisplayMetadata, TerminalSize};
 use latch::worker::paths::LatchHome;
 use latch_protocol::PROTOCOL_VERSION;
@@ -211,6 +212,24 @@ enum Command {
         key: Option<String>,
         /// New value; omit to read.
         value: Option<String>,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Update this binary to the newest published release.
+    ///
+    /// Latch installs as one file, so it updates by replacing that one file.
+    /// The archive is verified against the checksums the release publishes
+    /// before anything is replaced, and a copy owned by something else — a
+    /// Homebrew cellar, the helper inside Latch.app — is refused rather than
+    /// diverged from its package.
+    Update {
+        /// Report what is available without installing it.
+        #[arg(long)]
+        check: bool,
+        /// Install the published release even when it is not newer.
+        #[arg(long)]
+        force: bool,
         /// Emit machine-readable JSON.
         #[arg(long)]
         json: bool,
@@ -503,6 +522,19 @@ fn dispatch(command: Option<Command>) -> Result<()> {
             }
             Ok(())
         }
+        Some(Command::Update { check, force, json }) => {
+            let report = update::update(UpdateOptions {
+                check_only: check,
+                force,
+                ..UpdateOptions::new(env!("CARGO_PKG_VERSION"))
+            })?;
+            if json {
+                println!("{}", serde_json::to_string(&report)?);
+            } else {
+                print_update_human(&report);
+            }
+            Ok(())
+        }
         Some(Command::Capabilities { json }) => {
             let report = manage::capabilities();
             if json {
@@ -611,6 +643,31 @@ fn print_list_human(report: &latch::cli::json::ListReport) {
             "{}\t{}\t{}\tidle {}\t{}",
             session.id, session.name, session.state, idle, session.command_label
         );
+    }
+}
+
+/// The human form says what happened and, when something is available, how to
+/// get it — a check that only prints a version number leaves the reader to
+/// guess the command.
+fn print_update_human(report: &latch::cli::json::UpdateReport) {
+    let latest = report.latest_version.as_deref().unwrap_or("unknown");
+    match report.status.as_str() {
+        "installed" => {
+            println!("updated {} to {latest}", report.current_version);
+            if let Some(path) = &report.installed_path {
+                println!("{}", path.display());
+            }
+        }
+        "available" => {
+            println!(
+                "latch {latest} is available (this is {}); run `latch update` to install it",
+                report.current_version
+            );
+            if let Some(url) = &report.release_url {
+                println!("{url}");
+            }
+        }
+        _ => println!("latch {} is the latest release", report.current_version),
     }
 }
 

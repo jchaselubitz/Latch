@@ -174,6 +174,28 @@ pub struct RetainedSession {
     pub reclaimable_in_ms: u64,
 }
 
+/// `latch update --json`.
+///
+/// One shape for all three outcomes so a caller can branch on `status` alone:
+/// `current` when the install is the published version, `available` when a
+/// check found a newer one, `installed` when this run replaced the binary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateReport {
+    /// `current` | `available` | `installed`.
+    pub status: String,
+    /// Version that was running when the check was made.
+    pub current_version: String,
+    /// Newest published version, when the release feed was readable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_version: Option<String>,
+    /// Release page for the newest published version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_url: Option<String>,
+    /// Binary that was replaced, present only for `installed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installed_path: Option<PathBuf>,
+}
+
 /// One finding from `latch doctor`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DoctorFinding {
@@ -238,6 +260,13 @@ pub struct CapabilityFlags {
     /// Cloud attach is available (M4).
     #[serde(rename = "cloudAttach")]
     pub cloud_attach: bool,
+    /// `latch update` can replace this install in place.
+    ///
+    /// False for a build with no published release channel, and false for a
+    /// copy something else owns — the desktop app reads this to decide whether
+    /// offering to update the CLI would work.
+    #[serde(rename = "selfUpdate")]
+    pub self_update: bool,
     /// Extension identifiers this build supports.
     pub extensions: Vec<String>,
 }
