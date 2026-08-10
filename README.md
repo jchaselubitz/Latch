@@ -11,6 +11,7 @@ latch                       # a persistent shell, attached
 latch run -- claude         # a persistent agent session
 latch list                  # what is running
 latch attach auth-refactor  # from anywhere, including a phone over SSH
+latch remove old-session    # remove one exited/lost session
 ```
 
 Point your terminal profile's command at `latch` and every window you open is
@@ -32,6 +33,7 @@ crates/
   latch/                   # the single binary: CLI + worker modes
   latch-protocol/          # framing, control messages, codec
   latch-term/              # screen model + snapshot serialization
+apps/LatchDesktop/         # native macOS session manager + menu-bar extra
 packages/                  # TypeScript clients, M3 onward
 fixtures/                  # language-neutral protocol + VT fixtures
 docs/
@@ -45,11 +47,17 @@ cargo test --workspace          # unit, integration, and fixture suites
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 ./scripts/check-boundaries.sh   # dependency and layering rules
+swift test --package-path apps/LatchDesktop  # desktop contract tests (macOS)
 ```
 
 The rules CI enforces are written down in
 [`docs/ARCHITECTURE_RULES.md`](docs/ARCHITECTURE_RULES.md). Read that before
 adding a dependency between crates.
+
+The optional native companion is documented in
+[`apps/LatchDesktop/README.md`](apps/LatchDesktop/README.md). It invokes the
+same JSON CLI contracts as every other client; the CLI remains fully usable
+without the app installed.
 
 ## Planning
 

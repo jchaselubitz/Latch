@@ -9,7 +9,7 @@ mod support;
 
 use latch::cli::json::{
     parse_state, CapabilitiesReport, CreateReport, InspectReport, ListReport, PruneReport,
-    RenameReport, ResizeReport, StopReport,
+    RemoveReport, RenameReport, ResizeReport, StopReport,
 };
 use latch::cli::manage;
 use latch_protocol::PROTOCOL_VERSION;
@@ -136,6 +136,13 @@ fn stop_rename_resize_prune_json_schemas_round_trip() {
     .unwrap();
     assert_eq!(stop.state, "stopping");
 
+    let remove: RemoveReport = serde_json::from_value(serde_json::json!({
+        "id": "ses_01JTEST",
+        "removed": true
+    }))
+    .unwrap();
+    assert!(remove.removed);
+
     let rename: RenameReport = serde_json::from_value(serde_json::json!({
         "id": "ses_01JTEST",
         "name": "backend"
@@ -201,6 +208,7 @@ fn every_read_command_accepts_json() {
         vec!["list", "--json"],
         vec!["inspect", "ses_x", "--json"],
         vec!["stop", "ses_x", "--json"],
+        vec!["remove", "ses_x", "--json"],
         vec!["rename", "ses_x", "new", "--json"],
         vec!["resize", "ses_x", "--cols", "80", "--rows", "24", "--json"],
         vec!["prune", "--json"],

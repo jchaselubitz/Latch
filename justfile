@@ -5,6 +5,9 @@ test-install:
     cargo install --path crates/latch --root /tmp/latch-test --force
     /tmp/latch-test/bin/latch --help
 
+release-cli target="":
+    ./scripts/release-cli.sh {{target}}
+
 build-debug:
     cargo build --package latch
 

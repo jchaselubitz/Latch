@@ -1,0 +1,194 @@
+import Foundation
+
+enum SessionState: String, Codable, CaseIterable, Sendable {
+    case creating
+    case running
+    case stopping
+    case exited
+    case lost
+
+    var isLive: Bool {
+        self == .creating || self == .running || self == .stopping
+    }
+}
+
+struct SessionSummary: Codable, Identifiable, Hashable, Sendable {
+    let id: String
+    let name: String
+    let title: String?
+    let state: SessionState
+    let cwd: String
+    let commandLabel: String
+    let createdAt: String
+    let lastActivityAt: String?
+    let idleMs: UInt64?
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, title, state, cwd
+        case commandLabel = "command_label"
+        case createdAt = "created_at"
+        case lastActivityAt = "last_activity_at"
+        case idleMs = "idle_ms"
+    }
+}
+
+struct ListReport: Codable, Sendable {
+    let sessions: [SessionSummary]
+}
+
+struct TerminalSize: Codable, Hashable, Sendable {
+    let cols: UInt16
+    let rows: UInt16
+}
+
+struct ExitRecord: Codable, Hashable, Sendable {
+    let code: Int32?
+    let signal: String?
+    let exitedAt: String
+
+    enum CodingKeys: String, CodingKey {
+        case code, signal
+        case exitedAt = "exited_at"
+    }
+}
+
+struct AttachmentSummary: Codable, Identifiable, Hashable, Sendable {
+    let id: String
+    let mode: String
+    let clientKind: String
+    let clientName: String
+
+    enum CodingKeys: String, CodingKey {
+        case id, mode
+        case clientKind = "client_kind"
+        case clientName = "client_name"
+    }
+}
+
+struct InspectReport: Codable, Identifiable, Sendable {
+    let id: String
+    let name: String
+    let title: String?
+    let state: SessionState
+    let cwd: String
+    let commandLabel: String
+    let createdAt: String
+    let initialSize: TerminalSize
+    let size: TerminalSize?
+    let exit: ExitRecord?
+    let attachments: [AttachmentSummary]?
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, title, state, cwd, size, exit, attachments
+        case commandLabel = "command_label"
+        case createdAt = "created_at"
+        case initialSize = "initial_size"
+    }
+}
+
+struct CreateReport: Codable, Sendable {
+    let protocolVersion: UInt32
+    let session: CreatedSession
+}
+
+struct CreatedSession: Codable, Identifiable, Sendable {
+    let id: String
+    let name: String
+    let state: SessionState
+    let createdAt: String
+}
+
+struct StopReport: Codable, Sendable { let id: String; let state: SessionState }
+struct RenameReport: Codable, Sendable { let id: String; let name: String }
+struct RemoveReport: Codable, Sendable { let id: String; let removed: Bool }
+
+struct RetainedSession: Codable, Identifiable, Sendable {
+    var id: String { sessionID }
+    let sessionID: String
+    let reclaimableInMs: UInt64
+
+    enum CodingKeys: String, CodingKey {
+        case sessionID = "id"
+        case reclaimableInMs = "reclaimable_in_ms"
+    }
+}
+
+struct PruneReport: Codable, Sendable {
+    let reclaimed: [String]
+    let retained: [RetainedSession]
+    let dryRun: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case reclaimed, retained
+        case dryRun = "dry_run"
+    }
+}
+
+struct CapabilitiesReport: Codable, Sendable {
+    let protocolVersion: UInt32
+    let productVersion: String
+    let capabilities: CapabilityFlags
+}
+
+struct CapabilityFlags: Codable, Sendable {
+    let create: Bool
+    let openViewer: Bool
+    let localAttach: Bool
+    let cloudAttach: Bool
+}
+
+struct DoctorReport: Codable, Sendable { let findings: [DoctorFinding] }
+struct DoctorFinding: Codable, Identifiable, Sendable {
+    var id: String { code }
+    let code: String
+    let severity: String
+    let message: String
+}
+
+struct NewSessionRequest: Sendable {
+    var name = ""
+    var title = ""
+    var cwd = FileManager.default.homeDirectoryForCurrentUser.path
+    var command = ""
+    var cols: UInt16 = 120
+    var rows: UInt16 = 36
+}
+
+struct LaunchManifest: Encodable, Sendable {
+    let formatVersion = 1
+    let launch: Launch
+    let display: Display
+
+    struct Launch: Encodable, Sendable {
+        let argv: [String]
+        let cwd: String
+        let env: [String: String] = [:]
+        let inheritEnv = true
+        let size: TerminalSize
+        let term = "xterm-256color"
+
+        enum CodingKeys: String, CodingKey {
+            case argv, cwd, env, size, term
+            case inheritEnv = "inherit_env"
+        }
+    }
+
+    struct Display: Encodable, Sendable {
+        let name: String?
+        let title: String?
+        let commandLabel: String?
+        let source = Source()
+
+        enum CodingKeys: String, CodingKey {
+            case name, title, source
+            case commandLabel = "command_label"
+        }
+    }
+
+    struct Source: Encodable, Sendable { let kind = "desktop" }
+
+    enum CodingKeys: String, CodingKey {
+        case formatVersion = "format_version"
+        case launch, display
+    }
+}

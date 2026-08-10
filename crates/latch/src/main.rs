@@ -21,10 +21,11 @@ use latch::cli::attach::{self, AttachOptions, RetryPolicy};
 use latch::cli::create::{self, CreateOptions, ManifestOptions};
 use latch::cli::json::{CreateReport, CreatedSession};
 use latch::cli::manage::{
-    self, ConfigRequest, DoctorOptions, InspectOptions, ListOptions, PruneOptions, RenameRequest,
-    ResizeRequest, StopRequest,
+    self, ConfigRequest, DoctorOptions, InspectOptions, ListOptions, PruneOptions, RemoveRequest,
+    RenameRequest, ResizeRequest, StopRequest,
 };
 use latch::cli::nesting::{self, NestingDecision};
+use latch::cli::open::{self, OpenRequest};
 use latch::worker::manifest::{DisplayMetadata, TerminalSize};
 use latch::worker::paths::LatchHome;
 use latch_protocol::PROTOCOL_VERSION;
@@ -92,6 +93,20 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Open an existing session in a terminal viewer.
+    ///
+    /// This only opens an attachment. It never starts, stops, or otherwise
+    /// changes the session process.
+    Open {
+        /// Session id or name.
+        session: String,
+        /// Viewer to open (currently `iterm`).
+        #[arg(long, name = "VIEWER")]
+        with: String,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Attach this terminal to an existing session.
     Attach {
         /// Session id or name.
@@ -125,6 +140,17 @@ enum Command {
         /// Session id or name.
         session: String,
         /// Skip the graceful signal and force the stop immediately.
+        #[arg(long)]
+        force: bool,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove one session and its retained screen and metadata.
+    Remove {
+        /// Session id or name.
+        session: String,
+        /// Stop a live session before removing it.
         #[arg(long)]
         force: bool,
         /// Emit machine-readable JSON.
@@ -268,6 +294,23 @@ fn dispatch(command: Option<Command>) -> Result<()> {
                 attach_created_session(outcome.id.as_str())
             }
         }
+        Some(Command::Open {
+            session,
+            with,
+            json,
+        }) => {
+            let report = open::open(OpenRequest {
+                home: LatchHome::from_env()?,
+                session,
+                viewer: with,
+            })?;
+            if json {
+                println!("{}", serde_json::to_string(&report)?);
+            } else {
+                println!("opened {} in {}", report.id, report.viewer);
+            }
+            Ok(())
+        }
         Some(Command::Attach {
             session,
             watch,
@@ -327,6 +370,23 @@ fn dispatch(command: Option<Command>) -> Result<()> {
                 println!("{}", serde_json::to_string(&report)?);
             } else {
                 println!("{} {}", report.id, report.state);
+            }
+            Ok(())
+        }
+        Some(Command::Remove {
+            session,
+            force,
+            json,
+        }) => {
+            let report = manage::remove(RemoveRequest {
+                home: LatchHome::from_env()?,
+                session,
+                force,
+            })?;
+            if json {
+                println!("{}", serde_json::to_string(&report)?);
+            } else {
+                println!("removed {}", report.id);
             }
             Ok(())
         }

@@ -106,6 +106,26 @@ pub struct StopReport {
     pub state: String,
 }
 
+/// `latch remove SESSION --json`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoveReport {
+    /// Session whose retained files were removed.
+    pub id: String,
+    /// True after the session directory has been removed.
+    pub removed: bool,
+}
+
+/// `latch open SESSION --with VIEWER --json`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenReport {
+    /// Session opened in the requested viewer.
+    pub id: String,
+    /// Viewer selected by the caller.
+    pub viewer: String,
+    /// Whether the operating system accepted the viewer-open request.
+    pub opened: bool,
+}
+
 /// `latch rename --json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RenameReport {

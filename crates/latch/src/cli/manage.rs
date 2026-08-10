@@ -21,7 +21,7 @@ use latch_protocol::PROTOCOL_VERSION;
 use crate::cli::attach;
 use crate::cli::json::{
     AttachmentSummary, CapabilitiesReport, CapabilityFlags, ConfigReport, DoctorFinding,
-    DoctorReport, InspectReport, ListReport, PruneReport, RenameReport, ResizeReport,
+    DoctorReport, InspectReport, ListReport, PruneReport, RemoveReport, RenameReport, ResizeReport,
     RetainedSession, SessionSummary, StopReport,
 };
 use crate::worker::manifest::TerminalSize;
@@ -147,6 +147,63 @@ pub fn stop(request: StopRequest) -> anyhow::Result<StopReport> {
     Ok(StopReport {
         id: id.to_string(),
         state: state.as_wire().to_owned(),
+    })
+}
+
+/// A request to remove one session's retained files.
+#[derive(Debug, Clone)]
+pub struct RemoveRequest {
+    /// Where sessions live.
+    pub home: LatchHome,
+    /// Session id or name.
+    pub session: String,
+    /// Stop a live session before removing it.
+    pub force: bool,
+}
+
+/// Removes exactly one session.
+///
+/// A live session remains owned by its worker. Forced removal asks that worker
+/// to stop its process group and waits for a terminal state before the Rust
+/// filesystem abstraction removes the directory.
+pub fn remove(request: RemoveRequest) -> anyhow::Result<RemoveReport> {
+    let id = resolve_existing(&request.home, &request.session)?;
+    let paths = request.home.session(&id);
+    let state = worker::derive_state(&paths)?;
+
+    if matches!(
+        state,
+        SessionState::Creating | SessionState::Running | SessionState::Stopping
+    ) {
+        if !request.force {
+            bail!(
+                "session {id} is {}; stop it first or pass --force to stop and remove it",
+                state.as_wire()
+            );
+        }
+        stop(StopRequest {
+            home: request.home.clone(),
+            session: id.to_string(),
+            force: true,
+        })?;
+        if !wait_for_terminal_state(&paths, Duration::from_secs(5)) {
+            bail!("session {id} did not stop; retained files were not removed");
+        }
+    }
+
+    // Re-check immediately before deletion. This keeps the destructive action
+    // coupled to derived state rather than to an earlier observation.
+    let state = worker::derive_state(&paths)?;
+    if !matches!(state, SessionState::Exited | SessionState::Lost) {
+        bail!(
+            "session {id} is {}; retained files were not removed",
+            state.as_wire()
+        );
+    }
+    paths.remove()?;
+    Ok(RemoveReport {
+        id: id.to_string(),
+        removed: true,
     })
 }
 
@@ -456,7 +513,7 @@ pub fn capabilities() -> CapabilitiesReport {
         product_version: env!("CARGO_PKG_VERSION").to_owned(),
         capabilities: CapabilityFlags {
             create: true,
-            open_viewer: true,
+            open_viewer: cfg!(target_os = "macos"),
             local_attach: true,
             cloud_attach: false,
             extensions: Vec::new(),
@@ -586,7 +643,24 @@ fn wait_for_stop_state(paths: &SessionPaths, timeout: Duration) -> SessionState 
     }
 }
 
-fn resolve_existing(home: &LatchHome, session: &str) -> anyhow::Result<SessionId> {
+fn wait_for_terminal_state(paths: &SessionPaths, timeout: Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if matches!(
+            worker::derive_state(paths),
+            Ok(SessionState::Exited | SessionState::Lost)
+        ) {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Resolves a session id or display name to an existing session.
+pub fn resolve_existing(home: &LatchHome, session: &str) -> anyhow::Result<SessionId> {
     let id = attach::resolve_session(home, session)?;
     let paths = home.session(&id);
     if !paths.meta().is_file() {

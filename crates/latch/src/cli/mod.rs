@@ -15,18 +15,20 @@ pub mod create;
 pub mod json;
 pub mod manage;
 pub mod nesting;
+pub mod open;
 pub mod term;
 
 pub use attach::{AttachOptions, AttachOutcome, ConnectionState, RetryPolicy};
 pub use create::{CreateOptions, CreateOutcome};
 pub use json::{
-    CapabilitiesReport, ConfigReport, DoctorReport, InspectReport, ListReport, PruneReport,
-    RenameReport, ResizeReport, SessionSummary, StopReport,
+    CapabilitiesReport, ConfigReport, DoctorReport, InspectReport, ListReport, OpenReport,
+    PruneReport, RemoveReport, RenameReport, ResizeReport, SessionSummary, StopReport,
 };
 pub use manage::{
-    capabilities, config, doctor, inspect, list, prune, rename, resize, stop, ConfigRequest,
-    DoctorOptions, InspectOptions, ListOptions, PruneOptions, RenameRequest, ResizeRequest,
-    StopRequest,
+    capabilities, config, doctor, inspect, list, prune, remove, rename, resize, stop,
+    ConfigRequest, DoctorOptions, InspectOptions, ListOptions, PruneOptions, RemoveRequest,
+    RenameRequest, ResizeRequest, StopRequest,
 };
 pub use nesting::{nesting_decision, NestingDecision, SESSION_ID_ENV};
+pub use open::{open, OpenRequest};
 pub use term::RawModeGuard;

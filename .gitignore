@@ -13,5 +13,14 @@ dist/
 # macOS
 .DS_Store
 
+# Swift / LatchDesktop (apps/)
+.build/
+.swiftpm/
+xcuserdata/
+*.xcuserstate
+DerivedData/
+
 # Python (scripts/)
 __pycache__/
+
+.env

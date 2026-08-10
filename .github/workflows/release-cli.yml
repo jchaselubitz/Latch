@@ -1,0 +1,97 @@
+name: Release Latch CLI
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+  artifact-metadata: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-14
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    env:
+      LATCH_RELEASE_TAG: ${{ github.ref_name }}
+      LATCH_CODESIGN_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Import Developer ID certificate
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          : "${APPLE_CERTIFICATE_BASE64:?Set the Apple signing certificate secret}"
+          : "${APPLE_CERTIFICATE_PASSWORD:?Set the certificate password secret}"
+          : "${KEYCHAIN_PASSWORD:?Set a temporary keychain password secret}"
+          : "${LATCH_CODESIGN_IDENTITY:?Set the Developer ID Application signing identity secret}"
+          certificate_path="$RUNNER_TEMP/latch-signing.p12"
+          keychain_path="$RUNNER_TEMP/latch-signing.keychain-db"
+          echo "$APPLE_CERTIFICATE_BASE64" | base64 -D > "$certificate_path"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$keychain_path"
+          security import "$certificate_path" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain_path"
+          security list-keychain -d user -s "$keychain_path"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$keychain_path"
+
+      - name: Package signed CLI
+        run: scripts/release-cli.sh ${{ matrix.target }}
+
+      - name: Attest release archive
+        uses: actions/attest@v4
+        with:
+          subject-path: dist/latch-*.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: latch-${{ matrix.target }}
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Combine and verify checksums
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          cat latch-*.tar.gz.sha256 > checksums.txt
+          shasum -a 256 -c checksums.txt
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/latch-*.tar.gz dist/checksums.txt \
+            --title "Latch $GITHUB_REF_NAME" \
+            --generate-notes
