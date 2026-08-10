@@ -8,6 +8,9 @@ test-install:
 release-cli target="":
     ./scripts/release-cli.sh {{target}}
 
+release-desktop:
+    ./scripts/release-desktop.sh
+
 build-debug:
     cargo build --package latch
 
