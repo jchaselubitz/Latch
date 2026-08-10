@@ -11,6 +11,9 @@ release-cli target="":
 build-debug:
     cargo build --package latch
 
+build-release:
+    cargo build --package latch --release
+
 test:
     cargo test --workspace
 
