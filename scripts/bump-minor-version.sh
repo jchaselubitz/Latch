@@ -23,4 +23,11 @@ fi
 perl -0pi -e "s/^version = \"[0-9]+\\.[0-9]+\\.[0-9]+\"$/version = \"$next_version\"/m" "$manifest"
 perl -0pi -e "s/Latch-[0-9]+\\.[0-9]+\\.[0-9]+-macos\\.zip/Latch-$next_version-macos.zip/g; s{/download/v[0-9]+\\.[0-9]+\\.[0-9]+/}{/download/v$next_version/}g" "$readme"
 
-echo "Updated workspace and desktop download link to $next_version"
+# Cargo preserves existing dependency selections when it resolves an existing
+# lockfile. Running metadata after changing the workspace package version
+# updates only the workspace package records, so release builds can stay
+# reproducible with --locked.
+(cd "$repo_root" && cargo metadata --format-version 1 >/dev/null)
+(cd "$repo_root" && cargo metadata --locked --format-version 1 >/dev/null)
+
+echo "Updated workspace, lockfile, and desktop download link to $next_version"

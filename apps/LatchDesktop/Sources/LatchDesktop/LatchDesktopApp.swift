@@ -49,15 +49,6 @@ struct LatchDesktopApp: App {
                     openSessionsWindow()
                 }
             }
-
-            // A Settings scene normally supplies this automatically, but making
-            // the command explicit guarantees a standard App-menu entry point.
-            CommandGroup(replacing: .appSettings) {
-                Button("Settings…") {
-                    openSettingsWindow()
-                }
-                .keyboardShortcut(",", modifiers: .command)
-            }
         }
 
         MenuBarExtra {
