@@ -132,7 +132,9 @@ impl Release {
 
     /// The checksum manifest published alongside the archives.
     pub fn checksums(&self) -> Option<&Asset> {
-        self.assets.iter().find(|asset| asset.name == "checksums.txt")
+        self.assets
+            .iter()
+            .find(|asset| asset.name == "checksums.txt")
     }
 
     /// The macOS desktop application archive.
@@ -196,7 +198,10 @@ mod tests {
         assert!(newer > older);
         // String ordering would put "0.99.0" after "0.100.0"; numbers do not.
         assert!(Version::parse("0.100.0").unwrap() > Version::parse("0.99.0").unwrap());
-        assert_eq!(Version::parse("v1.2.3").unwrap(), Version::parse("1.2.3").unwrap());
+        assert_eq!(
+            Version::parse("v1.2.3").unwrap(),
+            Version::parse("1.2.3").unwrap()
+        );
     }
 
     #[test]
@@ -211,11 +216,15 @@ mod tests {
         let release = Release::parse(FEED).expect("parse feed");
         assert_eq!(release.version, Version::parse("0.2608101202.0").unwrap());
         assert_eq!(
-            release.cli_archive("aarch64-apple-darwin").map(|asset| asset.url.as_str()),
+            release
+                .cli_archive("aarch64-apple-darwin")
+                .map(|asset| asset.url.as_str()),
             Some("https://example.invalid/arm.zip")
         );
         assert_eq!(
-            release.cli_archive("x86_64-apple-darwin").map(|asset| asset.url.as_str()),
+            release
+                .cli_archive("x86_64-apple-darwin")
+                .map(|asset| asset.url.as_str()),
             Some("https://example.invalid/intel.zip")
         );
         assert!(release.cli_archive("aarch64-unknown-linux-gnu").is_none());
@@ -238,7 +247,9 @@ mod tests {
         }"#;
         let release = Release::parse(feed).expect("parse feed");
         assert_eq!(
-            release.cli_archive("aarch64-apple-darwin").map(|asset| asset.name.as_str()),
+            release
+                .cli_archive("aarch64-apple-darwin")
+                .map(|asset| asset.name.as_str()),
             Some("latch-0.2608101059.0-aarch64-apple-darwin.tar.gz")
         );
     }

@@ -4,6 +4,7 @@ import Darwin
 actor LatchClient {
     static let minimumProtocolVersion: UInt32 = 1
     static let preferences = UserDefaults(suiteName: "co.cooperativ.latch.desktop") ?? .standard
+    static let installCommand = "curl -fsSL https://raw.githubusercontent.com/jchaselubitz/Latch/main/scripts/install-cli.sh | bash"
 
     private let executableURL: URL
     private let timeout: TimeInterval
@@ -20,14 +21,39 @@ actor LatchClient {
            !configured.isEmpty {
             return URL(fileURLWithPath: configured)
         }
-        if let bundled = Bundle.main.url(forAuxiliaryExecutable: "latch") {
-            return bundled
+        if let discovered = try? discoverExecutablePaths(), let first = discovered.first {
+            return URL(fileURLWithPath: first)
         }
-        for path in ["/opt/homebrew/bin/latch", "/usr/local/bin/latch"]
-        where FileManager.default.isExecutableFile(atPath: path) {
-            return URL(fileURLWithPath: path)
+        return FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".local/bin/latch")
+    }
+
+    /// Ask the user's login shell to run `where latch`, preserving the order
+    /// it reports when more than one independently installed CLI is present.
+    static func discoverExecutablePaths(shell: String? = nil) throws -> [String] {
+        let process = Process()
+        let stdout = Pipe()
+        process.executableURL = URL(fileURLWithPath: shell ?? loginShell())
+        process.arguments = ["-lc", "where latch"]
+        process.standardOutput = stdout
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        process.waitUntilExit()
+
+        guard process.terminationStatus == 0 else { return [] }
+        let output = stdout.fileHandleForReading.readDataToEndOfFile()
+        return executablePaths(in: String(decoding: output, as: UTF8.self))
+    }
+
+    static func executablePaths(in whereOutput: String) -> [String] {
+        var seen = Set<String>()
+        return whereOutput.split(whereSeparator: \.isNewline).compactMap { line in
+            let path = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard path.hasPrefix("/"),
+                  FileManager.default.isExecutableFile(atPath: path),
+                  seen.insert(path).inserted else { return nil }
+            return path
         }
-        return URL(fileURLWithPath: "/usr/local/bin/latch")
     }
 
     func validateCompatibility() throws -> CapabilitiesReport {
@@ -100,7 +126,7 @@ actor LatchClient {
         }
     }
 
-    private static func loginShell() -> String {
+    static func loginShell() -> String {
         guard let record = getpwuid(getuid()), let value = record.pointee.pw_shell else {
             return "/bin/zsh"
         }
@@ -165,7 +191,7 @@ enum LatchClientError: LocalizedError, Equatable {
     var errorDescription: String? {
         switch self {
         case .executableNotFound(let path):
-            return "Latch CLI was not found at \(path). Choose a compatible latch executable in Settings."
+            return "Latch CLI was not found at \(path). Choose an installed CLI in Settings or run the install command shown there."
         case .timeout:
             return "Latch did not respond before the management timeout. No session worker was terminated."
         case .commandFailed(_, let diagnostic):

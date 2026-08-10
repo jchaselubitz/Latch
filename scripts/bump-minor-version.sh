@@ -6,6 +6,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 manifest="$repo_root/Cargo.toml"
+readme="$repo_root/README.md"
 timestamp="$(date -u +%y%m%d%H%M)"
 next_version="0.${timestamp}.0"
 
@@ -20,5 +21,6 @@ if grep -Fq "version = \"$next_version\"" "$manifest"; then
 fi
 
 perl -0pi -e "s/^version = \"[0-9]+\\.[0-9]+\\.[0-9]+\"$/version = \"$next_version\"/m" "$manifest"
+perl -0pi -e "s/Latch-[0-9]+\\.[0-9]+\\.[0-9]+-macos\\.zip/Latch-$next_version-macos.zip/g; s{/download/v[0-9]+\\.[0-9]+\\.[0-9]+/}{/download/v$next_version/}g" "$readme"
 
-echo "Updated workspace version to $next_version"
+echo "Updated workspace and desktop download link to $next_version"

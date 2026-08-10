@@ -2,6 +2,14 @@ import XCTest
 @testable import LatchDesktop
 
 final class ModelTests: XCTestCase {
+    func testWhereOutputKeepsExecutablePathsInOrderAndRemovesDuplicates() {
+        let output = "/bin/sh\n/bin/sh\nlatch: aliased to something\n/usr/bin/false\n"
+        XCTAssertEqual(
+            LatchClient.executablePaths(in: output),
+            ["/bin/sh", "/usr/bin/false"]
+        )
+    }
+
     func testListDecodesEverySessionStateAndUnknownFields() throws {
         let states = ["creating", "running", "stopping", "exited", "lost"]
         let sessions = states.enumerated().map { index, state in

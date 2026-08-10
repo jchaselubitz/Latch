@@ -14,13 +14,13 @@ safe argument template it needs to launch `latch attach`.
 ## Development
 
 Open `Package.swift` in Xcode 15 or newer and run the `LatchDesktop` scheme on
-macOS 13 or newer. Development builds locate `latch` in this order:
+macOS 13 or newer. On first launch the app asks the user's login shell to run
+`where latch`, presents every executable path it returns, and saves the path the
+user chooses. When no CLI is found, the setup flow presents the standalone CLI
+install command and can run it in Terminal. The same discovery, selection, and
+installation controls remain available in Settings.
 
-1. an auxiliary executable named `latch` in the app bundle;
-2. the `latchExecutablePath` user default;
-3. `/opt/homebrew/bin/latch` or `/usr/local/bin/latch`.
-
-To assemble a local `.app` containing a same-architecture release helper, run:
+To assemble a local universal `.app` with no bundled CLI, run:
 
 ```sh
 apps/LatchDesktop/build-app.sh
@@ -40,14 +40,37 @@ LATCH_APP_ARCHIVE='dist/Latch-macos.zip' \
 apps/LatchDesktop/build-app.sh
 ```
 
-The script signs the bundled `latch` helper before signing the app, submits a
-ZIP archive to Apple, staples the accepted ticket to the app, verifies the
-signature and Gatekeeper assessment, and recreates the archive with the
-stapled app. `LATCH_NOTARY_PROFILE` requires `LATCH_CODESIGN_IDENTITY`.
+The script signs the universal app, submits a ZIP archive to Apple, staples the
+accepted ticket to the app, verifies the signature and Gatekeeper assessment,
+and recreates the archive with the stapled app. The ZIP contains only
+`Latch.app`; `LATCH_NOTARY_PROFILE` requires `LATCH_CODESIGN_IDENTITY`.
 
 For a signed local build without notarization, set only
 `LATCH_CODESIGN_IDENTITY`. A locally-built ad-hoc or unsigned app will continue
 to show Gatekeeper warnings when opened outside a developer workflow.
+
+## Updating in place
+
+Latch Desktop updates itself from the same GitHub release the CLI is published
+to. **Latch → Check for Updates…** (also in the menu-bar extra) compares
+`CFBundleShortVersionString` with the newest release and offers the
+`Latch-<version>-macos.zip` attached to it. Settings has a *Check for updates
+automatically* toggle; automatic checks run at launch and once a day, and only
+open a window when something is actually available.
+
+Installing expands the archive with `ditto` into a replacement directory on the
+app's own volume, requires the download to be signed by the same Team ID as the
+running app and to pass Gatekeeper assessment, then swaps the bundle with
+`replaceItemAt` and offers to relaunch. Sessions are owned by their workers, so
+they keep running across the relaunch.
+
+Two cases are refused before anything is downloaded: an app running from a
+quarantine translocation mount (move it to Applications first) and an app in a
+directory the user cannot write.
+
+`build-app.sh` stamps the workspace version from `Cargo.toml` into the bundle
+before signing it. A bundle built without that stamp reports the placeholder
+version in `Info.plist` and would offer itself an update forever.
 
 ## Publishing a desktop release
 
@@ -67,12 +90,22 @@ The release script refuses a dirty worktree, notarizes and staples
 `dist/Latch-<version>-macos.zip`, creates an annotated `v<version>` tag on the
 current commit, then pushes both the current branch and that tag to `origin`.
 
-Release packaging should copy the matching universal `latch` binary into the
-app's auxiliary executables directory, then sign and notarize the app and helper
-together. The app validates protocol version 1 before its first refresh.
+Pushing the tag is what starts the CLI release workflow, and that workflow is
+what creates the GitHub Release. The desktop archive is notarized on this
+machine rather than in CI, so the script then waits for the release to appear
+and attaches `Latch-<version>-macos.zip` with `gh`. It adds the desktop digest
+to the release's `checksums.txt` instead of publishing a fifth sidecar asset.
+Without that attachment the in-app updater has nothing to find; if the upload
+does not happen the script prints the recovery commands.
 
-The Swift package tests cover JSON compatibility, manifest wire names, and
-terminal command escaping/template parsing.
+A complete release contains exactly the universal desktop ZIP, the two
+architecture-specific CLI ZIPs, and `checksums.txt`. The CLI is installed and
+updated independently. The app validates protocol version 1 before its first
+refresh.
+
+The Swift package tests cover JSON compatibility, manifest wire names,
+terminal command escaping/template parsing, and the updater's release
+resolution, version ordering, and pre-download refusals.
 Run them on macOS with:
 
 ```sh

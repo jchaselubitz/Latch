@@ -14,6 +14,9 @@ final class SessionStore: ObservableObject {
     @Published var prunePreview: PruneReport?
     @Published var shouldPresentNewSession = false
     @Published var shouldPresentPrune = false
+    @Published var shouldPresentCLISetup = false
+    @Published private(set) var discoveredLatchExecutables: [String] = []
+    @Published private(set) var isDiscoveringCLI = false
     @Published var customTerminalExecutable: String {
         didSet { UserDefaults.standard.set(customTerminalExecutable, forKey: "customTerminalExecutable") }
     }
@@ -37,6 +40,12 @@ final class SessionStore: ObservableObject {
     private var refreshRequested = false
     private var pollingTask: Task<Void, Never>?
     private var activationCancellable: AnyCancellable?
+
+    var cliInstallCommand: String { LatchClient.installCommand }
+    var selectedCLIIsExecutable: Bool {
+        !latchExecutablePath.isEmpty &&
+            FileManager.default.isExecutableFile(atPath: latchExecutablePath)
+    }
 
     init(client: LatchClient = LatchClient()) {
         self.client = client
@@ -74,6 +83,15 @@ final class SessionStore: ObservableObject {
                 Task { @MainActor in await self?.refresh() }
             }
         pollingTask = Task {
+            await discoverCLI(
+                present: !LatchClient.preferences.bool(forKey: "cliSetupCompleted")
+            )
+            guard FileManager.default.isExecutableFile(
+                atPath: LatchClient.defaultExecutableURL().path
+            ) else {
+                shouldPresentCLISetup = true
+                return
+            }
             do { _ = try await client.validateCompatibility() }
             catch { errorMessage = error.localizedDescription }
             await refresh()
@@ -82,6 +100,43 @@ final class SessionStore: ObservableObject {
                 if !Task.isCancelled { await refresh() }
             }
         }
+    }
+
+    func discoverCLI(present: Bool = false) async {
+        isDiscoveringCLI = true
+        let paths = await Task.detached(priority: .userInitiated) {
+            (try? LatchClient.discoverExecutablePaths()) ?? []
+        }.value
+        discoveredLatchExecutables = paths
+        isDiscoveringCLI = false
+        if present || (paths.isEmpty && !selectedCLIIsExecutable) {
+            shouldPresentCLISetup = true
+        }
+    }
+
+    func selectCLI(_ path: String) {
+        latchExecutablePath = path
+        LatchClient.preferences.set(true, forKey: "cliSetupCompleted")
+        shouldPresentCLISetup = false
+        restartPolling()
+    }
+
+    func runCLIInstaller() {
+        do { try TerminalLauncher.runInTerminal(cliInstallCommand) }
+        catch { errorMessage = error.localizedDescription }
+    }
+
+    func useConfiguredCLI() {
+        guard selectedCLIIsExecutable else { return }
+        LatchClient.preferences.set(true, forKey: "cliSetupCompleted")
+        shouldPresentCLISetup = false
+        restartPolling()
+    }
+
+    private func restartPolling() {
+        pollingTask?.cancel()
+        pollingTask = nil
+        start()
     }
 
     func refresh() async {

@@ -14,10 +14,13 @@
     <string>Latch</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
+    <!-- Placeholder versions. build-app.sh stamps the workspace version from
+         Cargo.toml into the assembled bundle before signing it, and the app's
+         updater compares that value with the newest published release. -->
     <key>CFBundleShortVersionString</key>
-    <string>0.1.0</string>
+    <string>0.0.0</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>0.0.0</string>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
     <key>NSAppleEventsUsageDescription</key>

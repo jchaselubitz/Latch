@@ -9,7 +9,7 @@ mod support;
 
 use latch::cli::json::{
     parse_state, CapabilitiesReport, CreateReport, InspectReport, ListReport, PruneReport,
-    RemoveReport, RenameReport, ResizeReport, StopReport,
+    RemoveReport, RenameReport, ResizeReport, StopReport, UpdateReport,
 };
 use latch::cli::manage;
 use latch_protocol::PROTOCOL_VERSION;
@@ -51,6 +51,54 @@ fn capabilities_json_matches_the_overlord_discovery_schema() {
         value["capabilities"].get("cloudAttach").is_some(),
         "{value}"
     );
+    // The desktop app reads this to decide whether offering to update the CLI
+    // would work, so its absence is a broken contract and not a default.
+    assert!(value["capabilities"].get("selfUpdate").is_some(), "{value}");
+}
+
+#[test]
+fn update_json_reports_one_shape_for_every_outcome() {
+    // `latch update` reaches the network, so the command itself is not run
+    // here. What the suite can pin is the document Overlord and the desktop
+    // app parse: one shape, distinguished by `status`.
+    for (report, expected) in [
+        (
+            UpdateReport {
+                status: "current".to_owned(),
+                current_version: "0.2608101202.0".to_owned(),
+                latest_version: Some("0.2608101202.0".to_owned()),
+                release_url: Some("https://example.invalid/tag".to_owned()),
+                installed_path: None,
+            },
+            serde_json::json!({
+                "status": "current",
+                "current_version": "0.2608101202.0",
+                "latest_version": "0.2608101202.0",
+                "release_url": "https://example.invalid/tag",
+            }),
+        ),
+        (
+            UpdateReport {
+                status: "installed".to_owned(),
+                current_version: "0.2608100841.0".to_owned(),
+                latest_version: Some("0.2608101202.0".to_owned()),
+                release_url: Some("https://example.invalid/tag".to_owned()),
+                installed_path: Some(std::path::PathBuf::from("/usr/local/bin/latch")),
+            },
+            serde_json::json!({
+                "status": "installed",
+                "current_version": "0.2608100841.0",
+                "latest_version": "0.2608101202.0",
+                "release_url": "https://example.invalid/tag",
+                "installed_path": "/usr/local/bin/latch",
+            }),
+        ),
+    ] {
+        let value = serde_json::to_value(&report).expect("serialize");
+        assert_eq!(value, expected);
+        let parsed: UpdateReport = serde_json::from_value(value).expect("round-trip");
+        assert_eq!(parsed, report);
+    }
 }
 
 #[test]
@@ -221,6 +269,22 @@ fn every_read_command_accepts_json() {
         assert!(
             !err.contains("unexpected argument"),
             "{args:?} must accept --json; stderr={err}"
+        );
+    }
+}
+
+#[test]
+fn update_is_on_the_command_surface_with_check_force_and_json() {
+    // `latch update` is exercised through `--help` rather than by running it:
+    // the command reaches the network by design, and what belongs in this
+    // suite is the surface, not a live release feed.
+    let harness = Harness::new();
+    let output = latch_cmd(&harness, &["update", "--help"]);
+    let help = String::from_utf8_lossy(&output.stdout);
+    for flag in ["--check", "--force", "--json"] {
+        assert!(
+            help.contains(flag),
+            "`latch update --help` must document {flag}: {help}"
         );
     }
 }

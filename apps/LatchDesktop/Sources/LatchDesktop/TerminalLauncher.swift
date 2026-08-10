@@ -12,6 +12,14 @@ enum PreferredTerminal: String, CaseIterable, Identifiable {
 
 @MainActor
 enum TerminalLauncher {
+    static func runInTerminal(_ shellCommand: String) throws {
+        try runAppleScript(
+            application: "Terminal",
+            statement: "do script",
+            shellCommand: shellCommand
+        )
+    }
+
     static func executablePath(forApplicationURL url: URL) throws -> String {
         guard url.pathExtension == "app",
               let executableURL = Bundle(url: url)?.executableURL else {
@@ -29,9 +37,17 @@ enum TerminalLauncher {
         guard command.count == 3 else { throw TerminalLaunchError.invalidCommand }
         switch terminal {
         case .iTerm:
-            try runAppleScript(application: "iTerm", statement: "create window with default profile command")
+            try runAppleScript(
+                application: "iTerm",
+                statement: "create window with default profile command",
+                shellCommand: command.map(shellQuote).joined(separator: " ")
+            )
         case .terminal:
-            try runAppleScript(application: "Terminal", statement: "do script")
+            try runAppleScript(
+                application: "Terminal",
+                statement: "do script",
+                shellCommand: command.map(shellQuote).joined(separator: " ")
+            )
         case .ghostty:
             guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.mitchellh.ghostty") else {
                 throw TerminalLaunchError.notInstalled(terminal.rawValue)
@@ -61,20 +77,24 @@ enum TerminalLauncher {
             try process.run()
         }
 
-        func runAppleScript(application: String, statement: String) throws {
-            let shellCommand = command.map(shellQuote).joined(separator: " ")
-            let source = """
-            tell application "\(application)"
-                activate
-                \(statement) "\(appleScriptEscape(shellCommand))"
-            end tell
-            """
-            var error: NSDictionary?
-            guard NSAppleScript(source: source)?.executeAndReturnError(&error) != nil else {
-                throw TerminalLaunchError.appleEvent(
-                    error?[NSAppleScript.errorMessage] as? String ?? "macOS denied the terminal launch"
-                )
-            }
+    }
+
+    private static func runAppleScript(
+        application: String,
+        statement: String,
+        shellCommand: String
+    ) throws {
+        let source = """
+        tell application "\(application)"
+            activate
+            \(statement) "\(appleScriptEscape(shellCommand))"
+        end tell
+        """
+        var error: NSDictionary?
+        guard NSAppleScript(source: source)?.executeAndReturnError(&error) != nil else {
+            throw TerminalLaunchError.appleEvent(
+                error?[NSAppleScript.errorMessage] as? String ?? "macOS denied the terminal launch"
+            )
         }
     }
 

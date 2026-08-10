@@ -96,7 +96,7 @@ jobs:
         run: |
           set -euo pipefail
           cat dist/latch-*.zip.sha256 > dist/checksums.txt
-          shasum -a 256 -c dist/checksums.txt
+          (cd dist && shasum -a 256 -c checksums.txt)
 
       - name: Create GitHub Release
         env:

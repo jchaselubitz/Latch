@@ -76,4 +76,54 @@ fi
 git tag --annotate "$tag" --message "Latch $version"
 git push origin "HEAD:refs/heads/$branch" "refs/tags/$tag"
 
-printf 'Published %s and %s\n' "$tag" "$archive_path"
+# Pushing the tag starts the CLI release workflow, and that workflow is what
+# creates the GitHub Release. The desktop archive is built here rather than in
+# CI — notarization needs the Developer ID identity on this machine — so it has
+# to be attached once the release exists. Without this the app's in-place
+# updater has nothing to find.
+attach_desktop_archive() {
+    if ! command -v gh >/dev/null 2>&1; then
+        cat >&2 <<EOF
+The GitHub CLI is not installed, so $archive_path was not attached to $tag.
+Attach it once the release workflow finishes:
+  gh release download $tag --pattern checksums.txt --dir /tmp/latch-release
+  shasum -a 256 "$archive_path" | sed 's|  .*/|  |' >> /tmp/latch-release/checksums.txt
+  gh release upload $tag "$archive_path" /tmp/latch-release/checksums.txt --clobber
+EOF
+        return 1
+    fi
+
+    printf 'Waiting for the release workflow to create %s…\n' "$tag"
+    local waited=0
+    until gh release view "$tag" >/dev/null 2>&1; do
+        if (( waited >= 1800 )); then
+            cat >&2 <<EOF
+Release $tag did not appear within 30 minutes. Check the release workflow, then
+attach the desktop archive by hand:
+  gh release download $tag --pattern checksums.txt --dir /tmp/latch-release
+  shasum -a 256 "$archive_path" | sed 's|  .*/|  |' >> /tmp/latch-release/checksums.txt
+  gh release upload $tag "$archive_path" /tmp/latch-release/checksums.txt --clobber
+EOF
+            return 1
+        fi
+        sleep 15
+        waited=$((waited + 15))
+    done
+
+    local checksum_dir
+    checksum_dir="$(mktemp -d "${TMPDIR:-/tmp}/latch-release.XXXXXX")"
+    trap 'rm -rf -- "$checksum_dir"' RETURN
+    gh release download "$tag" --pattern checksums.txt --dir "$checksum_dir"
+    awk -v archive="$(basename "$archive_path")" \
+        '$2 != archive { print }' "$checksum_dir/checksums.txt" > "$checksum_dir/checksums.next"
+    shasum -a 256 "$archive_path" | sed 's|  .*/|  |' >> "$checksum_dir/checksums.next"
+    mv "$checksum_dir/checksums.next" "$checksum_dir/checksums.txt"
+    gh release upload "$tag" "$archive_path" "$checksum_dir/checksums.txt" --clobber
+}
+
+if attach_desktop_archive; then
+    printf 'Published %s with %s\n' "$tag" "$archive_path"
+else
+    printf 'Published %s; %s still needs to be attached\n' "$tag" "$archive_path" >&2
+    exit 1
+fi

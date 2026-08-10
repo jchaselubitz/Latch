@@ -12,12 +12,46 @@ latch run -- claude         # a persistent agent session
 latch list                  # what is running
 latch attach auth-refactor  # from anywhere, including a phone over SSH
 latch remove old-session    # remove one exited/lost session
+latch update                # replace this binary with the newest release
 ```
 
 Point your terminal profile's command at `latch` and every window you open is
 already a persistent session, with nothing about using your terminal feeling
 different. That is the intended adoption path, and it is configuration rather
 than code.
+
+## Install
+
+Download the standalone CLI and the universal macOS desktop app from the same
+[GitHub Release](https://github.com/jchaselubitz/Latch/releases/latest). The
+current desktop archive is
+[Latch-0.2608101222.0-macos.zip](https://github.com/jchaselubitz/Latch/releases/download/v0.2608101222.0/Latch-0.2608101222.0-macos.zip);
+it contains only `Latch.app`. Drag the app to Applications, then install the CLI
+independently with:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jchaselubitz/Latch/main/scripts/install-cli.sh | bash
+```
+
+The installer chooses the Apple Silicon or Intel archive, verifies it against
+the release's `checksums.txt`, verifies its Developer ID signature, and installs
+`latch` in `~/.local/bin`. Latch Desktop runs `where latch` on first launch and
+lets you choose among every installed copy it finds.
+
+## Updating
+
+`latch update` replaces the running binary with the newest release published
+at [Latch releases](https://github.com/jchaselubitz/Latch/releases). It
+verifies the archive against the checksums that release publishes, and — when
+the installed binary is Developer ID signed — refuses a download signed by
+anyone else. `latch update --check` reports what is available without
+installing it.
+
+A copy something else owns is refused rather than diverged from its package: a
+Homebrew cellar binary says to run `brew upgrade`. Latch Desktop updates only
+the app, independently of the selected CLI, from **Latch → Check for Updates…**
+or its menu-bar extra. Verification there is Gatekeeper's, against the signing
+identity the installed app already has.
 
 ## Status
 

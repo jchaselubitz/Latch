@@ -7,6 +7,15 @@ small, dependency-free CLI and lets the app ship only when its UX is ready.
 
 ## Install
 
+For a verified automatic install into `~/.local/bin`, run:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jchaselubitz/Latch/main/scripts/install-cli.sh | bash
+```
+
+The desktop app offers this same command when `where latch` finds no installed
+CLI. To install manually instead, continue below.
+
 Download the archive for your Mac from the GitHub release page:
 
 - Apple Silicon: `latch-<version>-aarch64-apple-darwin.zip`
@@ -24,7 +33,26 @@ latch --version
 Ensure `~/.local/bin` is on your `PATH`. The ZIP is Developer ID signed and
 Apple-notarized; GitHub also publishes a provenance attestation for each
 archive in the release workflow. Verify it with
-`gh attestation verify <archive> --repo Cooperativ/Latch`.
+`gh attestation verify <archive> --repo jchaselubitz/Latch`.
+
+## Upgrading
+
+After the first install, `latch update` does the same work in one command: it
+reads the newest release, downloads the archive for this Mac, verifies it
+against the release's own `checksums.txt`, and replaces the running binary
+with an atomic rename. `latch update --check` reports what is available
+without installing it, and `latch update --force` reinstalls the published
+version over a copy that has gone wrong.
+
+Two things it deliberately will not do. It refuses a binary something else
+owns, such as a Homebrew cellar copy. And when the installed binary is
+Developer ID signed, it refuses a download that is not validly signed by the
+same team, because the archive and the checksums that describe it come from the
+same place and only the signature says who built them. Latch Desktop never
+bundles or updates the CLI, so an app update cannot replace the selected CLI.
+
+`latch capabilities --json` reports `selfUpdate`, so a client can tell whether
+offering an in-place update would work before offering it.
 
 ## Publishing a release
 

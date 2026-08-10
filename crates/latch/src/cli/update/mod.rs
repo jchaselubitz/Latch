@@ -320,7 +320,9 @@ fn install(
     // Match the mode of what is being replaced, so an install that was
     // deliberately group-readable-only stays that way; fall back to the mode
     // `install -m 755` gives a fresh copy.
-    let mode = fs::metadata(target).map(|meta| meta.permissions().mode() & 0o7777).unwrap_or(0o755);
+    let mode = fs::metadata(target)
+        .map(|meta| meta.permissions().mode() & 0o7777)
+        .unwrap_or(0o755);
     fs::set_permissions(&replacement, fs::Permissions::from_mode(mode))
         .with_context(|| format!("could not set permissions on {}", replacement.display()))?;
 
@@ -349,7 +351,10 @@ fn verify_digest(
     })?;
     let document = source.fetch_text(&manifest.url)?;
     let expected = release::expected_digest(&document, asset_name).ok_or_else(|| {
-        anyhow!("checksums.txt for {} does not list {asset_name}", release.tag)
+        anyhow!(
+            "checksums.txt for {} does not list {asset_name}",
+            release.tag
+        )
     })?;
     let actual = sha256::hex_of_file(archive)
         .with_context(|| format!("could not read {}", archive.display()))?;
@@ -713,10 +718,9 @@ mod tests {
 
     #[test]
     fn the_helper_inside_an_app_bundle_is_refused_by_name() {
-        let error = refuse_managed_location(Path::new(
-            "/Applications/Latch.app/Contents/MacOS/latch",
-        ))
-        .expect_err("a bundled helper must be refused");
+        let error =
+            refuse_managed_location(Path::new("/Applications/Latch.app/Contents/MacOS/latch"))
+                .expect_err("a bundled helper must be refused");
         assert!(format!("{error:#}").contains("Latch.app"), "{error:#}");
 
         let error = refuse_managed_location(Path::new("/opt/homebrew/Cellar/latch/1.0/bin/latch"))

@@ -60,5 +60,6 @@ fi
 
 rm -rf "$stage_dir"
 
-shasum -a 256 "$archive_path" > "$archive_path.sha256"
+checksum="$(shasum -a 256 "$archive_path" | awk '{print $1}')"
+printf '%s  %s\n' "$checksum" "$archive_name" > "$archive_path.sha256"
 printf '%s\n' "$archive_path"

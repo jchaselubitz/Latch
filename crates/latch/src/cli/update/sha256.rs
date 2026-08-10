@@ -123,11 +123,15 @@ impl Sha256 {
             self.block[self.buffered..self.buffered + take].copy_from_slice(&input[..take]);
             self.buffered += take;
             input = &input[take..];
-            if self.buffered == 64 {
-                let block = self.block;
-                self.compress(&block);
-                self.buffered = 0;
+            // A block that is still partial is all the state there is: falling
+            // through would reset `buffered` from the (now empty) remainder
+            // and silently drop everything absorbed so far.
+            if self.buffered < 64 {
+                return;
             }
+            let block = self.block;
+            self.compress(&block);
+            self.buffered = 0;
         }
         let mut chunks = input.chunks_exact(64);
         for chunk in &mut chunks {
@@ -153,7 +157,9 @@ impl Sha256 {
         let mut hex = String::with_capacity(64);
         for word in self.state {
             for byte in word.to_be_bytes() {
-                hex.push(char::from_digit((byte >> 4) as u32, 16).expect("nibble is one hex digit"));
+                hex.push(
+                    char::from_digit((byte >> 4) as u32, 16).expect("nibble is one hex digit"),
+                );
                 hex.push(
                     char::from_digit((byte & 0x0f) as u32, 16).expect("nibble is one hex digit"),
                 );
@@ -217,11 +223,7 @@ impl Sha256 {
             a = temp1.wrapping_add(temp2);
         }
 
-        for (slot, value) in self
-            .state
-            .iter_mut()
-            .zip([a, b, c, d, e, f, g, h].into_iter())
-        {
+        for (slot, value) in self.state.iter_mut().zip([a, b, c, d, e, f, g, h]) {
             *slot = slot.wrapping_add(value);
         }
     }

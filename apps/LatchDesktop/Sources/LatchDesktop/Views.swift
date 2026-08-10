@@ -3,6 +3,7 @@ import AppKit
 
 struct SessionsView: View {
     @ObservedObject var store: SessionStore
+    @ObservedObject var updates: UpdateController
     @State private var showingCreate = false
     @State private var showingPrune = false
 
@@ -85,6 +86,12 @@ struct SessionsView: View {
         }
         .sheet(isPresented: $showingPrune) {
             PruneView(store: store, isPresented: $showingPrune)
+        }
+        .sheet(isPresented: $updates.isPresented) {
+            UpdateView(updates: updates)
+        }
+        .sheet(isPresented: $store.shouldPresentCLISetup) {
+            CLISetupView(store: store)
         }
         .alert("Latch", isPresented: errorBinding) {
             Button("OK") { store.errorMessage = nil }
@@ -391,13 +398,92 @@ private struct PruneView: View {
     }
 }
 
+/// The one place an update is described and accepted.
+///
+/// It states the version, links the release notes rather than reproducing
+/// them, and never installs without being asked — an app that replaces itself
+/// while somebody is working in it is worse than an app that is a day old.
+private struct UpdateView: View {
+    @ObservedObject var updates: UpdateController
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text(title).font(.title2).fontWeight(.semibold)
+            content
+            HStack {
+                Spacer()
+                buttons
+            }
+        }
+        .padding(24)
+        .frame(width: 460)
+    }
+
+    private var title: String {
+        switch updates.phase {
+        case .available: return "Update Available"
+        case .installed: return "Update Installed"
+        case .failed: return "Update Failed"
+        case .upToDate: return "Latch Is Up to Date"
+        default: return "Checking for Updates"
+        }
+    }
+
+    @ViewBuilder private var content: some View {
+        switch updates.phase {
+        case .idle, .checking:
+            ProgressView().progressViewStyle(.linear)
+        case .upToDate:
+            Text("Latch \(updates.installedVersionLabel) is the newest release.")
+        case .available(let update):
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Latch \(update.version.description) is available. You have \(updates.installedVersionLabel).")
+                Link("Release notes", destination: update.releasePage)
+            }
+        case .downloading:
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Downloading and verifying the update…")
+                ProgressView().progressViewStyle(.linear)
+            }
+        case .installed:
+            Text("The update is installed. Latch needs to relaunch to use it; your sessions keep running either way.")
+        case .failed(let message):
+            Text(message).foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder private var buttons: some View {
+        switch updates.phase {
+        case .available(let update):
+            Button("Not Now") { updates.dismiss() }
+            Button("Install and Relaunch") {
+                Task { await updates.install(update) }
+            }
+            .buttonStyle(.borderedProminent)
+        case .installed:
+            Button("Later") { updates.dismiss() }
+            Button("Relaunch") { updates.relaunch() }
+                .buttonStyle(.borderedProminent)
+        case .downloading:
+            Button("Cancel", role: .cancel) { updates.dismiss() }.disabled(true)
+        default:
+            Button("OK") { updates.dismiss() }
+        }
+    }
+}
+
 struct MenuBarSessionsView: View {
     @ObservedObject var store: SessionStore
+    @ObservedObject var updates: UpdateController
     let openMainWindow: () -> Void
     let openSettings: () -> Void
+    let checkForUpdates: () -> Void
 
     var body: some View {
         Text("\(store.runningCount) running session\(store.runningCount == 1 ? "" : "s")")
+        if let update = updates.pendingUpdate {
+            Button("Update to Latch \(update.version.description)…") { checkForUpdates() }
+        }
         Divider()
         ForEach(store.sessions.prefix(6)) { session in
             Button {
@@ -418,6 +504,7 @@ struct MenuBarSessionsView: View {
         }
         Button("Refresh") { Task { await store.refresh() } }
         Button("Open Latch") { openMainWindow() }
+        Button("Check for Updates…") { checkForUpdates() }
         Button("Settings…") { openSettings() }
         Divider()
         Button("Quit Latch") { NSApp.terminate(nil) }
@@ -426,13 +513,55 @@ struct MenuBarSessionsView: View {
 
 struct SettingsView: View {
     @ObservedObject var store: SessionStore
+    @ObservedObject var updates: UpdateController
 
     var body: some View {
         Form {
+            Section("Updates") {
+                Toggle("Check for updates automatically", isOn: $updates.automaticChecks)
+                HStack {
+                    Text("Version \(updates.installedVersionLabel)")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Check Now") {
+                        Task { await updates.check(userInitiated: true) }
+                    }
+                }
+                Text("Latch installs updates from its signed GitHub releases and verifies that each one is signed by the same developer before replacing itself.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Latch CLI") {
                 TextField("Latch executable", text: $store.latchExecutablePath)
                     .textFieldStyle(.roundedBorder)
-                Text("Leave blank to use the CLI bundled with the app, then Homebrew or /usr/local.")
+                if !store.discoveredLatchExecutables.isEmpty {
+                    Text("Found by `where latch`:")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    ForEach(store.discoveredLatchExecutables, id: \.self) { path in
+                        Button(path) { store.selectCLI(path) }
+                            .buttonStyle(.link)
+                    }
+                } else {
+                    Text("No standalone Latch CLI was found. Install it with:")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(store.cliInstallCommand)
+                        .font(.system(.caption, design: .monospaced))
+                        .textSelection(.enabled)
+                    Button("Run Install Command in Terminal…") { store.runCLIInstaller() }
+                }
+                HStack {
+                    Button(store.isDiscoveringCLI ? "Searching…" : "Run `where latch` Again") {
+                        Task { await store.discoverCLI() }
+                    }
+                    .disabled(store.isDiscoveringCLI)
+                    Spacer()
+                    Button("Use This CLI") { store.useConfiguredCLI() }
+                        .disabled(!store.selectedCLIIsExecutable)
+                }
+                Text("Latch Desktop uses the independently installed CLI selected here; it never includes or updates the CLI itself.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -480,5 +609,55 @@ struct SettingsView: View {
         } catch {
             store.errorMessage = error.localizedDescription
         }
+    }
+}
+
+private struct CLISetupView: View {
+    @ObservedObject var store: SessionStore
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Connect the Latch CLI")
+                .font(.title2)
+                .fontWeight(.semibold)
+            if store.isDiscoveringCLI {
+                ProgressView("Running `where latch`…")
+            } else if store.discoveredLatchExecutables.isEmpty {
+                Text("Latch Desktop does not bundle the CLI, and `where latch` returned no paths. Run this verified-release installer in Terminal:")
+                Text(store.cliInstallCommand)
+                    .font(.system(.callout, design: .monospaced))
+                    .textSelection(.enabled)
+                    .padding(10)
+                    .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+                HStack {
+                    Button("Run in Terminal…") { store.runCLIInstaller() }
+                        .buttonStyle(.borderedProminent)
+                    Button("Search Again") {
+                        Task { await store.discoverCLI() }
+                    }
+                }
+            } else {
+                Text("`where latch` found the following executables. Choose the one Latch Desktop should use:")
+                ForEach(store.discoveredLatchExecutables, id: \.self) { path in
+                    Button {
+                        store.selectCLI(path)
+                    } label: {
+                        HStack {
+                            Image(systemName: "terminal")
+                            Text(path).textSelection(.enabled)
+                            Spacer()
+                            Text("Use").foregroundStyle(.secondary)
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                }
+            }
+            HStack {
+                Spacer()
+                Button("Not Now") { store.shouldPresentCLISetup = false }
+            }
+        }
+        .padding(24)
+        .frame(width: 540)
     }
 }
