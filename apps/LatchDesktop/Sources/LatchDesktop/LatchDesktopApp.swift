@@ -72,7 +72,12 @@ struct LatchDesktopApp: App {
                 Task { await updates.check(userInitiated: true) }
             }
         } label: {
-            Label("Latch \(store.runningCount)", systemImage: "rectangle.stack")
+            Label {
+                Text("Latch \(store.runningCount)")
+            } icon: {
+                Image(nsImage: Self.menuBarImage)
+                    .renderingMode(.template)
+            }
         }
         .menuBarExtraStyle(.menu)
 
@@ -90,4 +95,18 @@ struct LatchDesktopApp: App {
         NSApp.activate(ignoringOtherApps: true)
         NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
     }
+
+    private static let menuBarImage: NSImage = {
+        guard let url = Bundle.main.url(
+            forResource: "latch-menubar-template@2x",
+            withExtension: "png"
+        ), let image = NSImage(contentsOf: url) else {
+            return NSImage(systemSymbolName: "rectangle.stack", accessibilityDescription: "Latch")
+                ?? NSImage()
+        }
+
+        image.size = NSSize(width: 18, height: 18)
+        image.isTemplate = true
+        return image
+    }()
 }

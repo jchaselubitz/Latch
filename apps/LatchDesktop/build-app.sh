@@ -49,6 +49,32 @@ lipo "$contents_dir/MacOS/LatchDesktop" -verify_arch x86_64
 chmod 0755 "$contents_dir/MacOS/LatchDesktop"
 install -m 0644 "$desktop_dir/Info.plist" "$contents_dir/Info.plist"
 
+# Build a complete, native macOS icon set from the approved transparent Latch
+# logo.  Supplying every standard representation keeps the Dock, Finder, and
+# high-density displays sharp instead of asking macOS to scale a single image.
+iconset_dir="$desktop_dir/.build/Latch.iconset"
+rm -rf -- "$iconset_dir"
+mkdir -p "$iconset_dir"
+icon_source="$desktop_dir/Assets/latch-logo-l-transparent-v1.png"
+for icon_size in 16 32 128 256 512; do
+    sips --resampleHeightWidth "$icon_size" "$icon_size" "$icon_source" \
+        --out "$iconset_dir/icon_${icon_size}x${icon_size}.png" >/dev/null
+done
+for icon_size in 16 32 128 256 512; do
+    doubled_size=$((icon_size * 2))
+    sips --resampleHeightWidth "$doubled_size" "$doubled_size" "$icon_source" \
+        --out "$iconset_dir/icon_${icon_size}x${icon_size}@2x.png" >/dev/null
+done
+iconutil --convert icns "$iconset_dir" --output "$contents_dir/Resources/Latch.icns"
+rm -rf -- "$iconset_dir"
+
+# These monochrome images are marked as a template at runtime so macOS adapts
+# them automatically to light and dark menu bars.
+install -m 0644 "$desktop_dir/Assets/latch-menubar-template.png" \
+    "$contents_dir/Resources/latch-menubar-template.png"
+install -m 0644 "$desktop_dir/Assets/latch-menubar-template@2x.png" \
+    "$contents_dir/Resources/latch-menubar-template@2x.png"
+
 # The app's in-place updater compares CFBundleShortVersionString with the
 # newest published release, so a bundle that ships the placeholder version in
 # the source plist would offer itself an update forever. Stamp the workspace
