@@ -41,7 +41,11 @@ lipo -create \
     "$arm64_bin_dir/LatchDesktop" \
     "$x86_64_bin_dir/LatchDesktop" \
     -output "$contents_dir/MacOS/LatchDesktop"
-lipo -verify_arch arm64 x86_64 "$contents_dir/MacOS/LatchDesktop"
+# `-verify_arch` takes one architecture and one input at a time.  Invoking it
+# twice makes both required universal slices explicit without asking lipo to
+# parse multiple input files.
+lipo "$contents_dir/MacOS/LatchDesktop" -verify_arch arm64
+lipo "$contents_dir/MacOS/LatchDesktop" -verify_arch x86_64
 chmod 0755 "$contents_dir/MacOS/LatchDesktop"
 install -m 0644 "$desktop_dir/Info.plist" "$contents_dir/Info.plist"
 
