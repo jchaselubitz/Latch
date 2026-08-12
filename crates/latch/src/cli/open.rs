@@ -70,7 +70,12 @@ fn open_iterm(session_id: &str) -> anyhow::Result<()> {
 
 fn host_attach_command(shell: impl AsRef<std::ffi::OsStr>, session_id: &str) -> String {
     let attach = format!("exec latch attach {}", shell_quote(session_id));
-    format!("exec {} -lc {}", shell_quote(shell), shell_quote(attach))
+    // iTerm's AppleScript `command` replaces the profile's login command; it
+    // is not itself a shell script. Put the real executable first so iTerm's
+    // launcher can exec it directly. The login shell interprets the inner
+    // command, where `exec` is useful because it leaves `latch attach` as the
+    // terminal's foreground process.
+    format!("{} -lc {}", shell_quote(shell), shell_quote(attach))
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -101,7 +106,8 @@ mod tests {
     fn iterm_attach_resolves_latch_from_the_host_login_shell() {
         let command = host_attach_command("/bin/zsh", "ses_01JTEST");
 
-        assert!(command.starts_with("exec '/bin/zsh' -lc "));
+        assert!(command.starts_with("'/bin/zsh' -lc "));
+        assert!(!command.starts_with("exec "));
         assert!(command.contains("exec latch attach"));
         assert!(!command.contains(std::env::current_exe().unwrap().to_string_lossy().as_ref()));
     }
