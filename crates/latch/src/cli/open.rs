@@ -47,12 +47,10 @@ pub fn open(request: OpenRequest) -> anyhow::Result<OpenReport> {
 fn open_iterm(session_id: &str) -> anyhow::Result<()> {
     use std::process::Command;
 
-    let latch = std::env::current_exe().context("cannot locate the latch executable")?;
-    let command = format!(
-        "exec {} attach {}",
-        shell_quote(latch.as_os_str()),
-        shell_quote(session_id)
-    );
+    let shell = std::env::var_os("SHELL")
+        .filter(|value| std::path::Path::new(value).is_absolute())
+        .unwrap_or_else(|| "/bin/zsh".into());
+    let command = host_attach_command(shell, session_id);
     let output = Command::new("osascript")
         .arg("-e")
         .arg("on run argv\ntell application \"iTerm\"\nactivate\ncreate window with default profile command (item 1 of argv)\nend tell\nend run")
@@ -70,12 +68,16 @@ fn open_iterm(session_id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn host_attach_command(shell: impl AsRef<std::ffi::OsStr>, session_id: &str) -> String {
+    let attach = format!("exec latch attach {}", shell_quote(session_id));
+    format!("exec {} -lc {}", shell_quote(shell), shell_quote(attach))
+}
+
 #[cfg(not(target_os = "macos"))]
 fn open_iterm(_session_id: &str) -> anyhow::Result<()> {
     bail!("opening iTerm is only supported on macOS")
 }
 
-#[cfg(target_os = "macos")]
 fn shell_quote(value: impl AsRef<std::ffi::OsStr>) -> String {
     use std::os::unix::ffi::OsStrExt;
 
@@ -85,16 +87,23 @@ fn shell_quote(value: impl AsRef<std::ffi::OsStr>) -> String {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(target_os = "macos")]
-    use super::shell_quote;
+    use super::{host_attach_command, shell_quote};
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn shell_quote_preserves_spaces_and_single_quotes() {
         assert_eq!(
             shell_quote("/Applications/Latch's App/latch"),
             "'/Applications/Latch'\\\"'\\\"'s App/latch'"
         );
+    }
+
+    #[test]
+    fn iterm_attach_resolves_latch_from_the_host_login_shell() {
+        let command = host_attach_command("/bin/zsh", "ses_01JTEST");
+
+        assert!(command.starts_with("exec '/bin/zsh' -lc "));
+        assert!(command.contains("exec latch attach"));
+        assert!(!command.contains(std::env::current_exe().unwrap().to_string_lossy().as_ref()));
     }
 
     #[cfg(not(target_os = "macos"))]

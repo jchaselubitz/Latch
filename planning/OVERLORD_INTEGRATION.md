@@ -114,6 +114,62 @@ versioned provider shape:
 Do not store Latch account credentials, local socket tokens, or cloud attachment
 grants in Overlord preferences.
 
+### Why this is two settings rather than one terminal choice
+
+The tempting simplification is to put Latch in the terminal list — the user picks
+`Latch` where they would have picked iTerm, and Latch is then configured with the
+terminal application that presents its sessions. It reads as one question instead of
+two, and it matches what Latch Desktop already does: its Settings pane asks for the
+default terminal used for attachments (Terminal, iTerm2, Ghostty, or a custom `.app`
+with an argument template).
+
+It is nevertheless the wrong shape for Overlord's stored preference, because the two
+choices are orthogonal and fail independently:
+
+- **Latch is not a peer of iTerm; it is the layer beneath it.** A terminal list whose
+  entries are iTerm, Terminal, Ghostty, and Latch claims a choice between four
+  interchangeable things. Choosing Latch does not remove iTerm from the picture — it
+  puts iTerm in front of a session iTerm did not create. Latch's own adoption pitch is
+  that you keep your terminal, so a UI whose first implication is that you are giving
+  it up argues against the product while offering it.
+- **Nesting the viewer inside the provider does not remove the second question, it
+  hides it.** `Terminal: Latch` still has to be followed by `…shown in: iTerm`, and if
+  the user picks direct execution the same viewer list reappears at the outer level.
+  One list rendered in two places is worse than two lines rendered once.
+- **The two selections have different failure semantics, and collapsing them invites
+  reporting one as the other.** Spawn failure is fatal to the launch; viewer failure is
+  cosmetic and recoverable (see *Open viewer* and acceptance criterion 3). A single
+  `terminal` concept has one obvious place to put an error, which is exactly the
+  regression the boundary exists to prevent.
+- **`no viewer` is a legitimate mode.** "Persistent, and do not open a window" is a
+  sentence; "the terminal is Latch and there is no terminal" is not.
+
+What the proposal gets right is that the user should read one panel, not two settings
+screens, and that after adopting Latch they stop thinking about a terminal as the thing
+their work lives in. Both survive without overloading the terminal list:
+
+```text
+Terminal sessions
+
+Where it runs    Directly on this machine
+                 In a persistent Latch session      <- process outlives the window
+
+Show it in       iTerm / Terminal / Ghostty / Do not open automatically
+```
+
+Copy carries the distinction the structure no longer has to: with Latch selected, the
+second line reads as *show* rather than *launch*, and gains the note that closing the
+window leaves the agent running. Attaching from a second device is an action on the
+running session — Overlord offers the attach command — not a preference, and until
+M4 it is honestly the SSH path in [`../docs/SSH_SETUP.md`](../docs/SSH_SETUP.md)
+rather than a shipped remote mode.
+
+One prerequisite this exposes: viewer breadth currently lives in Latch Desktop, not in
+the CLI. `latch open --with` accepts `iterm` alone, so any delegation of viewer choice
+to Latch is one viewer wide until the CLI reaches parity with `TerminalLauncher`'s
+Terminal, Ghostty, and custom-template cases. Overlord may keep opening the viewer
+itself in the interim; the stored preference shape above does not change either way.
+
 ## Runner integration contract
 
 ### Discovery

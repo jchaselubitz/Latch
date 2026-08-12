@@ -89,6 +89,7 @@ fi
 
 if [[ -n "${LATCH_CODESIGN_IDENTITY:-}" ]]; then
     codesign --force --options runtime --timestamp \
+        --entitlements "$desktop_dir/LatchDesktop.entitlements" \
         --sign "$LATCH_CODESIGN_IDENTITY" "$app_dir"
     codesign --verify --strict --verbose=2 "$app_dir"
 fi
