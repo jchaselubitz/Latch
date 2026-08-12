@@ -83,11 +83,18 @@ fn open_iterm(_session_id: &str) -> anyhow::Result<()> {
     bail!("opening iTerm is only supported on macOS")
 }
 
+/// Wraps a value as a single POSIX shell word.
+///
+/// The escape for an embedded single quote is `'"'"'` — close the quoted run,
+/// emit one double-quoted apostrophe, reopen. It has to be exactly that, with
+/// no backslashes: `open` quotes the session id, then quotes the whole attach
+/// command again, so any error here is applied twice and reaches `latch attach`
+/// as extra characters in the session id rather than as a syntax error.
 fn shell_quote(value: impl AsRef<std::ffi::OsStr>) -> String {
     use std::os::unix::ffi::OsStrExt;
 
     let text = String::from_utf8_lossy(value.as_ref().as_bytes());
-    format!("'{}'", text.replace('\'', "'\\\"'\\\"'"))
+    format!("'{}'", text.replace('\'', "'\"'\"'"))
 }
 
 #[cfg(test)]
@@ -98,7 +105,95 @@ mod tests {
     fn shell_quote_preserves_spaces_and_single_quotes() {
         assert_eq!(
             shell_quote("/Applications/Latch's App/latch"),
-            "'/Applications/Latch'\\\"'\\\"'s App/latch'"
+            "'/Applications/Latch'\"'\"'s App/latch'"
+        );
+    }
+
+    /// Splits a command string into words the way a POSIX shell does.
+    ///
+    /// The construction bug this file guards against produced a command whose
+    /// *substrings* all looked right while its *words* were wrong, so the tests
+    /// have to tokenize rather than match text.
+    fn split_shell_words(input: &str) -> Vec<String> {
+        #[derive(PartialEq)]
+        enum Quote {
+            None,
+            Single,
+            Double,
+        }
+
+        let mut words = Vec::new();
+        let mut current = String::new();
+        let mut started = false;
+        let mut quote = Quote::None;
+        let mut escaped = false;
+
+        for character in input.chars() {
+            if escaped {
+                current.push(character);
+                started = true;
+                escaped = false;
+                continue;
+            }
+            match (&quote, character) {
+                (Quote::None, '\\') | (Quote::Double, '\\') => escaped = true,
+                (Quote::None, '\'') => {
+                    quote = Quote::Single;
+                    started = true;
+                }
+                (Quote::Single, '\'') => quote = Quote::None,
+                (Quote::None, '"') => {
+                    quote = Quote::Double;
+                    started = true;
+                }
+                (Quote::Double, '"') => quote = Quote::None,
+                (Quote::None, character) if character.is_ascii_whitespace() => {
+                    if started {
+                        words.push(std::mem::take(&mut current));
+                        started = false;
+                    }
+                }
+                (_, character) => {
+                    current.push(character);
+                    started = true;
+                }
+            }
+        }
+        assert!(quote == Quote::None, "unbalanced quotes in `{input}`");
+        assert!(!escaped, "trailing backslash in `{input}`");
+        if started {
+            words.push(current);
+        }
+        words
+    }
+
+    #[test]
+    fn the_session_id_survives_iterm_and_the_login_shell_unaltered() {
+        // Two rounds of parsing stand between this string and `latch attach`:
+        // iTerm splits the AppleScript `command` into argv, then the login
+        // shell parses argv[2] as a script. A quoting error in either round
+        // reaches `latch attach` as a corrupted session id, which resolves to
+        // no session and exits — an immediately-closing window, not an error
+        // anyone can read.
+        let argv = split_shell_words(&host_attach_command("/bin/zsh", "ses_01JTEST"));
+
+        assert_eq!(argv.len(), 3, "iTerm should see exactly `shell -lc script`");
+        assert_eq!(argv[0], "/bin/zsh");
+        assert_eq!(argv[1], "-lc");
+        assert_eq!(
+            split_shell_words(&argv[2]),
+            ["exec", "latch", "attach", "ses_01JTEST"]
+        );
+    }
+
+    #[test]
+    fn a_shell_path_with_a_space_and_an_apostrophe_stays_one_word() {
+        let argv = split_shell_words(&host_attach_command("/opt/jake's tools/zsh", "ses_01JTEST"));
+
+        assert_eq!(argv[0], "/opt/jake's tools/zsh");
+        assert_eq!(
+            split_shell_words(&argv[2]),
+            ["exec", "latch", "attach", "ses_01JTEST"]
         );
     }
 
