@@ -206,17 +206,38 @@ viewer integrations, and — new — the engine API and connectors.
 
 ### Risks to close during the phase
 
-- **`$TMUX` leakage.** The child sees `$TMUX` pointing at Latch's private
-  socket. A user who runs their own tmux inside a Latch session will hit
-  nesting refusals. Decide explicitly: unset it, rename it to
-  `LATCH_TMUX`, or set `allow-nested` behaviour.
+- **Environment fidelity.** Two variables the child sees change under tmux, and
+  they are not equally important.
+
+  `$TMUX` is the easy one. **Assumption: nobody runs tmux inside a Latch
+  session**, which collapses the choice to *unset it* — no nesting semantics to
+  design, and the abstraction stops leaking into prompts and `env` output.
+  Latch's own nesting guard uses `LATCH_SESSION_ID` and is unaffected.
+
+  **`TERM` is the one that actually matters.** Today the worker passes the
+  user's `TERM` straight through; under tmux the child gets tmux's
+  `default-terminal` instead. That changes truecolor and italic detection and
+  some key encodings — for exactly the full-screen TUI agents this product
+  exists to host. `SSH_SETUP.md` already treats `TERM` as something to verify by
+  hand. Set `default-terminal` deliberately, and check a real Claude Code
+  session renders identically before and after.
 - **tmux availability and version.** Pin a minimum version, bundle the binary
   inside `Latch.app`, and have `latch doctor` report which one is in use.
 - **Exit-status fidelity.** Verify `pane_dead_status` reports signals the way
   `exit.json` did, including the `128 + signal` convention.
 - **Startup cost.** D1's whole justification was that a terminal profile pays
-  CLI startup on every window. Measure `latch` → first prompt against the
-  current binary before committing.
+  CLI startup on every window, so this is a benchmark against the current
+  binary — with three specifics, because a naive one measures the wrong thing:
+
+  1. **Cold and warm are different cases.** Cold — the first window with no
+     server running — pays tmux server startup and config parse. Warm — every
+     window after — is one connect to a server that already exists, with no PTY
+     allocation and no socket bind, and should be *faster* than today's spawn.
+     A loop benchmark measures only warm and will flatter the result.
+  2. **Measure to first prompt, not to process start.** That is what a person
+     perceives, and it is the endpoint D1's claim was about.
+  3. **The bar is "not perceptibly worse."** If warm start improves, which is
+     likely, that is an argument for the swap rather than a risk cleared.
 
 ### Done when
 
@@ -259,18 +280,26 @@ records chained by `parentUuid`.
 makes a notification possible, and notification is what makes a remote chat view
 worth opening at all.
 
-### The format-stability problem
+### The format-stability problem — deliberately deferred
 
 Anthropic's documentation states plainly that the transcript format *"is
 internal to Claude Code and changes between versions, so scripts that parse
-these files directly can break on any release."* Promoting the transcript to the
-primary interface puts that on the critical path. Mitigations, all required:
+these files directly can break on any release."*
 
-- A recorded-transcript fixture suite per harness, with the same discipline
-  `fixtures/vt/` had.
-- A version probe at connector start, and a **visible degraded state** in the UI
-  — never a chat view that silently stops updating.
-- `latch attach` as the always-available fallback.
+**Decision: build the parser first, solve this later.** It is a maintenance risk
+rather than a design risk — it changes nothing about the architecture — and a
+mitigation designed before the format has churned once is a guess. `latch
+attach` remains the fallback in the meantime, which is what makes deferring it
+safe.
+
+Two things cost almost nothing now and are expensive to retrofit, so do them
+while building rather than as a later project:
+
+- **Keep the raw records next to the parsed events.** A fixture corpus then
+  accumulates for free. Reconstructing one later means going back to sessions
+  that no longer exist.
+- **Stamp the harness version on what was parsed.** One field. Without it, when
+  something does break, there is no way to tell which release did it.
 
 ### Seed it from Overlord's connectors
 
@@ -413,7 +442,10 @@ possible one.
 
 ## Open decisions
 
-1. **`$TMUX` handling** — unset, rename, or allow nesting. Phase 0 blocker.
+1. ~~**`$TMUX` handling.**~~ **Settled:** unset it, on the assumption that nobody
+   runs tmux inside a Latch session. What remains is `TERM` — pick a
+   `default-terminal` and verify a real agent renders identically. See
+   *Environment fidelity* in Phase 0.
 2. **Bundle tmux or require it.** Bundling makes `Latch.app` self-contained and
    pins the version; requiring it keeps the CLI a single file. Affects D1's
    one-binary claim.
