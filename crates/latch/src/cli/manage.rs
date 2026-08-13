@@ -11,9 +11,9 @@ use anyhow::{bail, Context};
 
 use crate::cli::attach;
 use crate::cli::json::{
-    AttachmentSummary, CapabilitiesReport, CapabilityFlags, ConfigReport, DoctorFinding,
-    DoctorReport, InspectReport, ListReport, PruneReport, RemoveReport, RenameReport, ResizeReport,
-    RetainedSession, SessionSummary, StopReport,
+    CapabilitiesReport, CapabilityFlags, ConfigReport, DoctorFinding, DoctorReport, InspectReport,
+    ListReport, PruneReport, RemoveReport, RenameReport, ResizeReport, RetainedSession,
+    SessionSummary, StopReport,
 };
 use crate::engine::{self, SessionState, PROTOCOL_VERSION};
 use crate::session::manifest::TerminalSize;
@@ -92,9 +92,6 @@ pub fn inspect(options: InspectOptions) -> anyhow::Result<InspectReport> {
     let state = info
         .as_ref()
         .map_or(SessionState::Lost, |value| value.state);
-    let attachments = info
-        .as_ref()
-        .map(|value| shared_attachments(value.attached));
     Ok(InspectReport {
         id: metadata.id,
         name: metadata.name,
@@ -106,7 +103,7 @@ pub fn inspect(options: InspectOptions) -> anyhow::Result<InspectReport> {
         initial_size: metadata.initial_size,
         size: info.as_ref().map(|value| value.size),
         exit: info.as_ref().and_then(engine::exit_record),
-        attachments,
+        attached: info.as_ref().map(|value| value.attached),
     })
 }
 
@@ -132,6 +129,7 @@ pub fn stop(request: StopRequest) -> anyhow::Result<StopReport> {
     Ok(StopReport {
         id: id.to_string(),
         state: state.as_wire().to_owned(),
+        stopped: state != SessionState::Running,
     })
 }
 
@@ -188,6 +186,14 @@ pub fn rename(request: RenameRequest) -> anyhow::Result<RenameReport> {
     let name = meta::sanitize_display(&request.name);
     if name.is_empty() {
         bail!("session name must contain at least one printable character");
+    }
+    if name != metadata.name {
+        if let Some(other) = attach::session_ids_named(&request.home, &name)?
+            .into_iter()
+            .find(|candidate| candidate != &id)
+        {
+            bail!("session name `{name}` is already used by {other}; choose a different name");
+        }
     }
     metadata.name = name.clone();
     meta::update(&paths, &metadata)?;
@@ -441,20 +447,11 @@ pub fn capabilities() -> CapabilitiesReport {
 pub fn resolve_existing(home: &LatchHome, session: &str) -> anyhow::Result<SessionId> {
     let id = attach::resolve_session(home, session)?;
     if !home.session(&id).meta().is_file() {
-        bail!("no session `{session}`");
+        bail!(attach::SessionLookupError::NotFound {
+            session: session.to_owned(),
+        });
     }
     Ok(id)
-}
-
-fn shared_attachments(count: usize) -> Vec<AttachmentSummary> {
-    (1..=count)
-        .map(|number| AttachmentSummary {
-            id: format!("client-{number}"),
-            mode: "shared".to_owned(),
-            client_kind: "tmux".to_owned(),
-            client_name: "attached terminal".to_owned(),
-        })
-        .collect()
 }
 
 fn session_ids_or_empty(home: &LatchHome) -> anyhow::Result<Vec<SessionId>> {

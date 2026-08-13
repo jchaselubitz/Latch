@@ -4,16 +4,17 @@ use std::io;
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 
-use axum::extract::ws::{Message, WebSocket};
+use axum::extract::ws::{close_code, CloseFrame, Message, WebSocket};
 use serde::Deserialize;
 use tokio::io::unix::AsyncFd;
 
 use super::pty::{PtyChild, SpawnAttachRequest};
+use crate::session::manifest::TerminalSize;
 use crate::session::paths::LatchHome;
 
-const DEFAULT_COLS: u16 = 80;
-const DEFAULT_ROWS: u16 = 24;
 const PTY_BUFFER: usize = 32 * 1024;
+/// Application close code: the session id or name does not exist.
+const WS_CLOSE_SESSION_NOT_FOUND: u16 = 4404;
 
 /// Connection inputs for one terminal socket.
 pub struct TerminalConnect {
@@ -23,6 +24,19 @@ pub struct TerminalConnect {
     pub latch_bin: PathBuf,
     /// Session id or name from the URL.
     pub session: String,
+    /// Initial columns from the WebSocket query string, when provided.
+    pub cols: Option<u16>,
+    /// Initial rows from the WebSocket query string, when provided.
+    pub rows: Option<u16>,
+}
+
+/// `cols` / `rows` query parameters on `/v1/sessions/{id}/terminal`.
+#[derive(Debug, Default, Deserialize)]
+pub struct TerminalQuery {
+    /// Initial columns. Must be paired with [`Self::rows`].
+    pub cols: Option<u16>,
+    /// Initial rows. Must be paired with [`Self::cols`].
+    pub rows: Option<u16>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -33,30 +47,68 @@ struct ControlFrame {
     rows: Option<u16>,
 }
 
+struct TerminalClose {
+    code: u16,
+    reason: &'static str,
+}
+
 /// Relays PTY bytes until the socket or attach process ends.
 pub async fn run(mut socket: WebSocket, connect: TerminalConnect) {
     let Ok(id) = crate::cli::manage::resolve_existing(&connect.home, &connect.session) else {
-        let _ = socket.send(Message::Close(None)).await;
+        close_socket(
+            &mut socket,
+            TerminalClose {
+                code: WS_CLOSE_SESSION_NOT_FOUND,
+                reason: "session not found",
+            },
+        )
+        .await;
+        return;
+    };
+    let Some(size) = initial_pty_size(&mut socket, &connect).await else {
         return;
     };
     let mut pty = match PtyChild::spawn(SpawnAttachRequest {
         latch_bin: &connect.latch_bin,
         session_id: id.as_str(),
-        cols: DEFAULT_COLS,
-        rows: DEFAULT_ROWS,
+        cols: size.cols,
+        rows: size.rows,
     }) {
         Ok(pty) => pty,
         Err(_) => {
-            let _ = socket.send(Message::Close(None)).await;
+            close_socket(
+                &mut socket,
+                TerminalClose {
+                    code: close_code::ERROR,
+                    reason: "attach failed",
+                },
+            )
+            .await;
             return;
         }
     };
     let Ok(file) = pty.master.try_clone() else {
         pty.kill();
+        close_socket(
+            &mut socket,
+            TerminalClose {
+                code: close_code::ERROR,
+                reason: "attach failed",
+            },
+        )
+        .await;
         return;
     };
     let Ok(master) = AsyncFd::new(file) else {
         pty.kill();
+        close_socket(
+            &mut socket,
+            TerminalClose {
+                code: close_code::ERROR,
+                reason: "attach failed",
+            },
+        )
+        .await;
         return;
     };
 
@@ -104,34 +156,84 @@ pub async fn run(mut socket: WebSocket, connect: TerminalConnect) {
     pty.kill();
 }
 
-fn apply_control(master: &AsyncFd<std::fs::File>, text: &str) -> io::Result<()> {
-    let Ok(frame) = serde_json::from_str::<ControlFrame>(text) else {
-        return Ok(());
-    };
-    if frame.kind != "resize" {
-        return Ok(());
+async fn initial_pty_size(
+    socket: &mut WebSocket,
+    connect: &TerminalConnect,
+) -> Option<TerminalSize> {
+    if let Some(size) = query_size(connect) {
+        return Some(size);
     }
-    let (Some(cols), Some(rows)) = (frame.cols, frame.rows) else {
+    loop {
+        match socket.recv().await {
+            None | Some(Err(_)) => return None,
+            Some(Ok(Message::Text(text))) => {
+                if let Some(size) = resize_from_text(text.as_str()) {
+                    return Some(size);
+                }
+            }
+            Some(Ok(Message::Binary(_))) | Some(Ok(Message::Pong(_))) => {}
+            Some(Ok(Message::Ping(payload))) => {
+                if socket.send(Message::Pong(payload)).await.is_err() {
+                    return None;
+                }
+            }
+            Some(Ok(Message::Close(_))) => return None,
+        }
+    }
+}
+
+fn query_size(connect: &TerminalConnect) -> Option<TerminalSize> {
+    match (connect.cols, connect.rows) {
+        (Some(cols), Some(rows)) => Some(TerminalSize::new(cols.max(1), rows.max(1))),
+        _ => None,
+    }
+}
+
+fn resize_from_text(text: &str) -> Option<TerminalSize> {
+    let frame = serde_json::from_str::<ControlFrame>(text).ok()?;
+    if frame.kind != "resize" {
+        return None;
+    }
+    let cols = frame.cols?;
+    let rows = frame.rows?;
+    Some(TerminalSize::new(cols.max(1), rows.max(1)))
+}
+
+fn apply_control(master: &AsyncFd<std::fs::File>, text: &str) -> io::Result<()> {
+    let Some(size) = resize_from_text(text) else {
         return Ok(());
     };
-    let size = libc::winsize {
-        ws_row: rows.max(1),
-        ws_col: cols.max(1),
+    set_pty_size(master, size)
+}
+
+fn set_pty_size(master: &AsyncFd<std::fs::File>, size: TerminalSize) -> io::Result<()> {
+    let winsize = libc::winsize {
+        ws_row: size.rows,
+        ws_col: size.cols,
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
-    // SAFETY: `size` lives for the ioctl; `master` holds an open PTY fd.
+    // SAFETY: `winsize` lives for the ioctl; `master` holds an open PTY fd.
     if unsafe {
         libc::ioctl(
             master.get_ref().as_raw_fd(),
             libc::TIOCSWINSZ as libc::c_ulong,
-            &size,
+            &winsize,
         )
     } == -1
     {
         return Err(io::Error::last_os_error());
     }
     Ok(())
+}
+
+async fn close_socket(socket: &mut WebSocket, close: TerminalClose) {
+    let _ = socket
+        .send(Message::Close(Some(CloseFrame {
+            code: close.code,
+            reason: close.reason.into(),
+        })))
+        .await;
 }
 
 async fn read_pty(master: &AsyncFd<std::fs::File>, buf: &mut [u8]) -> io::Result<usize> {

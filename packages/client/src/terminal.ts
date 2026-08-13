@@ -7,6 +7,8 @@ type AttachTerminalOptions = {
   baseUrl: string;
   token: string;
   sessionId: string;
+  cols?: number;
+  rows?: number;
   retry: RetryPolicy;
   webSocket?: new (url: string, protocols?: string | string[]) => WebSocket;
 };
@@ -22,7 +24,10 @@ export function attachTerminal(options: AttachTerminalOptions): TerminalHandle {
   let attempt = 0;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let state: TerminalState = 'connecting';
-  let lastSize: { cols: number; rows: number } | null = null;
+  let lastSize: { cols: number; rows: number } | null =
+    options.cols != null && options.rows != null
+      ? { cols: options.cols, rows: options.rows }
+      : null;
   const writeQueue: Uint8Array[] = [];
   const dataHandlers = new Set<(bytes: Uint8Array) => void>();
   const stateHandlers = new Set<(next: TerminalState) => void>();
@@ -43,6 +48,10 @@ export function attachTerminal(options: AttachTerminalOptions): TerminalHandle {
     url.pathname = `/v1/sessions/${encodeURIComponent(options.sessionId)}/terminal`;
     url.search = '';
     url.hash = '';
+    if (lastSize) {
+      url.searchParams.set('cols', String(lastSize.cols));
+      url.searchParams.set('rows', String(lastSize.rows));
+    }
     return url.toString();
   }
 

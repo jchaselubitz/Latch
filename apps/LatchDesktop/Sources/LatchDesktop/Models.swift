@@ -52,19 +52,6 @@ struct ExitRecord: Codable, Hashable, Sendable {
     }
 }
 
-struct AttachmentSummary: Codable, Identifiable, Hashable, Sendable {
-    let id: String
-    let mode: String
-    let clientKind: String
-    let clientName: String
-
-    enum CodingKeys: String, CodingKey {
-        case id, mode
-        case clientKind = "client_kind"
-        case clientName = "client_name"
-    }
-}
-
 struct InspectReport: Codable, Identifiable, Sendable {
     let id: String
     let name: String
@@ -76,10 +63,10 @@ struct InspectReport: Codable, Identifiable, Sendable {
     let initialSize: TerminalSize
     let size: TerminalSize?
     let exit: ExitRecord?
-    let attachments: [AttachmentSummary]?
+    let attached: UInt?
 
     enum CodingKeys: String, CodingKey {
-        case id, name, title, state, cwd, size, exit, attachments
+        case id, name, title, state, cwd, size, exit, attached
         case commandLabel = "command_label"
         case createdAt = "created_at"
         case initialSize = "initial_size"

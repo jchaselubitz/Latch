@@ -28,7 +28,55 @@ pub const DEFAULT_TERMINAL: &str = "xterm-256color";
 /// Bundled binary name next to `latch`.
 pub const BUNDLED_TMUX_NAME: &str = "latch-tmux";
 
+/// tmux 3.7b stderr fragments used to classify empty-server outcomes.
+/// Revisit these when bumping [`TMUX_VERSION`].
+const TMUX_ERR_NO_SERVER: &str = "no server running";
+const TMUX_ERR_NO_SESSION: &str = "can't find session";
+const TMUX_ERR_NO_SESSIONS: &str = "no sessions";
+
+/// Stop polls tmux rather than sleeping on a single long timeout, so this
+/// interval is the process-churn / wait-time tradeoff.
+const STOP_POLL_INTERVAL: Duration = Duration::from_millis(50);
+/// Graceful SIGTERM window (~5 s).
+const STOP_GRACE_POLLS: usize = 100;
+/// SIGKILL window (~2 s), used for `--force` and the post-TERM escalation.
+const STOP_FORCE_POLLS: usize = 40;
+
+/// Why a tmux query produced no session rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TmuxMiss {
+    /// No private server process.
+    Server,
+    /// Targeted session name is absent.
+    Session,
+    /// Server is up but has no sessions.
+    Empty,
+}
+
+/// Classifies pinned-tmux stderr that means "nothing to query".
+pub(crate) fn classify_tmux_stderr(diagnostic: &str) -> Option<TmuxMiss> {
+    if diagnostic.contains(TMUX_ERR_NO_SERVER) {
+        Some(TmuxMiss::Server)
+    } else if diagnostic.contains(TMUX_ERR_NO_SESSION) {
+        Some(TmuxMiss::Session)
+    } else if diagnostic.contains(TMUX_ERR_NO_SESSIONS) {
+        Some(TmuxMiss::Empty)
+    } else {
+        None
+    }
+}
+
 const TMUX_OVERRIDE_ENV: &str = "LATCH_TMUX_BIN";
+/// UTF-8 `LC_CTYPE` injected into pinned-tmux children when the caller's
+/// effective locale is not UTF-8 (Finder/launchd/cron parents). Without it
+/// tmux sanitizes the U+001F field separator to `_` in command output and
+/// session rows stop parsing. Session commands keep the caller's original
+/// locale: pane environments come from the launch manifest, not from this
+/// override.
+#[cfg(target_os = "macos")]
+const UTF8_CTYPE: &str = "UTF-8";
+#[cfg(not(target_os = "macos"))]
+const UTF8_CTYPE: &str = "C.UTF-8";
 /// Unit separator between tmux format fields. Tabs are invisible in errors and
 /// get collapsed by some callers; this character cannot appear in Latch ids.
 const SESSION_ROW_SEPARATOR: char = '\u{1f}';
@@ -202,7 +250,15 @@ pub fn create(request: CreateRequest) -> Result<CreateResult> {
     let cols = size.cols.to_string();
     let rows = size.rows.to_string();
     let session_environment = format!("{SESSION_ID_ENV}={id}");
-    let tmux_result = tmux(&request.home)
+    let mut command = match tmux(&request.home) {
+        Ok(command) => command,
+        Err(error) => {
+            let _ = fs::remove_file(&fifo);
+            let _ = fs::remove_dir_all(paths.dir());
+            return Err(error);
+        }
+    };
+    let tmux_result = command
         .args([
             OsStr::new("new-session"),
             OsStr::new("-d"),
@@ -290,7 +346,7 @@ pub fn launch_from_fifo(path: &Path) -> Result<()> {
 /// Attaches the calling terminal to a session.
 pub fn attach(home: &LatchHome, id: &SessionId) -> Result<()> {
     ensure_config(home)?;
-    let status = tmux(home)
+    let status = tmux(home)?
         .args(["attach-session", "-t", id.as_str()])
         .status()
         .with_context(|| format!("cannot attach to session {id}"))?;
@@ -302,7 +358,10 @@ pub fn attach(home: &LatchHome, id: &SessionId) -> Result<()> {
 
 /// Returns whether tmux still owns a named session.
 pub fn has_session(home: &LatchHome, id: &SessionId) -> bool {
-    tmux(home)
+    let Ok(mut command) = tmux(home) else {
+        return false;
+    };
+    command
         .args(["has-session", "-t", id.as_str()])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -313,13 +372,16 @@ pub fn has_session(home: &LatchHome, id: &SessionId) -> bool {
 /// Lists every session from the private server in one query.
 pub fn list(home: &LatchHome) -> Result<Vec<SessionInfo>> {
     ensure_config(home)?;
-    let output = tmux(home)
+    let output = tmux(home)?
         .args(["list-sessions", "-F", SESSION_INFO_FORMAT])
         .output()
         .context("cannot query the bundled tmux")?;
     if !output.status.success() {
         let diagnostic = String::from_utf8_lossy(&output.stderr);
-        if diagnostic.contains("no server running") || diagnostic.contains("no sessions") {
+        if matches!(
+            classify_tmux_stderr(&diagnostic),
+            Some(TmuxMiss::Server | TmuxMiss::Empty)
+        ) {
             return Ok(Vec::new());
         }
         return Err(tmux_error("list sessions", output));
@@ -335,7 +397,7 @@ pub fn list(home: &LatchHome) -> Result<Vec<SessionInfo>> {
 /// Queries one session.
 pub fn inspect(home: &LatchHome, id: &SessionId) -> Result<Option<SessionInfo>> {
     ensure_config(home)?;
-    let output = tmux(home)
+    let output = tmux(home)?
         .args([
             "display-message",
             "-p",
@@ -348,10 +410,7 @@ pub fn inspect(home: &LatchHome, id: &SessionId) -> Result<Option<SessionInfo>> 
         .context("cannot inspect the private tmux session")?;
     if !output.status.success() {
         let diagnostic = String::from_utf8_lossy(&output.stderr);
-        if diagnostic.contains("no server running")
-            || diagnostic.contains("can't find session")
-            || diagnostic.contains("no sessions")
-        {
+        if classify_tmux_stderr(&diagnostic).is_some() {
             return Ok(None);
         }
         return Err(tmux_error("inspect session", output));
@@ -363,7 +422,7 @@ pub fn inspect(home: &LatchHome, id: &SessionId) -> Result<Option<SessionInfo>> 
 /// Captures the currently visible pane for input-safety classification.
 pub fn capture_pane(home: &LatchHome, id: &SessionId) -> Result<String> {
     ensure_config(home)?;
-    let output = tmux(home)
+    let output = tmux(home)?
         .args(["capture-pane", "-p", "-J", "-t", id.as_str()])
         .output()
         .context("cannot capture the private tmux pane")?;
@@ -385,7 +444,7 @@ pub fn paste_message(request: PasteMessageRequest<'_>) -> Result<()> {
             .unwrap_or_default()
             .as_nanos()
     );
-    let mut command = tmux(request.home);
+    let mut command = tmux(request.home)?;
     command
         .args(["load-buffer", "-b", &buffer, "-"])
         .stdin(Stdio::piped());
@@ -402,7 +461,7 @@ pub fn paste_message(request: PasteMessageRequest<'_>) -> Result<()> {
         bail!("cannot load a private tmux paste buffer");
     }
 
-    let mut paste = tmux(request.home);
+    let mut paste = tmux(request.home)?;
     paste.args([
         "paste-buffer",
         "-p",
@@ -413,15 +472,19 @@ pub fn paste_message(request: PasteMessageRequest<'_>) -> Result<()> {
         request.id.as_str(),
     ]);
     if let Err(error) = run_tmux(paste, "paste message") {
-        let mut cleanup = tmux(request.home);
-        cleanup.args(["delete-buffer", "-b", &buffer]);
-        let _ = cleanup.status();
+        if let Ok(mut cleanup) = tmux(request.home) {
+            cleanup.args(["delete-buffer", "-b", &buffer]);
+            let _ = cleanup.status();
+        }
         return Err(error);
     }
     send_keys(SendKeysRequest {
         home: request.home,
         id: request.id,
         keys: &["Enter".to_owned()],
+    })
+    .with_context(|| {
+        "message was pasted into the composer but not submitted; recover with `latch send --keys C-u`"
     })
 }
 
@@ -430,7 +493,7 @@ pub fn send_keys(request: SendKeysRequest<'_>) -> Result<()> {
     if request.keys.is_empty() {
         bail!("at least one key is required");
     }
-    let mut command = tmux(request.home);
+    let mut command = tmux(request.home)?;
     command
         .args(["send-keys", "-t", request.id.as_str(), "--"])
         .args(request.keys);
@@ -439,7 +502,7 @@ pub fn send_keys(request: SendKeysRequest<'_>) -> Result<()> {
 
 /// Resizes a session and optionally pins manual geometry.
 pub fn resize(request: ResizeRequest<'_>) -> Result<()> {
-    let mut command = tmux(request.home);
+    let mut command = tmux(request.home)?;
     command.args([
         "resize-window",
         "-t",
@@ -451,7 +514,7 @@ pub fn resize(request: ResizeRequest<'_>) -> Result<()> {
     ]);
     run_tmux(command, "resize session")?;
     if request.pin {
-        let mut command = tmux(request.home);
+        let mut command = tmux(request.home)?;
         command.args([
             "set-option",
             "-t",
@@ -477,28 +540,57 @@ pub fn stop(request: StopRequest<'_>) -> Result<SessionState> {
         libc::SIGTERM
     };
     signal_pane(&info, signal).with_context(|| format!("cannot signal session {}", request.id))?;
-    let attempts = if request.force { 100 } else { 250 };
-    for _ in 0..attempts {
-        if inspect(request.home, request.id)?
-            .is_some_and(|current| current.state == SessionState::Exited)
-        {
-            return Ok(SessionState::Exited);
-        }
-        std::thread::sleep(Duration::from_millis(20));
+    let polls = if request.force {
+        STOP_FORCE_POLLS
+    } else {
+        STOP_GRACE_POLLS
+    };
+    if wait_until_exited(request.home, request.id, polls)? {
+        return Ok(SessionState::Exited);
     }
     if !request.force {
         signal_pane(&info, libc::SIGKILL)
             .with_context(|| format!("cannot force session {} to stop", request.id))?;
-        for _ in 0..100 {
-            if inspect(request.home, request.id)?
-                .is_some_and(|current| current.state == SessionState::Exited)
-            {
-                return Ok(SessionState::Exited);
-            }
-            std::thread::sleep(Duration::from_millis(20));
+        if wait_until_exited(request.home, request.id, STOP_FORCE_POLLS)? {
+            return Ok(SessionState::Exited);
         }
     }
     Ok(SessionState::Running)
+}
+
+fn wait_until_exited(home: &LatchHome, id: &SessionId, polls: usize) -> Result<bool> {
+    for _ in 0..polls {
+        if inspect(home, id)?.is_some_and(|current| current.state == SessionState::Exited) {
+            return Ok(true);
+        }
+        std::thread::sleep(STOP_POLL_INTERVAL);
+    }
+    Ok(false)
+}
+
+/// True when list/inspect failures are caused by a missing private server.
+///
+/// Used by `latch attach --retry` so "server not up yet" is retried and
+/// "session is gone" is not.
+pub(crate) fn tmux_server_is_absent(home: &LatchHome) -> bool {
+    let Ok(mut command) = tmux(home) else {
+        return false;
+    };
+    let Ok(output) = command.args(["list-sessions", "-F", "#S"]).output() else {
+        return false;
+    };
+    if output.status.success() {
+        return false;
+    }
+    classify_tmux_stderr(&String::from_utf8_lossy(&output.stderr)) == Some(TmuxMiss::Server)
+}
+
+/// True when `--retry` should try attach again after `error`.
+pub(crate) fn attach_is_retryable(home: &LatchHome, id: &SessionId) -> bool {
+    match inspect(home, id) {
+        Ok(Some(info)) => info.state == SessionState::Running,
+        Ok(None) | Err(_) => tmux_server_is_absent(home),
+    }
 }
 
 fn signal_pane(info: &SessionInfo, signal: i32) -> std::io::Result<()> {
@@ -516,7 +608,7 @@ fn signal_pane(info: &SessionInfo, signal: i32) -> std::io::Result<()> {
 
 /// Removes a tmux session, including its retained dead pane.
 pub fn kill_session(home: &LatchHome, id: &SessionId) -> Result<()> {
-    let mut command = tmux(home);
+    let mut command = tmux(home)?;
     command.args(["kill-session", "-t", id.as_str()]);
     run_tmux(command, "remove session")
 }
@@ -609,22 +701,35 @@ fn ensure_config(home: &LatchHome) -> Result<()> {
     Ok(())
 }
 
-fn tmux(home: &LatchHome) -> Command {
-    let binary = tmux_override().map(PathBuf::from).unwrap_or_else(|| {
-        std::env::current_exe()
-            .ok()
-            .and_then(|path| path.parent().map(Path::to_path_buf))
-            .unwrap_or_else(|| PathBuf::from("/nonexistent"))
-            .join(BUNDLED_TMUX_NAME)
-    });
-    let mut command = Command::new(binary);
+fn tmux(home: &LatchHome) -> Result<Command> {
+    let mut command = Command::new(tmux_binary()?);
     command
         .arg("-S")
         .arg(home.server_socket())
         .arg("-f")
         .arg(home.tmux_config())
         .env_remove("TMUX");
-    command
+    if !effective_ctype().as_deref().is_some_and(ctype_is_utf8) {
+        // LC_ALL would outrank the injected LC_CTYPE, so it has to go.
+        command.env_remove("LC_ALL").env("LC_CTYPE", UTF8_CTYPE);
+    }
+    Ok(command)
+}
+
+/// Effective `LC_CTYPE` value under POSIX precedence (`LC_ALL` over
+/// `LC_CTYPE` over `LANG`); empty values count as unset.
+fn effective_ctype() -> Option<String> {
+    ["LC_ALL", "LC_CTYPE", "LANG"]
+        .into_iter()
+        .filter_map(|key| std::env::var(key).ok())
+        .find(|value| !value.is_empty())
+}
+
+/// Matches tmux's own advertisement check: any spelling containing
+/// `UTF-8`/`utf8` counts.
+fn ctype_is_utf8(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    lower.contains("utf-8") || lower.contains("utf8")
 }
 
 fn tmux_override() -> Option<std::ffi::OsString> {
@@ -727,15 +832,11 @@ fn ensure_interactive_login_shell(argv: &mut Vec<String>) {
 }
 
 fn split_session_row(line: &str) -> Vec<&str> {
-    if line.contains(SESSION_ROW_SEPARATOR) {
-        line.split(SESSION_ROW_SEPARATOR).collect()
-    } else {
-        line.split('\t').collect()
-    }
+    line.split(SESSION_ROW_SEPARATOR).collect()
 }
 
 fn display_session_row(line: &str) -> String {
-    line.replace(SESSION_ROW_SEPARATOR, ",").replace('\t', ",")
+    line.replace(SESSION_ROW_SEPARATOR, ",")
 }
 
 fn parse_info(line: &str) -> Result<SessionInfo> {
@@ -835,6 +936,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn tmux_stderr_markers_classify_empty_server_outcomes() {
+        assert_eq!(
+            classify_tmux_stderr("error connecting to /tmp/server (No such file or directory)"),
+            None
+        );
+        assert_eq!(
+            classify_tmux_stderr("no server running on /tmp/latch/server"),
+            Some(TmuxMiss::Server)
+        );
+        assert_eq!(
+            classify_tmux_stderr("can't find session: ses_abc"),
+            Some(TmuxMiss::Session)
+        );
+        assert_eq!(classify_tmux_stderr("no sessions"), Some(TmuxMiss::Empty));
+    }
+
+    #[test]
     fn tmux_signal_names_map_to_platform_numbers() {
         assert_eq!(parse_signal("kill").unwrap(), libc::SIGKILL);
         assert_eq!(parse_signal("SIGTERM").unwrap(), libc::SIGTERM);
@@ -865,10 +983,25 @@ mod tests {
         assert_eq!(cursor, ["cursor", "agent"]);
     }
 
+    fn session_row(fields: &[&str]) -> String {
+        fields.join(&SESSION_ROW_SEPARATOR.to_string())
+    }
+
     #[test]
     fn live_and_dead_tmux_rows_parse_with_empty_trailing_fields() {
-        let live = parse_info("ses_19ffc24df42abdc0\t0\t\t144\t25\t1786641713\t1\t43998\t\t")
-            .expect("live row");
+        let live = parse_info(&session_row(&[
+            "ses_19ffc24df42abdc0",
+            "0",
+            "",
+            "144",
+            "25",
+            "1786641713",
+            "1",
+            "43998",
+            "",
+            "",
+        ]))
+        .expect("live row");
         assert_eq!(live.id, "ses_19ffc24df42abdc0");
         assert_eq!(live.state, SessionState::Running);
         assert_eq!(live.size, TerminalSize::new(144, 25));
@@ -876,22 +1009,54 @@ mod tests {
         assert_eq!(live.pane_pid, 43998);
         assert!(live.exit_status.is_none());
 
-        let live_short = parse_info("ses_19ffc24df42abdc0\t0\t\t144\t25\t1786641713\t1\t43998")
-            .expect("live row without trailing dead fields");
+        let live_short = parse_info(&session_row(&[
+            "ses_19ffc24df42abdc0",
+            "0",
+            "",
+            "144",
+            "25",
+            "1786641713",
+            "1",
+            "43998",
+        ]))
+        .expect("live row without trailing dead fields");
         assert_eq!(live_short.state, SessionState::Running);
 
-        let dead =
-            parse_info("ses_19ffc224e3183df0\t1\t127\t138\t25\t1786641544\t1\t33762\t1786641534\t")
-                .expect("dead row");
+        let dead = parse_info(&session_row(&[
+            "ses_19ffc224e3183df0",
+            "1",
+            "127",
+            "138",
+            "25",
+            "1786641544",
+            "1",
+            "33762",
+            "1786641534",
+            "",
+        ]))
+        .expect("dead row");
         assert_eq!(dead.state, SessionState::Exited);
         assert_eq!(dead.exit_status, Some(127));
         assert_eq!(dead.pane_pid, 33762);
+    }
 
-        let unit = parse_info(&format!(
-            "ses_live{SESSION_ROW_SEPARATOR}0{SESSION_ROW_SEPARATOR}{SESSION_ROW_SEPARATOR}80{SESSION_ROW_SEPARATOR}24{SESSION_ROW_SEPARATOR}1{SESSION_ROW_SEPARATOR}1{SESSION_ROW_SEPARATOR}9{SESSION_ROW_SEPARATOR}{SESSION_ROW_SEPARATOR}"
-        ))
-        .expect("unit-separator row");
-        assert_eq!(unit.state, SessionState::Running);
-        assert_eq!(unit.size, TerminalSize::new(80, 24));
+    #[test]
+    fn sanitized_session_rows_fail_with_a_readable_error() {
+        // tmux with a non-UTF-8 client locale flattens U+001F to '_'; the
+        // parse error must show the row instead of invisible separators.
+        let error = parse_info("ses_abc_0__110_25_1786641713_1_9__").expect_err("sanitized row");
+        assert!(error.to_string().contains("unexpected session row"));
+    }
+
+    #[test]
+    fn ctype_detection_matches_tmux_utf8_advertisement() {
+        assert!(ctype_is_utf8("en_US.UTF-8"));
+        assert!(ctype_is_utf8("C.UTF-8"));
+        assert!(ctype_is_utf8("UTF-8"));
+        assert!(ctype_is_utf8("en_US.utf8"));
+        assert!(ctype_is_utf8("de_DE.UTF-8@euro"));
+        assert!(!ctype_is_utf8("C"));
+        assert!(!ctype_is_utf8("POSIX"));
+        assert!(!ctype_is_utf8("en_US.ISO8859-1"));
     }
 }

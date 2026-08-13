@@ -1,17 +1,14 @@
 //! `latch` — persistent terminal sessions.
 //!
-//! One binary, two modes. Invoked normally it is the CLI; invoked with the
-//! hidden `worker` subcommand it is the per-session PTY owner. Decision D1.
+//! One binary: the CLI, plus hidden `__launch` and `__harness-hook` entry
+//! points for session spawn and Claude Code hooks.
 //!
 //! Bare `latch` creates a persistent shell and attaches to it, because the
 //! intended adoption path is pointing a terminal profile's command at this
 //! binary. That makes startup cost a product requirement rather than a
 //! nice-to-have: it is paid on every new window.
 //!
-//! Behaviour behind each arm lives in [`latch::cli`]. Until a milestone fills
-//! an arm in, the command exists, documents itself, and fails loudly — which is
-//! more useful than a missing subcommand, because `latch --help` already shows
-//! the surface the milestones are working toward.
+//! Behaviour behind each arm lives in [`latch::cli`].
 
 use std::io::Read;
 use std::time::Duration;
@@ -113,12 +110,6 @@ enum Command {
     Attach {
         /// Session id or name.
         session: Option<String>,
-        /// Compatibility flag; all tmux attachments are shared.
-        #[arg(long)]
-        watch: bool,
-        /// Compatibility flag; attach is never exclusive.
-        #[arg(long)]
-        steal: bool,
         /// Reconnect automatically when the transport drops (M2).
         #[arg(long)]
         retry: bool,
@@ -244,10 +235,23 @@ enum Command {
         json: bool,
     },
     /// Serve a loopback HTTP/WebSocket gateway for remote clients.
+    ///
+    /// The supported remote path is an SSH tunnel to this loopback port. The
+    /// gateway speaks plaintext HTTP, so the bearer token is only safe on
+    /// loopback (or a tunnel to it). Binding a non-loopback address requires
+    /// `--allow-remote`.
     Serve {
         /// Listen address. Loopback by default.
+        ///
+        /// Remote access should SSH-tunnel to this address. Non-loopback binds
+        /// speak plaintext HTTP and need `--allow-remote`.
         #[arg(long, default_value = "127.0.0.1:4610")]
         bind: String,
+        /// Allow binding a non-loopback address (plaintext HTTP; token in the clear).
+        ///
+        /// Prefer an SSH tunnel to the default loopback bind instead.
+        #[arg(long)]
+        allow_remote: bool,
         /// Bearer token file. Defaults to `$LATCH_HOME/serve.token`.
         #[arg(long, value_name = "PATH")]
         token_file: Option<String>,
@@ -308,14 +312,16 @@ fn dispatch(command: Option<Command>) -> Result<()> {
         | Some(Command::Shell {
             name: None,
             title: None,
-        }) => create_and_attach(shell_options(DisplayMetadata::default())),
-        Some(Command::Shell { name, title }) => create_and_attach(shell_options(DisplayMetadata {
-            name,
-            title,
-            ..Default::default()
-        })),
+        }) => create_and_attach(shell_options(DisplayMetadata::default())?),
+        Some(Command::Shell { name, title }) => {
+            create_and_attach(shell_options(DisplayMetadata {
+                name,
+                title,
+                ..Default::default()
+            })?)
+        }
         Some(Command::Run { name, title, argv }) => {
-            match nesting::nesting_decision(create::enclosing_session_id().as_deref(), true) {
+            match nesting::nesting_decision(create::enclosing_session_id().as_deref()) {
                 NestingDecision::Allow => create_and_attach(run_options(
                     argv,
                     DisplayMetadata {
@@ -323,12 +329,11 @@ fn dispatch(command: Option<Command>) -> Result<()> {
                         title,
                         ..Default::default()
                     },
-                )),
+                )?),
                 NestingDecision::AttachToEnclosing { session_id } => bail!(
                     "refusing to create a nested Latch session (already inside {session_id}); \
                  `latch run` cannot nest — exit the enclosing session or attach to it first"
                 ),
-                NestingDecision::Decline { reason } => bail!("{reason}"),
             }
         }
         Some(Command::Create {
@@ -378,21 +383,12 @@ fn dispatch(command: Option<Command>) -> Result<()> {
             }
             Ok(())
         }
-        Some(Command::Attach {
-            session,
-            watch,
-            steal,
-            retry,
-        }) => {
+        Some(Command::Attach { session, retry }) => {
             let options = AttachOptions {
                 home: LatchHome::from_env()?,
                 session,
-                watch,
-                steal,
             };
-            // `--retry` changes only how many times the same attach is made, and
-            // never what it asks for: a watcher stays a watcher and an attach
-            // that was not told to steal never starts stealing.
+            // `--retry` changes only how many times the same attach is made.
             if retry {
                 attach::attach_with_retry(options, RetryPolicy::default())?;
             } else {
@@ -437,6 +433,9 @@ fn dispatch(command: Option<Command>) -> Result<()> {
                 println!("{}", serde_json::to_string(&report)?);
             } else {
                 println!("{} {}", report.id, report.state);
+            }
+            if !report.stopped {
+                bail!("session {} is still running after stop", report.id);
             }
             Ok(())
         }
@@ -589,6 +588,7 @@ fn dispatch(command: Option<Command>) -> Result<()> {
         }
         Some(Command::Serve {
             bind,
+            allow_remote,
             token_file,
             command,
         }) => {
@@ -608,6 +608,7 @@ fn dispatch(command: Option<Command>) -> Result<()> {
                     bind: bind.parse().context("invalid --bind address")?,
                     token_file,
                     latch_bin: std::env::current_exe().context("cannot locate the latch binary")?,
+                    allow_remote,
                 }),
             }
         }
@@ -620,20 +621,21 @@ fn dispatch(command: Option<Command>) -> Result<()> {
                     })?;
                 if json {
                     println!("{}", serde_json::to_string(&capabilities)?);
-                } else if capabilities.can_send.ok {
+                } else {
                     println!(
                         "sendMessage={} sendKeys={} resolve={}",
                         capabilities.send_message, capabilities.send_keys, capabilities.resolve
                     );
-                } else {
-                    println!(
-                        "input unavailable: {}",
-                        capabilities
-                            .can_send
-                            .reason
-                            .as_deref()
-                            .unwrap_or("unknown reason")
-                    );
+                    if !capabilities.can_send.ok {
+                        println!(
+                            "input unavailable: {}",
+                            capabilities
+                                .can_send
+                                .reason
+                                .as_deref()
+                                .unwrap_or("unknown reason")
+                        );
+                    }
                 }
                 Ok(())
             }
@@ -732,54 +734,60 @@ fn dispatch(command: Option<Command>) -> Result<()> {
     }
 }
 
-fn shell_options(display: DisplayMetadata) -> CreateOptions {
-    CreateOptions {
-        home: LatchHome::from_env().expect("cannot locate the Latch home"),
+fn shell_options(display: DisplayMetadata) -> Result<CreateOptions> {
+    Ok(CreateOptions {
+        home: LatchHome::from_env()?,
         manifest: create::shell_manifest(ManifestOptions {
-            cwd: std::env::current_dir().expect("cannot determine current directory"),
+            cwd: std::env::current_dir().context("cannot determine current directory")?,
             size: terminal_size(),
             display,
         }),
         attach: true,
-    }
+    })
 }
 
-fn run_options(argv: Vec<String>, display: DisplayMetadata) -> CreateOptions {
-    CreateOptions {
-        home: LatchHome::from_env().expect("cannot locate the Latch home"),
+fn run_options(argv: Vec<String>, display: DisplayMetadata) -> Result<CreateOptions> {
+    Ok(CreateOptions {
+        home: LatchHome::from_env()?,
         manifest: create::run_manifest(
             argv,
             ManifestOptions {
-                cwd: std::env::current_dir().expect("cannot determine current directory"),
+                cwd: std::env::current_dir().context("cannot determine current directory")?,
                 size: terminal_size(),
                 display,
             },
         ),
         attach: true,
-    }
+    })
 }
 
 fn create_and_attach(options: CreateOptions) -> Result<()> {
-    match nesting::nesting_decision(create::enclosing_session_id().as_deref(), true) {
+    match nesting::nesting_decision(create::enclosing_session_id().as_deref()) {
         NestingDecision::Allow => {
             let outcome = create::create_session(options)?;
             attach_created_session(outcome.id.as_str())
         }
-        NestingDecision::AttachToEnclosing { session_id } => attach_created_session(&session_id),
-        NestingDecision::Decline { reason } => bail!("{reason}"),
+        NestingDecision::AttachToEnclosing { session_id } => {
+            if options.manifest.display.name.is_some() || options.manifest.display.title.is_some() {
+                bail!(
+                    "refusing to create a nested Latch session (already inside {session_id}); \
+                     named `latch shell` cannot nest — exit the enclosing session or attach to it first"
+                );
+            }
+            attach_created_session(&session_id)
+        }
     }
 }
 
 /// `latch create` cannot be satisfied by attaching to the enclosing session —
 /// the caller supplied a different launch. Decline rather than nest.
 fn refuse_nested_create() -> Result<()> {
-    match nesting::nesting_decision(create::enclosing_session_id().as_deref(), true) {
+    match nesting::nesting_decision(create::enclosing_session_id().as_deref()) {
         NestingDecision::Allow => Ok(()),
         NestingDecision::AttachToEnclosing { session_id } => bail!(
             "refusing to create a nested Latch session (already inside {session_id}); \
              run `latch attach` or exit the enclosing session first"
         ),
-        NestingDecision::Decline { reason } => bail!("{reason}"),
     }
 }
 
@@ -787,8 +795,6 @@ fn attach_created_session(session: &str) -> Result<()> {
     attach::attach(AttachOptions {
         home: LatchHome::from_env()?,
         session: Some(session.to_owned()),
-        watch: false,
-        steal: false,
     })?;
     Ok(())
 }
@@ -859,5 +865,8 @@ fn print_inspect_human(report: &latch::cli::json::InspectReport) {
     }
     if let Some(exit) = &report.exit {
         println!("exited:\t\t{}", exit.exited_at);
+    }
+    if let Some(attached) = report.attached {
+        println!("attached:\t{attached}");
     }
 }

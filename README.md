@@ -28,7 +28,7 @@ than code.
 Download the standalone CLI payload and the universal macOS desktop app from the same
 [GitHub Release](https://github.com/jchaselubitz/Latch/releases/latest). The
 current desktop archive is
-[Latch-0.2608131746.0-macos.zip](https://github.com/jchaselubitz/Latch/releases/download/v0.2608131746.0/Latch-0.2608131746.0-macos.zip);
+[Latch-0.2608132217.0-macos.zip](https://github.com/jchaselubitz/Latch/releases/download/v0.2608132217.0/Latch-0.2608132217.0-macos.zip);
 it contains only `Latch.app`. Drag the app to Applications, then install the CLI
 independently with:
 
@@ -73,10 +73,15 @@ when Claude writes transcript records late.
 `latch capabilities <session> --json` reports the schema-defined interaction
 capabilities for the current screen. `latch send` reads messages from stdin,
 sends explicit key names with `--keys`, and binds `--resolve` to the exact
-pending request id. Latch captures the live tmux pane before every operation:
-an empty Claude composer and a visible numbered prompt are accepted, while
-typed text, stale requests, exited sessions, and unrecognized screens are
-refused rather than receiving input.
+pending request id. `--message` and `--resolve` are offered only when Latch
+knows the session is hosting Claude Code (a harness marker written at launch
+from `claude` argv, or the session's hook sidecar). Plain shells — including
+ones whose prompt uses the same `❯` glyph as Claude's composer — report
+`sendMessage=false` and keep `--keys` as the explicit caller-owns-the-risk
+path. Latch captures the live tmux pane before every operation: an empty
+Claude composer and a visible numbered prompt are accepted, while typed text,
+stale requests, exited sessions, and unrecognized screens are refused rather
+than receiving input.
 
 ## Layout
 

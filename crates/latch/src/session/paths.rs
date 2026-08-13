@@ -241,7 +241,8 @@ impl SessionPaths {
         self.dir.join("harness-resolutions.ndjson")
     }
 
-    /// Advisory lock serializing capability checks with PTY writes.
+    /// Advisory lock held by `latch send` while applying capability-gated input.
+    /// Read-only capability queries do not take this lock.
     pub fn harness_interaction_lock(&self) -> PathBuf {
         self.dir.join("harness-interaction.lock")
     }

@@ -2,10 +2,11 @@
 
 mod generated;
 mod interaction;
+mod permission;
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -116,20 +117,44 @@ struct StreamLedger<'a, W: Write> {
     output: &'a mut W,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FileStamp {
+    len: u64,
+    modified: SystemTime,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct SourceStamps {
+    transcript: Option<FileStamp>,
+    hooks: Option<FileStamp>,
+}
+
+#[derive(Default)]
+struct LedgerView {
+    events: Vec<HarnessEvent>,
+    counts: HashMap<String, usize>,
+    offset: u64,
+    lines: usize,
+}
+
+struct ReconcileIfChanged<'a> {
+    request: ReconcileLedger<'a>,
+    previous: &'a mut Option<SourceStamps>,
+    view: &'a mut LedgerView,
+}
+
+struct HostedTranscript<'a> {
+    projects: &'a Path,
+    metadata: &'a crate::session::meta::SessionMeta,
+}
+
 /// Injects Latch's private observation plugin into a directly launched Claude
 /// Code process.
 pub fn prepare_claude_launch(
     home: &LatchHome,
     manifest: &mut LaunchManifest,
 ) -> anyhow::Result<()> {
-    let Some(program) = manifest.launch.argv.first() else {
-        return Ok(());
-    };
-    if Path::new(program)
-        .file_name()
-        .and_then(|name| name.to_str())
-        != Some("claude")
-    {
+    if crate::session::meta::harness_kind(&manifest.launch.argv) != Some("claude") {
         return Ok(());
     }
     let plugin = ensure_claude_plugin(home)?;
@@ -314,8 +339,17 @@ fn stream_transcript<W: Write>(request: StreamTranscript<'_, W>) -> anyhow::Resu
     } = request;
     let mut emitted = options.from;
     let mut prior = Vec::new();
+    let mut previous_stamp = None;
 
     loop {
+        let stamp = file_stamp(&transcript.path)?
+            .with_context(|| format!("cannot read {}", transcript.path.display()))?;
+        if previous_stamp == Some(stamp) {
+            thread::sleep(options.poll_interval);
+            continue;
+        }
+        previous_stamp = Some(stamp);
+
         let raw = fs::read_to_string(&transcript.path)
             .with_context(|| format!("cannot read {}", transcript.path.display()))?;
         let complete = complete_jsonl(&raw);
@@ -358,29 +392,34 @@ fn stream_ledger<W: Write>(request: StreamLedger<'_, W>) -> anyhow::Result<()> {
     let (lock, mut writer) = ledger_lock(&paths)?;
     let mut emitted = options.from;
     let mut checked_cursor = false;
+    let mut previous = None;
+    let mut view = LedgerView::default();
 
     loop {
         if writer {
-            reconcile_ledger(ReconcileLedger {
-                transcript: &transcript.path,
-                paths: &paths,
+            reconcile_if_changed(ReconcileIfChanged {
+                request: ReconcileLedger {
+                    transcript: &transcript.path,
+                    paths: &paths,
+                },
+                previous: &mut previous,
+                view: &mut view,
             })?;
-        }
-        if !writer {
+        } else {
             writer = try_lock_exclusive(&lock)?;
+            view.pull(&paths)?;
         }
-        let events = read_event_ledger(&paths)?;
         if !checked_cursor {
-            if emitted > events.len() {
+            if emitted > view.events.len() {
                 bail!(
                     "cursor {} is beyond the session's {} persisted events",
                     emitted,
-                    events.len()
+                    view.events.len()
                 );
             }
             checked_cursor = true;
         }
-        for event in events.iter().skip(emitted) {
+        for event in view.events.iter().skip(emitted) {
             serde_json::to_writer(&mut *output, event)?;
             output.write_all(b"\n")?;
             output.flush()?;
@@ -434,7 +473,33 @@ fn lock_exclusive(file: &fs::File) -> anyhow::Result<()> {
     }
 }
 
+#[cfg(test)]
 fn reconcile_ledger(request: ReconcileLedger<'_>) -> anyhow::Result<()> {
+    let mut previous = None;
+    let mut view = LedgerView::default();
+    reconcile_if_changed(ReconcileIfChanged {
+        request,
+        previous: &mut previous,
+        view: &mut view,
+    })?;
+    Ok(())
+}
+
+fn reconcile_if_changed(request: ReconcileIfChanged<'_>) -> anyhow::Result<bool> {
+    let ReconcileIfChanged {
+        request,
+        previous,
+        view,
+    } = request;
+    let current = SourceStamps {
+        transcript: file_stamp(request.transcript)?,
+        hooks: file_stamp(&request.paths.harness_hooks())?,
+    };
+    if *previous == Some(current) {
+        return Ok(false);
+    }
+
+    view.pull(request.paths)?;
     let transcript = fs::read_to_string(request.transcript)
         .with_context(|| format!("cannot read {}", request.transcript.display()))?;
     let mut candidates = parse_transcript(complete_jsonl(&transcript))?;
@@ -446,42 +511,83 @@ fn reconcile_ledger(request: ReconcileLedger<'_>) -> anyhow::Result<()> {
     }
     candidates.sort_by(|left, right| left.at.cmp(&right.at));
 
-    let existing = read_event_ledger(request.paths)?;
-    let mut existing_counts = HashMap::<String, usize>::new();
-    for event in &existing {
-        *existing_counts
-            .entry(serde_json::to_string(event)?)
-            .or_default() += 1;
-    }
     let mut candidate_counts = HashMap::<String, usize>::new();
     let mut additions = Vec::new();
     for event in candidates {
         let key = serde_json::to_string(&event)?;
         let occurrence = candidate_counts.entry(key.clone()).or_default();
         *occurrence += 1;
-        if *occurrence > existing_counts.get(&key).copied().unwrap_or_default() {
+        if *occurrence > view.counts.get(&key).copied().unwrap_or_default() {
             additions.push(event);
         }
     }
-    append_event_ledger(request.paths, &additions)
+    append_event_ledger(request.paths, &additions)?;
+    view.pull(request.paths)?;
+    *previous = Some(current);
+    Ok(true)
 }
 
-fn read_event_ledger(paths: &SessionPaths) -> anyhow::Result<Vec<HarnessEvent>> {
-    let path = paths.harness_events();
-    if !path.exists() {
-        return Ok(Vec::new());
+fn file_stamp(path: &Path) -> anyhow::Result<Option<FileStamp>> {
+    match fs::metadata(path) {
+        Ok(metadata) => Ok(Some(FileStamp {
+            len: metadata.len(),
+            modified: metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+        })),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("cannot stat {}", path.display())),
     }
-    let raw = fs::read_to_string(&path)
-        .with_context(|| format!("cannot read event ledger {}", path.display()))?;
-    complete_jsonl(&raw)
-        .lines()
-        .enumerate()
-        .filter(|(_, line)| !line.trim().is_empty())
-        .map(|(index, line)| {
-            serde_json::from_str(line)
-                .with_context(|| format!("malformed event ledger line {}", index + 1))
-        })
-        .collect()
+}
+
+impl LedgerView {
+    fn pull(&mut self, paths: &SessionPaths) -> anyhow::Result<()> {
+        let path = paths.harness_events();
+        let mut file = match fs::File::open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("cannot read event ledger {}", path.display()));
+            }
+        };
+        let len = file.metadata()?.len();
+        if len < self.offset {
+            self.events.clear();
+            self.counts.clear();
+            self.offset = 0;
+            self.lines = 0;
+        }
+        if len == self.offset {
+            return Ok(());
+        }
+        file.seek(SeekFrom::Start(self.offset))?;
+        let mut appended = String::new();
+        file.read_to_string(&mut appended)
+            .with_context(|| format!("cannot read event ledger {}", path.display()))?;
+        let complete = complete_jsonl(&appended);
+        let consumed = consumed_complete_jsonl_len(&appended);
+        for line in complete.lines() {
+            self.lines += 1;
+            if line.trim().is_empty() {
+                continue;
+            }
+            let event: HarnessEvent = serde_json::from_str(line)
+                .with_context(|| format!("malformed event ledger line {}", self.lines))?;
+            *self
+                .counts
+                .entry(serde_json::to_string(&event)?)
+                .or_default() += 1;
+            self.events.push(event);
+        }
+        self.offset += consumed as u64;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+fn read_event_ledger(paths: &SessionPaths) -> anyhow::Result<Vec<HarnessEvent>> {
+    let mut view = LedgerView::default();
+    view.pull(paths)?;
+    Ok(view.events)
 }
 
 fn append_event_ledger(paths: &SessionPaths, events: &[HarnessEvent]) -> anyhow::Result<()> {
@@ -509,6 +615,16 @@ fn complete_jsonl(raw: &str) -> &str {
         raw
     } else {
         raw.rsplit_once('\n').map_or("", |(complete, _)| complete)
+    }
+}
+
+fn consumed_complete_jsonl_len(raw: &str) -> usize {
+    if raw.is_empty() {
+        0
+    } else if raw.ends_with('\n') {
+        raw.len()
+    } else {
+        raw.rfind('\n').map_or(0, |index| index + 1)
     }
 }
 
@@ -591,33 +707,14 @@ fn active_records(records: &[Value]) -> Vec<&Value> {
 }
 
 fn normalize_record(mut request: NormalizeRecord<'_>) {
-    if is_permission_request(request.record) {
-        let question =
-            string(request.record, &["tool_name", "toolName"]) == Some("AskUserQuestion");
-        let tool_input = request
-            .record
-            .get("tool_input")
-            .or_else(|| request.record.get("toolInput"))
-            .unwrap_or(&Value::Null);
+    if let Some(derived) = permission::from_record(request.record) {
         request.events.push(event(
             request.context,
             HarnessEventPayload::AwaitingInput {
-                request_id: permission_request_id(request.record, request.context),
-                kind: if question {
-                    AwaitingInputKind::Question
-                } else {
-                    AwaitingInputKind::Permission
-                },
-                prompt: if question {
-                    question_prompt(tool_input)
-                } else {
-                    permission_prompt(request.record)
-                },
-                choices: if question {
-                    question_choices(tool_input)
-                } else {
-                    permission_choices(request.record)
-                },
+                request_id: derived.request_id,
+                kind: derived.kind,
+                prompt: derived.prompt,
+                choices: derived.choices,
             },
         ));
         return;
@@ -845,8 +942,8 @@ fn normalize_assistant(request: NormalizeAssistant<'_>) {
                         HarnessEventPayload::AwaitingInput {
                             request_id: id,
                             kind: AwaitingInputKind::Question,
-                            prompt: question_prompt(&raw_input),
-                            choices: question_choices(&raw_input),
+                            prompt: permission::question_prompt(&raw_input),
+                            choices: permission::question_choices(&raw_input),
                         },
                     ));
                 }
@@ -923,90 +1020,6 @@ fn event(context: EventContext<'_>, payload: HarnessEventPayload) -> HarnessEven
     }
 }
 
-fn question_prompt(input: &Value) -> String {
-    let prompt = input
-        .get("questions")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|question| string(question, &["question", "header"]))
-        .collect::<Vec<_>>()
-        .join("\n");
-    if prompt.is_empty() {
-        "Claude is waiting for an answer.".to_owned()
-    } else {
-        prompt
-    }
-}
-
-fn question_choices(input: &Value) -> Option<Vec<String>> {
-    let choices = input
-        .get("questions")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .flat_map(|question| {
-            question
-                .get("options")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-        })
-        .filter_map(|option| string(option, &["label"]).map(str::to_owned))
-        .collect::<Vec<_>>();
-    (!choices.is_empty()).then_some(choices)
-}
-
-fn is_permission_request(record: &Value) -> bool {
-    string(record, &["hook_event_name", "hookEventName"]) == Some("PermissionRequest")
-        || string(record, &["type"]) == Some("permission_request")
-}
-
-fn permission_request_id(record: &Value, context: EventContext<'_>) -> String {
-    string(record, &["request_id", "requestId", "tool_use_id", "uuid"])
-        .map(str::to_owned)
-        .unwrap_or_else(|| {
-            format!(
-                "permission:{}:{}",
-                string(record, &["tool_name", "toolName"]).unwrap_or("tool"),
-                context.at
-            )
-        })
-}
-
-fn permission_prompt(record: &Value) -> String {
-    record
-        .pointer("/tool_input/description")
-        .or_else(|| record.pointer("/toolInput/description"))
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .unwrap_or_else(|| {
-            format!(
-                "Allow {}?",
-                string(record, &["tool_name", "toolName"]).unwrap_or("this tool")
-            )
-        })
-}
-
-fn permission_choices(record: &Value) -> Option<Vec<String>> {
-    let suggestions = record
-        .get("permission_suggestions")
-        .or_else(|| record.get("permissionSuggestions"))
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|choice| string(choice, &["description"]).map(str::to_owned))
-        .collect::<Vec<_>>();
-    let mut choices = vec!["Allow once".to_owned()];
-    for suggestion in suggestions {
-        if !choices.iter().any(|choice| choice == &suggestion) && suggestion != "Deny" {
-            choices.push(suggestion);
-        }
-    }
-    choices.push("Deny".to_owned());
-    Some(choices)
-}
-
 fn delta_text(record: &Value) -> Option<String> {
     record
         .pointer("/delta/text")
@@ -1048,21 +1061,15 @@ fn resolve_transcript(options: &EventsOptions) -> anyhow::Result<Transcript> {
 
     if let Some(id) = &latch_id {
         let metadata = crate::session::meta::read(&options.home.session(id))?;
-        let directory = projects.join(encode_project_path(&metadata.cwd));
-        if let Some(external_id) = &metadata.source.external_run_id {
-            let exact = directory.join(format!("{external_id}.jsonl"));
-            if exact.is_file() {
-                return Ok(Transcript {
-                    path: exact,
-                    latch_id,
-                });
-            }
-        }
-        let path = newest_jsonl(&directory)?.with_context(|| {
+        let path = hosted_transcript(HostedTranscript {
+            projects: &projects,
+            metadata: &metadata,
+        })?
+        .with_context(|| {
             format!(
-                "no Claude Code transcript found for Latch session {} in {}",
+                "no Claude Code transcript found for Latch session {} under {}",
                 options.session,
-                directory.display()
+                projects.display()
             )
         })?;
         return Ok(Transcript { path, latch_id });
@@ -1082,7 +1089,29 @@ fn resolve_transcript(options: &EventsOptions) -> anyhow::Result<Transcript> {
 }
 
 fn encode_project_path(path: &Path) -> String {
-    path.to_string_lossy().replace('/', "-")
+    path.to_string_lossy()
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+        .collect()
+}
+
+fn hosted_transcript(request: HostedTranscript<'_>) -> anyhow::Result<Option<PathBuf>> {
+    let encoded = request
+        .projects
+        .join(encode_project_path(&request.metadata.cwd));
+    if let Some(external_id) = &request.metadata.source.external_run_id {
+        let exact = encoded.join(format!("{external_id}.jsonl"));
+        if exact.is_file() {
+            return Ok(Some(exact));
+        }
+        if let Some(path) = transcript_by_session_id(request.projects, external_id)? {
+            return Ok(Some(path));
+        }
+    }
+    if encoded.is_dir() {
+        return newest_jsonl(&encoded);
+    }
+    Ok(None)
 }
 
 fn newest_jsonl(directory: &Path) -> anyhow::Result<Option<PathBuf>> {
@@ -1109,10 +1138,14 @@ fn newest_jsonl(directory: &Path) -> anyhow::Result<Option<PathBuf>> {
 
 fn transcript_by_session_id(projects: &Path, session_id: &str) -> anyhow::Result<Option<PathBuf>> {
     let filename = format!("{session_id}.jsonl");
-    for project in fs::read_dir(projects)
-        .with_context(|| format!("cannot read {}", projects.display()))?
-        .filter_map(Result::ok)
-    {
+    let entries = match fs::read_dir(projects) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| format!("cannot read {}", projects.display()));
+        }
+    };
+    for project in entries.filter_map(Result::ok) {
         let candidate = project.path().join(&filename);
         if candidate.is_file() {
             return Ok(Some(candidate));
@@ -1406,5 +1439,214 @@ mod tests {
         let events = String::from_utf8(output).unwrap();
         assert!(events.contains("\"type\":\"user_message\""));
         assert!(events.contains("\"type\":\"status\",\"status\":\"completed\""));
+    }
+
+    fn fixture_session(home: &LatchHome) -> SessionPaths {
+        let id = SessionId::parse("ses_fixture").unwrap();
+        let paths = home.session(&id);
+        paths.ensure().unwrap();
+        paths
+    }
+
+    fn sample_meta(cwd: &Path, external_id: Option<&str>) -> crate::session::meta::SessionMeta {
+        let launch = crate::session::manifest::LaunchSpec {
+            argv: vec!["claude".to_owned()],
+            cwd: cwd.to_owned(),
+            env: Default::default(),
+            inherit_env: true,
+            size: crate::session::manifest::TerminalSize::new(80, 24),
+            term: "xterm-256color".to_owned(),
+        };
+        let mut display = crate::session::manifest::DisplayMetadata::default();
+        display.source.external_run_id = external_id.map(str::to_owned);
+        crate::session::meta::derive(crate::session::meta::MetaRequest {
+            id: "ses_fixture",
+            launch: &launch,
+            display: &display,
+            created_at: "2026-08-13T00:00:00Z",
+        })
+    }
+
+    fn poll_reconcile(request: ReconcileIfChanged<'_>) -> bool {
+        reconcile_if_changed(request).unwrap()
+    }
+
+    #[test]
+    fn unchanged_sources_skip_reparse() {
+        let directory = tempfile::tempdir().unwrap();
+        let home = LatchHome::new(directory.path().join("latch"));
+        home.ensure().unwrap();
+        let paths = fixture_session(&home);
+        fs::write(paths.meta(), "{}").unwrap();
+        capture_hook_record(HookCapture {
+            home: &home,
+            id: &SessionId::parse("ses_fixture").unwrap(),
+            raw: fixture("permission-request", "raw.jsonl").as_bytes(),
+        })
+        .unwrap();
+        let transcript = directory.path().join("transcript.jsonl");
+        fs::write(&transcript, fixture("conversation", "raw.jsonl")).unwrap();
+
+        let mut previous = None;
+        let mut view = LedgerView::default();
+        assert!(poll_reconcile(ReconcileIfChanged {
+            request: ReconcileLedger {
+                transcript: &transcript,
+                paths: &paths,
+            },
+            previous: &mut previous,
+            view: &mut view,
+        }));
+        let events_after_parse = view.events.len();
+        let offset_after_parse = view.offset;
+        assert!(events_after_parse > 0);
+        assert!(!poll_reconcile(ReconcileIfChanged {
+            request: ReconcileLedger {
+                transcript: &transcript,
+                paths: &paths,
+            },
+            previous: &mut previous,
+            view: &mut view,
+        }));
+        assert_eq!(view.events.len(), events_after_parse);
+        assert_eq!(view.offset, offset_after_parse);
+    }
+
+    #[test]
+    fn large_transcript_reconcile_stays_incremental() {
+        let directory = tempfile::tempdir().unwrap();
+        let home = LatchHome::new(directory.path().join("latch"));
+        home.ensure().unwrap();
+        let paths = fixture_session(&home);
+        fs::write(paths.meta(), "{}").unwrap();
+
+        let mut raw = String::new();
+        for index in 0..2_000 {
+            raw.push_str(&format!(
+                "{{\"uuid\":\"u{index}\",\"parentUuid\":{},\"type\":\"user\",\"sessionId\":\"large\",\"timestamp\":\"2026-08-13T10:00:00.{index:06}Z\",\"version\":\"2.1\",\"message\":{{\"content\":\"m{index}\"}}}}\n",
+                if index == 0 {
+                    "null".to_owned()
+                } else {
+                    format!("\"u{}\"", index - 1)
+                }
+            ));
+        }
+        let transcript = directory.path().join("transcript.jsonl");
+        fs::write(&transcript, &raw).unwrap();
+
+        let mut previous = None;
+        let mut view = LedgerView::default();
+        assert!(poll_reconcile(ReconcileIfChanged {
+            request: ReconcileLedger {
+                transcript: &transcript,
+                paths: &paths,
+            },
+            previous: &mut previous,
+            view: &mut view,
+        }));
+        assert_eq!(view.events.len(), 2_000);
+        let offset = view.offset;
+        assert!(!poll_reconcile(ReconcileIfChanged {
+            request: ReconcileLedger {
+                transcript: &transcript,
+                paths: &paths,
+            },
+            previous: &mut previous,
+            view: &mut view,
+        }));
+        assert_eq!(view.offset, offset);
+
+        let mut file = OpenOptions::new().append(true).open(&transcript).unwrap();
+        file.write_all(
+            b"{\"uuid\":\"u2000\",\"parentUuid\":\"u1999\",\"type\":\"user\",\"sessionId\":\"large\",\"timestamp\":\"2026-08-13T10:00:01.000000Z\",\"version\":\"2.1\",\"message\":{\"content\":\"tail\"}}\n",
+        )
+        .unwrap();
+        drop(file);
+        assert!(poll_reconcile(ReconcileIfChanged {
+            request: ReconcileLedger {
+                transcript: &transcript,
+                paths: &paths,
+            },
+            previous: &mut previous,
+            view: &mut view,
+        }));
+        assert_eq!(view.events.len(), 2_001);
+        assert!(matches!(
+            &view.events[2_000].payload,
+            HarnessEventPayload::UserMessage { text } if text == "tail"
+        ));
+    }
+
+    #[test]
+    fn encode_project_path_matches_claude_code() {
+        assert_eq!(
+            encode_project_path(Path::new("/Users/jake/dev/my.app")),
+            "-Users-jake-dev-my-app"
+        );
+        assert_eq!(
+            encode_project_path(Path::new("/tmp/work_dir")),
+            "-tmp-work-dir"
+        );
+        assert_eq!(
+            encode_project_path(Path::new("/Users/jake/Development/Cooperativ/Latch")),
+            "-Users-jake-Development-Cooperativ-Latch"
+        );
+    }
+
+    #[test]
+    fn hosted_transcript_uses_claude_encoding_and_scans_by_session_id() {
+        let directory = tempfile::tempdir().unwrap();
+        let projects = directory.path().join("projects");
+        let encoded = projects.join("-Users-jake-dev-my-app");
+        fs::create_dir_all(&encoded).unwrap();
+        let transcript = encoded.join("claude-dotted-1.jsonl");
+        fs::write(&transcript, "{}\n").unwrap();
+        let metadata = sample_meta(Path::new("/Users/jake/dev/my.app"), Some("claude-dotted-1"));
+        assert_eq!(
+            hosted_transcript(HostedTranscript {
+                projects: &projects,
+                metadata: &metadata,
+            })
+            .unwrap()
+            .as_deref(),
+            Some(transcript.as_path())
+        );
+
+        let misplaced = projects.join("-wrong-encoding-with-dot");
+        fs::create_dir_all(&misplaced).unwrap();
+        let scanned = misplaced.join("claude-scan-1.jsonl");
+        fs::write(&scanned, "{}\n").unwrap();
+        let metadata = sample_meta(Path::new("/Users/jake/dev/my.app"), Some("claude-scan-1"));
+        assert_eq!(
+            hosted_transcript(HostedTranscript {
+                projects: &projects,
+                metadata: &metadata,
+            })
+            .unwrap()
+            .as_deref(),
+            Some(scanned.as_path())
+        );
+    }
+
+    #[test]
+    fn events_and_resolve_share_fallback_permission_ids() {
+        let raw = "{\"hook_event_name\":\"PermissionRequest\",\"tool_name\":\"Bash\",\"tool_input\":{\"description\":\"Run tests\"}}\n";
+        let record: Value = serde_json::from_str(raw.trim()).unwrap();
+        let events = parse_transcript(raw).unwrap();
+        let derived = super::permission::from_record(&record).unwrap();
+        match &events[0].payload {
+            HarnessEventPayload::AwaitingInput {
+                request_id,
+                prompt,
+                choices,
+                ..
+            } => {
+                assert_eq!(request_id, &derived.request_id);
+                assert_eq!(prompt, &derived.prompt);
+                assert_eq!(choices, &derived.choices);
+            }
+            other => panic!("unexpected payload {other:?}"),
+        }
+        assert_eq!(derived.request_id, "permission:Bash:1970-01-01T00:00:00Z");
     }
 }

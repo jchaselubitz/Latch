@@ -10,12 +10,16 @@ use anyhow::{bail, Context};
 use serde::Serialize;
 use serde_json::Value;
 
+use super::permission;
 use super::{CanSend, InteractionCapabilities};
 use crate::cli::manage;
 use crate::engine::{self, SessionState};
+use crate::session::meta;
 use crate::session::paths::{LatchHome, SessionId, SessionPaths, FILE_MODE};
 
 const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
+const UNKNOWN_HARNESS_REASON: &str =
+    "this session is not a known Claude Code harness; use --keys to send input";
 
 /// Session-scoped interaction query.
 pub struct InteractionOptions {
@@ -111,21 +115,16 @@ pub fn send(options: SendOptions) -> anyhow::Result<SendReport> {
     let id = manage::resolve_existing(&options.home, &options.session)?;
     let _lock = interaction_lock(&options.home.session(&id))?;
     let (capabilities, state) = capabilities_for(&options.home, &id)?;
-    if !capabilities.can_send.ok {
-        bail!(
-            "{}",
-            capabilities
-                .can_send
-                .reason
-                .as_deref()
-                .unwrap_or("input is unavailable")
-        );
-    }
 
     match options.action {
         SendAction::Message(message) => {
             if !capabilities.send_message || !matches!(state, ScreenState::Idle) {
-                bail!("the Claude Code composer is not empty; refusing to send a message");
+                bail!(
+                    "{}",
+                    capabilities.can_send.reason.as_deref().unwrap_or(
+                        "the Claude Code composer is not empty; refusing to send a message"
+                    )
+                );
             }
             if message.is_empty() {
                 bail!("message must not be empty");
@@ -148,7 +147,14 @@ pub fn send(options: SendOptions) -> anyhow::Result<SendReport> {
         }
         SendAction::Keys(keys) => {
             if !capabilities.send_keys {
-                bail!("direct keypresses are unsafe on the current screen");
+                bail!(
+                    "{}",
+                    capabilities
+                        .can_send
+                        .reason
+                        .as_deref()
+                        .unwrap_or("direct keypresses are unsafe on the current screen")
+                );
             }
             let keys = parse_keys(&keys)?;
             engine::send_keys(engine::SendKeysRequest {
@@ -166,7 +172,14 @@ pub fn send(options: SendOptions) -> anyhow::Result<SendReport> {
         }
         SendAction::Resolve { request_id, choice } => {
             if !capabilities.resolve {
-                bail!("there is no visible unresolved request for this session");
+                bail!(
+                    "{}",
+                    capabilities
+                        .can_send
+                        .reason
+                        .as_deref()
+                        .unwrap_or("there is no visible unresolved request for this session")
+                );
             }
             let ScreenState::Pending(pending) = state else {
                 bail!("there is no visible unresolved request for this session");
@@ -246,8 +259,12 @@ fn capabilities_for(
     if info.state != SessionState::Running {
         return Ok(unavailable("the session process has exited"));
     }
+    let paths = home.session(id);
     let screen = engine::capture_pane(home, id)?;
-    let state = classify_screen(&home.session(id), &screen)?;
+    let state = classify_screen(&paths, &screen)?;
+    if !hosts_known_harness(&paths)? && !matches!(state, ScreenState::Unsafe(_)) {
+        return Ok(unknown_harness(state));
+    }
     let capabilities = match &state {
         ScreenState::Idle => InteractionCapabilities {
             send_message: true,
@@ -278,6 +295,38 @@ fn capabilities_for(
         },
     };
     Ok((capabilities, state))
+}
+
+fn unknown_harness(state: ScreenState) -> (InteractionCapabilities, ScreenState) {
+    (
+        InteractionCapabilities {
+            send_message: false,
+            send_keys: true,
+            resolve: false,
+            can_send: CanSend {
+                ok: false,
+                reason: Some(UNKNOWN_HARNESS_REASON.to_owned()),
+            },
+        },
+        state,
+    )
+}
+
+fn hosts_known_harness(paths: &SessionPaths) -> anyhow::Result<bool> {
+    if paths.harness_hooks().is_file() {
+        return Ok(true);
+    }
+    match meta::read(paths) {
+        Ok(metadata) => {
+            Ok(metadata.harness.as_deref() == Some("claude") || metadata.command_label == "claude")
+        }
+        Err(meta::MetaError::Io { source, .. })
+            if source.kind() == std::io::ErrorKind::NotFound =>
+        {
+            Ok(false)
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn unavailable(reason: &str) -> (InteractionCapabilities, ScreenState) {
@@ -454,111 +503,17 @@ fn latest_pending_request(paths: &SessionPaths) -> anyhow::Result<Option<Pending
     let raw = read_locked(&path, "hook sidecar")?;
     for line in raw.lines().rev().filter(|line| !line.trim().is_empty()) {
         let record: Value = serde_json::from_str(line).context("malformed Claude hook record")?;
-        let event = record
-            .get("hook_event_name")
-            .or_else(|| record.get("hookEventName"))
-            .and_then(Value::as_str);
-        if event != Some("PermissionRequest") {
+        let Some(derived) = permission::from_record(&record) else {
             continue;
-        }
-        let id = string(&record, &["request_id", "requestId", "tool_use_id", "uuid"])
-            .map(str::to_owned)
-            .unwrap_or_else(|| {
-                format!(
-                    "permission:{}:{}",
-                    string(&record, &["tool_name", "toolName"]).unwrap_or("tool"),
-                    string(&record, &["timestamp", "at"]).unwrap_or("unknown")
-                )
-            });
-        let tool_input = record
-            .get("tool_input")
-            .or_else(|| record.get("toolInput"))
-            .unwrap_or(&Value::Null);
-        let question = string(&record, &["tool_name", "toolName"]) == Some("AskUserQuestion");
-        let prompt = if question {
-            question_prompt(tool_input)
-        } else {
-            tool_input
-                .get("description")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-                .unwrap_or_else(|| {
-                    format!(
-                        "Allow {}?",
-                        string(&record, &["tool_name", "toolName"]).unwrap_or("this tool")
-                    )
-                })
-        };
-        let choices = if question {
-            question_choices(tool_input)
-        } else {
-            permission_choices(&record)
         };
         return Ok(Some(PendingRequest {
-            id,
-            prompt,
-            choices,
+            id: derived.request_id,
+            prompt: derived.prompt,
+            choices: derived.choices.unwrap_or_default(),
             resolution_keys: Vec::new(),
         }));
     }
     Ok(None)
-}
-
-fn question_prompt(input: &Value) -> String {
-    let prompt = input
-        .get("questions")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|question| string(question, &["question", "header"]))
-        .collect::<Vec<_>>()
-        .join("\n");
-    if prompt.is_empty() {
-        "Claude is waiting for an answer.".to_owned()
-    } else {
-        prompt
-    }
-}
-
-fn question_choices(input: &Value) -> Vec<String> {
-    input
-        .get("questions")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .flat_map(|question| {
-            question
-                .get("options")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-        })
-        .filter_map(|option| string(option, &["label"]).map(str::to_owned))
-        .collect()
-}
-
-fn permission_choices(record: &Value) -> Vec<String> {
-    let suggestions = record
-        .get("permission_suggestions")
-        .or_else(|| record.get("permissionSuggestions"))
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|choice| string(choice, &["description"]).map(str::to_owned))
-        .collect::<Vec<_>>();
-    let mut choices = vec!["Allow once".to_owned()];
-    for suggestion in suggestions {
-        if !choices.iter().any(|choice| choice == &suggestion) && suggestion != "Deny" {
-            choices.push(suggestion);
-        }
-    }
-    choices.push("Deny".to_owned());
-    choices
-}
-
-fn string<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a str> {
-    keys.iter()
-        .find_map(|key| value.get(*key).and_then(Value::as_str))
 }
 
 fn was_resolved(paths: &SessionPaths, request_id: &str) -> anyhow::Result<bool> {
@@ -678,6 +633,44 @@ mod tests {
             vec!["C-c", "Down", "Enter"]
         );
         assert!(parse_keys("arbitrary-text").is_err());
+    }
+
+    #[test]
+    fn known_harness_evidence_comes_from_marker_hooks_or_claude_label() {
+        let directory = tempfile::tempdir().unwrap();
+        let home = LatchHome::new(directory.path().join("latch"));
+        home.ensure().unwrap();
+        let id = SessionId::parse("ses_fixture").unwrap();
+        let paths = home.session(&id);
+        paths.ensure().unwrap();
+        assert!(!hosts_known_harness(&paths).unwrap());
+
+        let launch = crate::session::manifest::LaunchSpec {
+            argv: vec!["/bin/zsh".to_owned()],
+            cwd: directory.path().to_owned(),
+            env: Default::default(),
+            inherit_env: true,
+            size: crate::session::manifest::TerminalSize::new(80, 24),
+            term: "xterm-256color".to_owned(),
+        };
+        let display = crate::session::manifest::DisplayMetadata::default();
+        let mut metadata = meta::derive(meta::MetaRequest {
+            id: id.as_str(),
+            launch: &launch,
+            display: &display,
+            created_at: "2026-08-13T00:00:00Z",
+        });
+        meta::write_once(&paths, &metadata).unwrap();
+        assert!(!hosts_known_harness(&paths).unwrap());
+
+        metadata.command_label = "claude".to_owned();
+        meta::update(&paths, &metadata).unwrap();
+        assert!(hosts_known_harness(&paths).unwrap());
+
+        metadata.command_label = "zsh".to_owned();
+        meta::update(&paths, &metadata).unwrap();
+        fs::write(paths.harness_hooks(), "{}\n").unwrap();
+        assert!(hosts_known_harness(&paths).unwrap());
     }
 
     #[test]

@@ -46,20 +46,20 @@ pub struct CreateOutcome {
 pub struct ManifestOptions {
     /// The child's initial working directory.
     pub cwd: PathBuf,
-    /// The size supplied to the worker before a controller attaches.
+    /// The child's initial terminal size before a client attaches.
     pub size: TerminalSize,
     /// Human-display fields supplied at the CLI boundary.
     pub display: DisplayMetadata,
 }
 
 /// Creates a session: id, directory at `0700`, `meta.json` via temp+rename,
-/// detached worker, optional attach.
+/// detached tmux session, optional attach.
 ///
 /// Display fields on the manifest are sanitized at this boundary — the single
 /// place externally supplied names and titles arrive — before anything is
 /// written or shown.
 pub fn create_session(options: CreateOptions) -> anyhow::Result<CreateOutcome> {
-    match nesting::nesting_decision(enclosing_session_id().as_deref(), true) {
+    match nesting::nesting_decision(enclosing_session_id().as_deref()) {
         NestingDecision::Allow => {}
         NestingDecision::AttachToEnclosing { session_id } => {
             bail!(
@@ -67,7 +67,6 @@ pub fn create_session(options: CreateOptions) -> anyhow::Result<CreateOutcome> {
                  run `latch attach` or exit the enclosing session first"
             );
         }
-        NestingDecision::Decline { reason } => bail!("{reason}"),
     }
 
     options.home.ensure()?;

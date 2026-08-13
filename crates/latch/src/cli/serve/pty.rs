@@ -38,7 +38,7 @@ impl PtyChild {
     pub fn spawn(request: SpawnAttachRequest<'_>) -> io::Result<Self> {
         let mut master_fd: libc::c_int = -1;
         let mut slave_fd: libc::c_int = -1;
-        let mut size = libc::winsize {
+        let size = libc::winsize {
             ws_row: request.rows.max(1),
             ws_col: request.cols.max(1),
             ws_xpixel: 0,
@@ -53,7 +53,7 @@ impl PtyChild {
                 &mut slave_fd,
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
-                &mut size,
+                &size,
             )
         };
         if opened != 0 {

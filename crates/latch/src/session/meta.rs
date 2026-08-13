@@ -30,6 +30,9 @@ pub struct SessionMeta {
     pub cwd: PathBuf,
     /// Redacted program label.
     pub command_label: String,
+    /// Hosted harness Latch recognized from launch argv, when any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
     /// RFC 3339 creation time.
     pub created_at: String,
     /// Initial geometry.
@@ -133,6 +136,7 @@ pub fn derive(request: MetaRequest<'_>) -> SessionMeta {
             .filter(|title| !title.is_empty()),
         cwd: request.launch.cwd.clone(),
         command_label,
+        harness: harness_kind(&request.launch.argv).map(str::to_owned),
         created_at: request.created_at.to_owned(),
         initial_size: request.launch.size,
         source: SourceInfo {
@@ -203,6 +207,11 @@ pub fn sanitize_display(raw: &str) -> String {
         .filter(|character| !character.is_control())
         .take(MAX_DISPLAY_CHARS)
         .collect()
+}
+
+/// Hosted harness Latch recognizes from launch argv.
+pub fn harness_kind(argv: &[String]) -> Option<&'static str> {
+    (redact_command(argv) == "claude").then_some("claude")
 }
 
 /// Reduces argv to the executable basename.
@@ -279,4 +288,46 @@ fn write_atomic<T: Serialize>(request: AtomicWrite<'_, T>) -> Result<(), MetaErr
             source,
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::manifest::LaunchSpec;
+
+    fn launch(argv: Vec<String>) -> LaunchSpec {
+        LaunchSpec {
+            argv,
+            cwd: PathBuf::from("/tmp/app"),
+            env: Default::default(),
+            inherit_env: true,
+            size: TerminalSize::new(80, 24),
+            term: "xterm-256color".to_owned(),
+        }
+    }
+
+    fn derive_argv(argv: Vec<String>) -> SessionMeta {
+        let launch = launch(argv);
+        let display = DisplayMetadata::default();
+        derive(MetaRequest {
+            id: "ses_test",
+            launch: &launch,
+            display: &display,
+            created_at: "2026-08-13T00:00:00Z",
+        })
+    }
+
+    #[test]
+    fn claude_argv_persists_a_harness_marker() {
+        let meta = derive_argv(vec!["/usr/local/bin/claude".to_owned(), "-p".to_owned()]);
+        assert_eq!(meta.harness.as_deref(), Some("claude"));
+        assert_eq!(meta.command_label, "claude");
+    }
+
+    #[test]
+    fn shell_argv_does_not_mark_a_harness() {
+        let meta = derive_argv(vec!["/bin/zsh".to_owned(), "-il".to_owned()]);
+        assert_eq!(meta.harness, None);
+        assert_eq!(meta.command_label, "zsh");
+    }
 }

@@ -41,11 +41,13 @@ export function createLatchClient(options: LatchClientOptions): LatchClient {
       requestJson<InteractionCapabilities>({
         path: `/v1/sessions/${encodeURIComponent(sessionId)}/capabilities`
       }),
-    attachTerminal: ({ sessionId }) =>
+    attachTerminal: ({ sessionId, cols, rows }) =>
       attachTerminal({
         baseUrl,
         token,
         sessionId,
+        cols,
+        rows,
         retry,
         webSocket
       })

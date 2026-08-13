@@ -215,22 +215,11 @@ private struct SessionDetailView: View {
                     if let exit = session.exit {
                         DetailRow(label: "Exit", value: exitDescription(exit))
                     }
-                }
-                .textSelection(.enabled)
-
-                if let attachments = session.attachments, !attachments.isEmpty {
-                    GroupBox("Attachments") {
-                        VStack(alignment: .leading, spacing: 8) {
-                            ForEach(attachments) { attachment in
-                                Label(
-                                    "\(attachment.clientName) (\(attachment.mode))",
-                                    systemImage: attachment.mode == "control" ? "keyboard" : "eye"
-                                )
-                            }
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                    if let attached = session.attached {
+                        DetailRow(label: "Attached", value: "\(attached)")
                     }
                 }
+                .textSelection(.enabled)
 
                 HStack {
                     Button("Rename…") {

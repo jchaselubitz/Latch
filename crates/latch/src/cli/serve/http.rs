@@ -2,7 +2,7 @@
 
 use anyhow::Context;
 use axum::extract::ws::WebSocketUpgrade;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, Method, Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -14,8 +14,9 @@ use tokio::net::TcpListener;
 use super::auth::{
     load_token, origin_allowed, presented_token, selected_subprotocol, token_matches,
 };
-use super::terminal::{self, TerminalConnect};
+use super::terminal::{self, TerminalConnect, TerminalQuery};
 use super::ServeOptions;
+use crate::cli::attach::SessionLookupError;
 use crate::cli::manage::{self, InspectOptions, ListOptions};
 use crate::harness::{self, InteractionOptions};
 use crate::session::paths::LatchHome;
@@ -182,6 +183,7 @@ async fn session_capabilities(
 async fn terminal_ws(
     ws: WebSocketUpgrade,
     Path(id): Path<String>,
+    Query(query): Query<TerminalQuery>,
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Response {
@@ -193,23 +195,89 @@ async fn terminal_ws(
         home: state.home.clone(),
         latch_bin: state.latch_bin.clone(),
         session: id,
+        cols: query.cols,
+        rows: query.rows,
     };
     upgrade.on_upgrade(move |socket| terminal::run(socket, connect))
 }
 
 fn map_engine_error(error: anyhow::Error) -> ApiError {
-    let message = error.to_string();
-    let status = if message.contains("no session") || message.contains("not available") {
-        StatusCode::NOT_FOUND
-    } else {
-        StatusCode::INTERNAL_SERVER_ERROR
-    };
-    ApiError { status, message }
+    if let Some(lookup) = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<SessionLookupError>())
+    {
+        if lookup.is_absent() {
+            return ApiError {
+                status: StatusCode::NOT_FOUND,
+                message: "session not found".to_owned(),
+            };
+        }
+        return ApiError {
+            status: StatusCode::CONFLICT,
+            message: "session name is ambiguous".to_owned(),
+        };
+    }
+    ApiError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        message: "internal error".to_owned(),
+    }
 }
 
 fn internal(what: &str) -> ApiError {
     ApiError {
         status: StatusCode::INTERNAL_SERVER_ERROR,
         message: format!("{what} failed"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::attach::SessionLookupError;
+
+    #[test]
+    fn missing_session_is_404_without_internal_detail() {
+        let mapped = map_engine_error(
+            SessionLookupError::UnknownName {
+                session: "secret-name".to_owned(),
+            }
+            .into(),
+        );
+        assert_eq!(mapped.status, StatusCode::NOT_FOUND);
+        assert_eq!(mapped.message, "session not found");
+        assert!(!mapped.message.contains("secret-name"));
+    }
+
+    #[test]
+    fn absent_tmux_session_is_404() {
+        let mapped = map_engine_error(
+            SessionLookupError::NotInServer {
+                session: "ses_dead".to_owned(),
+            }
+            .into(),
+        );
+        assert_eq!(mapped.status, StatusCode::NOT_FOUND);
+        assert_eq!(mapped.message, "session not found");
+    }
+
+    #[test]
+    fn ambiguous_name_is_conflict_without_the_name() {
+        let mapped = map_engine_error(
+            SessionLookupError::Ambiguous {
+                session: "agent".to_owned(),
+            }
+            .into(),
+        );
+        assert_eq!(mapped.status, StatusCode::CONFLICT);
+        assert_eq!(mapped.message, "session name is ambiguous");
+        assert!(!mapped.message.contains("agent"));
+    }
+
+    #[test]
+    fn other_errors_are_generic_500() {
+        let mapped = map_engine_error(anyhow::anyhow!("cannot read /private/path/meta.json"));
+        assert_eq!(mapped.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(mapped.message, "internal error");
+        assert!(!mapped.message.contains("/private"));
     }
 }

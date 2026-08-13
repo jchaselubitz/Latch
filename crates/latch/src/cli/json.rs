@@ -15,7 +15,6 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::engine::SessionState;
 use crate::session::manifest::TerminalSize;
 use crate::session::meta::ExitRecord;
 
@@ -72,28 +71,16 @@ pub struct InspectReport {
     pub created_at: String,
     /// Size at spawn.
     pub initial_size: TerminalSize,
-    /// Current size, when the worker answered.
+    /// Current size, when tmux reported it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<TerminalSize>,
     /// Exit record, when the session has exited.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit: Option<ExitRecord>,
-    /// Attachments currently present, when the worker answered.
+    /// Number of tmux clients currently attached, when the private server
+    /// reported the session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub attachments: Option<Vec<AttachmentSummary>>,
-}
-
-/// One attachment as `inspect` reports it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AttachmentSummary {
-    /// Worker-assigned attachment id.
-    pub id: String,
-    /// `watch` or `control`.
-    pub mode: String,
-    /// Client kind — `cli`, `desktop`, `web`, `mobile`.
-    pub client_kind: String,
-    /// Client display name.
-    pub client_name: String,
+    pub attached: Option<usize>,
 }
 
 /// `latch stop --json`.
@@ -101,8 +88,14 @@ pub struct AttachmentSummary {
 pub struct StopReport {
     /// Session that was asked to stop.
     pub id: String,
-    /// State after the request was delivered (typically `stopping` or `exited`).
+    /// State after the request was delivered (typically `exited`, or `running`
+    /// when the process survived SIGKILL).
     pub state: String,
+    /// False when the pane was still live after the escalation window.
+    ///
+    /// Scripted callers should also treat a non-zero exit as failure; this
+    /// field makes the same fact visible in the JSON document.
+    pub stopped: bool,
 }
 
 /// `latch remove SESSION --json`.
@@ -299,9 +292,4 @@ pub struct CreatedSession {
     /// RFC 3339 creation timestamp.
     #[serde(rename = "createdAt")]
     pub created_at: String,
-}
-
-/// Parses a session-state string the way `--json` emits it.
-pub fn parse_state(raw: &str) -> Option<SessionState> {
-    SessionState::from_wire(raw)
 }

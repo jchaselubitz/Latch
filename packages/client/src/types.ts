@@ -50,12 +50,7 @@ export type InspectReport = {
     signal?: string;
     exited_at: string;
   };
-  attachments?: Array<{
-    id: string;
-    mode: string;
-    client_kind: string;
-    client_name: string;
-  }>;
+  attached?: number;
 };
 
 export type TerminalState = 'connecting' | 'open' | 'reconnecting' | 'closed';
@@ -73,5 +68,9 @@ export type LatchClient = {
   listSessions(): Promise<ListReport>;
   inspectSession(options: { sessionId: string }): Promise<InspectReport>;
   sessionCapabilities(options: { sessionId: string }): Promise<InteractionCapabilities>;
-  attachTerminal(options: { sessionId: string }): TerminalHandle;
+  attachTerminal(options: {
+    sessionId: string;
+    cols?: number;
+    rows?: number;
+  }): TerminalHandle;
 };

@@ -89,7 +89,10 @@ pub fn token_matches(expected: &str, presented: &str) -> bool {
     diff == 0
 }
 
-/// Loopback-bound servers reject non-loopback browser origins.
+/// Loopback-bound servers reject non-loopback browser origins. Non-loopback
+/// binds (opt-in via `--allow-remote`) accept every well-formed http(s) Origin
+/// because the token is already the access control; prefer an SSH tunnel to
+/// loopback instead.
 pub fn origin_allowed(origin: Option<&HeaderValue>, bind_is_loopback: bool) -> bool {
     let Some(origin) = origin else {
         return true;

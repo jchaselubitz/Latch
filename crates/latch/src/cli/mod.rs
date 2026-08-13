@@ -1,14 +1,10 @@
-//! The CLI: create, attach, list, and the rest of the M1 command surface.
+//! The CLI: create, attach, list, and the rest of the command surface.
 //!
 //! The binary's clap surface in `main.rs` is the public contract; this module is
 //! the behaviour behind it. Tests exercise both: the binary for end-to-end
 //! behaviour, and these APIs for the pieces that deserve to be asserted without
 //! a terminal — nesting policy, raw-mode restoration, JSON schemas, list sort
 //! order.
-//!
-//! Every public function here lands in a later objective of this milestone.
-//! Until then the signatures exist so the suite compiles and fails at runtime
-//! with `todo!` rather than with a missing symbol.
 
 pub mod attach;
 pub mod create;
@@ -20,7 +16,7 @@ pub mod serve;
 pub mod term;
 pub mod update;
 
-pub use attach::{AttachOptions, AttachOutcome, ConnectionState, RetryPolicy};
+pub use attach::{AttachOptions, RetryPolicy};
 pub use create::{CreateOptions, CreateOutcome};
 pub use json::{
     CapabilitiesReport, ConfigReport, DoctorReport, InspectReport, ListReport, OpenReport,

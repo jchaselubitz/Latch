@@ -2,6 +2,8 @@
 
 import { useEffect, useRef } from 'react';
 
+import type { TerminalHandle } from '@latch/client';
+
 import type { LatchTerminalProps } from './types';
 import { createXtermRenderer } from './xterm';
 
@@ -14,14 +16,23 @@ export function LatchTerminal({ client, sessionId, createRenderer }: LatchTermin
       return undefined;
     }
     const renderer = (createRenderer ?? createXtermRenderer)({ element });
-    const terminal = client.attachTerminal({ sessionId });
+    let terminal: TerminalHandle | undefined;
+    let initialSize: { cols: number; rows: number } | undefined;
+    const stopResize = renderer.onResize(size => {
+      initialSize = size;
+      terminal?.resize(size);
+    });
+    terminal = client.attachTerminal({
+      sessionId,
+      cols: initialSize?.cols,
+      rows: initialSize?.rows
+    });
     const stopData = terminal.onData(bytes => renderer.write(bytes));
-    const stopResize = renderer.onResize(size => terminal.resize(size));
     renderer.focus();
     return () => {
       stopData();
       stopResize();
-      terminal.close();
+      terminal?.close();
       renderer.dispose();
     };
   }, [client, sessionId, createRenderer]);
