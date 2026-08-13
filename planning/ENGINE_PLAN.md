@@ -11,38 +11,83 @@ server becomes the session kernel; Latch keeps its CLI contract, its metadata,
 its integrations, and adds the thing that is actually differentiated — a
 harness-aware engine other software can build on.
 
-Four responsibilities, in the order they are built:
+Four responsibilities, built in two parallel tracks:
 
 ```text
-1. Session host          persistence, PTY ownership, multi-client   (tmux)
-2. Public engine API     the contract every client integrates against
-3. Harness observation   transcript -> normalized events            (read-only)
-4. Harness interaction   capability-gated injection                 (later)
+Phase 0   Session host          persistence, PTY ownership, multi-client   (tmux)
+Phase 1   Harness integration   transcript -> normalized events       (read-only)
+              ^ these two are independent; run them at the same time
+
+Phase 2   Overlord migration    plug-ins stay, connectors move to Latch
+Phase 3   Harness interaction   capability-gated injection
 ```
+
+The public engine API spans all four: it is the contract every client
+integrates against, and Overlord is its first consumer rather than its only
+possible one.
 
 Everything else the current codebase does — the worker, the wire protocol, the
 screen model, the attachment registry, the resize authority — is deleted rather
 than fixed.
 
-## Assumption this plan rests on
+## The ownership split
 
-**Latch owns mechanical harness observation. Overlord keeps semantic
-authority.**
+**Latch is the harness integrator. Overlord keeps the agent plug-ins.**
 
-Latch reads a harness's transcript and emits normalized events. It does not know
-what a mission is, does not bind a session to one, and does not decide anything
-consequential. Overlord consumes Latch's events, enriches them with mission
-context, and remains the authority for permissions, delivery, and objectives.
+| Concern | Latch | Overlord |
+| --- | --- | --- |
+| Session hosting, PTY, injection mechanism | Owns | — |
+| Harness connectors, transcript parsing, normalized events | Owns | — |
+| Agent plug-ins — MCP tools, skills, briefing and context files | — | Owns |
+| Missions, objectives, execution requests, worktrees, runner | — | Owns |
+| Mission binding authority | Never | Owns |
 
-This **amends invariant 5** of [`OVERLORD_INTEGRATION.md`](./OVERLORD_INTEGRATION.md),
-which currently states that Latch does not supply the semantic integration path.
-The amended version: Latch supplies *events*; Overlord supplies *authority*.
-Where both can observe the same interaction, Overlord's connector wins for
-anything actionable, under the first-writer-wins rule that document already
-defines.
+The decomposition is orthogonal **by direction of flow**, which is what makes it
+clean:
 
-Without this written down, both products will implement the same connector twice
-and disagree about which one may answer a permission prompt.
+```text
+Latch          reads the agent        per-harness,          mission-agnostic
+Overlord       instructs the agent    per-mission-concept,  harness-agnostic
+```
+
+Neither side needs per-harness code on the other's axis. An MCP tool that tells
+an agent how to attach to a mission works on any harness; a transcript connector
+works for any mission. This also **removes an arbitration rule** an earlier draft
+of this plan needed: there is no longer a case where both products observe the
+same interaction and have to decide whose event wins.
+
+This **replaces invariant 5** of [`OVERLORD_INTEGRATION.md`](./OVERLORD_INTEGRATION.md),
+which currently reserves the semantic integration path for Overlord's connectors.
+Overlord does not keep connectors. It keeps the plug-ins.
+
+### Three consequences
+
+**Binding moves from observation to declaration.** Today a connector performs
+`ovld protocol attach` after inferring which session belongs to which execution
+request. Under the plug-in model the *agent* calls the mission-attach tool
+itself. That is strictly more trustworthy — an authenticated, intentional act
+rather than an inference — and it is consistent with the existing rule that a
+Latch environment marker is correlation only and confers no mission authority.
+
+**New risk: an agent that never calls the tool is invisible to Overlord.**
+Compliance becomes a prompt-following problem, and models do not always call the
+tool they were told to. The mitigation falls out of the split: Latch's event
+stream gives Overlord an *independent, mechanical* view — session started, turns
+happening, session exited — so "launched but never attached" is detectable
+rather than silent. Overlord should reconcile the two and surface the gap.
+
+**Permissions become Latch end to end.** Observed as `awaiting_input`, answered
+through `resolve`. Overlord displays them and relays the user's choice, and may
+apply mission policy on top, but there is one mechanism and one request id
+rather than two implementations racing.
+
+### Migration cost this creates
+
+Overlord's connectors are described as fixture-proven for permissions,
+questions, and turn completion. That code and those fixtures are the obvious
+seed for Latch's connector layer rather than something to rebuild — which makes
+open decision 3 (where connectors run) urgent rather than deferrable, and
+couples Phase 1 to Phase 2 below.
 
 ## What is no longer true
 
@@ -140,34 +185,7 @@ attaches instead of failing.
 
 ---
 
-## Phase 1 — Overlord realignment
-
-**Most of `OVERLORD_INTEGRATION.md` survives**, because Overlord integrates
-against the CLI contract and the CLI contract does not change. `capabilities`,
-`create --manifest-file -`, `open`, `inspect`, `stop`, the two-settings model,
-the session-identity mapping, and acceptance criteria 1–10 all hold as written.
-
-What changes:
-
-- **Delete the "session input control" row** from the ownership table, and the
-  UI affordances behind it. There is no controller to display and none to
-  request.
-- **Simplify the state list.** `lost` becomes rare enough to describe as an
-  error rather than a state. `creating → running → stopping → exited` stands.
-- **Rewrite Stage 3.** "Embed the TypeScript Latch client, attaching directly to
-  the worker socket" describes a socket that no longer exists. The embedded
-  view is fed by the engine's event stream (Phase 2); an embedded *terminal*
-  becomes optional and later, since `latch attach` in the user's own terminal
-  already covers it.
-- **Reconcile the widget-source section** with the amended invariant above:
-  Latch is now a first-class event source, not only a terminal plane.
-
-Everything about worktrees, briefing files, Agent Session Exchange bootstrap,
-and `ovld protocol attach` is untouched.
-
----
-
-## Phase 2 — Observation
+## Phase 1 — Harness integration
 
 **Goal:** a chat view of a live agent session, read-only, harness-agnostic.
 
@@ -211,12 +229,70 @@ primary interface puts that on the critical path. Mitigations, all required:
   — never a chat view that silently stops updating.
 - `latch attach` as the always-available fallback.
 
-### This phase has no dependencies
+### Seed it from Overlord's connectors
 
-It needs neither Phase 0 nor Phase 1. A transcript can be tailed for a session
-launched any way at all. **Start it in parallel with Phase 0** — it is the only
-work here that answers the question `M2_FIELD_REPORT.md` still records as
-unanswered: *do you actually reach for your agent from your phone?*
+Overlord's existing connectors already normalize permissions, questions, and
+turn completion, with fixtures. Port that rather than rebuild it — the fixtures
+in particular are the expensive part, and they encode harness behaviour nobody
+should discover twice. Whether the port is to Rust or the code moves as a
+TypeScript sidecar is open decision 3, and it has to be settled before this
+phase starts rather than during it.
+
+### This phase does not depend on Phase 0
+
+A transcript can be tailed for a session launched any way at all, so harness
+integration needs nothing from the kernel swap. **Run the two in parallel.**
+This is also the only work in the plan that answers the question
+`M2_FIELD_REPORT.md` still records as unanswered: *do you actually reach for
+your agent from your phone?* Read-only observation answers it without waiting
+for injection or for tmux.
+
+---
+
+## Phase 2 — Overlord migration
+
+**Goal:** Overlord keeps the plug-ins and consumes Latch for everything else.
+
+The launch contract is unaffected — Overlord integrates against the CLI, and the
+CLI does not change. `capabilities`, `create --manifest-file -`, `open`,
+`inspect`, `stop`, the two-settings model, the session-identity mapping, and
+acceptance criteria 1–10 all hold as written. So does everything about
+missions, objectives, execution requests, worktrees, and the runner.
+
+### Retained: the agent plug-ins
+
+Everything that instructs an agent how to use Overlord stays exactly where it
+is — the MCP tools an agent calls to attach to a mission, load context, record
+work, add artifacts, and deliver; any installed skills or commands; and the
+briefing and context files the runner constructs. These are the mission
+semantics *expressed to the agent*, and they are harness-agnostic already.
+
+### Decommissioned: the connectors
+
+Harness observation moves to Latch. Overlord stops maintaining per-harness
+transcript or event code and subscribes to `latch events` instead.
+
+- **Binding is now the agent's declaration**, not the connector's inference.
+  Confirm the plug-in path covers every case the connector's
+  `ovld protocol attach` covered, and add reconciliation against Latch's
+  mechanical event stream so a launched-but-never-attached session is surfaced
+  rather than silently missing.
+- **Permission and question events** arrive as `awaiting_input` and are answered
+  through `resolve`. Overlord displays, applies mission policy, and relays.
+
+### Corrections to `OVERLORD_INTEGRATION.md`
+
+- **Delete the "session input control" row** from the ownership table, and the
+  UI affordances behind it. There is no controller to display and none to
+  request.
+- **Replace invariant 5** with the ownership split above.
+- **Simplify the state list.** `lost` becomes rare enough to describe as an
+  error rather than a state. `creating → running → stopping → exited` stands.
+- **Rewrite Stage 3.** "Embed the TypeScript Latch client, attaching directly to
+  the worker socket" describes a socket that no longer exists. The embedded view
+  is fed by the engine's event stream; an embedded *terminal* becomes optional
+  and later, since `latch attach` already covers it.
+- **Collapse the two-sources-for-widgets section.** There is one source now.
 
 ---
 
@@ -290,9 +366,11 @@ possible one.
 2. **Bundle tmux or require it.** Bundling makes `Latch.app` self-contained and
    pins the version; requiring it keeps the CLI a single file. Affects D1's
    one-binary claim.
-3. **Where connectors run.** In the Rust CLI (one binary, no runtime) or as a
-   TypeScript sidecar (shares code with Overlord's existing connectors, adds a
-   runtime dependency). This is the largest remaining design choice.
+3. **Where connectors run — now urgent.** In the Rust CLI (one binary, no
+   runtime, but Overlord's fixture-proven connector code has to be ported) or as
+   a TypeScript sidecar (the existing code moves largely intact, at the cost of a
+   runtime dependency and D1's one-binary claim). Making Latch the harness
+   integrator turns this from a design preference into a Phase 1 blocker.
 4. **Whether `latch-term` is deleted or archived.** It is good work and it is
    most of a mosh server; M4's remote transport may want it back.
 
