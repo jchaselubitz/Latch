@@ -69,6 +69,7 @@ offering an in-place update would work before offering it.
 For a local, same-architecture archive, run:
 
 ```bash
+brew install libevent
 just release-cli
 ```
 

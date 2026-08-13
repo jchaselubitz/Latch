@@ -41,6 +41,10 @@ tmux_version="3.7b"
 tmux_sha256="87f2e99e3b685973f2ca002ffd6ed7e51a5744f7009daae5a15670b6d532db96"
 tmux_source="$output_dir/tmux-$tmux_version.tar.gz"
 tmux_build="$output_dir/.tmux-$target"
+utf8proc_version="2.11.3"
+utf8proc_sha256="abfed50b6d4da51345713661370290f4f4747263ee73dc90356299dfc7990c78"
+utf8proc_source="$output_dir/utf8proc-$utf8proc_version.tar.gz"
+utf8proc_build="$output_dir/.utf8proc-$target"
 
 cargo build --locked --release --package latch --target "$target"
 
@@ -57,7 +61,15 @@ mkdir -p "$tmux_build"
 tar -xzf "$tmux_source" -C "$tmux_build" --strip-components=1
 
 libevent_prefix="$(brew --prefix libevent)"
-utf8proc_prefix="$(brew --prefix utf8proc)"
+curl --fail --silent --show-error --location --proto '=https' \
+  "https://github.com/JuliaStrings/utf8proc/archive/refs/tags/v$utf8proc_version.tar.gz" \
+  -o "$utf8proc_source"
+printf '%s  %s\n' "$utf8proc_sha256" "$utf8proc_source" | shasum -a 256 -c -
+rm -rf "$utf8proc_build"
+mkdir -p "$utf8proc_build"
+tar -xzf "$utf8proc_source" -C "$utf8proc_build" --strip-components=1
+make -C "$utf8proc_build"
+utf8proc_prefix="$utf8proc_build"
 (
   cd "$tmux_build"
   PKG_CONFIG_PATH="$libevent_prefix/lib/pkgconfig:$utf8proc_prefix/lib/pkgconfig" \
@@ -95,7 +107,7 @@ if [[ -n "${LATCH_NOTARY_PROFILE:-}" ]]; then
   xcrun notarytool submit "$archive_path" --keychain-profile "$LATCH_NOTARY_PROFILE" --wait
 fi
 
-rm -rf "$stage_dir" "$tmux_build" "$tmux_source"
+rm -rf "$stage_dir" "$tmux_build" "$tmux_source" "$utf8proc_build" "$utf8proc_source"
 
 checksum="$(shasum -a 256 "$archive_path" | awk '{print $1}')"
 printf '%s  %s\n' "$checksum" "$archive_name" > "$archive_path.sha256"

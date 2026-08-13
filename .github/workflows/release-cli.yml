@@ -36,7 +36,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Install tmux build dependency
-        run: brew install libevent utf8proc
+        run: brew install libevent
 
       - name: Import Developer ID certificate
         env:
