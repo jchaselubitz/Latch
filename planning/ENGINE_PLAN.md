@@ -126,11 +126,11 @@ from Latch's `awaiting_input`. Neither should wait on the other.
 
 ### Migration cost this creates
 
-Overlord's observation connectors are described as fixture-proven for
-permissions, questions, and turn completion. That code and those fixtures are
-the obvious seed for Latch's connector layer rather than something to rebuild —
-which makes open decision 3 (where connectors run) urgent rather than
-deferrable, and couples Phase 1 to Phase 2 below.
+Overlord's observation connectors are fixture-proven for permissions, questions,
+and turn completion. Those fixtures — not the code — are what transfers: Latch's
+connectors are ported to Rust and verified against them, which is why the port
+is cheap and why Phase 1 depends on getting the fixtures out of Overlord early
+rather than at migration time. See *Connectors are Rust* in Phase 1.
 
 ## What is no longer true
 
@@ -301,14 +301,47 @@ while building rather than as a later project:
 - **Stamp the harness version on what was parsed.** One field. Without it, when
   something does break, there is no way to tell which release did it.
 
-### Seed it from Overlord's connectors
+### Connectors are Rust, verified against Overlord's fixtures
 
-Overlord's existing connectors already normalize permissions, questions, and
-turn completion, with fixtures. Port that rather than rebuild it — the fixtures
-in particular are the expensive part, and they encode harness behaviour nobody
-should discover twice. Whether the port is to Rust or the code moves as a
-TypeScript sidecar is open decision 3, and it has to be settled before this
-phase starts rather than during it.
+**Decided.** The connector layer lives in the `latch` binary rather than in a
+TypeScript sidecar.
+
+The deciding factor is not performance. Connectors are not on the every-window
+path — they run when something subscribes to `latch events`, which is a UI
+action, not a window action — so D1's startup argument does not transfer here.
+Nor is an always-on process needed: the transcript is an append-only file, so a
+late subscriber backfills by reading from a cursor. No daemon, no missed events.
+
+What decides it is distribution. `latch update` replaces **one file**, refuses a
+copy another package manager owns, and verifies a Developer ID signature. That
+is shipped, documented behaviour. A sidecar means rewriting it, or taking a Node
+dependency on the user's machine, or shipping an artifact roughly ten times
+larger.
+
+And the rewrite is small. A JSONL tail, a `parentUuid` chain walk, and a state
+machine — a few hundred lines. **Overlord's fixtures transfer unchanged**,
+because this repo already builds fixtures as language-neutral data: recorded
+input, expected output, a description, in `fixtures/protocol/` and
+`fixtures/vt/`. They are not a reason to stay in TypeScript; they are the oracle
+that makes a port safe.
+
+The argument against — that a format expected to churn should live in the
+faster-iterating language — is real but smaller than it looks. A break needs a
+fixture, a parser fix, and a release either way. Rust adds a compile step, not a
+redesign.
+
+**Revisit if** Latch supports four or more harnesses. Per-harness connector
+volume is what would make iteration speed outweigh distribution; at one or two
+it does not.
+
+### One schema, two languages
+
+`HarnessEvent` is defined **once, as a JSON schema in `fixtures/`**, and the
+Rust types and the TypeScript types are both generated from it. The protocol
+fixtures already work this way, and it removes the duplicate-definition cost
+that is otherwise the real price of keeping connectors out of TypeScript — the
+chat UI consumes the same contract the connector emits, checked by the same
+fixtures.
 
 ### This phase does not depend on Phase 0
 
@@ -449,11 +482,12 @@ possible one.
 2. **Bundle tmux or require it.** Bundling makes `Latch.app` self-contained and
    pins the version; requiring it keeps the CLI a single file. Affects D1's
    one-binary claim.
-3. **Where connectors run — now urgent.** In the Rust CLI (one binary, no
-   runtime, but Overlord's fixture-proven connector code has to be ported) or as
-   a TypeScript sidecar (the existing code moves largely intact, at the cost of a
-   runtime dependency and D1's one-binary claim). Making Latch the harness
-   integrator turns this from a design preference into a Phase 1 blocker.
+3. ~~**Where connectors run.**~~ **Settled: Rust, in the `latch` binary.**
+   Connectors are not on the every-window path, so D1's startup argument does not
+   apply; what decides it is the one-file install and update story, and a port
+   verified against language-neutral fixtures is small. `HarnessEvent` is
+   schema-first so both languages generate from one definition. See *Connectors
+   are Rust* in Phase 1.
 4. **Whether `latch-term` is deleted or archived.** It is good work and it is
    most of a mosh server; M4's remote transport may want it back.
 
