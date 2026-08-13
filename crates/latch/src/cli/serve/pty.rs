@@ -38,7 +38,7 @@ impl PtyChild {
     pub fn spawn(request: SpawnAttachRequest<'_>) -> io::Result<Self> {
         let mut master_fd: libc::c_int = -1;
         let mut slave_fd: libc::c_int = -1;
-        let size = libc::winsize {
+        let mut size = libc::winsize {
             ws_row: request.rows.max(1),
             ws_col: request.cols.max(1),
             ws_xpixel: 0,
@@ -46,14 +46,14 @@ impl PtyChild {
         };
         // SAFETY: `openpty` writes the two file descriptors and optional name
         // and termios. We pass null for the unused outputs and stack storage
-        // for the fds and winsize.
+        // for the fds and winsize (`&mut` matches Apple's `*mut winsize`).
         let opened = unsafe {
             libc::openpty(
                 &mut master_fd,
                 &mut slave_fd,
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
-                &size,
+                &mut size,
             )
         };
         if opened != 0 {
