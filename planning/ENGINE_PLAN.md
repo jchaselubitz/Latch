@@ -32,62 +32,105 @@ than fixed.
 
 ## The ownership split
 
-**Latch is the harness integrator. Overlord keeps the agent plug-ins.**
+The boundary is not one line between two products. There are **three channels**,
+and each has exactly one owner:
+
+```text
+1  Agent  ->  Overlord     artifacts, shared state, recorded work, delivery,
+                           mission attach
+                           agent-initiated · authenticated · plug-in (MCP)
+                           NO Latch dependency — works with Latch absent
+
+2  Harness ->  Latch       turns, tool activity, awaiting_input, exit
+                           mechanical · involuntary · transcript-derived
+                           requires no cooperation from the agent
+
+3  Human  ->  Agent        messages, keypresses, permission answers
+                           requires PTY ownership — Latch only
+```
+
+**Channel 1 must keep working when Latch is not installed.** It is how an agent
+reports into a mission, and that path is Overlord's alone: the agent calls
+Overlord's tools directly, and neither the transport nor the authority passes
+through Latch. Nothing in this plan is allowed to make artifacts, state updates,
+or deliveries conditional on a Latch session existing.
+
+**Channels 2 and 3 move to Latch**, because both need something only a session
+host has. Channel 2 needs the harness's own session record; channel 3 needs a
+PTY you own, which is the only mechanism that exists for injection today.
 
 | Concern | Latch | Overlord |
 | --- | --- | --- |
 | Session hosting, PTY, injection mechanism | Owns | — |
-| Harness connectors, transcript parsing, normalized events | Owns | — |
+| Observation: transcript parsing, normalized events | Owns | — |
+| Interactive input: messages, keys, permission answers | Owns | Requests through Latch |
 | Agent plug-ins — MCP tools, skills, briefing and context files | — | Owns |
+| Artifacts, shared state, recorded work, delivery | — | Owns, received direct |
 | Missions, objectives, execution requests, worktrees, runner | — | Owns |
 | Mission binding authority | Never | Owns |
 
-The decomposition is orthogonal **by direction of flow**, which is what makes it
-clean:
+### Where the connector line falls
 
-```text
-Latch          reads the agent        per-harness,          mission-agnostic
-Overlord       instructs the agent    per-mission-concept,  harness-agnostic
-```
+What moves is the **observation connector** — the per-harness code that derives
+permissions, questions, and turn completion by watching a session. What stays is
+the **plug-in surface** — the MCP tools an agent calls to attach, load context,
+record work, add artifacts, and deliver.
 
-Neither side needs per-harness code on the other's axis. An MCP tool that tells
-an agent how to attach to a mission works on any harness; a transcript connector
-works for any mission. This also **removes an arbitration rule** an earlier draft
-of this plan needed: there is no longer a case where both products observe the
-same interaction and have to decide whose event wins.
+The distinction is who initiates. An agent *asserting* something to Overlord is
+Overlord's; a session *exhibiting* something observable is Latch's. This
+**replaces invariant 5** of [`OVERLORD_INTEGRATION.md`](./OVERLORD_INTEGRATION.md),
+which currently reserves both for Overlord.
 
-This **replaces invariant 5** of [`OVERLORD_INTEGRATION.md`](./OVERLORD_INTEGRATION.md),
-which currently reserves the semantic integration path for Overlord's connectors.
-Overlord does not keep connectors. It keeps the plug-ins.
+### The precedence rule
 
-### Three consequences
+The two observation paths are complementary, not redundant, and both should
+exist. But they can describe the same fact — a turn completing, for instance —
+so one rule settles it:
 
-**Binding moves from observation to declaration.** Today a connector performs
-`ovld protocol attach` after inferring which session belongs to which execution
-request. Under the plug-in model the *agent* calls the mission-attach tool
-itself. That is strictly more trustworthy — an authenticated, intentional act
-rather than an inference — and it is consistent with the existing rule that a
-Latch environment marker is correlation only and confers no mission authority.
+> **The agent's assertion to Overlord is the record. Latch's observation is
+> presentation.**
 
-**New risk: an agent that never calls the tool is invisible to Overlord.**
-Compliance becomes a prompt-following problem, and models do not always call the
-tool they were told to. The mitigation falls out of the split: Latch's event
-stream gives Overlord an *independent, mechanical* view — session started, turns
-happening, session exited — so "launched but never attached" is detectable
-rather than silent. Overlord should reconcile the two and surface the gap.
+Where only Latch can see something (a pending permission), Latch is the only
+source and the question does not arise.
 
-**Permissions become Latch end to end.** Observed as `awaiting_input`, answered
-through `resolve`. Overlord displays them and relays the user's choice, and may
-apply mission policy on top, but there is one mechanism and one request id
-rather than two implementations racing.
+### Two consequences
+
+**Binding is a declaration, not an inference.** The agent calls the
+mission-attach tool itself rather than a connector inferring which session
+belongs to which execution request. More trustworthy, and consistent with the
+existing rule that a Latch environment marker is correlation only.
+
+**The gap between the channels is informative.** An agent that never calls the
+attach tool is invisible on channel 1 — models do not always call the tool they
+were told to. Because channel 2 is involuntary, Overlord can see that a session
+started and produced turns without ever attaching, and surface it. That is not a
+substitute for the agent's assertion; it is how a missing assertion becomes
+visible instead of silent.
+
+### What Latch adds, and what works without it
+
+Latch must be strictly additive. Stated plainly:
+
+| | Agent launched bare | Agent launched under Latch |
+| --- | --- | --- |
+| Artifacts, state, work, delivery | Yes | Yes |
+| Mission attach and authority | Yes | Yes |
+| Chat view of the live session | No | Yes |
+| Permission and question notifications | No | Yes |
+| Send a message or answer a prompt remotely | No | Yes |
+| Session survives the window closing | No | Yes |
+
+Notification splits along the same line: delivery and artifact notifications
+stay on Overlord's existing hooks, and permission or question notifications come
+from Latch's `awaiting_input`. Neither should wait on the other.
 
 ### Migration cost this creates
 
-Overlord's connectors are described as fixture-proven for permissions,
-questions, and turn completion. That code and those fixtures are the obvious
-seed for Latch's connector layer rather than something to rebuild — which makes
-open decision 3 (where connectors run) urgent rather than deferrable, and
-couples Phase 1 to Phase 2 below.
+Overlord's observation connectors are described as fixture-proven for
+permissions, questions, and turn completion. That code and those fixtures are
+the obvious seed for Latch's connector layer rather than something to rebuild —
+which makes open decision 3 (where connectors run) urgent rather than
+deferrable, and couples Phase 1 to Phase 2 below.
 
 ## What is no longer true
 
@@ -259,26 +302,34 @@ CLI does not change. `capabilities`, `create --manifest-file -`, `open`,
 acceptance criteria 1–10 all hold as written. So does everything about
 missions, objectives, execution requests, worktrees, and the runner.
 
-### Retained: the agent plug-ins
+### Retained: the plug-in surface, and it must stand alone
 
-Everything that instructs an agent how to use Overlord stays exactly where it
-is — the MCP tools an agent calls to attach to a mission, load context, record
-work, add artifacts, and deliver; any installed skills or commands; and the
-briefing and context files the runner constructs. These are the mission
-semantics *expressed to the agent*, and they are harness-agnostic already.
+Channel 1 stays exactly where it is — the MCP tools an agent calls to attach to
+a mission, load context, record work, add artifacts, and deliver; any installed
+skills or commands; and the briefing and context files the runner constructs.
 
-### Decommissioned: the connectors
+**The acceptance test for this phase is that channel 1 still works with Latch
+uninstalled.** Artifacts, shared state, and deliveries reach a mission from an
+agent launched in a bare terminal, exactly as they do today. If any of that
+starts depending on a Latch session, the phase has failed regardless of what
+else it delivered.
 
-Harness observation moves to Latch. Overlord stops maintaining per-harness
-transcript or event code and subscribes to `latch events` instead.
+### Decommissioned: the observation connectors
 
-- **Binding is now the agent's declaration**, not the connector's inference.
-  Confirm the plug-in path covers every case the connector's
-  `ovld protocol attach` covered, and add reconciliation against Latch's
-  mechanical event stream so a launched-but-never-attached session is surfaced
-  rather than silently missing.
+Per-harness code that derives permissions, questions, and turn completion by
+watching a session moves to Latch. Overlord subscribes to `latch events`
+instead of maintaining its own.
+
+- **Binding is the agent's declaration.** Confirm the plug-in path covers every
+  case the connector's `ovld protocol attach` covered, and add reconciliation
+  against Latch's involuntary event stream so a launched-but-never-attached
+  session is surfaced rather than silently missing.
 - **Permission and question events** arrive as `awaiting_input` and are answered
   through `resolve`. Overlord displays, applies mission policy, and relays.
+- **Apply the precedence rule** wherever both channels can report the same fact:
+  the agent's assertion is the record, Latch's observation is presentation.
+- **Split notification** to match: delivery and artifact notifications stay on
+  Overlord's hooks; permission and question notifications come from Latch.
 
 ### Corrections to `OVERLORD_INTEGRATION.md`
 
