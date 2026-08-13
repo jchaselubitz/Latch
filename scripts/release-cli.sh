@@ -61,6 +61,7 @@ utf8proc_prefix="$(brew --prefix utf8proc)"
 (
   cd "$tmux_build"
   PKG_CONFIG_PATH="$libevent_prefix/lib/pkgconfig:$utf8proc_prefix/lib/pkgconfig" \
+  LDFLAGS="-L$libevent_prefix/lib -L$utf8proc_prefix/lib" \
   LIBEVENT_CORE_CFLAGS="-I$libevent_prefix/include" \
   LIBEVENT_CORE_LIBS="$libevent_prefix/lib/libevent_core.a" \
   LIBEVENT_CFLAGS="-I$libevent_prefix/include" \
