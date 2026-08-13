@@ -1,5 +1,10 @@
 # Why attaching is unreliable, and what to do instead
 
+> **Decided.** Option A was chosen, exclusive control was dropped, and a
+> transcript-fed chat view became the primary interface. Parts 3 and 4 below are
+> the record of how that was reached; the live plan is
+> [`ENGINE_PLAN.md`](./ENGINE_PLAN.md).
+
 **Question asked:** tmux creates a session and lets other terminals attach to it
 with almost no trouble. Latch does the same thing and is intermittent — sessions
 end early, clients disconnect, and moving between windows misbehaves. Is there a
