@@ -194,15 +194,17 @@ id. Launch material still arrives over stdin and is still never written down.
 
 ### Deleted
 
-| Component | Lines |
-| --- | --- |
-| `crates/latch-term` (screen model, snapshots, VT fixtures) | ~1,770 |
-| `crates/latch-protocol` (framing, control vocabulary, msgpack) | ~780 |
-| `worker/` (PTY, registry, queue, journal, socket, resize, spawn) | ~3,400 |
-| `tests/` for the above | ~4,000 |
+| Component | Lines | Fate |
+| --- | --- | --- |
+| `crates/latch-term` (screen model, snapshots) | ~1,770 | **Archived**, tag `archive/latch-term-v1` |
+| `crates/latch-protocol` (framing, control vocabulary, msgpack) | ~780 | Deleted |
+| `worker/` (PTY, registry, queue, journal, socket, resize, spawn) | ~3,400 | Deleted |
+| `tests/` for the above | ~4,000 | Deleted |
 
-Roughly 10,000 lines out. What remains is the CLI, the metadata sidecar, the
-viewer integrations, and — new — the engine API and connectors.
+Roughly 10,000 lines out of the workspace. What remains is the CLI, the metadata
+sidecar, the viewer integrations, and — new — the engine API and connectors.
+`fixtures/vt/` stays: it is recorded evidence about real harness behaviour, not
+scaffolding for the crate that consumed it.
 
 ### Risks to close during the phase
 
@@ -221,8 +223,26 @@ viewer integrations, and — new — the engine API and connectors.
   exists to host. `SSH_SETUP.md` already treats `TERM` as something to verify by
   hand. Set `default-terminal` deliberately, and check a real Claude Code
   session renders identically before and after.
-- **tmux availability and version.** Pin a minimum version, bundle the binary
-  inside `Latch.app`, and have `latch doctor` report which one is in use.
+- **Bundling tmux.** tmux is vendored and pinned rather than required from the
+  user's machine, which removes the version floor, the missing-dependency case,
+  and any interaction with a tmux the user already runs. Latch invokes it by
+  absolute path with `-S` and `-f`, so the two never meet. What it costs:
+
+  - **The updater changes shape.** `latch update` currently replaces *one file*
+    and refuses a copy another package manager owns. It becomes a small
+    payload — `latch` plus a vendored `tmux` — so the replace step, the
+    checksum verification, and the Homebrew-cellar refusal all need revisiting
+    rather than reusing.
+  - **The vendored binary needs signing too.** The release already does
+    Developer ID signing and notarization; the bundled tmux must carry the same
+    identity and be included in the notarized payload, or Gatekeeper rejects it.
+  - **You now own a CVE surface.** A pinned dependency is a dependency you have
+    to bump deliberately. `latch doctor` should report the vendored version.
+
+  This does weaken — though not overturn — the distribution argument that
+  settled decision 3. "One file" becomes "one payload, two binaries, one of them
+  vendored and rarely changing." That is still meaningfully different from a
+  second *authored* artifact that has to stay in lockstep with the CLI.
 - **Exit-status fidelity.** Verify `pane_dead_status` reports signals the way
   `exit.json` did, including the `128 + signal` convention.
 - **Startup cost.** D1's whole justification was that a terminal profile pays
@@ -253,24 +273,71 @@ attaches instead of failing.
 
 **Goal:** a chat view of a live agent session, read-only, harness-agnostic.
 
-A connector translates one harness's session record into normalized events:
+A connector translates one harness's session record into normalized events. The
+event is the contract, so it is defined as a schema rather than as any one
+language's types — `fixtures/harness/harness-event.v1.json`:
 
-```ts
-interface HarnessConnector {
-  detect(session: SessionRef): Promise<boolean>;
-  subscribe(session: SessionRef): AsyncIterable<HarnessEvent>;
-  capabilities(session: SessionRef): Promise<InteractionCapabilities>;
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "harness-event.v1.json",
+  "title": "HarnessEvent",
+  "type": "object",
+  "required": ["type", "sessionId", "at"],
+  "properties": {
+    "type": {
+      "enum": ["user_message", "assistant_delta", "assistant_message",
+               "tool_started", "tool_finished", "awaiting_input", "status"]
+    },
+    "sessionId":      { "type": "string" },
+    "at":             { "type": "string", "format": "date-time" },
+    "harnessVersion": { "type": "string" }
+  },
+  "oneOf": [
+    { "properties": { "type": { "const": "user_message" },
+                      "text": { "type": "string" } },
+      "required": ["text"] },
+
+    { "properties": { "type": { "const": "assistant_delta" },
+                      "text": { "type": "string" } },
+      "required": ["text"] },
+
+    { "properties": { "type": { "const": "assistant_message" },
+                      "text": { "type": "string" } },
+      "required": ["text"] },
+
+    { "properties": { "type":  { "const": "tool_started" },
+                      "tool":  { "type": "string" },
+                      "input": {} },
+      "required": ["tool"] },
+
+    { "properties": { "type":   { "const": "tool_finished" },
+                      "tool":   { "type": "string" },
+                      "output": {} },
+      "required": ["tool"] },
+
+    { "properties": { "type":      { "const": "awaiting_input" },
+                      "requestId": { "type": "string" },
+                      "kind":      { "enum": ["permission", "question"] },
+                      "prompt":    { "type": "string" },
+                      "choices":   { "type": "array", "items": { "type": "string" } } },
+      "required": ["requestId", "kind", "prompt"] },
+
+    { "properties": { "type":   { "const": "status" },
+                      "status": { "type": "string" } },
+      "required": ["status"] }
+  ]
 }
-
-type HarnessEvent =
-  | { type: "user_message";     text: string }
-  | { type: "assistant_delta";  text: string }
-  | { type: "assistant_message"; text: string }
-  | { type: "tool_started";     tool: string; input?: unknown }
-  | { type: "tool_finished";    output?: unknown }
-  | { type: "awaiting_input";   requestId: string; kind: "permission" | "question"; prompt: string; choices?: string[] }
-  | { type: "status";           status: string };
 ```
+
+`harnessVersion` is the stamp described under *format stability* below. It is on
+every event rather than sent once, so a transcript that changes shape mid-session
+— a harness upgraded while a session was open — is still attributable.
+
+`HarnessConnector` itself is an internal Rust trait, not a published interface:
+`detect`, `subscribe`, and `capabilities` over a session reference. What other
+software integrates against is the schema above and the CLI in *The engine API*,
+which is why the trait's exact shape can change without breaking anyone.
 
 First connector: Claude Code, tailing
 `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl` — append-only, typed
@@ -420,22 +487,36 @@ one. `TIOCSTI` has been disabled by default since Linux 6.2 as a
 privilege-escalation vector. **The only mechanism that works is writing to a PTY
 you own**, which is exactly what Phase 0 buys.
 
-So injection is capability-gated, not assumed:
+So injection is capability-gated, not assumed. Capabilities are data, reported by
+`latch capabilities --json` per session and schema'd alongside the event —
+`fixtures/harness/interaction-capabilities.v1.json`:
 
-```ts
-interface InteractionCapabilities {
-  sendMessage: boolean;   // free text
-  sendKeys:    boolean;   // keypresses — what permission prompts need
-  resolve:     boolean;   // answer a specific requestId
-}
-
-interface HarnessInteraction {
-  canSend(session): Promise<{ ok: boolean; reason?: string }>;
-  sendMessage(session, text): Promise<void>;
-  sendKeys(session, keys): Promise<void>;
-  resolve(session, requestId, choice): Promise<void>;
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "interaction-capabilities.v1.json",
+  "title": "InteractionCapabilities",
+  "type": "object",
+  "required": ["sendMessage", "sendKeys", "resolve", "canSend"],
+  "properties": {
+    "sendMessage": { "type": "boolean", "description": "free text" },
+    "sendKeys":    { "type": "boolean", "description": "keypresses — what permission prompts need" },
+    "resolve":     { "type": "boolean", "description": "answer a specific requestId" },
+    "canSend": {
+      "type": "object",
+      "required": ["ok"],
+      "properties": {
+        "ok":     { "type": "boolean" },
+        "reason": { "type": "string", "description": "why not, when ok is false" }
+      }
+    }
+  }
 }
 ```
+
+The operations themselves are the `latch send` surface in *The engine API* —
+`--message`, `--keys`, `--resolve <id>=<choice>` — rather than a library
+interface, so a client in any language reaches them the same way.
 
 Three notes that decide the design:
 
@@ -479,17 +560,27 @@ possible one.
    runs tmux inside a Latch session. What remains is `TERM` — pick a
    `default-terminal` and verify a real agent renders identically. See
    *Environment fidelity* in Phase 0.
-2. **Bundle tmux or require it.** Bundling makes `Latch.app` self-contained and
-   pins the version; requiring it keeps the CLI a single file. Affects D1's
-   one-binary claim.
+2. ~~**Bundle tmux or require it.**~~ **Settled: bundle it.** A pinned, vendored
+   tmux removes an entire class of "works on my machine" — no version floor to
+   police, no user config to collide with, no missing dependency on a fresh
+   install. See *Bundling tmux* in Phase 0 for what it costs.
 3. ~~**Where connectors run.**~~ **Settled: Rust, in the `latch` binary.**
    Connectors are not on the every-window path, so D1's startup argument does not
    apply; what decides it is the one-file install and update story, and a port
    verified against language-neutral fixtures is small. `HarnessEvent` is
    schema-first so both languages generate from one definition. See *Connectors
    are Rust* in Phase 1.
-4. **Whether `latch-term` is deleted or archived.** It is good work and it is
-   most of a mosh server; M4's remote transport may want it back.
+4. ~~**Whether `latch-term` is deleted or archived.**~~ **Settled: archived.**
+   Removed from the workspace, but the commit that last contains it is tagged
+   `archive/latch-term-v1` so it stays retrievable without rotting in-tree
+   against a build nothing exercises. It is most of a mosh server, and the remote
+   transport may want it back.
+
+   **`fixtures/vt/` stays in the tree regardless.** Those are recorded streams
+   from real Claude Code and Codex sessions — evidence about how these harnesses
+   actually behave, language-neutral, and costing nothing to keep. They outlive
+   the crate that motivated them, and re-recording them later would mean
+   reproducing conditions that no longer exist.
 
 ## What this plan does not change
 
