@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build one distributable, optionally notarized macOS Latch CLI archive.
+# Build the distributable Latch payload: CLI plus pinned private tmux.
 #
 # Usage: scripts/release-cli.sh [target]
 #
@@ -37,6 +37,10 @@ output_dir="${LATCH_RELEASE_DIR:-dist}"
 archive_name="latch-${version}-${target}.zip"
 archive_path="$output_dir/$archive_name"
 stage_dir="$output_dir/.stage-$target"
+tmux_version="3.7b"
+tmux_sha256="87f2e99e3b685973f2ca002ffd6ed7e51a5744f7009daae5a15670b6d532db96"
+tmux_source="$output_dir/tmux-$tmux_version.tar.gz"
+tmux_build="$output_dir/.tmux-$target"
 
 cargo build --locked --release --package latch --target "$target"
 
@@ -44,22 +48,53 @@ rm -rf "$stage_dir"
 mkdir -p "$stage_dir"
 cp "target/$target/release/latch" "$stage_dir/latch"
 
+curl --fail --silent --show-error --location --proto '=https' \
+  "https://github.com/tmux/tmux/releases/download/$tmux_version/tmux-$tmux_version.tar.gz" \
+  -o "$tmux_source"
+printf '%s  %s\n' "$tmux_sha256" "$tmux_source" | shasum -a 256 -c -
+rm -rf "$tmux_build"
+mkdir -p "$tmux_build"
+tar -xzf "$tmux_source" -C "$tmux_build" --strip-components=1
+
+libevent_prefix="$(brew --prefix libevent)"
+utf8proc_prefix="$(brew --prefix utf8proc)"
+(
+  cd "$tmux_build"
+  PKG_CONFIG_PATH="$libevent_prefix/lib/pkgconfig:$utf8proc_prefix/lib/pkgconfig" \
+  LIBEVENT_CORE_CFLAGS="-I$libevent_prefix/include" \
+  LIBEVENT_CORE_LIBS="$libevent_prefix/lib/libevent_core.a" \
+  LIBEVENT_CFLAGS="-I$libevent_prefix/include" \
+  LIBEVENT_LIBS="$libevent_prefix/lib/libevent.a" \
+  LIBUTF8PROC_CFLAGS="-I$utf8proc_prefix/include" \
+  LIBUTF8PROC_LIBS="$utf8proc_prefix/lib/libutf8proc.a" \
+  ./configure --enable-utf8proc
+  make -j"$(sysctl -n hw.ncpu)"
+)
+cp "$tmux_build/tmux" "$stage_dir/latch-tmux"
+"$stage_dir/latch-tmux" -V | grep -Fx "tmux $tmux_version"
+if otool -L "$stage_dir/latch-tmux" | grep -Eq "$libevent_prefix|$utf8proc_prefix"; then
+  echo "Vendored tmux still links to a Homebrew build dependency" >&2
+  exit 1
+fi
+
 if [[ -n "${LATCH_CODESIGN_IDENTITY:-}" ]]; then
   codesign --force --options runtime --timestamp --sign "$LATCH_CODESIGN_IDENTITY" "$stage_dir/latch"
+  codesign --force --options runtime --timestamp --sign "$LATCH_CODESIGN_IDENTITY" "$stage_dir/latch-tmux"
   codesign --verify --strict --verbose=2 "$stage_dir/latch"
+  codesign --verify --strict --verbose=2 "$stage_dir/latch-tmux"
 fi
 
 mkdir -p "$output_dir"
 archive_path="$(cd "$output_dir" && pwd -P)/$archive_name"
 rm -f "$archive_path"
-(cd "$stage_dir" && /usr/bin/zip -q -X "$archive_path" latch)
+(cd "$stage_dir" && /usr/bin/zip -q -X "$archive_path" latch latch-tmux)
 
 if [[ -n "${LATCH_NOTARY_PROFILE:-}" ]]; then
   : "${LATCH_CODESIGN_IDENTITY:?LATCH_NOTARY_PROFILE requires LATCH_CODESIGN_IDENTITY}"
   xcrun notarytool submit "$archive_path" --keychain-profile "$LATCH_NOTARY_PROFILE" --wait
 fi
 
-rm -rf "$stage_dir"
+rm -rf "$stage_dir" "$tmux_build" "$tmux_source"
 
 checksum="$(shasum -a 256 "$archive_path" | awk '{print $1}')"
 printf '%s  %s\n' "$checksum" "$archive_name" > "$archive_path.sha256"

@@ -1,0 +1,1 @@
+{"sessionId":"claude-session-3","at":"2026-08-13T10:20:00Z","harnessVersion":"2.1.119","connectorEpoch":1,"type":"awaiting_input","requestId":"permission-1","kind":"permission","prompt":"Install the test runner","choices":["Allow once","Deny"]}

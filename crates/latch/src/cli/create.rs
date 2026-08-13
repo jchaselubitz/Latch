@@ -1,4 +1,4 @@
-//! Session creation: allocate an id, write `meta.json`, spawn the worker, attach.
+//! Session creation on the private tmux kernel.
 //!
 //! Bare `latch`, `latch shell`, and `latch run -- <cmd>` all land here. So does
 //! `latch create --manifest-file -`, which is the path M3's Overlord provider
@@ -9,10 +9,10 @@ use std::io;
 use std::path::PathBuf;
 
 use crate::cli::nesting::{self, NestingDecision, SESSION_ID_ENV};
-use crate::worker::manifest::{DisplayMetadata, LaunchManifest, TerminalSize};
-use crate::worker::meta;
-use crate::worker::paths::{LatchHome, SessionId, SessionPaths};
-use crate::worker::spawn::{self, SpawnRequest};
+use crate::engine::{self, CreateRequest};
+use crate::session::manifest::{DisplayMetadata, LaunchManifest, LaunchRequest, TerminalSize};
+use crate::session::meta;
+use crate::session::paths::{LatchHome, SessionId, SessionPaths};
 use anyhow::{bail, Context};
 
 /// How a session is being asked for.
@@ -75,24 +75,15 @@ pub fn create_session(options: CreateOptions) -> anyhow::Result<CreateOutcome> {
     let mut manifest = options.manifest;
     sanitize_display_metadata(&mut manifest.display);
 
-    let (id, paths) = loop {
-        let id = SessionId::generate();
-        let paths = options.home.session(&id);
-        if !paths.dir().exists() {
-            break (id, paths);
-        }
-    };
-
-    let worker_binary = worker_binary()?;
-    spawn::spawn_detached(SpawnRequest::new(
-        paths.clone(),
-        id.clone(),
-        worker_binary,
+    let result = engine::create(CreateRequest {
+        home: options.home,
         manifest,
-    ))?;
-
-    let name = meta::read(&paths)?.name;
-    Ok(CreateOutcome { id, paths, name })
+    })?;
+    Ok(CreateOutcome {
+        id: result.id,
+        paths: result.paths,
+        name: result.meta.name,
+    })
 }
 
 /// Builds the launch material for a shell session.
@@ -101,14 +92,22 @@ pub fn shell_manifest(options: ManifestOptions) -> LaunchManifest {
     // iTerm's ordinary profile starts a login shell. The Latch profile must do
     // the same or shell startup files, PATH setup, and other profile behavior
     // differ before the user types the first command.
-    let mut manifest = LaunchManifest::new(vec![shell, "-l".to_owned()], options.cwd, options.size);
+    let mut manifest = LaunchManifest::new(LaunchRequest {
+        argv: vec![shell, "-l".to_owned()],
+        cwd: options.cwd,
+        size: options.size,
+    });
     manifest.display = options.display;
     manifest
 }
 
 /// Builds the launch material for `latch run -- <argv>`.
 pub fn run_manifest(argv: Vec<String>, options: ManifestOptions) -> LaunchManifest {
-    let mut manifest = LaunchManifest::new(argv, options.cwd, options.size);
+    let mut manifest = LaunchManifest::new(LaunchRequest {
+        argv,
+        cwd: options.cwd,
+        size: options.size,
+    });
     manifest.display = options.display;
     manifest
 }
@@ -120,10 +119,10 @@ pub fn run_manifest(argv: Vec<String>, options: ManifestOptions) -> LaunchManife
 /// display metadata.
 pub fn read_manifest_file(path: &str) -> anyhow::Result<LaunchManifest> {
     if path == "-" {
-        return crate::worker::manifest::read(io::stdin()).map_err(Into::into);
+        return crate::session::manifest::read(io::stdin()).map_err(Into::into);
     }
     let file = File::open(path).with_context(|| format!("cannot open launch manifest {path}"))?;
-    crate::worker::manifest::read(file).map_err(Into::into)
+    crate::session::manifest::read(file).map_err(Into::into)
 }
 
 fn sanitize_display_metadata(display: &mut DisplayMetadata) {
@@ -138,24 +137,6 @@ fn sanitize_option(value: Option<String>) -> Option<String> {
     value
         .map(|value| meta::sanitize_display(&value))
         .filter(|value| !value.is_empty())
-}
-
-fn worker_binary() -> anyhow::Result<PathBuf> {
-    if let Some(path) = std::env::var_os("CARGO_BIN_EXE_latch") {
-        return Ok(path.into());
-    }
-
-    let current = std::env::current_exe().context("cannot locate the current executable")?;
-    if current.file_name().is_some_and(|name| name == "latch") {
-        return Ok(current);
-    }
-
-    let test_binary = current
-        .parent()
-        .and_then(|directory| directory.parent())
-        .map(|directory| directory.join("latch"))
-        .filter(|path| path.is_file());
-    test_binary.context("cannot locate the latch worker binary")
 }
 
 /// Reads [`SESSION_ID_ENV`] from this process, if set to a non-empty value.

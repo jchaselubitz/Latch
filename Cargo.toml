@@ -2,12 +2,10 @@
 resolver = "2"
 members = [
     "crates/latch",
-    "crates/latch-protocol",
-    "crates/latch-term",
 ]
 
 [workspace.package]
-version = "0.2608121945.0"
+version = "0.2608131641.0"
 edition = "2021"
 rust-version = "1.82"
 license = "UNLICENSED"
@@ -15,22 +13,15 @@ publish = false
 repository = "https://github.com/Cooperativ/Latch"
 
 [workspace.dependencies]
-# Internal crates. `latch-protocol` and `latch-term` are leaves: they must not
-# depend on each other or on `latch`. See docs/ARCHITECTURE_RULES.md.
-latch-protocol = { path = "crates/latch-protocol" }
-latch-term = { path = "crates/latch-term" }
-
 # Third-party versions are pinned here so every crate agrees.
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 # The process plane is POSIX: `setsid`, PTY allocation, process groups, signals,
 # and `SO_PEERCRED`/`LOCAL_PEERCRED` have no portable std equivalent.
 libc = "0.2"
-rmp-serde = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-vt100 = "0.16"
 
 # Dev-only
 proptest = "1"

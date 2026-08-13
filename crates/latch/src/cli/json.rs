@@ -15,10 +15,9 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use latch_protocol::control::SessionState;
-
-use crate::worker::manifest::TerminalSize;
-use crate::worker::meta::ExitRecord;
+use crate::engine::SessionState;
+use crate::session::manifest::TerminalSize;
+use crate::session::meta::ExitRecord;
 
 /// One row of `latch list --json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -212,6 +211,13 @@ pub struct DoctorFinding {
 /// Reports what is actually wrong, not a checklist of things that are fine.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DoctorReport {
+    /// Version reported by the pinned bundled tmux, when runnable.
+    #[serde(
+        rename = "tmuxVersion",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub tmux_version: Option<String>,
     /// Findings. Empty means the installation looks sound.
     pub findings: Vec<DoctorFinding>,
 }

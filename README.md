@@ -11,8 +11,11 @@ latch                       # a persistent shell, attached
 latch run -- claude         # a persistent agent session
 latch list                  # what is running
 latch attach auth-refactor  # from anywhere, including a phone over SSH
+latch events auth-refactor --json  # normalized live agent events
+printf '%s' 'continue' | latch send auth-refactor --message -
+latch send auth-refactor --resolve permission-1='Allow once'
 latch remove old-session    # remove one exited/lost session
-latch update                # replace this binary with the newest release
+latch update                # replace the CLI + private tmux payload
 ```
 
 Point your terminal profile's command at `latch` and every window you open is
@@ -22,10 +25,10 @@ than code.
 
 ## Install
 
-Download the standalone CLI and the universal macOS desktop app from the same
+Download the standalone CLI payload and the universal macOS desktop app from the same
 [GitHub Release](https://github.com/jchaselubitz/Latch/releases/latest). The
 current desktop archive is
-[Latch-0.2608121945.0-macos.zip](https://github.com/jchaselubitz/Latch/releases/download/v0.2608121945.0/Latch-0.2608121945.0-macos.zip);
+[Latch-0.2608131641.0-macos.zip](https://github.com/jchaselubitz/Latch/releases/download/v0.2608131641.0/Latch-0.2608131641.0-macos.zip);
 it contains only `Latch.app`. Drag the app to Applications, then install the CLI
 independently with:
 
@@ -34,13 +37,14 @@ curl -fsSL https://raw.githubusercontent.com/jchaselubitz/Latch/main/scripts/ins
 ```
 
 The installer chooses the Apple Silicon or Intel archive, verifies it against
-the release's `checksums.txt`, verifies its Developer ID signature, and installs
-`latch` in `~/.local/bin`. Latch Desktop runs `where latch` on first launch and
-lets you choose among every installed copy it finds.
+the release's `checksums.txt`, verifies both Developer ID signatures, and
+installs `latch` plus its pinned private `latch-tmux` kernel in
+`~/.local/bin`. Latch always invokes that sibling binary by absolute path; it
+never discovers or joins a tmux server the user runs.
 
 ## Updating
 
-`latch update` replaces the running binary with the newest release published
+`latch update` replaces the complete two-binary payload with the newest release published
 at [Latch releases](https://github.com/jchaselubitz/Latch/releases). It
 verifies the archive against the checksums that release publishes, and — when
 the installed binary is Developer ID signed — refuses a download signed by
@@ -55,21 +59,33 @@ identity the installed app already has.
 
 ## Status
 
-M1 is implemented and verified on macOS: local workers own persistent PTYs,
-iTerm-compatible clients can detach and reattach, and the management command
-surface is live. M2's SSH/phone path is implemented for dogfooding but remains
-explicitly non-shippable; see [`docs/M2_FIELD_REPORT.md`](docs/M2_FIELD_REPORT.md).
+The session kernel is a private, pinned tmux server behind the Latch CLI.
+Multiple terminals can attach, closing a terminal does not stop the process,
+and session state is queried directly from tmux.
+
+When Latch launches Claude Code directly, it adds an owner-only observation
+plugin for that process only. The plugin records pending permission and
+question hooks beside the session transcript; it never changes the user's
+global Claude settings. `latch events` combines those hooks with transcript
+messages in a persistent event ledger, so numeric cursors remain stable even
+when Claude writes transcript records late.
+
+`latch capabilities <session> --json` reports the schema-defined interaction
+capabilities for the current screen. `latch send` reads messages from stdin,
+sends explicit key names with `--keys`, and binds `--resolve` to the exact
+pending request id. Latch captures the live tmux pane before every operation:
+an empty Claude composer and a visible numbered prompt are accepted, while
+typed text, stale requests, exited sessions, and unrecognized screens are
+refused rather than receiving input.
 
 ## Layout
 
 ```text
 crates/
-  latch/                   # the single binary: CLI + worker modes
-  latch-protocol/          # framing, control messages, codec
-  latch-term/              # screen model + snapshot serialization
+  latch/                   # CLI, metadata, and private tmux engine
 apps/LatchDesktop/         # native macOS session manager + menu-bar extra
-packages/                  # TypeScript clients, M3 onward
-fixtures/                  # language-neutral protocol + VT fixtures
+packages/                  # generated harness contract and TypeScript clients
+fixtures/                  # harness schemas, raw transcripts, retained VT recordings
 docs/
 planning/
 ```
@@ -80,6 +96,7 @@ planning/
 cargo test --workspace          # unit, integration, and fixture suites
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
+python3 scripts/generate-harness-types.py  # regenerate Rust + TypeScript contracts
 ./scripts/check-boundaries.sh   # dependency and layering rules
 swift test --package-path apps/LatchDesktop  # desktop contract tests (macOS)
 ```
@@ -97,8 +114,7 @@ without the app installed.
 
 - [`planning/PROJECT_ARCHITECTURE.md`](planning/PROJECT_ARCHITECTURE.md) — the
   product and its boundaries
-- [`planning/IMPLEMENTATION_PLAN.md`](planning/IMPLEMENTATION_PLAN.md) —
-  milestones M1–M6, and the decisions each one rests on
+- [`planning/ENGINE_PLAN.md`](planning/ENGINE_PLAN.md) — current engine sequence
 - [`planning/OVERLORD_INTEGRATION.md`](planning/OVERLORD_INTEGRATION.md) — how
   Overlord uses Latch without either product requiring the other
 - [`planning/ARCHITECTURE_REVIEW.md`](planning/ARCHITECTURE_REVIEW.md) — the

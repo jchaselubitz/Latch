@@ -16,20 +16,6 @@ report() {
     fail=1
 }
 
-# --- Leaf crates stay leaves -------------------------------------------------
-#
-# latch-protocol and latch-term may depend on third-party crates, but not on
-# each other and not on the binary.
-for leaf in latch-protocol latch-term; do
-    manifest="crates/$leaf/Cargo.toml"
-    for forbidden in latch-protocol latch-term 'latch '; do
-        [ "$(printf '%s' "$forbidden" | tr -d ' ')" = "$leaf" ] && continue
-        if grep -Eq "^[[:space:]]*${forbidden%% }[[:space:]]*[.=]" "$manifest"; then
-            report "$manifest depends on ${forbidden%% }; leaf crates must not"
-        fi
-    done
-done
-
 # --- No Overlord in the local plane ------------------------------------------
 #
 # Latch is useful without Overlord. Integration flows the other way: Overlord

@@ -1,23 +1,22 @@
 # packages/
 
-TypeScript, starting at M3.
+TypeScript contracts and presentation clients.
 
 ```text
-protocol/          # TypeScript codec, fixture-verified against the Rust one
-session-client/    # attachment client with reconnect
-terminal-react/    # xterm.js behind a stable Latch renderer API
+harness-schema/    # generated normalized-event and interaction types
+client/            # remote session client
+react/             # chat and terminal presentation components
 ```
 
-Deliberately empty until then. The local plane is Rust only — with a terminal
-profile pointed at `latch`, every window pays CLI startup cost, and Node's
-startup is not affordable there.
+The local plane remains Rust only — with a terminal profile pointed at `latch`,
+every window pays CLI startup cost, and Node's startup is not affordable there.
+`harness-schema` is compile-time consumer material; it is never loaded by the
+CLI.
 
-Two rules apply when this fills in:
-
-**`protocol/` does not share code with `crates/latch-protocol`.** They are
-independent implementations kept honest by `fixtures/`. No shared generator, no
-WASM build of the Rust codec, no schema that emits both — the value comes from
-them being written separately.
+`harness-schema/src/generated.ts` and
+`crates/latch/src/harness/generated.rs` come from the same JSON schemas under
+`fixtures/harness/`. Regenerate both with
+`scripts/generate-harness-types.py`; do not edit either output by hand.
 
 **xterm.js is not the public surface.** It sits behind a Latch renderer API so
 it can be replaced without breaking every embedder.

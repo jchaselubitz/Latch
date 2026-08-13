@@ -32,6 +32,7 @@ use std::process::{Command, Stdio};
 use anyhow::{anyhow, bail, Context, Result};
 
 use crate::cli::json::UpdateReport;
+use crate::engine::BUNDLED_TMUX_NAME;
 use release::{host_target, Release, Version, DEFAULT_RELEASE_REPO};
 
 /// What an update run was asked to do.
@@ -203,7 +204,8 @@ pub fn update_from(options: UpdateOptions, source: &dyn ReleaseSource) -> Result
     let release = Release::parse(&source.latest_release()?)?;
 
     let newer = release.version > current;
-    if !newer && !options.force {
+    let payload_incomplete = !payload_is_complete(options.executable.as_deref());
+    if !newer && !options.force && !payload_incomplete {
         return Ok(UpdateReport {
             status: UpdateStatus::Current.as_wire().to_owned(),
             current_version: current.to_string(),
@@ -247,6 +249,19 @@ pub fn update_from(options: UpdateOptions, source: &dyn ReleaseSource) -> Result
         release_url: Some(release.url),
         installed_path: Some(installed),
     })
+}
+
+fn payload_is_complete(executable: Option<&Path>) -> bool {
+    let executable = executable
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::current_exe().ok());
+    let Some(executable) = executable else {
+        return false;
+    };
+    let executable = fs::canonicalize(&executable).unwrap_or(executable);
+    executable
+        .parent()
+        .is_some_and(|parent| parent.join(BUNDLED_TMUX_NAME).is_file())
 }
 
 /// Refuses to replace a binary that something else is responsible for.
@@ -309,13 +324,15 @@ fn install(
     unpack(&archive_path, &unpacked)?;
 
     let replacement = unpacked.join("latch");
-    if !replacement.is_file() {
+    let replacement_tmux = unpacked.join(BUNDLED_TMUX_NAME);
+    if !replacement.is_file() || !replacement_tmux.is_file() {
         bail!(
-            "{} did not contain a `latch` binary; the release layout has changed",
+            "{} did not contain the complete `latch` and `{BUNDLED_TMUX_NAME}` payload",
             archive.name
         );
     }
     verify_signature(target, &replacement)?;
+    verify_signature(target, &replacement_tmux)?;
 
     // Match the mode of what is being replaced, so an install that was
     // deliberately group-readable-only stays that way; fall back to the mode
@@ -325,14 +342,37 @@ fn install(
         .unwrap_or(0o755);
     fs::set_permissions(&replacement, fs::Permissions::from_mode(mode))
         .with_context(|| format!("could not set permissions on {}", replacement.display()))?;
+    fs::set_permissions(&replacement_tmux, fs::Permissions::from_mode(0o755)).with_context(
+        || {
+            format!(
+                "could not set permissions on {}",
+                replacement_tmux.display()
+            )
+        },
+    )?;
 
-    fs::rename(&replacement, target).with_context(|| {
-        format!(
-            "could not replace {}. Re-run with write access to {}",
-            target.display(),
-            parent.display()
-        )
-    })?;
+    let tmux_target = parent.join(BUNDLED_TMUX_NAME);
+    let tmux_backup = staging.path().join("previous-tmux");
+    if tmux_target.is_file() {
+        fs::copy(&tmux_target, &tmux_backup)
+            .with_context(|| format!("could not stage {}", tmux_target.display()))?;
+    }
+    fs::rename(&replacement_tmux, &tmux_target)
+        .with_context(|| format!("could not replace {}", tmux_target.display()))?;
+    if let Err(error) = fs::rename(&replacement, target) {
+        if tmux_backup.is_file() {
+            let _ = fs::rename(&tmux_backup, &tmux_target);
+        } else {
+            let _ = fs::remove_file(&tmux_target);
+        }
+        return Err(error).with_context(|| {
+            format!(
+                "could not replace {}. The bundled tmux was rolled back; re-run with write access to {}",
+                target.display(),
+                parent.display()
+            )
+        });
+    }
     Ok(target.to_path_buf())
 }
 
@@ -560,6 +600,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let staged = dir.path().join("latch");
         fs::write(&staged, body).expect("stage binary");
+        let staged_tmux = dir.path().join(BUNDLED_TMUX_NAME);
+        fs::write(&staged_tmux, b"tmux 3.7b").expect("stage tmux");
         let archive_name = format!("latch-{version}-{FIXTURE_TARGET}.tar.gz");
         let archive = dir.path().join(&archive_name);
         let status = Command::new("tar")
@@ -567,7 +609,7 @@ mod tests {
             .arg(&archive)
             .args(["-C"])
             .arg(dir.path())
-            .arg("latch")
+            .args(["latch", BUNDLED_TMUX_NAME])
             .status()
             .expect("tar");
         assert!(status.success(), "tar must produce the fixture archive");
@@ -602,6 +644,9 @@ mod tests {
         let path = directory.join("latch");
         fs::write(&path, b"the old binary").expect("write old binary");
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod");
+        let tmux = directory.join(BUNDLED_TMUX_NAME);
+        fs::write(&tmux, b"the old tmux").expect("write old tmux");
+        fs::set_permissions(&tmux, fs::Permissions::from_mode(0o755)).expect("chmod tmux");
         path
     }
 
@@ -616,6 +661,10 @@ mod tests {
         assert_eq!(report.status, "installed");
         assert_eq!(report.latest_version.as_deref(), Some("0.2608101202.0"));
         assert_eq!(fs::read(&target).expect("read"), b"the new binary");
+        assert_eq!(
+            fs::read(dir.path().join(BUNDLED_TMUX_NAME)).expect("read tmux"),
+            b"tmux 3.7b"
+        );
         assert_eq!(
             fs::metadata(&target).expect("stat").permissions().mode() & 0o777,
             0o755,
@@ -657,6 +706,23 @@ mod tests {
         assert!(
             source.fetched.lock().unwrap().is_empty(),
             "a check that finds nothing newer must not download anything"
+        );
+    }
+
+    #[test]
+    fn a_current_cli_with_a_missing_tmux_repairs_the_complete_payload() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let target = installed_binary(dir.path());
+        fs::remove_file(dir.path().join(BUNDLED_TMUX_NAME)).expect("remove tmux");
+        let source = release_with("0.2608101202.0", b"the repaired binary", false);
+
+        let report = update_from(options_for(&target, "0.2608101202.0"), &source).expect("repair");
+
+        assert_eq!(report.status, "installed");
+        assert_eq!(fs::read(&target).unwrap(), b"the repaired binary");
+        assert_eq!(
+            fs::read(dir.path().join(BUNDLED_TMUX_NAME)).unwrap(),
+            b"tmux 3.7b"
         );
     }
 
@@ -711,7 +777,7 @@ mod tests {
             .expect("read dir")
             .filter_map(Result::ok)
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
-            .filter(|name| name != "latch")
+            .filter(|name| name != "latch" && name != BUNDLED_TMUX_NAME)
             .collect();
         assert!(leftovers.is_empty(), "left behind {leftovers:?}");
     }

@@ -1,0 +1,2 @@
+{"sessionId":"70700000-0000-4000-8000-000000000001","at":"2026-08-13T11:11:22.437Z","harnessVersion":"2.1.228","connectorEpoch":1,"type":"user_message","text":"Reply with exactly: latch-live-ok"}
+{"sessionId":"70700000-0000-4000-8000-000000000001","at":"2026-08-13T11:11:23.986Z","harnessVersion":"2.1.228","connectorEpoch":1,"type":"assistant_message","text":"latch-live-ok"}

@@ -10,7 +10,7 @@ use anyhow::Context;
 
 use crate::cli::json::OpenReport;
 use crate::cli::manage;
-use crate::worker::paths::LatchHome;
+use crate::session::paths::LatchHome;
 
 /// A request to open one session in a local terminal viewer.
 #[derive(Debug, Clone)]
@@ -68,6 +68,7 @@ fn open_iterm(session_id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn host_attach_command(shell: impl AsRef<std::ffi::OsStr>, session_id: &str) -> String {
     let attach = format!("exec latch attach {}", shell_quote(session_id));
     // iTerm's AppleScript `command` replaces the profile's login command; it
@@ -90,6 +91,7 @@ fn open_iterm(_session_id: &str) -> anyhow::Result<()> {
 /// no backslashes: `open` quotes the session id, then quotes the whole attach
 /// command again, so any error here is applied twice and reaches `latch attach`
 /// as extra characters in the session id rather than as a syntax error.
+#[cfg(any(target_os = "macos", test))]
 fn shell_quote(value: impl AsRef<std::ffi::OsStr>) -> String {
     use std::os::unix::ffi::OsStrExt;
 

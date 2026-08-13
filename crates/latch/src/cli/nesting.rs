@@ -5,7 +5,7 @@
 //! The worker exports this variable into the child; the CLI reads it before
 //! creating anything and either attaches to the named session or declines.
 
-pub use crate::worker::paths::SESSION_ID_ENV;
+pub use crate::session::paths::SESSION_ID_ENV;
 
 /// What to do when `latch` is invoked and a session may already enclose it.
 #[derive(Debug, Clone, PartialEq, Eq)]

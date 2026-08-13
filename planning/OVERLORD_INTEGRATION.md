@@ -15,8 +15,11 @@ The integration must preserve these statements:
    directories or cloud tables.
 4. Latch owns PTY and attachment lifecycle; Overlord owns mission and agent-work
    lifecycle.
-5. Overlord's harness connectors remain the semantic integration path. Latch does
-   not replace `ovld protocol` or the Agent Session Exchange.
+5. Overlord owns Channel 1 (protocol attach, artifacts, shared state, delivery). Latch owns
+   harness observation (turns, tools, `awaiting_input`) via `latch events`. Humans answer
+   permission/question prompts through the Latch PTY (`latch send` when advertised). Binding
+   is the agent's `ovld protocol attach` declaration, not connector inference. Latch does
+   not replace `ovld protocol`.
 
 ## Current Overlord launch model
 
@@ -29,8 +32,7 @@ Overlord:
 4. Resolve the agent, model, reasoning effort, flags, pre-command, project launch
    environment, and pre-launch commands.
 5. Write mission briefing/context files and construct the final agent command.
-6. Mark the request `launching` and create the Agent Session Exchange bootstrap
-   before the process exists.
+6. Mark the request `launching`.
 7. Launch the command inline, through a configured prefix, or by opening a terminal
    application.
 8. Mark terminal/command opening as successful or failed.
@@ -55,13 +57,12 @@ The runner still decides what to run. It asks Latch to host the resulting comman
 | PTY and child process | Owns | Does not own |
 | Detach, reattach, resize, replay | Owns | Uses through API/SDK |
 | Preferred terminal viewer | Owns generic launch integrations; may accept caller preference | Stores the user's per-target selection and requests it |
-| Session input control | Owns | Displays and requests through Latch |
 | Mission/objective/execution request | Does not understand | Owns |
 | Worktree and cwd selection | Receives resolved cwd | Owns resolution |
 | Agent command/model/flags | Receives opaque launch specification | Owns resolution |
 | Mission context and launch environment | Passes to process without persisting secrets | Owns construction |
-| Agent protocol lifecycle | Does not replace | Owns through connectors and protocol |
-| Agent Session Exchange | May surface optional extension data | Owns semantic events, decisions, and injection |
+| Agent protocol lifecycle | Does not replace | Owns Channel 1 through connectors and protocol |
+| Harness observation | Owns `latch events` / `awaiting_input` | Displays as presentation; does not re-parse transcripts |
 | Session termination | Executes a scoped process stop | Decides when to request one based on user action/policy |
 | Cloud session discovery | Latch cloud owns | Links or embeds through public APIs |
 
@@ -298,19 +299,18 @@ latch inspect ses_01J... --json
 The response distinguishes:
 
 ```text
-running       verified live worker and primary process
+running       verified live process
 exited        verified process exit, with optional code
 stopping      termination underway
-lost          session directory exists but the worker cannot be reached and no
-              exit record was written
 ```
 
-`unreachable` is deliberately not in this list. Whether a remote device can currently
-be contacted is a property of the caller's connectivity, not of the session, and
-Latch's session state machine is `creating -> running -> stopping -> exited`, with
-`lost` as the branch for an unverifiable worker. Overlord should render reachability as
-its own client-side condition layered over the last known session state, so that a
-network problem is never mistaken for something having happened to the process.
+`lost` is an error, not a normal state: the session directory exists but the process cannot
+be verified and no exit record was written. `unreachable` is deliberately not in this list.
+Whether a remote device can currently be contacted is a property of the caller's
+connectivity, not of the session. Latch's session state machine is
+`creating -> running -> stopping -> exited`. Overlord should render reachability as its own
+client-side condition layered over the last known session state, so that a network problem
+is never mistaken for something having happened to the process.
 
 Overlord should project this as terminal-session status, separate from mission and
 agent-session status. For example, an agent may have delivered its objective while
@@ -342,7 +342,6 @@ sequenceDiagram
   participant API as "Overlord backend"
   participant Runner as "Overlord runner"
   participant Latch as "latch CLI"
-  participant Worker as "Latch worker"
   participant Agent as "Agent harness"
   participant Viewer as "iTerm or Latch frontend"
 
@@ -350,13 +349,11 @@ sequenceDiagram
   API->>API: Queue execution request
   Runner->>API: Claim request
   Runner->>Runner: Resolve cwd, worktree, command, env
-  Runner->>API: Mark launching and receive session-channel bootstrap
+  Runner->>API: Mark launching
   Runner->>Latch: Create using protected manifest
-  Latch->>Worker: Start session worker
-  Worker->>Agent: Spawn in PTY
-  Worker-->>Latch: Process running
+  Latch->>Agent: Spawn in PTY
   Latch-->>Runner: Latch session ID
-  Runner->>API: Mark launch successful with external session ID
+  Runner->>API: Mark launch successful with provider session
   Runner->>Latch: Open preferred viewer (best effort)
   Viewer->>Latch: Attach to same session
   Agent->>API: ovld protocol attach
@@ -364,8 +361,8 @@ sequenceDiagram
 ```
 
 The Latch create call replaces only the final process/terminal spawn. Queueing,
-claiming, worktrees, context construction, Agent Session Exchange bootstrap, and
-protocol attachment remain unchanged.
+claiming, worktrees, context construction, and protocol attachment remain Overlord's.
+Harness observation is subscribed via `latch events`, not a session-channel bootstrap.
 
 ## Mapping Latch and Overlord session identities
 
@@ -377,9 +374,6 @@ Latch session ID
 
 Overlord agent session ID
   identifies one harness's mission-protocol lifecycle
-
-Overlord agent-session channel ID
-  authorizes normalized harness interaction for one launch channel
 
 Execution request ID
   identifies Overlord's queued and claimed launch request
@@ -429,7 +423,7 @@ The connector follows its ordinary Overlord binding rules. Latch supplies no mis
 authority merely because the process has a cwd or an external metadata label.
 
 The environment marker is correlation only. Overlord authorization continues to
-come from its own authenticated protocol and session-channel mechanisms.
+come from its own authenticated protocol.
 
 ## Overlord desktop, web, and mobile experiences
 
@@ -446,29 +440,26 @@ Terminal session
 ```
 
 The initial integration opens the session through the Latch CLI in the user's chosen
-terminal. After the TypeScript embeddable client exists, Overlord Desktop attaches that
-component **directly to the session's worker socket**.
+terminal. An embedded view is fed by the engine's event stream; an embedded terminal
+is optional and later, since `latch attach` already covers it.
 
-Overlord Desktop is an Electron application, so its main process can open the Unix
-socket and forward frames to the renderer over Electron IPC. **No daemon, gateway, or
-other intermediary is required**, and the renderer never needs socket access. This
-keeps Latch free of any resident process until the cloud control plane, and keeps
-Overlord Desktop off the terminal data path in the same way its backend is.
+Overlord Desktop does not attach to a Latch worker socket — that socket no longer
+exists. The renderer never needs socket access. This keeps Latch free of any resident
+process until the cloud control plane, and keeps Overlord Desktop off the terminal
+data path in the same way its backend is.
 
 A Swift component is optional and not part of the initial integration. Overlord does
 not proxy terminal bytes through its backend.
 
-### Notifications before Latch has its own
+### Notifications
 
-Overlord already knows when an agent needs a human, because its connectors and the
-Agent Session Exchange already produce normalized events for permissions, questions,
-and turn completion. Those existing hooks should carry notification for the first
-integration rather than waiting on Latch push infrastructure.
+Delivery, artifact, and `ovld protocol ask` notifications stay on Overlord's existing
+hooks. Permission and question notifications come from Latch `awaiting_input` ingested
+through `latch events`. Neither waits on the other.
 
 This matters more than it sounds: remote chat without notification is a polling chore.
 Being able to answer a prompt from a phone is only useful if the phone tells you the
-prompt exists. Reusing Overlord's pipeline makes that loop testable long before Latch
-Cloud exists.
+prompt exists.
 
 ### Remote web/mobile before Latch Cloud
 
@@ -483,10 +474,6 @@ device and run `latch attach`, borrowing SSH's reachability and encryption. It r
 the device to be SSH-reachable, so Overlord should present it as what it is rather than
 as a supported remote mode.
 
-Consequently, **Overlord Desktop's embedded chat view can ship well before Overlord
-mobile's can.** Desktop is local and needs no transport; mobile needs one that does not
-yet exist. Splitting them is what keeps the terminal-byte boundary intact.
-
 ### Remote web/mobile with Latch Cloud
 
 Overlord requests a short-lived Latch attachment grant through the public Latch
@@ -497,44 +484,21 @@ Overlord's backend never exchanges the grant for database access and does not be
 the terminal relay. The embedded component receives only the session-scoped grant
 needed for its attachment.
 
-## Relationship to Overlord connectors and widgets
+## Relationship to Overlord connectors
 
-Latch terminal attachment and Overlord Agent Session Exchange are complementary:
+Latch terminal attachment and Overlord protocol are complementary:
 
 ```text
 Latch terminal plane
-  raw terminal input/output, resize, replay, control ownership
+  PTY, attach, events, awaiting_input, send when advertised
 
-Overlord semantic plane
-  normalized agent events, permission decisions, follow-up injection, mission state
+Overlord Channel 1
+  protocol attach/update/deliver, artifacts, shared state, follow-up, touched files
 ```
 
-Do not send PTY bytes through `ovld agent-session`. Do not make Latch responsible for
-Overlord mission lifecycle.
-
-There are two viable sources for advanced widgets:
-
-1. **Latch-native harness extension:** useful to every application embedding Latch.
-2. **Overlord connector event:** useful when the session is bound to Overlord and the
-   existing connector already supplies a fixture-proven structured event.
-
-The UI may compose both sources, but actions must have one authority. A permission
-request should have one request ID and first-writer-wins resolution even if it is
-visible in the terminal, Latch widget, and Overlord mission panel. The integration
-should prefer reusing a reliable structured Overlord connector capability rather
-than screen-scraping the same interaction again, while keeping Latch's extension SDK
-independent of Overlord types.
-
-A bridge can translate an Overlord normalized event into a Latch extension event at
-the UI boundary:
-
-```text
-Overlord request DTO
-  -> Overlord/Latch presentation adapter
-  -> generic Latch permission widget model
-```
-
-This is presentation composition, not a change in terminal ownership.
+Do not send PTY bytes through Overlord. Do not make Latch responsible for Overlord
+mission lifecycle. There is one source for harness permission/question widgets:
+`latch events`. Agent assertions remain the record; Latch observation is presentation.
 
 ## Cloud deployment alongside Overlord on Railway
 
@@ -575,8 +539,8 @@ terminal access.
 - Record the external provider session ID.
 - Separate process-spawn success from viewer-open success.
 - Detect `LATCH_SESSION_ID` to avoid nesting.
-- Add inspect, open, and explicit stop operations through the Latch CLI/API.
-- Preserve the existing Agent Session Exchange bootstrap and protocol attach flow.
+- Add inspect, open, collect events, resolve input, and explicit stop operations through the Latch CLI.
+- Preserve protocol attach. Do not mint Agent Session Exchange channels at launch.
 
 ### Data contract
 
@@ -595,8 +559,10 @@ terminal access.
 
 ### User interface
 
-- Display terminal-session state separately from agent state.
+- Display terminal-session state separately from agent state, including unattached turns
+  and Latch `awaiting_input`.
 - Offer Open, Attach, Copy Attach Command, Detach, and End Session distinctly.
+- Do not offer session-input-control affordances. There is no controller to display.
 - Initially open sessions through the Latch CLI; later embed the TypeScript frontend
   locally.
 - Later request scoped Latch Cloud grants for remote embedding.
@@ -619,11 +585,12 @@ Implement capability discovery, protected create, structured response, and
 provider-session mapping. This is the minimum seamless integration and the prerequisite
 for anything that needs to know *which* session belongs to a mission.
 
-### Stage 3: embedded local terminal and chat — Latch M3
+### Stage 3: embedded local view — Latch M3
 
-Embed the TypeScript Latch client in Overlord Desktop, attaching directly to the worker
-socket, while keeping iTerm as a first-class alternative. Notifications ride Overlord's
-existing agent hooks. This is the first real test of whether agent work reads better as
+Feed an embedded Overlord view from the engine's event stream. An embedded terminal is
+optional and later; `latch attach` already covers the terminal. Notifications split:
+delivery/artifact/`ovld protocol ask` stay on Overlord; permission/question come from
+Latch `awaiting_input`. This is the first real test of whether agent work reads better as
 conversation than as a terminal, so it should land before any widget work.
 
 A native Swift frontend is not required.

@@ -1,101 +1,94 @@
 # Architecture rules
 
-Constraints that CI enforces, or that a reviewer should reject a change for.
-Everything here is derived from [`planning/PROJECT_ARCHITECTURE.md`](../planning/PROJECT_ARCHITECTURE.md)
-and [`planning/IMPLEMENTATION_PLAN.md`](../planning/IMPLEMENTATION_PLAN.md); this
-file exists so the rules are checkable rather than remembered.
+Constraints derived from
+[`planning/ENGINE_PLAN.md`](../planning/ENGINE_PLAN.md) and enforced in review
+or CI.
 
 ## Layout
 
 ```text
 crates/
-  latch/                   # the single binary: CLI + worker modes
-  latch-protocol/          # framing, control messages, codec
-  latch-term/              # screen model + snapshot serialization
-packages/                  # M3 onward — TypeScript
-fixtures/                  # language-neutral protocol + VT fixtures
-docs/
-planning/
+  latch/                   # CLI, metadata sidecar, tmux engine
+apps/LatchDesktop/         # native macOS client
+packages/                  # TypeScript presentation clients
+fixtures/harness/          # public schemas plus raw/normalized connector corpus
+fixtures/vt/               # irreplaceable recorded harness streams
 ```
 
-## Dependency direction
+The retired Rust terminal server is archived at the
+`archive/latch-term-v1` tag. Do not recreate worker, framing, attachment
+registry, screen-model, or resize-authority modules in the active workspace.
 
-`latch-protocol` and `latch-term` are **leaves**. They may depend on
-third-party crates; they may not depend on each other, on `latch`, or on
-anything with an I/O runtime.
+## The session kernel is private and pinned
 
-`latch` depends on both. Nothing else may.
+Latch invokes the bundled `latch-tmux` executable by absolute path with both
+`-S ~/.latch/server` and `-f ~/.latch/tmux.conf`. It must never discover the
+user's tmux executable, configuration, socket, or sessions.
 
-*Why:* the protocol crate has to be embeddable somewhere that is not this
-binary, and the screen model has to be testable without a PTY. A dependency in
-the other direction makes both untrue at once and is not usually noticed until
-someone tries.
+The generated configuration has no status bar, prefix, or copy-mode keys. It
+sets `remain-on-exit on`, `window-size latest`, and a deliberate
+`default-terminal`. The child environment removes `TMUX`; nesting is detected
+only through `LATCH_SESSION_ID`.
 
 ## No Overlord in `crates/`
 
-Nothing under `crates/` may import, link, or vendor an Overlord type, and no
-Latch code path may require Overlord to exist. Latch is useful without Overlord;
-Overlord is one client that can ask Latch to create a session.
+Nothing under `crates/` may import, link, or vendor an Overlord type. Latch is
+useful without Overlord; Overlord is one client of the public CLI.
 
-Integration flows the other way: Overlord calls the public `latch` CLI or API,
-never Latch's session directories or cloud tables.
+## Rust owns the local engine
 
-Enforced by `scripts/check-boundaries.sh` in CI.
+No Node.js process sits on the every-window path. A terminal profile invokes
+`latch`, so startup latency remains a product requirement. TypeScript belongs
+in `packages/` and presentation clients.
 
-## Rust owns the process plane; TypeScript owns the presentation plane
+## Harness events are schema-first
 
-No Node.js in the local plane. The deciding factor is that a terminal profile
-points at `latch`, so **every terminal window pays CLI startup cost** — and a
-perceptible hitch on every new window is close to disqualifying for a customer
-whose stated requirement is that their terminal experience is preserved.
+`fixtures/harness/harness-event.v1.json` and
+`interaction-capabilities.v1.json` own the public observation and interaction
+contracts. Rust connector types and TypeScript consumer types are generated
+from those schemas. Connector fixtures retain raw records alongside normalized
+events; parser changes must preserve deterministic event indexes within a
+connector epoch.
 
-TypeScript is the language of `packages/` and the M4 cloud plane.
+Claude transcripts do not reliably contain pending input. A generated,
+owner-only plugin is therefore injected into directly launched Claude
+processes and captures only `PermissionRequest` records. It must not modify
+global Claude settings. Transcript and hook records feed an append-only
+per-session event ledger; emitted cursor positions are ledger indexes and are
+never renumbered when one source writes late.
 
-## The two implementations do not share code
-
-`packages/protocol` and `crates/latch-protocol` are independent implementations
-kept honest by `fixtures/`. Do not introduce a shared generator, a WASM build of
-the Rust codec, or a schema that emits both. The fixtures are the contract, and
-their value comes precisely from the implementations being written separately.
-
-## Session state is derived, never stored
+## Session state is queried, never stored
 
 ```text
-socket accepts a connection      -> ask the worker (creating | running | stopping)
-exit.json present, socket gone   -> exited
-neither                          -> lost
+tmux has a live pane       -> running
+tmux has a dead pane       -> exited
+metadata without a session -> lost
 ```
 
-Do not add a registry file, a status field in `meta.json`, or a cache of session
-state. There is no state to diverge from reality, nothing to reconcile after a
-restart, and no schema to migrate — that is the point.
+Do not add a stored status field or process id. `has-session`,
+`list-sessions`, and pane formats are authoritative. A process id may be
+queried from tmux for an immediate signal operation but is never persisted.
 
-The corollary is structural rather than a discipline to remember: **no stored
-PID is ever consulted for a kill.** `latch stop` sends a message to the live
-worker, which signals its own child's process group. A session whose socket does
-not answer cannot be stopped, because there is nothing left to stop.
+## Launch secrets never reach disk
 
-## Secrets never reach disk or argv
-
-Launch material arrives over stdin or the socket and lives only in worker
-memory. `meta.json` holds bounded display metadata and a *redacted* command
-label — never full argv, environment blocks, or tokens.
+`latch create` accepts launch material over stdin. The engine transfers it to
+the pane launcher over an owner-only FIFO, then removes the FIFO. `meta.json`
+contains only bounded display metadata, a redacted command label, and an
+opaque external correlation id.
 
 ## Sanitize display metadata at ingest
 
-Externally supplied names and titles are sanitized to printable characters **at
-the boundary where they arrive**, not where they are rendered. A mission title
-flows from a caller into terminal titles, `latch list` output, and later into
-web and mobile clients; sanitizing at render means every future call site is a
-new chance to forget.
+Names, titles, command labels, source kinds, and external ids are reduced to
+bounded printable text before they are stored or rendered.
 
-## The PTY read never blocks on a client
+## Distribution is one signed payload
 
-A slow or hung client gets its queue dropped and a fresh snapshot. It does not
-get an unbounded buffer, and it never applies backpressure to the PTY — that
-would freeze the child process for everyone attached to it.
+Every release archive contains `latch` and pinned `latch-tmux`. Both binaries
+carry the same Developer ID and are covered by the notarized archive. The
+updater verifies the archive checksum and both signatures, stages both files,
+and rolls back the tmux replacement if replacing the CLI fails.
 
 ## Filesystem modes
 
-`~/.latch` and every session directory are `0700`. Sockets are `0600`. This is
-asserted by tests, not left to umask.
+`~/.latch` and every session directory are `0700`. Metadata, generated config,
+and launch FIFOs are owner-only.

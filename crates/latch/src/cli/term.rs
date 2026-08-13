@@ -10,7 +10,7 @@ use std::io;
 use std::os::fd::RawFd;
 use std::sync::atomic::{AtomicI32, Ordering};
 
-use latch_protocol::control::Size;
+use crate::session::manifest::TerminalSize;
 
 static RECEIVED_SIGNAL: AtomicI32 = AtomicI32::new(0);
 
@@ -82,7 +82,7 @@ pub fn take_received_signal() -> Option<i32> {
 /// The same function supplies the child's initial PTY size and every attach or
 /// resize message. Keeping that platform query here prevents creation and
 /// attachment from quietly disagreeing about what the iTerm window looks like.
-pub fn terminal_size(fd: RawFd) -> Size {
+pub fn terminal_size(fd: RawFd) -> TerminalSize {
     let mut winsize = std::mem::MaybeUninit::<libc::winsize>::uninit();
     // SAFETY: `winsize` is writable storage and the kernel validates `fd`.
     let has_size = unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, winsize.as_mut_ptr()) } != -1;
@@ -90,13 +90,13 @@ pub fn terminal_size(fd: RawFd) -> Size {
         // SAFETY: a successful TIOCGWINSZ initialized `winsize`.
         let winsize = unsafe { winsize.assume_init() };
         if winsize.ws_col > 0 && winsize.ws_row > 0 {
-            return Size {
+            return TerminalSize {
                 cols: winsize.ws_col,
                 rows: winsize.ws_row,
             };
         }
     }
-    Size { cols: 80, rows: 24 }
+    TerminalSize { cols: 80, rows: 24 }
 }
 
 /// The attributes currently in effect on `fd`.

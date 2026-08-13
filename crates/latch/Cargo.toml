@@ -1,6 +1,6 @@
 [package]
 name = "latch"
-description = "Persistent terminal sessions: CLI and session worker in one binary."
+description = "Persistent terminal sessions on a private tmux kernel."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,25 +12,17 @@ repository.workspace = true
 name = "latch"
 path = "src/main.rs"
 
-# The worker lives behind a library target so the suite in `tests/` can exercise
-# it as an API and not only as a subprocess. Process behaviour — detachment,
-# signals, socket lifetime — still has to be tested against the real binary, and
-# those tests reach it through `CARGO_BIN_EXE_latch`.
 [lib]
 name = "latch"
 path = "src/lib.rs"
 
-# One binary contains both the CLI and the session worker (worker mode via an
-# internal subcommand) — decision D1. There is no Node.js in the local plane and
-# no separate worker binary to install.
+# One authored binary drives one pinned, bundled tmux binary.
 #
 # Dependencies here are held to what CLI startup can afford: with an iTerm
 # profile pointed at `latch`, every terminal window pays this cost.
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
-latch-protocol.workspace = true
-latch-term.workspace = true
 libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true

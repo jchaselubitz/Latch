@@ -291,7 +291,8 @@ language's types — `fixtures/harness/harness-event.v1.json`:
     },
     "sessionId":      { "type": "string" },
     "at":             { "type": "string", "format": "date-time" },
-    "harnessVersion": { "type": "string" }
+    "harnessVersion": { "type": "string" },
+    "connectorEpoch": { "type": "integer" }
   },
   "oneOf": [
     { "properties": { "type": { "const": "user_message" },
@@ -333,6 +334,18 @@ language's types — `fixtures/harness/harness-event.v1.json`:
 `harnessVersion` is the stamp described under *format stability* below. It is on
 every event rather than sent once, so a transcript that changes shape mid-session
 — a harness upgraded while a session was open — is still attributable.
+
+`connectorEpoch` is the connector's derivation stamp, and it is not the same
+fact as `harnessVersion`: a connector patch can change how events are derived
+from an unchanged transcript — splitting deltas differently, emitting a new
+event type — while the harness version stays the same. The epoch is bumped
+whenever derivation changes in a way that can shift event indexes. Its purpose
+is cursor safety for resumable consumers (see `--from` under *The engine API*):
+within one epoch, event indexes are stable and a stored cursor may resume;
+across an epoch change, the cursor is invalid and the consumer re-syncs from
+the start instead of resuming into a shifted stream. Adding the field now costs
+one line; adding it after clients hold cursors means designing an invalidation
+story retroactively.
 
 `HarnessConnector` itself is an internal Rust trait, not a published interface:
 `detect`, `subscribe`, and `capabilities` over a session reference. What other
@@ -540,7 +553,7 @@ The contract other software builds against. Existing commands keep their
 
 ```bash
 latch capabilities --json                 # discovery, incl. connectors + interaction
-latch events <session> --json             # NDJSON stream of HarnessEvent, one per line
+latch events <session> --json [--from <cursor>]   # NDJSON stream of HarnessEvent
 latch send <session> --message - | --keys <keys> | --resolve <id>=<choice>
 ```
 
@@ -548,6 +561,15 @@ latch send <session> --message - | --keys <keys> | --resolve <id>=<choice>
 session ends. This keeps the no-daemon principle (D2) intact: a subscription is
 a long-lived child process, not a service. A local socket or HTTP surface can
 come later without changing the event model.
+
+`--from <cursor>` resumes the stream from an event index instead of the
+beginning, which is what makes a remote consumer's reconnect cheap — the SDK
+plan's events channel is defined by it. The flag is a promise, not a mechanism:
+replaying the derivation and skipping the first N events is a valid
+implementation. What it commits the connector to is determinism — within one
+`connectorEpoch`, the event sequence is a pure function of the transcript, so
+the same cursor always names the same position. When the epoch changes,
+outstanding cursors are invalid and consumers restart from zero.
 
 Overlord is the first consumer. The API is designed so it is not the only
 possible one.
