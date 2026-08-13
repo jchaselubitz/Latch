@@ -69,23 +69,25 @@ rm -rf "$utf8proc_build"
 mkdir -p "$utf8proc_build"
 tar -xzf "$utf8proc_source" -C "$utf8proc_build" --strip-components=1
 make -C "$utf8proc_build"
-utf8proc_prefix="$utf8proc_build"
+utf8proc_build="$(cd "$utf8proc_build" && pwd -P)"
+utf8proc_include="$utf8proc_build"
+utf8proc_library="$utf8proc_build/libutf8proc.a"
 (
   cd "$tmux_build"
-  PKG_CONFIG_PATH="$libevent_prefix/lib/pkgconfig:$utf8proc_prefix/lib/pkgconfig" \
-  LDFLAGS="-L$libevent_prefix/lib -L$utf8proc_prefix/lib" \
+  PKG_CONFIG_PATH="$libevent_prefix/lib/pkgconfig" \
+  LDFLAGS="-L$libevent_prefix/lib" \
   LIBEVENT_CORE_CFLAGS="-I$libevent_prefix/include" \
   LIBEVENT_CORE_LIBS="$libevent_prefix/lib/libevent_core.a" \
   LIBEVENT_CFLAGS="-I$libevent_prefix/include" \
   LIBEVENT_LIBS="$libevent_prefix/lib/libevent.a" \
-  LIBUTF8PROC_CFLAGS="-I$utf8proc_prefix/include" \
-  LIBUTF8PROC_LIBS="$utf8proc_prefix/lib/libutf8proc.a" \
+  LIBUTF8PROC_CFLAGS="-I$utf8proc_include" \
+  LIBUTF8PROC_LIBS="$utf8proc_library" \
   ./configure --enable-utf8proc
   make -j"$(sysctl -n hw.ncpu)"
 )
 cp "$tmux_build/tmux" "$stage_dir/latch-tmux"
 "$stage_dir/latch-tmux" -V | grep -Fx "tmux $tmux_version"
-if otool -L "$stage_dir/latch-tmux" | grep -Eq "$libevent_prefix|$utf8proc_prefix"; then
+if otool -L "$stage_dir/latch-tmux" | grep -Fq "$libevent_prefix"; then
   echo "Vendored tmux still links to a Homebrew build dependency" >&2
   exit 1
 fi
