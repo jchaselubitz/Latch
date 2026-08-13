@@ -16,6 +16,7 @@ pub mod json;
 pub mod manage;
 pub mod nesting;
 pub mod open;
+pub mod serve;
 pub mod term;
 pub mod update;
 

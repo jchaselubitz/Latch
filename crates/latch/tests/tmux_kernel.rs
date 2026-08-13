@@ -1,7 +1,11 @@
 use std::fs;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::TcpStream;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
+use std::sync::mpsc;
+use std::thread;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -259,6 +263,173 @@ fn interaction_is_screen_gated_and_resolution_is_request_bound() {
         .unwrap();
     assert!(!repeated.status.success());
     assert!(String::from_utf8_lossy(&repeated.stderr).contains("already resolved"));
+}
+
+#[test]
+fn serve_exposes_sessions_and_a_pty_terminal_behind_a_bearer_token() {
+    let harness = Harness::new();
+    let created = harness.create("sleep 30");
+    let id = created["session"]["id"].as_str().unwrap();
+
+    let token_output = harness
+        .command()
+        .args(["serve", "token"])
+        .output()
+        .expect("mint token");
+    assert_success(&token_output);
+    let token = String::from_utf8(token_output.stdout)
+        .unwrap()
+        .trim()
+        .to_owned();
+    assert_eq!(token.len(), 64);
+    let token_path = harness.home.join("serve.token");
+    let mode = fs::metadata(&token_path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600);
+
+    let mut child = harness
+        .command()
+        .args(["serve", "--bind", "127.0.0.1:0"])
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn latch serve");
+    let stderr = child.stderr.take().expect("serve stderr");
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        for line in BufReader::new(stderr).lines() {
+            let Ok(line) = line else { break };
+            if let Some(addr) = line.strip_prefix("latch serve listening on ") {
+                let _ = tx.send(addr.to_owned());
+                break;
+            }
+        }
+    });
+    let addr = rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("serve bound an address");
+
+    let unauth = http_get(HttpGet {
+        addr: &addr,
+        path: "/v1/sessions",
+        token: None,
+        origin: None,
+    });
+    assert_eq!(unauth.status, 401);
+    let wrong = http_get(HttpGet {
+        addr: &addr,
+        path: "/v1/sessions",
+        token: Some("nope"),
+        origin: None,
+    });
+    assert_eq!(wrong.status, 401);
+    let blocked = http_get(HttpGet {
+        addr: &addr,
+        path: "/v1/sessions",
+        token: Some(&token),
+        origin: Some("https://evil.example"),
+    });
+    assert_eq!(blocked.status, 403);
+
+    let listed = http_get(HttpGet {
+        addr: &addr,
+        path: "/v1/sessions",
+        token: Some(&token),
+        origin: None,
+    });
+    assert_eq!(listed.status, 200);
+    let body: Value = serde_json::from_str(&listed.body).unwrap();
+    assert_eq!(body["sessions"][0]["id"], id);
+
+    let inspect = http_get(HttpGet {
+        addr: &addr,
+        path: &format!("/v1/sessions/{id}"),
+        token: Some(&token),
+        origin: None,
+    });
+    assert_eq!(inspect.status, 200);
+    let inspect_body: Value = serde_json::from_str(&inspect.body).unwrap();
+    assert_eq!(inspect_body["id"], id);
+
+    let capabilities = http_get(HttpGet {
+        addr: &addr,
+        path: &format!("/v1/sessions/{id}/capabilities"),
+        token: Some(&token),
+        origin: None,
+    });
+    assert_eq!(capabilities.status, 200);
+    let capabilities_body: Value = serde_json::from_str(&capabilities.body).unwrap();
+    assert!(capabilities_body.get("canSend").is_some());
+
+    let request = tungstenite::http::Request::builder()
+        .uri(format!("ws://{addr}/v1/sessions/{id}/terminal"))
+        .header("Host", &addr)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Connection", "Upgrade")
+        .header("Upgrade", "websocket")
+        .header("Sec-WebSocket-Version", "13")
+        .header(
+            "Sec-WebSocket-Key",
+            tungstenite::handshake::client::generate_key(),
+        )
+        .body(())
+        .unwrap();
+    let (mut socket, response) = tungstenite::connect(request).expect("terminal websocket");
+    assert_eq!(
+        response.status(),
+        tungstenite::http::StatusCode::SWITCHING_PROTOCOLS
+    );
+    socket
+        .send(tungstenite::Message::Text(
+            r#"{"type":"resize","cols":100,"rows":30}"#.into(),
+        ))
+        .unwrap();
+    socket.close(None).ok();
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+struct HttpResponse {
+    status: u16,
+    body: String,
+}
+
+struct HttpGet<'a> {
+    addr: &'a str,
+    path: &'a str,
+    token: Option<&'a str>,
+    origin: Option<&'a str>,
+}
+
+fn http_get(request: HttpGet<'_>) -> HttpResponse {
+    let mut stream = TcpStream::connect(request.addr).expect("connect to latch serve");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    let mut message = format!(
+        "GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n",
+        path = request.path,
+        addr = request.addr
+    );
+    if let Some(token) = request.token {
+        message.push_str(&format!("Authorization: Bearer {token}\r\n"));
+    }
+    if let Some(origin) = request.origin {
+        message.push_str(&format!("Origin: {origin}\r\n"));
+    }
+    message.push_str("\r\n");
+    stream.write_all(message.as_bytes()).unwrap();
+    let mut raw = String::new();
+    stream.read_to_string(&mut raw).unwrap();
+    let (head, body) = raw.split_once("\r\n\r\n").unwrap_or((raw.as_str(), ""));
+    let status = head
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|code| code.parse().ok())
+        .unwrap_or(0);
+    HttpResponse {
+        status,
+        body: body.to_owned(),
+    }
 }
 
 const FAKE_TMUX: &str = r#"#!/usr/bin/env python3

@@ -29,6 +29,11 @@ pub const DEFAULT_TERMINAL: &str = "xterm-256color";
 pub const BUNDLED_TMUX_NAME: &str = "latch-tmux";
 
 const TMUX_OVERRIDE_ENV: &str = "LATCH_TMUX_BIN";
+/// Unit separator between tmux format fields. Tabs are invisible in errors and
+/// get collapsed by some callers; this character cannot appear in Latch ids.
+const SESSION_ROW_SEPARATOR: char = '\u{1f}';
+const SESSION_INFO_FORMAT: &str =
+    "#{session_name}\u{1f}#{pane_dead}\u{1f}#{pane_dead_status}\u{1f}#{window_width}\u{1f}#{window_height}\u{1f}#{session_activity}\u{1f}#{session_attached}\u{1f}#{pane_pid}\u{1f}#{pane_dead_time}\u{1f}#{pane_dead_signal}";
 const CONFIG_BODY: &str = "\
 set -g status off
 set -g prefix None
@@ -257,9 +262,10 @@ pub fn create(request: CreateRequest) -> Result<CreateResult> {
 pub fn launch_from_fifo(path: &Path) -> Result<()> {
     let mut file = fs::File::open(path)
         .with_context(|| format!("cannot read launch pipe {}", path.display()))?;
-    let manifest = manifest::read(&mut file)?;
+    let mut manifest = manifest::read(&mut file)?;
     drop(file);
     let _ = fs::remove_file(path);
+    ensure_interactive_login_shell(&mut manifest.launch.argv);
 
     let mut command = Command::new(&manifest.launch.argv[0]);
     command.args(&manifest.launch.argv[1..]);
@@ -308,11 +314,7 @@ pub fn has_session(home: &LatchHome, id: &SessionId) -> bool {
 pub fn list(home: &LatchHome) -> Result<Vec<SessionInfo>> {
     ensure_config(home)?;
     let output = tmux(home)
-        .args([
-            "list-sessions",
-            "-F",
-            "#{session_name}\t#{pane_dead}\t#{pane_dead_status}\t#{window_width}\t#{window_height}\t#{session_activity}\t#{session_attached}\t#{pane_pid}\t#{pane_dead_time}\t#{pane_dead_signal}",
-        ])
+        .args(["list-sessions", "-F", SESSION_INFO_FORMAT])
         .output()
         .context("cannot query the bundled tmux")?;
     if !output.status.success() {
@@ -325,6 +327,7 @@ pub fn list(home: &LatchHome) -> Result<Vec<SessionInfo>> {
     String::from_utf8(output.stdout)
         .context("tmux returned non-UTF-8 session data")?
         .lines()
+        .filter(|line| !line.is_empty())
         .map(parse_info)
         .collect()
 }
@@ -339,7 +342,7 @@ pub fn inspect(home: &LatchHome, id: &SessionId) -> Result<Option<SessionInfo>> 
             "-t",
             id.as_str(),
             "-F",
-            "#{session_name}\t#{pane_dead}\t#{pane_dead_status}\t#{window_width}\t#{window_height}\t#{session_activity}\t#{session_attached}\t#{pane_pid}\t#{pane_dead_time}\t#{pane_dead_signal}",
+            SESSION_INFO_FORMAT,
         ])
         .output()
         .context("cannot inspect the private tmux session")?;
@@ -691,34 +694,84 @@ fn open_fifo_writer(path: &Path) -> Result<fs::File> {
     }
 }
 
-fn parse_info(line: &str) -> Result<SessionInfo> {
-    let fields = line.split('\t').collect::<Vec<_>>();
-    if fields.len() != 10 {
-        bail!("tmux returned an unexpected session row: {line}");
+fn ensure_interactive_login_shell(argv: &mut Vec<String>) {
+    let Some(program) = argv.first() else {
+        return;
+    };
+    let name = Path::new(program)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    if !matches!(name, "zsh" | "bash" | "sh" | "ksh" | "dash") {
+        return;
     }
-    let dead = fields[1] == "1";
-    let exited_at = dead
-        .then(|| fields[8].parse::<u64>())
+    match argv.get(1).map(String::as_str) {
+        None => argv.insert(1, "-il".to_owned()),
+        Some("-c") => argv[1] = "-ilc".to_owned(),
+        Some(flags)
+            if flags.starts_with('-')
+                && !flags.starts_with("--")
+                && flags.chars().skip(1).all(|c| c.is_ascii_alphabetic()) =>
+        {
+            let mut letters: String = flags.chars().skip(1).collect();
+            if !letters.contains('i') {
+                letters.insert(0, 'i');
+            }
+            if letters.contains('c') && !letters.contains('l') {
+                letters.insert(0, 'l');
+            }
+            argv[1] = format!("-{letters}");
+        }
+        _ => {}
+    }
+}
+
+fn split_session_row(line: &str) -> Vec<&str> {
+    if line.contains(SESSION_ROW_SEPARATOR) {
+        line.split(SESSION_ROW_SEPARATOR).collect()
+    } else {
+        line.split('\t').collect()
+    }
+}
+
+fn display_session_row(line: &str) -> String {
+    line.replace(SESSION_ROW_SEPARATOR, ",").replace('\t', ",")
+}
+
+fn parse_info(line: &str) -> Result<SessionInfo> {
+    let fields = split_session_row(line);
+    // Live panes omit trailing empty dead-time/signal fields on some tmux
+    // queries; require the eight live columns and treat the rest as optional.
+    if fields.len() < 8 || fields.len() > 10 {
+        bail!(
+            "tmux returned an unexpected session row: {}",
+            display_session_row(line)
+        );
+    }
+    let field = |index: usize| fields.get(index).copied().unwrap_or("");
+    let dead = field(1) == "1";
+    let exited_at = (dead && !field(8).is_empty())
+        .then(|| field(8).parse::<u64>())
         .transpose()?
         .map(|seconds| UNIX_EPOCH + Duration::from_secs(seconds));
-    let activity = exited_at.unwrap_or(UNIX_EPOCH + Duration::from_secs(fields[5].parse()?));
-    let signal = (!fields[9].is_empty())
-        .then(|| parse_signal(fields[9]))
+    let activity = exited_at.unwrap_or(UNIX_EPOCH + Duration::from_secs(field(5).parse()?));
+    let signal = (!field(9).is_empty())
+        .then(|| parse_signal(field(9)))
         .transpose()?;
     Ok(SessionInfo {
-        id: fields[0].to_owned(),
+        id: field(0).to_owned(),
         state: if dead {
             SessionState::Exited
         } else {
             SessionState::Running
         },
-        exit_status: (dead && !fields[2].is_empty())
-            .then(|| fields[2].parse())
+        exit_status: (dead && !field(2).is_empty())
+            .then(|| field(2).parse())
             .transpose()?,
-        size: TerminalSize::new(fields[3].parse()?, fields[4].parse()?),
+        size: TerminalSize::new(field(3).parse()?, field(4).parse()?),
         activity,
-        attached: fields[6].parse()?,
-        pane_pid: fields[7].parse()?,
+        attached: field(6).parse()?,
+        pane_pid: field(7).parse()?,
         exited_at,
         signal,
     })
@@ -787,5 +840,58 @@ mod tests {
         assert_eq!(parse_signal("SIGTERM").unwrap(), libc::SIGTERM);
         assert_eq!(parse_signal("2").unwrap(), 2);
         assert!(parse_signal("unknown").is_err());
+    }
+
+    #[test]
+    fn dash_c_shells_become_interactive_login_shells() {
+        let mut zsh_lc = vec![
+            "/bin/zsh".to_owned(),
+            "-lc".to_owned(),
+            "agp cursor".to_owned(),
+        ];
+        ensure_interactive_login_shell(&mut zsh_lc);
+        assert_eq!(zsh_lc[1], "-ilc");
+
+        let mut sh_c = vec!["/bin/sh".to_owned(), "-c".to_owned(), "exit 7".to_owned()];
+        ensure_interactive_login_shell(&mut sh_c);
+        assert_eq!(sh_c[1], "-ilc");
+
+        let mut login = vec!["/bin/zsh".to_owned(), "-l".to_owned()];
+        ensure_interactive_login_shell(&mut login);
+        assert_eq!(login[1], "-il");
+
+        let mut cursor = vec!["cursor".to_owned(), "agent".to_owned()];
+        ensure_interactive_login_shell(&mut cursor);
+        assert_eq!(cursor, ["cursor", "agent"]);
+    }
+
+    #[test]
+    fn live_and_dead_tmux_rows_parse_with_empty_trailing_fields() {
+        let live = parse_info("ses_19ffc24df42abdc0\t0\t\t144\t25\t1786641713\t1\t43998\t\t")
+            .expect("live row");
+        assert_eq!(live.id, "ses_19ffc24df42abdc0");
+        assert_eq!(live.state, SessionState::Running);
+        assert_eq!(live.size, TerminalSize::new(144, 25));
+        assert_eq!(live.attached, 1);
+        assert_eq!(live.pane_pid, 43998);
+        assert!(live.exit_status.is_none());
+
+        let live_short = parse_info("ses_19ffc24df42abdc0\t0\t\t144\t25\t1786641713\t1\t43998")
+            .expect("live row without trailing dead fields");
+        assert_eq!(live_short.state, SessionState::Running);
+
+        let dead =
+            parse_info("ses_19ffc224e3183df0\t1\t127\t138\t25\t1786641544\t1\t33762\t1786641534\t")
+                .expect("dead row");
+        assert_eq!(dead.state, SessionState::Exited);
+        assert_eq!(dead.exit_status, Some(127));
+        assert_eq!(dead.pane_pid, 33762);
+
+        let unit = parse_info(&format!(
+            "ses_live{SESSION_ROW_SEPARATOR}0{SESSION_ROW_SEPARATOR}{SESSION_ROW_SEPARATOR}80{SESSION_ROW_SEPARATOR}24{SESSION_ROW_SEPARATOR}1{SESSION_ROW_SEPARATOR}1{SESSION_ROW_SEPARATOR}9{SESSION_ROW_SEPARATOR}{SESSION_ROW_SEPARATOR}"
+        ))
+        .expect("unit-separator row");
+        assert_eq!(unit.state, SessionState::Running);
+        assert_eq!(unit.size, TerminalSize::new(80, 24));
     }
 }

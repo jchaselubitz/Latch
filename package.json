@@ -1,0 +1,8 @@
+{
+  "private": true,
+  "workspaces": [
+    "packages/harness-schema",
+    "packages/client",
+    "packages/terminal-react"
+  ]
+}

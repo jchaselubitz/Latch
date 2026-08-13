@@ -6,8 +6,11 @@ session. Closing the window leaves the process running; `exit` ends it.
 Reattach with `latch attach` (or bare `latch` from inside another Latch
 session, which attaches rather than nesting).
 
-The shell Latch starts is a login shell, matching iTerm's normal profile
-behavior so the same startup files and environment setup apply.
+The shell Latch starts is a login interactive shell (`zsh -il`, or `$SHELL
+-ilc` when a caller supplies a `-c` command), matching iTerm's normal profile
+behavior so the same startup files — including `.zshrc` PATH setup such as nvm
+— apply. A login-only shell (`-lc` without `-i`) skips `.zshrc`, so wrappers
+like `agp` and `ovld` look missing even though they work in iTerm.
 
 No daemon, no account, and no network connection are required.
 

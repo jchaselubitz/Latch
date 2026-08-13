@@ -22,11 +22,13 @@ path = "src/lib.rs"
 # profile pointed at `latch`, every terminal window pays this cost.
 [dependencies]
 anyhow.workspace = true
+axum.workspace = true
 clap.workspace = true
 libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 
 # `libc` and `tempfile` are repeated here because an integration test is its own
 # crate: it links the library target, not the library's dependency graph. The
@@ -36,3 +38,4 @@ thiserror.workspace = true
 libc.workspace = true
 proptest.workspace = true
 tempfile.workspace = true
+tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }

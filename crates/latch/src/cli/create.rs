@@ -89,11 +89,12 @@ pub fn create_session(options: CreateOptions) -> anyhow::Result<CreateOutcome> {
 /// Builds the launch material for a shell session.
 pub fn shell_manifest(options: ManifestOptions) -> LaunchManifest {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned());
-    // iTerm's ordinary profile starts a login shell. The Latch profile must do
-    // the same or shell startup files, PATH setup, and other profile behavior
-    // differ before the user types the first command.
+    // iTerm's ordinary profile starts a login *interactive* shell, so nvm,
+    // aliases, and other `.zshrc` setup are in PATH. `zsh -l` on a TTY is
+    // interactive; pass `-il` so the same files load even if TTY detection
+    // fails (and so Overlord's `$SHELL -lc` wrapper is promoted to `-ilc`).
     let mut manifest = LaunchManifest::new(LaunchRequest {
-        argv: vec![shell, "-l".to_owned()],
+        argv: vec![shell, "-il".to_owned()],
         cwd: options.cwd,
         size: options.size,
     });

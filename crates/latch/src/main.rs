@@ -243,6 +243,17 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Serve a loopback HTTP/WebSocket gateway for remote clients.
+    Serve {
+        /// Listen address. Loopback by default.
+        #[arg(long, default_value = "127.0.0.1:4610")]
+        bind: String,
+        /// Bearer token file. Defaults to `$LATCH_HOME/serve.token`.
+        #[arg(long, value_name = "PATH")]
+        token_file: Option<String>,
+        #[command(subcommand)]
+        command: Option<ServeCommand>,
+    },
     /// Stream normalized harness events as newline-delimited JSON.
     Events {
         /// Latch session id/name or Claude Code session id.
@@ -281,6 +292,12 @@ enum Command {
     /// Capture one Claude hook record. Internal only.
     #[command(hide = true, name = "__harness-hook")]
     HarnessHook,
+}
+
+#[derive(Subcommand)]
+enum ServeCommand {
+    /// Mint or rotate the bearer token required by every connection.
+    Token,
 }
 
 fn dispatch(command: Option<Command>) -> Result<()> {
@@ -569,6 +586,30 @@ fn dispatch(command: Option<Command>) -> Result<()> {
                 print_update_human(&report);
             }
             Ok(())
+        }
+        Some(Command::Serve {
+            bind,
+            token_file,
+            command,
+        }) => {
+            let home = LatchHome::from_env()?;
+            let token_file = token_file
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| home.serve_token());
+            match command {
+                Some(ServeCommand::Token) => {
+                    home.ensure()?;
+                    let token = latch::cli::serve::mint_token(&token_file)?;
+                    println!("{token}");
+                    Ok(())
+                }
+                None => latch::cli::serve::serve(latch::cli::serve::ServeOptions {
+                    home,
+                    bind: bind.parse().context("invalid --bind address")?,
+                    token_file,
+                    latch_bin: std::env::current_exe().context("cannot locate the latch binary")?,
+                }),
+            }
         }
         Some(Command::Capabilities { session, json }) => match session {
             Some(session) => {

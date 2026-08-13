@@ -145,6 +145,11 @@ impl LatchHome {
         self.root.join("config.toml")
     }
 
+    /// Bearer token used by `latch serve`.
+    pub fn serve_token(&self) -> PathBuf {
+        self.root.join("serve.token")
+    }
+
     /// Paths belonging to one session.
     pub fn session(&self, id: &SessionId) -> SessionPaths {
         SessionPaths::new(self.sessions_dir().join(id.as_str()))
