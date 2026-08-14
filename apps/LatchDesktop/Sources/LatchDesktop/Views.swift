@@ -643,36 +643,176 @@ struct SettingsView: View {
     @ObservedObject var store: SessionStore
     @ObservedObject var updates: UpdateController
 
+    private enum Tab: String, Hashable {
+        case terminal
+        case cli
+        case updates
+    }
+
+    @State private var selection: Tab = .terminal
+
     var body: some View {
+        TabView(selection: $selection) {
+            terminalTab
+                .tabItem { Label("Terminal", systemImage: "terminal") }
+                .tag(Tab.terminal)
+            cliTab
+                .tabItem { Label("Latch CLI", systemImage: "wrench.and.screwdriver") }
+                .tag(Tab.cli)
+            updatesTab
+                .tabItem { Label("Updates", systemImage: "arrow.down.circle") }
+                .tag(Tab.updates)
+        }
+        .frame(width: 580, height: 470)
+    }
+
+    // MARK: - Terminal
+
+    private var terminalTab: some View {
         Form {
-            Section("Desktop App Updates") {
-                Toggle("Check for updates automatically", isOn: $updates.automaticChecks)
-                HStack {
-                    Text("Version \(updates.installedVersionLabel)")
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Button("Check Now") {
-                        Task { await updates.check(userInitiated: true) }
+            Section {
+                Picker("Preferred terminal", selection: Binding(
+                    get: { store.preferredTerminal },
+                    set: { store.preferredTerminal = $0 }
+                )) {
+                    ForEach(PreferredTerminal.allCases) { terminal in
+                        Text(terminal.rawValue + (TerminalLauncher.isInstalled(terminal) ? "" : " (not installed)"))
+                            .tag(terminal)
                     }
                 }
-                Text("Latch installs updates from its signed GitHub releases and verifies that each one is signed by the same developer before replacing itself.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+
+                Picker("Open sessions in", selection: Binding(
+                    get: { store.terminalOpenBehavior },
+                    set: { store.terminalOpenBehavior = $0 }
+                )) {
+                    ForEach(TerminalOpenBehavior.allCases) { behavior in
+                        Text(behavior.label + (store.preferredTerminal.supports(behavior) ? "" : " (unavailable)"))
+                            .tag(behavior)
+                    }
+                }
+                .disabled(store.preferredTerminal.supportedOpenBehaviors.isEmpty)
+            } header: {
+                SettingsSectionHeader("Opening Sessions")
+            } footer: {
+                SettingsFootnote(openBehaviorFootnote)
             }
 
-            Section("Latch CLI") {
-                TextField("Latch executable", text: $store.latchExecutablePath)
-                    .textFieldStyle(.roundedBorder)
-                Text("Using \(store.activeCLIPath)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            if store.preferredTerminal == .custom {
+                Section {
+                    LabeledContent("Application") {
+                        Button("Choose Terminal Application…") {
+                            chooseCustomTerminalApplication()
+                        }
+                    }
+                    TextField("Executable", text: $store.customTerminalExecutable)
+                    TextField("Argument template", text: $store.customTerminalTemplate)
+                } header: {
+                    SettingsSectionHeader("Custom Terminal")
+                } footer: {
+                    SettingsFootnote(
+                        "Choose any .app not listed above, then adjust its launch arguments if needed. Required placeholders: {latch} and {session}. Arguments are parsed directly and never passed to a shell."
+                    )
+                }
+            }
+
+            Section {
+                SettingsFootnote(
+                    "This is the default app Latch uses when opening a session. Closing Latch never stops sessions."
+                )
+            }
+        }
+        .formStyle(.grouped)
+    }
+
+    // MARK: - CLI
+
+    private var cliTab: some View {
+        Form {
+            Section {
+                TextField("Executable path", text: $store.latchExecutablePath)
+                LabeledContent("Currently using") {
+                    Text(store.activeCLIPath)
+                        .textSelection(.enabled)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .truncationMode(.middle)
+                }
+                HStack(spacing: 10) {
+                    Button(store.isDiscoveringCLI ? "Searching…" : "Run `where latch`") {
+                        Task { await store.discoverCLI() }
+                    }
+                    .disabled(store.isDiscoveringCLI)
+                    Button("Diagnose") {
+                        Task { await store.refreshCLIDiagnostics() }
+                    }
+                    Spacer()
+                    Button("Use This CLI") { store.useConfiguredCLI() }
+                        .disabled(!store.selectedCLIIsExecutable)
+                }
+            } header: {
+                SettingsSectionHeader("Executable")
+            } footer: {
+                SettingsFootnote(
+                    "Latch Desktop uses the independently installed CLI selected here. CLI updates replace both the command and its pinned tmux payload."
+                )
+            }
+
+            discoverySection
+            statusSection
+            cliUpdatesSection
+        }
+        .formStyle(.grouped)
+    }
+
+    @ViewBuilder private var discoverySection: some View {
+        if !store.discoveredLatchExecutables.isEmpty {
+            Section {
+                ForEach(store.discoveredLatchExecutables, id: \.self) { path in
+                    Button {
+                        store.selectCLI(path)
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: "terminal")
+                                .foregroundStyle(.secondary)
+                            Text(path)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Spacer()
+                            Text(path == store.activeCLIPath ? "In use" : "Use")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(path == store.activeCLIPath)
+                }
+            } header: {
+                SettingsSectionHeader("Found by `where latch`")
+            }
+        } else {
+            Section {
+                Text(store.cliInstallCommand)
+                    .font(.system(.caption, design: .monospaced))
                     .textSelection(.enabled)
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
+                Button("Run Install Command in Terminal…") { store.runCLIInstaller() }
+            } header: {
+                SettingsSectionHeader("Install the CLI")
+            } footer: {
+                SettingsFootnote("No standalone Latch CLI was found on this Mac.")
+            }
+        }
+    }
+
+    @ViewBuilder private var statusSection: some View {
+        if store.cliCapabilities != nil || store.cliDoctorReport != nil {
+            Section {
                 if let capabilities = store.cliCapabilities {
                     LabeledContent("CLI version", value: capabilities.productVersion)
-                    LabeledContent(
-                        "Protocol",
-                        value: String(capabilities.protocolVersion)
-                    )
+                    LabeledContent("Protocol", value: String(capabilities.protocolVersion))
                     if !capabilities.capabilities.extensions.isEmpty {
                         LabeledContent(
                             "Extensions",
@@ -692,96 +832,62 @@ struct SettingsView: View {
                                 : "exclamationmark.triangle"
                         )
                         .font(.caption)
-                        .foregroundStyle(finding.severity == "error" ? Color.red : Color.gray)
+                        .foregroundStyle(finding.severity == "error" ? Color.red : Color.secondary)
                     }
                 }
-                cliUpdateStatus
-                if !store.discoveredLatchExecutables.isEmpty {
-                    Text("Found by `where latch`:")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    ForEach(store.discoveredLatchExecutables, id: \.self) { path in
-                        Button(path) { store.selectCLI(path) }
-                            .buttonStyle(.link)
-                    }
-                } else {
-                    Text("No standalone Latch CLI was found. Install it with:")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text(store.cliInstallCommand)
-                        .font(.system(.caption, design: .monospaced))
-                        .textSelection(.enabled)
-                    Button("Run Install Command in Terminal…") { store.runCLIInstaller() }
-                }
-                HStack {
-                    Button(store.isDiscoveringCLI ? "Searching…" : "Run `where latch` Again") {
-                        Task { await store.discoverCLI() }
-                    }
-                    .disabled(store.isDiscoveringCLI)
-                    Button("Diagnose") {
-                        Task { await store.refreshCLIDiagnostics() }
-                    }
-                    Spacer()
-                    Button("Use This CLI") { store.useConfiguredCLI() }
-                        .disabled(!store.selectedCLIIsExecutable)
-                }
-                HStack {
-                    Button(store.isCheckingCLIUpdate ? "Checking…" : "Check for CLI Update") {
-                        Task { await store.checkForCLIUpdate() }
-                    }
-                    .disabled(store.isCheckingCLIUpdate || store.isUpdatingCLI)
-                    if store.cliUpdateReport?.status == .available,
-                       store.cliCapabilities?.capabilities.selfUpdate == true {
-                        Button(store.isUpdatingCLI ? "Updating…" : "Install CLI Update") {
-                            Task { await store.updateCLI() }
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(store.isUpdatingCLI)
-                    }
-                }
-                Text("Latch Desktop uses the independently installed CLI selected here. CLI updates replace both the command and its pinned tmux payload.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            } header: {
+                SettingsSectionHeader("Status")
             }
-
-            Picker("Preferred terminal", selection: Binding(
-                get: { store.preferredTerminal },
-                set: { store.preferredTerminal = $0 }
-            )) {
-                ForEach(PreferredTerminal.allCases) { terminal in
-                    Text(terminal.rawValue + (TerminalLauncher.isInstalled(terminal) ? "" : " (not installed)"))
-                        .tag(terminal)
-                }
-            }
-            if store.preferredTerminal == .custom {
-                Button("Choose Terminal Application…") {
-                    chooseCustomTerminalApplication()
-                }
-                TextField("Terminal executable", text: $store.customTerminalExecutable)
-                TextField("Argument template", text: $store.customTerminalTemplate)
-                Text("Choose any .app not listed above, then adjust its launch arguments if needed. Required placeholders: {latch} and {session}. Arguments are parsed directly and never passed to a shell.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            Picker("Open sessions in", selection: Binding(
-                get: { store.terminalOpenBehavior },
-                set: { store.terminalOpenBehavior = $0 }
-            )) {
-                ForEach(TerminalOpenBehavior.allCases) { behavior in
-                    Text(behavior.label + (store.preferredTerminal.supports(behavior) ? "" : " (unavailable)"))
-                        .tag(behavior)
-                }
-            }
-            .disabled(store.preferredTerminal.supportedOpenBehaviors.isEmpty)
-            Text(openBehaviorFootnote)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Text("This is the default app Latch uses when opening a session. Closing Latch never stops sessions.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
         }
-        .padding(24)
-        .frame(width: 460)
+    }
+
+    private var cliUpdatesSection: some View {
+        Section {
+            HStack(spacing: 10) {
+                Button(store.isCheckingCLIUpdate ? "Checking…" : "Check for CLI Update") {
+                    Task { await store.checkForCLIUpdate() }
+                }
+                .disabled(store.isCheckingCLIUpdate || store.isUpdatingCLI)
+                if store.cliUpdateReport?.status == .available,
+                   store.cliCapabilities?.capabilities.selfUpdate == true {
+                    Button(store.isUpdatingCLI ? "Updating…" : "Install CLI Update") {
+                        Task { await store.updateCLI() }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(store.isUpdatingCLI)
+                }
+                Spacer()
+            }
+            cliUpdateStatus
+        } header: {
+            SettingsSectionHeader("CLI Updates")
+        }
+    }
+
+    // MARK: - App updates
+
+    private var updatesTab: some View {
+        Form {
+            Section {
+                Toggle("Check for updates automatically", isOn: $updates.automaticChecks)
+                LabeledContent("Installed version") {
+                    HStack(spacing: 12) {
+                        Text(updates.installedVersionLabel)
+                            .foregroundStyle(.secondary)
+                        Button("Check Now") {
+                            Task { await updates.check(userInitiated: true) }
+                        }
+                    }
+                }
+            } header: {
+                SettingsSectionHeader("Desktop App Updates")
+            } footer: {
+                SettingsFootnote(
+                    "Latch installs updates from its signed GitHub releases and verifies that each one is signed by the same developer before replacing itself."
+                )
+            }
+        }
+        .formStyle(.grouped)
     }
 
     private var openBehaviorFootnote: String {
@@ -801,11 +907,9 @@ struct SettingsView: View {
         if let report = store.cliUpdateReport {
             switch report.status {
             case .current:
-                Text("Latch CLI \(report.currentVersion) is current.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                SettingsFootnote("Latch CLI \(report.currentVersion) is current.")
             case .available:
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: 8) {
                     Text("Latch CLI \(report.latestVersion ?? "update") is available; you have \(report.currentVersion).")
                     if let releaseURL = report.releaseURL {
                         Link("CLI release notes", destination: releaseURL)
@@ -815,15 +919,18 @@ struct SettingsView: View {
                         Text(store.cliInstallCommand)
                             .font(.system(.caption, design: .monospaced))
                             .textSelection(.enabled)
+                            .padding(8)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
                         Button("Run Installer in Terminal…") { store.runCLIInstaller() }
                     }
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
             case .installed:
-                Text("Updated the CLI from \(report.currentVersion) to \(report.latestVersion ?? "the latest release").")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                SettingsFootnote(
+                    "Updated the CLI from \(report.currentVersion) to \(report.latestVersion ?? "the latest release")."
+                )
             }
         }
     }
@@ -844,6 +951,34 @@ struct SettingsView: View {
         } catch {
             store.errorMessage = error.localizedDescription
         }
+    }
+}
+
+/// Section headers and footnotes are repeated across every settings tab, so they
+/// live here to keep one typographic voice instead of ad-hoc `.font(.caption)`
+/// calls scattered through the form.
+private struct SettingsSectionHeader: View {
+    private let title: String
+
+    init(_ title: String) { self.title = title }
+
+    var body: some View {
+        Text(title)
+            .font(.headline)
+            .padding(.bottom, 2)
+    }
+}
+
+private struct SettingsFootnote: View {
+    private let text: String
+
+    init(_ text: String) { self.text = text }
+
+    var body: some View {
+        Text(text)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
     }
 }
 
