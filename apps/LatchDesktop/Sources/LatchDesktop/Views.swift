@@ -16,6 +16,7 @@ struct SessionsView: View {
                         Button("Open in \(store.preferredTerminal.rawValue)") {
                             Task { await store.open(session.id) }
                         }
+                        .disabled(!session.state.isAttachable || !store.canAttachSessions)
                     }
             }
             .searchable(text: $store.search, prompt: "Search sessions")
@@ -44,6 +45,7 @@ struct SessionsView: View {
                         Label("New Session", systemImage: "plus")
                     }
                     .keyboardShortcut("n")
+                    .disabled(!store.canCreateSessions)
                 }
             }
         } detail: {
@@ -154,9 +156,14 @@ private struct SessionRow: View {
                     .lineLimit(1)
             }
             Spacer()
-            Text(session.state.rawValue)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
+            VStack(alignment: .trailing, spacing: 2) {
+                Text(session.state.rawValue)
+                if let idle = idleDescription {
+                    Text(idle)
+                }
+            }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
         }
         .padding(.vertical, 3)
     }
@@ -164,10 +171,20 @@ private struct SessionRow: View {
     private var stateColor: Color {
         switch session.state {
         case .running: return .green
-        case .creating, .stopping: return .orange
         case .exited: return .secondary
         case .lost: return .red
         }
+    }
+
+    private var idleDescription: String? {
+        guard let milliseconds = session.idleMs else { return nil }
+        let seconds = milliseconds / 1_000
+        if seconds < 60 { return "\(seconds)s idle" }
+        let minutes = seconds / 60
+        if minutes < 60 { return "\(minutes)m idle" }
+        let hours = minutes / 60
+        if hours < 24 { return "\(hours)h idle" }
+        return "\(hours / 24)d idle"
     }
 }
 
@@ -176,6 +193,7 @@ private struct SessionDetailView: View {
     let session: InspectReport
     @State private var renameValue = ""
     @State private var showingRename = false
+    @State private var showingResize = false
     @State private var destructiveAction: DestructiveAction?
 
     enum DestructiveAction: String, Identifiable {
@@ -205,11 +223,16 @@ private struct SessionDetailView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
+                .disabled(!session.state.isAttachable || !store.canAttachSessions)
 
                 Grid(alignment: .leading, horizontalSpacing: 22, verticalSpacing: 10) {
                     DetailRow(label: "Command", value: session.commandLabel)
                     DetailRow(label: "Directory", value: session.cwd)
                     DetailRow(label: "Created", value: session.createdAt)
+                    if let summary = store.sessions.first(where: { $0.id == session.id }),
+                       let lastActivity = summary.lastActivityAt {
+                        DetailRow(label: "Last Activity", value: lastActivity)
+                    }
                     DetailRow(label: "Size", value: sizeDescription)
                     DetailRow(label: "Session ID", value: session.id)
                     if let exit = session.exit {
@@ -225,6 +248,9 @@ private struct SessionDetailView: View {
                     Button("Rename…") {
                         renameValue = session.name
                         showingRename = true
+                    }
+                    if session.state == .running {
+                        Button("Resize…") { showingResize = true }
                     }
                     if session.state.isLive {
                         Button("Stop…") { destructiveAction = .stop }
@@ -242,6 +268,13 @@ private struct SessionDetailView: View {
             TextField("Name", text: $renameValue)
             Button("Cancel", role: .cancel) {}
             Button("Rename") { Task { await store.rename(session.id, to: renameValue) } }
+        }
+        .sheet(isPresented: $showingResize) {
+            ResizeSessionView(
+                store: store,
+                session: session,
+                isPresented: $showingResize
+            )
         }
         .confirmationDialog(
             destructiveTitle,
@@ -300,6 +333,50 @@ private struct SessionDetailView: View {
     private func exitDescription(_ exit: ExitRecord) -> String {
         if let code = exit.code { return "Code \(code) at \(exit.exitedAt)" }
         return "\(exit.signal ?? "signal") at \(exit.exitedAt)"
+    }
+}
+
+private struct ResizeSessionView: View {
+    @ObservedObject var store: SessionStore
+    let session: InspectReport
+    @Binding var isPresented: Bool
+    @State private var request: ResizeSessionRequest
+
+    init(store: SessionStore, session: InspectReport, isPresented: Binding<Bool>) {
+        self.store = store
+        self.session = session
+        _isPresented = isPresented
+        let size = session.size ?? session.initialSize
+        _request = State(initialValue: ResizeSessionRequest(cols: size.cols, rows: size.rows))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text("Resize \(session.name)")
+                .font(.title2)
+                .fontWeight(.semibold)
+            Form {
+                TextField("Columns", value: $request.cols, format: .number)
+                TextField("Rows", value: $request.rows, format: .number)
+                Toggle("Pin this size", isOn: $request.pin)
+                Text("Without pinning, an attached terminal can change the session size later. Pinning switches the tmux window to manual sizing.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            HStack {
+                Button("Cancel", role: .cancel) { isPresented = false }
+                Spacer()
+                Button("Resize") {
+                    let submitted = request
+                    isPresented = false
+                    Task { await store.resize(session.id, request: submitted) }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(request.cols == 0 || request.rows == 0)
+            }
+        }
+        .padding(24)
+        .frame(width: 420)
     }
 }
 
@@ -480,6 +557,7 @@ struct MenuBarSessionsView: View {
             } label: {
                 Label(session.name, systemImage: session.state == .running ? "circle.fill" : "circle")
             }
+            .disabled(!session.state.isAttachable || !store.canAttachSessions)
         }
         if store.sessions.isEmpty { Text("No sessions") }
         Divider()
@@ -487,6 +565,7 @@ struct MenuBarSessionsView: View {
             store.shouldPresentNewSession = true
             openMainWindow()
         }
+        .disabled(!store.canCreateSessions)
         Button("Prune…") {
             store.shouldPresentPrune = true
             openMainWindow()
@@ -506,7 +585,7 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
-            Section("Updates") {
+            Section("Desktop App Updates") {
                 Toggle("Check for updates automatically", isOn: $updates.automaticChecks)
                 HStack {
                     Text("Version \(updates.installedVersionLabel)")
@@ -524,6 +603,39 @@ struct SettingsView: View {
             Section("Latch CLI") {
                 TextField("Latch executable", text: $store.latchExecutablePath)
                     .textFieldStyle(.roundedBorder)
+                Text("Using \(store.activeCLIPath)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                if let capabilities = store.cliCapabilities {
+                    LabeledContent("CLI version", value: capabilities.productVersion)
+                    LabeledContent(
+                        "Protocol",
+                        value: String(capabilities.protocolVersion)
+                    )
+                    if !capabilities.capabilities.extensions.isEmpty {
+                        LabeledContent(
+                            "Extensions",
+                            value: capabilities.capabilities.extensions.joined(separator: ", ")
+                        )
+                    }
+                }
+                if let doctor = store.cliDoctorReport {
+                    if let tmuxVersion = doctor.tmuxVersion {
+                        LabeledContent("Session kernel", value: tmuxVersion)
+                    }
+                    ForEach(doctor.findings) { finding in
+                        Label(
+                            finding.message,
+                            systemImage: finding.severity == "error"
+                                ? "exclamationmark.octagon"
+                                : "exclamationmark.triangle"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(finding.severity == "error" ? Color.red : Color.gray)
+                    }
+                }
+                cliUpdateStatus
                 if !store.discoveredLatchExecutables.isEmpty {
                     Text("Found by `where latch`:")
                         .font(.caption)
@@ -546,11 +658,28 @@ struct SettingsView: View {
                         Task { await store.discoverCLI() }
                     }
                     .disabled(store.isDiscoveringCLI)
+                    Button("Diagnose") {
+                        Task { await store.refreshCLIDiagnostics() }
+                    }
                     Spacer()
                     Button("Use This CLI") { store.useConfiguredCLI() }
                         .disabled(!store.selectedCLIIsExecutable)
                 }
-                Text("Latch Desktop uses the independently installed CLI selected here; it never includes or updates the CLI itself.")
+                HStack {
+                    Button(store.isCheckingCLIUpdate ? "Checking…" : "Check for CLI Update") {
+                        Task { await store.checkForCLIUpdate() }
+                    }
+                    .disabled(store.isCheckingCLIUpdate || store.isUpdatingCLI)
+                    if store.cliUpdateReport?.status == .available,
+                       store.cliCapabilities?.capabilities.selfUpdate == true {
+                        Button(store.isUpdatingCLI ? "Updating…" : "Install CLI Update") {
+                            Task { await store.updateCLI() }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(store.isUpdatingCLI)
+                    }
+                }
+                Text("Latch Desktop uses the independently installed CLI selected here. CLI updates replace both the command and its pinned tmux payload.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -580,6 +709,37 @@ struct SettingsView: View {
         }
         .padding(24)
         .frame(width: 460)
+    }
+
+    @ViewBuilder private var cliUpdateStatus: some View {
+        if let report = store.cliUpdateReport {
+            switch report.status {
+            case .current:
+                Text("Latch CLI \(report.currentVersion) is current.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            case .available:
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Latch CLI \(report.latestVersion ?? "update") is available; you have \(report.currentVersion).")
+                    if let releaseURL = report.releaseURL {
+                        Link("CLI release notes", destination: releaseURL)
+                    }
+                    if store.cliCapabilities?.capabilities.selfUpdate != true {
+                        Text("This CLI cannot replace itself. Use its package manager or run:")
+                        Text(store.cliInstallCommand)
+                            .font(.system(.caption, design: .monospaced))
+                            .textSelection(.enabled)
+                        Button("Run Installer in Terminal…") { store.runCLIInstaller() }
+                    }
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            case .installed:
+                Text("Updated the CLI from \(report.currentVersion) to \(report.latestVersion ?? "the latest release").")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
     }
 
     private func chooseCustomTerminalApplication() {
@@ -640,6 +800,15 @@ private struct CLISetupView: View {
                     }
                     .buttonStyle(.bordered)
                 }
+            }
+            if !store.discoveredLatchExecutables.isEmpty {
+                Text("To install or replace an outdated CLI, run:")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(store.cliInstallCommand)
+                    .font(.system(.caption, design: .monospaced))
+                    .textSelection(.enabled)
+                Button("Run Installer in Terminal…") { store.runCLIInstaller() }
             }
             HStack {
                 Spacer()

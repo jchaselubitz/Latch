@@ -1,15 +1,12 @@
 import Foundation
 
 enum SessionState: String, Codable, CaseIterable, Sendable {
-    case creating
     case running
-    case stopping
     case exited
     case lost
 
-    var isLive: Bool {
-        self == .creating || self == .running || self == .stopping
-    }
+    var isLive: Bool { self == .running }
+    var isAttachable: Bool { self != .lost }
 }
 
 struct SessionSummary: Codable, Identifiable, Hashable, Sendable {
@@ -85,9 +82,20 @@ struct CreatedSession: Codable, Identifiable, Sendable {
     let createdAt: String
 }
 
-struct StopReport: Codable, Sendable { let id: String; let state: SessionState }
+struct StopReport: Codable, Sendable {
+    let id: String
+    let state: SessionState
+    let stopped: Bool
+}
 struct RenameReport: Codable, Sendable { let id: String; let name: String }
 struct RemoveReport: Codable, Sendable { let id: String; let removed: Bool }
+
+struct ResizeReport: Codable, Sendable {
+    let id: String
+    let cols: UInt16
+    let rows: UInt16
+    let pinned: Bool
+}
 
 struct RetainedSession: Codable, Identifiable, Sendable {
     var id: String { sessionID }
@@ -122,14 +130,41 @@ struct CapabilityFlags: Codable, Sendable {
     let openViewer: Bool
     let localAttach: Bool
     let cloudAttach: Bool
+    let selfUpdate: Bool
+    let extensions: [String]
 }
 
-struct DoctorReport: Codable, Sendable { let findings: [DoctorFinding] }
+struct DoctorReport: Codable, Sendable {
+    let tmuxVersion: String?
+    let findings: [DoctorFinding]
+}
 struct DoctorFinding: Codable, Identifiable, Sendable {
     var id: String { code }
     let code: String
     let severity: String
     let message: String
+}
+
+enum CLIUpdateStatus: String, Codable, Sendable {
+    case current
+    case available
+    case installed
+}
+
+struct CLIUpdateReport: Codable, Sendable {
+    let status: CLIUpdateStatus
+    let currentVersion: String
+    let latestVersion: String?
+    let releaseURL: URL?
+    let installedPath: String?
+
+    enum CodingKeys: String, CodingKey {
+        case status
+        case currentVersion = "current_version"
+        case latestVersion = "latest_version"
+        case releaseURL = "release_url"
+        case installedPath = "installed_path"
+    }
 }
 
 struct NewSessionRequest: Sendable {
@@ -139,6 +174,12 @@ struct NewSessionRequest: Sendable {
     var command = ""
     var cols: UInt16 = 120
     var rows: UInt16 = 36
+}
+
+struct ResizeSessionRequest: Sendable {
+    var cols: UInt16
+    var rows: UInt16
+    var pin = false
 }
 
 struct LaunchManifest: Encodable, Sendable {

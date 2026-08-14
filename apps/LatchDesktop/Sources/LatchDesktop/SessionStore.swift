@@ -17,6 +17,12 @@ final class SessionStore: ObservableObject {
     @Published var shouldPresentCLISetup = false
     @Published private(set) var discoveredLatchExecutables: [String] = []
     @Published private(set) var isDiscoveringCLI = false
+    @Published private(set) var cliCapabilities: CapabilitiesReport?
+    @Published private(set) var cliDoctorReport: DoctorReport?
+    @Published private(set) var cliUpdateReport: CLIUpdateReport?
+    @Published private(set) var isCheckingCLIUpdate = false
+    @Published private(set) var isUpdatingCLI = false
+    @Published private(set) var activeCLIPath: String
     @Published var customTerminalExecutable: String {
         didSet { UserDefaults.standard.set(customTerminalExecutable, forKey: "customTerminalExecutable") }
     }
@@ -31,6 +37,7 @@ final class SessionStore: ObservableObject {
                 LatchClient.preferences.set(latchExecutablePath, forKey: "latchExecutablePath")
             }
             client = LatchClient()
+            activeCLIPath = client.executableURL.path
         }
     }
 
@@ -49,6 +56,7 @@ final class SessionStore: ObservableObject {
 
     init(client: LatchClient = LatchClient()) {
         self.client = client
+        activeCLIPath = client.executableURL.path
         preferredTerminalRaw = UserDefaults.standard.string(forKey: "preferredTerminal")
             ?? PreferredTerminal.terminal.rawValue
         customTerminalExecutable = UserDefaults.standard.string(forKey: "customTerminalExecutable") ?? ""
@@ -74,26 +82,36 @@ final class SessionStore: ObservableObject {
     }
 
     var runningCount: Int { sessions.filter { $0.state == .running }.count }
+    var canCreateSessions: Bool { cliCapabilities?.capabilities.create == true }
+    var canAttachSessions: Bool { cliCapabilities?.capabilities.localAttach == true }
 
     func start() {
         guard pollingTask == nil else { return }
         activationCancellable = NotificationCenter.default
             .publisher(for: NSApplication.didBecomeActiveNotification)
             .sink { [weak self] _ in
-                Task { @MainActor in await self?.refresh() }
+                Task { @MainActor in
+                    guard self?.cliCapabilities != nil else { return }
+                    await self?.refresh()
+                }
             }
         pollingTask = Task {
             await discoverCLI(
                 present: !LatchClient.preferences.bool(forKey: "cliSetupCompleted")
             )
             guard FileManager.default.isExecutableFile(
-                atPath: LatchClient.defaultExecutableURL().path
+                atPath: activeCLIPath
             ) else {
                 shouldPresentCLISetup = true
                 return
             }
-            do { _ = try await client.validateCompatibility() }
-            catch { errorMessage = error.localizedDescription }
+            do { cliCapabilities = try await client.validateCompatibility() }
+            catch {
+                errorMessage = error.localizedDescription
+                shouldPresentCLISetup = true
+                return
+            }
+            cliDoctorReport = try? await client.doctor()
             await refresh()
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 5_000_000_000)
@@ -136,6 +154,9 @@ final class SessionStore: ObservableObject {
     private func restartPolling() {
         pollingTask?.cancel()
         pollingTask = nil
+        cliCapabilities = nil
+        cliDoctorReport = nil
+        cliUpdateReport = nil
         start()
     }
 
@@ -205,6 +226,11 @@ final class SessionStore: ObservableObject {
         catch { errorMessage = error.localizedDescription }
     }
 
+    func resize(_ id: String, request: ResizeSessionRequest) async {
+        do { _ = try await client.resize(id, request: request); await refresh() }
+        catch { errorMessage = error.localizedDescription }
+    }
+
     func remove(_ id: String, force: Bool) async {
         do { _ = try await client.remove(id, force: force); await refresh() }
         catch { errorMessage = error.localizedDescription }
@@ -218,5 +244,44 @@ final class SessionStore: ObservableObject {
     func pruneAll() async {
         do { _ = try await client.pruneAll(); prunePreview = nil; await refresh() }
         catch { errorMessage = error.localizedDescription }
+    }
+
+    func refreshCLIDiagnostics() async {
+        do {
+            cliCapabilities = try await client.validateCompatibility()
+            cliDoctorReport = try await client.doctor()
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func checkForCLIUpdate() async {
+        guard !isCheckingCLIUpdate, !isUpdatingCLI else { return }
+        isCheckingCLIUpdate = true
+        defer { isCheckingCLIUpdate = false }
+        do {
+            cliUpdateReport = try await client.checkForUpdate()
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func updateCLI() async {
+        guard cliCapabilities?.capabilities.selfUpdate == true,
+              !isCheckingCLIUpdate,
+              !isUpdatingCLI else { return }
+        isUpdatingCLI = true
+        defer { isUpdatingCLI = false }
+        do {
+            cliUpdateReport = try await client.update()
+            cliCapabilities = try await client.validateCompatibility()
+            cliDoctorReport = try await client.doctor()
+            errorMessage = nil
+            await refresh()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 }

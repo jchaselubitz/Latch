@@ -3,10 +3,11 @@ import Darwin
 
 actor LatchClient {
     static let minimumProtocolVersion: UInt32 = 1
+    static let minimumProductVersion = "0.2608132217.0"
     static let preferences = UserDefaults(suiteName: "co.cooperativ.latch.desktop") ?? .standard
     static let installCommand = "curl -fsSL https://raw.githubusercontent.com/jchaselubitz/Latch/main/scripts/install-cli.sh | bash"
 
-    private let executableURL: URL
+    nonisolated let executableURL: URL
     private let timeout: TimeInterval
     private let decoder = JSONDecoder()
     private let encoder = JSONEncoder()
@@ -65,6 +66,14 @@ actor LatchClient {
                 productVersion: report.productVersion
             )
         }
+        guard let actual = ReleaseVersion(report.productVersion),
+              let minimum = ReleaseVersion(Self.minimumProductVersion),
+              actual >= minimum else {
+            throw LatchClientError.incompatibleProduct(
+                minimum: Self.minimumProductVersion,
+                actual: report.productVersion
+            )
+        }
         return report
     }
 
@@ -76,6 +85,15 @@ actor LatchClient {
     func rename(_ id: String, to name: String) throws -> RenameReport {
         try request(["rename", id, name, "--json"])
     }
+    func resize(_ id: String, request: ResizeSessionRequest) throws -> ResizeReport {
+        try self.request(
+            [
+                "resize", id,
+                "--cols", String(request.cols),
+                "--rows", String(request.rows),
+            ] + (request.pin ? ["--pin"] : []) + ["--json"]
+        )
+    }
     func remove(_ id: String, force: Bool) throws -> RemoveReport {
         try request(["remove", id] + (force ? ["--force"] : []) + ["--json"])
     }
@@ -84,6 +102,12 @@ actor LatchClient {
     }
     func pruneAll() throws -> PruneReport { try request(["prune", "--all", "--json"]) }
     func doctor() throws -> DoctorReport { try request(["doctor", "--json"]) }
+    func checkForUpdate() throws -> CLIUpdateReport {
+        try request(["update", "--check", "--json"], timeout: 30)
+    }
+    func update() throws -> CLIUpdateReport {
+        try request(["update", "--json"], timeout: 120)
+    }
 
     func create(_ request: NewSessionRequest) throws -> CreateReport {
         let shell = Self.loginShell()
@@ -112,12 +136,16 @@ actor LatchClient {
         [executableURL.path, "attach", id]
     }
 
-    private func request<Response: Decodable>(_ arguments: [String], stdin: Data? = nil) throws -> Response {
+    private func request<Response: Decodable>(
+        _ arguments: [String],
+        stdin: Data? = nil,
+        timeout: TimeInterval? = nil
+    ) throws -> Response {
         let output = try ProcessRunner.run(
             executableURL: executableURL,
             arguments: arguments,
             stdin: stdin,
-            timeout: timeout
+            timeout: timeout ?? self.timeout
         )
         do {
             return try decoder.decode(Response.self, from: output)
@@ -146,30 +174,49 @@ private enum ProcessRunner {
         }
 
         let process = Process()
-        let stdout = Pipe()
-        let stderr = Pipe()
+        let stdout = PipeCapture()
+        let stderr = PipeCapture()
         let finished = DispatchSemaphore(value: 0)
         process.executableURL = executableURL
         process.arguments = arguments
-        process.standardOutput = stdout
-        process.standardError = stderr
+        process.standardOutput = stdout.pipe
+        process.standardError = stderr.pipe
         process.terminationHandler = { _ in finished.signal() }
 
-        if let stdin {
-            let input = Pipe()
-            process.standardInput = input
-            try process.run()
-            input.fileHandleForWriting.write(stdin)
-            try? input.fileHandleForWriting.close()
+        let input: Pipe?
+        if stdin != nil {
+            let pipe = Pipe()
+            input = pipe
+            process.standardInput = pipe
         } else {
-            try process.run()
+            input = nil
+        }
+        try process.run()
+        stdout.start()
+        stderr.start()
+
+        if let stdin {
+            input?.fileHandleForWriting.write(stdin)
+            try? input?.fileHandleForWriting.close()
         }
         if finished.wait(timeout: .now() + timeout) == .timedOut {
             process.terminate()
+            var didExit = finished.wait(timeout: .now() + 2) == .success
+            if !didExit {
+                kill(process.processIdentifier, SIGKILL)
+                didExit = finished.wait(timeout: .now() + 2) == .success
+            }
+            if didExit {
+                _ = stdout.finish()
+                _ = stderr.finish()
+            } else {
+                stdout.cancel()
+                stderr.cancel()
+            }
             throw LatchClientError.timeout
         }
-        let output = stdout.fileHandleForReading.readDataToEndOfFile()
-        let diagnostic = stderr.fileHandleForReading.readDataToEndOfFile()
+        let output = stdout.finish()
+        let diagnostic = stderr.finish()
         guard process.terminationStatus == 0 else {
             let bounded = diagnostic.suffix(8_192)
             throw LatchClientError.commandFailed(
@@ -181,12 +228,45 @@ private enum ProcessRunner {
     }
 }
 
+/// Drains a child pipe while it runs so a response larger than the kernel pipe
+/// buffer cannot deadlock the process before the timeout is observed.
+private final class PipeCapture: @unchecked Sendable {
+    let pipe = Pipe()
+
+    private let group = DispatchGroup()
+    private let lock = NSLock()
+    private var data = Data()
+
+    func start() {
+        group.enter()
+        DispatchQueue.global(qos: .userInitiated).async { [self] in
+            let captured = pipe.fileHandleForReading.readDataToEndOfFile()
+            lock.lock()
+            data = captured
+            lock.unlock()
+            group.leave()
+        }
+    }
+
+    func finish() -> Data {
+        group.wait()
+        lock.lock()
+        defer { lock.unlock() }
+        return data
+    }
+
+    func cancel() {
+        try? pipe.fileHandleForReading.close()
+    }
+}
+
 enum LatchClientError: LocalizedError, Equatable {
     case executableNotFound(String)
     case timeout
     case commandFailed(status: Int32, diagnostic: String)
     case invalidResponse(String)
     case incompatibleProtocol(expected: UInt32, actual: UInt32, productVersion: String)
+    case incompatibleProduct(minimum: String, actual: String)
 
     var errorDescription: String? {
         switch self {
@@ -200,6 +280,8 @@ enum LatchClientError: LocalizedError, Equatable {
             return "Latch returned an incompatible response: \(detail)"
         case .incompatibleProtocol(let expected, let actual, let version):
             return "Latch \(version) uses protocol \(actual); this app requires protocol \(expected)."
+        case .incompatibleProduct(let minimum, let actual):
+            return "Latch CLI \(actual) is too old for this app. Install or update to \(minimum) or newer."
         }
     }
 }

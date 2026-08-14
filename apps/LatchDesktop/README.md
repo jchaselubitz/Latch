@@ -1,9 +1,9 @@
 # Latch Desktop
 
 Latch Desktop is the native macOS companion for the standalone `latch` CLI. It
-shows, creates, opens, stops, renames, removes, and prunes local sessions from a
-SwiftUI window and menu-bar extra. It never reads `~/.latch` directly and does
-not own session lifetime.
+shows, creates, opens, resizes, stops, renames, removes, and prunes local
+sessions from a SwiftUI window and menu-bar extra. It never reads `~/.latch`
+directly and does not own session lifetime.
 
 Use **File → New Session…** to create a session and **Latch → Settings…** (or
 Command-Comma) to choose the default terminal Latch uses for attachments.
@@ -18,7 +18,10 @@ macOS 13 or newer. On first launch the app asks the user's login shell to run
 `where latch`, presents every executable path it returns, and saves the path the
 user chooses. When no CLI is found, the setup flow presents the standalone CLI
 install command and can run it in Terminal. The same discovery, selection, and
-installation controls remain available in Settings.
+installation controls remain available in Settings. Settings also shows the
+selected CLI and private tmux versions, reports `latch doctor` findings, and can
+check for or install a CLI update when that installation advertises
+`selfUpdate` support.
 
 To assemble a local universal `.app` with no bundled CLI, run:
 
@@ -99,13 +102,17 @@ Without that attachment the in-app updater has nothing to find; if the upload
 does not happen the script prints the recovery commands.
 
 A complete release contains exactly the universal desktop ZIP, the two
-architecture-specific CLI ZIPs, and `checksums.txt`. The CLI is installed and
-updated independently. The app validates protocol version 1 before its first
-refresh.
+architecture-specific CLI ZIPs, and `checksums.txt`. The CLI is installed
+independently. The app validates protocol version 1 and requires CLI version
+`0.2608132217.0` or newer before its first refresh; this is the first release
+whose tmux-backed list/inspect contracts match the desktop models. A self-update
+initiated in Settings delegates to `latch update`, which atomically replaces
+both the CLI and its pinned tmux payload.
 
-The Swift package tests cover JSON compatibility, manifest wire names,
-terminal command escaping/template parsing, and the updater's release
-resolution, version ordering, and pre-download refusals.
+The Swift package tests cover the current list, stop, resize, doctor,
+capabilities, and update JSON contracts; manifest wire names; terminal command
+escaping/template parsing; and the updater's release resolution, version
+ordering, and pre-download refusals.
 Run them on macOS with:
 
 ```sh

@@ -36,6 +36,7 @@ struct LatchDesktopApp: App {
                     openSessionsWindow()
                 }
                 .keyboardShortcut("n", modifiers: .command)
+                .disabled(!store.canCreateSessions)
             }
 
             CommandMenu("Session") {
