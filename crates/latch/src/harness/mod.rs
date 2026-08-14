@@ -14,6 +14,7 @@ use std::thread;
 use std::time::{Duration, SystemTime};
 
 use anyhow::{bail, Context};
+use serde::Serialize;
 use serde_json::Value;
 
 use crate::cli::manage;
@@ -25,8 +26,8 @@ pub use generated::{
     AwaitingInputKind, CanSend, HarnessEvent, HarnessEventPayload, InteractionCapabilities,
 };
 pub use interaction::{
-    capabilities as interaction_capabilities, send, InteractionOptions, SendAction, SendOptions,
-    SendReport,
+    capabilities as interaction_capabilities, send, InteractionOptions, SendAction, SendInvalid,
+    SendOptions, SendRefused, SendReport,
 };
 
 /// Derivation version for cursor compatibility.
@@ -37,6 +38,23 @@ pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 pub const MAX_HOOK_BYTES: usize = 1024 * 1024;
 
 const CLAUDE_PLUGIN_NAME: &str = "latch-observer";
+
+/// Whether a remote client should offer a chat view for this session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EventsAvailability {
+    /// True when a harness connector can produce events for this session.
+    pub ok: bool,
+    /// Why events are unavailable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Hosted harness id, when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
+    /// Connector epoch a stored cursor must match.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connector_epoch: Option<u32>,
+}
 
 /// Named arguments for an event subscription.
 #[derive(Debug, Clone)]
@@ -305,6 +323,32 @@ fn read_bounded_hook(reader: impl Read) -> anyhow::Result<Vec<u8>> {
         bail!("Claude hook payload exceeds {MAX_HOOK_BYTES} bytes");
     }
     Ok(raw)
+}
+
+/// Reports whether `latch events` can be offered for a hosted session.
+pub fn events_availability(options: InteractionOptions) -> anyhow::Result<EventsAvailability> {
+    let id = manage::resolve_existing(&options.home, &options.session)?;
+    let paths = options.home.session(&id);
+    if !interaction::hosts_known_harness(&paths)? {
+        return Ok(EventsAvailability {
+            ok: false,
+            reason: Some("no harness connector".to_owned()),
+            harness: None,
+            connector_epoch: None,
+        });
+    }
+    let harness = match crate::session::meta::read(&paths) {
+        Ok(metadata) => metadata
+            .harness
+            .or_else(|| (metadata.command_label == "claude").then(|| "claude".to_owned())),
+        Err(_) => Some("claude".to_owned()),
+    };
+    Ok(EventsAvailability {
+        ok: true,
+        reason: None,
+        harness,
+        connector_epoch: Some(CONNECTOR_EPOCH),
+    })
 }
 
 /// Streams newline-delimited normalized events until a hosted session exits.

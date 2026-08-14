@@ -1,4 +1,4 @@
-import type { RetryPolicy } from './types';
+import type { RetryPolicy } from './types.ts';
 
 export const defaultRetryPolicy: RetryPolicy = {
   initialMs: 200,

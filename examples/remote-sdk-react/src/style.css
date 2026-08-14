@@ -1,0 +1,16 @@
+:root { color: #e8edf2; background: #111827; font-family: ui-sans-serif, system-ui, sans-serif; }
+* { box-sizing: border-box; }
+body { margin: 0; }
+main { max-width: 1440px; margin: 0 auto; padding: 2rem; }
+header p, .sessions p { color: #a8b3c5; }
+form, label { display: grid; gap: .5rem; }
+.connection { grid-template-columns: minmax(14rem, 1fr) minmax(14rem, 1fr) auto; align-items: end; }
+input, select, textarea, button { font: inherit; padding: .6rem; border-radius: .35rem; border: 1px solid #536174; }
+button { cursor: pointer; background: #2b6ce8; color: white; }
+.sessions { margin: 1.5rem 0; }
+.surface { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(20rem, 1fr); gap: 1rem; }
+.terminal { min-height: 32rem; background: #000; padding: .5rem; }
+.chat { min-height: 32rem; overflow: auto; border: 1px solid #334155; padding: 1rem; }
+.timeline { padding-left: 1.25rem; }
+pre { overflow: auto; white-space: pre-wrap; }
+@media (max-width: 800px) { .connection, .surface { grid-template-columns: 1fr; } .terminal { min-height: 20rem; } }

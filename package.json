@@ -3,6 +3,20 @@
   "workspaces": [
     "packages/harness-schema",
     "packages/client",
-    "packages/terminal-react"
-  ]
+    "packages/terminal-react",
+    "packages/chat-react",
+    "examples/remote-sdk-react"
+  ],
+  "devDependencies": {
+    "@types/node": "^24.13.3",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.3",
+    "typescript": "^5.9.3"
+  },
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "example": "npm run dev --workspace @latch/remote-sdk-example",
+    "typecheck": "npm run typecheck --workspaces",
+    "test": "npm run test --workspaces --if-present"
+  }
 }

@@ -1,5 +1,11 @@
-import { backoffDelay } from './reconnect';
-import type { RetryPolicy, TerminalHandle, TerminalState } from './types';
+import { backoffDelay } from './reconnect.ts';
+import type {
+  RetryPolicy,
+  TerminalCloseInfo,
+  TerminalHandle,
+  TerminalState
+} from './types.ts';
+import { FATAL_CLOSE_CODES, SOCKET_OPEN, latchProtocols, sessionWsUrl } from './ws.ts';
 
 const WRITE_QUEUE_LIMIT = 32;
 
@@ -31,6 +37,13 @@ export function attachTerminal(options: AttachTerminalOptions): TerminalHandle {
   const writeQueue: Uint8Array[] = [];
   const dataHandlers = new Set<(bytes: Uint8Array) => void>();
   const stateHandlers = new Set<(next: TerminalState) => void>();
+  const closeHandlers = new Set<(info: TerminalCloseInfo) => void>();
+
+  function emitClose(info: TerminalCloseInfo) {
+    for (const handler of closeHandlers) {
+      handler(info);
+    }
+  }
 
   function setState(next: TerminalState) {
     if (state === next) {
@@ -43,20 +56,21 @@ export function attachTerminal(options: AttachTerminalOptions): TerminalHandle {
   }
 
   function socketUrl() {
-    const url = new URL(options.baseUrl);
-    url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
-    url.pathname = `/v1/sessions/${encodeURIComponent(options.sessionId)}/terminal`;
-    url.search = '';
-    url.hash = '';
+    const query: Record<string, string> = {};
     if (lastSize) {
-      url.searchParams.set('cols', String(lastSize.cols));
-      url.searchParams.set('rows', String(lastSize.rows));
+      query.cols = String(lastSize.cols);
+      query.rows = String(lastSize.rows);
     }
-    return url.toString();
+    return sessionWsUrl({
+      baseUrl: options.baseUrl,
+      sessionId: options.sessionId,
+      channel: 'terminal',
+      query
+    });
   }
 
   function flushQueue(target: WebSocket) {
-    while (writeQueue.length > 0 && target.readyState === WebSocketImpl.OPEN) {
+    while (writeQueue.length > 0 && target.readyState === SOCKET_OPEN) {
       const bytes = writeQueue.shift();
       if (bytes) {
         target.send(bytes);
@@ -68,7 +82,7 @@ export function attachTerminal(options: AttachTerminalOptions): TerminalHandle {
     if (closed) {
       return;
     }
-    const next = new WebSocketImpl(socketUrl(), [`latch.v1.${options.token}`]);
+    const next = new WebSocketImpl(socketUrl(), latchProtocols({ token: options.token }));
     next.binaryType = 'arraybuffer';
     socket = next;
     setState(attempt === 0 ? 'connecting' : 'reconnecting');
@@ -100,9 +114,19 @@ export function attachTerminal(options: AttachTerminalOptions): TerminalHandle {
       }
     };
 
-    next.onclose = () => {
+    next.onclose = event => {
       if (socket === next) {
         socket = null;
+      }
+      const code = event?.code ?? 0;
+      const reason = event?.reason ?? '';
+      if (FATAL_CLOSE_CODES.has(code)) {
+        // The session is gone or the gateway refused this client. Reconnecting
+        // would loop forever against an answer that will not change.
+        closed = true;
+        emitClose({ code, reason });
+        setState('closed');
+        return;
       }
       scheduleReconnect();
     };
@@ -134,7 +158,7 @@ export function attachTerminal(options: AttachTerminalOptions): TerminalHandle {
       if (closed || bytes.byteLength === 0) {
         return;
       }
-      if (socket && socket.readyState === WebSocketImpl.OPEN) {
+      if (socket && socket.readyState === SOCKET_OPEN) {
         socket.send(bytes);
         return;
       }
@@ -145,7 +169,7 @@ export function attachTerminal(options: AttachTerminalOptions): TerminalHandle {
     },
     resize(size) {
       lastSize = size;
-      if (socket && socket.readyState === WebSocketImpl.OPEN) {
+      if (socket && socket.readyState === SOCKET_OPEN) {
         socket.send(JSON.stringify({ type: 'resize', cols: size.cols, rows: size.rows }));
       }
     },
@@ -153,6 +177,12 @@ export function attachTerminal(options: AttachTerminalOptions): TerminalHandle {
       dataHandlers.add(handler);
       return () => {
         dataHandlers.delete(handler);
+      };
+    },
+    onClose(handler) {
+      closeHandlers.add(handler);
+      return () => {
+        closeHandlers.delete(handler);
       };
     },
     onState(handler) {

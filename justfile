@@ -24,3 +24,12 @@ check:
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     cargo test --workspace
+    just check-web
+
+# The SDK packages. `npm ci` needs a lockfile, so `npm install` is the
+# first-run path; both are cheap next to the Rust build.
+check-web:
+    npm install --no-audit --no-fund
+    npm run typecheck
+    npm run build
+    npm test

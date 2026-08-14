@@ -44,16 +44,20 @@ impl PtyChild {
             ws_xpixel: 0,
             ws_ypixel: 0,
         };
+        // The winsize parameter is `*mut winsize` on Apple platforms and
+        // `*const winsize` on glibc. A raw `*mut` satisfies both — it coerces
+        // to `*const` — where a `&mut` borrow reads as gratuitous on Linux.
+        let size_ptr: *mut libc::winsize = &mut size;
         // SAFETY: `openpty` writes the two file descriptors and optional name
         // and termios. We pass null for the unused outputs and stack storage
-        // for the fds and winsize (`&mut` matches Apple's `*mut winsize`).
+        // for the fds and winsize.
         let opened = unsafe {
             libc::openpty(
                 &mut master_fd,
                 &mut slave_fd,
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
-                &mut size,
+                size_ptr,
             )
         };
         if opened != 0 {

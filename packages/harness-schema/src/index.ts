@@ -2,4 +2,4 @@ export type {
   HarnessEvent,
   HarnessEventType,
   InteractionCapabilities
-} from './generated';
+} from './generated.ts';

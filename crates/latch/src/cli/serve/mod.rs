@@ -9,6 +9,7 @@
 //! tunnel to it). Binding a non-loopback address requires `--allow-remote`.
 
 mod auth;
+mod events;
 mod http;
 mod pty;
 mod terminal;

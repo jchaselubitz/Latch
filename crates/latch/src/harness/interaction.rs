@@ -30,6 +30,7 @@ pub struct InteractionOptions {
 }
 
 /// One operation accepted by `latch send`.
+#[derive(Debug)]
 pub enum SendAction {
     /// Paste a message and submit it.
     Message(String),
@@ -52,6 +53,43 @@ pub struct SendOptions {
     pub session: String,
     /// Requested operation.
     pub action: SendAction,
+}
+
+/// Capability or screen-state refusal from `latch send`.
+///
+/// The gateway maps this to HTTP 409 `{ error: "refused", reason }` so a
+/// client can surface the reason instead of treating it as a crash.
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("{reason}")]
+pub struct SendRefused {
+    /// Why the operation was not applied.
+    pub reason: String,
+}
+
+impl SendRefused {
+    fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+        }
+    }
+}
+
+/// Malformed `latch send` input, as opposed to a capability refusal.
+///
+/// The gateway maps this to HTTP 400.
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("{reason}")]
+pub struct SendInvalid {
+    /// What was wrong with the request.
+    pub reason: String,
+}
+
+impl SendInvalid {
+    fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+        }
+    }
 }
 
 /// Machine-readable confirmation for `latch send --json`.
@@ -119,18 +157,19 @@ pub fn send(options: SendOptions) -> anyhow::Result<SendReport> {
     match options.action {
         SendAction::Message(message) => {
             if !capabilities.send_message || !matches!(state, ScreenState::Idle) {
-                bail!(
-                    "{}",
+                bail!(SendRefused::new(
                     capabilities.can_send.reason.as_deref().unwrap_or(
                         "the Claude Code composer is not empty; refusing to send a message"
                     )
-                );
+                ));
             }
             if message.is_empty() {
-                bail!("message must not be empty");
+                bail!(SendInvalid::new("message must not be empty"));
             }
             if message.len() > MAX_MESSAGE_BYTES {
-                bail!("message exceeds {MAX_MESSAGE_BYTES} bytes");
+                bail!(SendInvalid::new(format!(
+                    "message exceeds {MAX_MESSAGE_BYTES} bytes"
+                )));
             }
             engine::paste_message(engine::PasteMessageRequest {
                 home: &options.home,
@@ -147,14 +186,13 @@ pub fn send(options: SendOptions) -> anyhow::Result<SendReport> {
         }
         SendAction::Keys(keys) => {
             if !capabilities.send_keys {
-                bail!(
-                    "{}",
+                bail!(SendRefused::new(
                     capabilities
                         .can_send
                         .reason
                         .as_deref()
                         .unwrap_or("direct keypresses are unsafe on the current screen")
-                );
+                ));
             }
             let keys = parse_keys(&keys)?;
             engine::send_keys(engine::SendKeysRequest {
@@ -171,42 +209,48 @@ pub fn send(options: SendOptions) -> anyhow::Result<SendReport> {
             }))
         }
         SendAction::Resolve { request_id, choice } => {
+            if request_id.is_empty() || choice.is_empty() {
+                bail!(SendInvalid::new("resolve requires requestId and choice"));
+            }
             if !capabilities.resolve {
-                bail!(
-                    "{}",
+                bail!(SendRefused::new(
                     capabilities
                         .can_send
                         .reason
                         .as_deref()
                         .unwrap_or("there is no visible unresolved request for this session")
-                );
+                ));
             }
             let ScreenState::Pending(pending) = state else {
-                bail!("there is no visible unresolved request for this session");
+                bail!(SendRefused::new(
+                    "there is no visible unresolved request for this session"
+                ));
             };
             if pending.id != request_id {
-                bail!(
+                bail!(SendRefused::new(format!(
                     "request `{request_id}` is stale; the visible request is `{}`",
                     pending.id
-                );
+                )));
             }
-            let choice_index = pending
+            let Some(choice_index) = pending
                 .choices
                 .iter()
                 .position(|candidate| candidate == &choice)
-                .with_context(|| {
-                    format!(
-                        "choice `{choice}` is not valid for request `{request_id}`; expected one of: {}",
-                        pending.choices.join(", ")
-                    )
-                })?;
-            let keys = pending
+            else {
+                bail!(SendRefused::new(format!(
+                    "choice `{choice}` is not valid for request `{request_id}`; expected one of: {}",
+                    pending.choices.join(", ")
+                )));
+            };
+            let Some(keys) = pending
                 .resolution_keys
                 .get(choice_index)
                 .and_then(Option::as_ref)
-                .with_context(|| {
-                    format!("choice `{choice}` is not identifiable on the current screen")
-                })?;
+            else {
+                bail!(SendRefused::new(format!(
+                    "choice `{choice}` is not identifiable on the current screen"
+                )));
+            };
             engine::send_keys(engine::SendKeysRequest {
                 home: &options.home,
                 id: &id,
@@ -312,7 +356,7 @@ fn unknown_harness(state: ScreenState) -> (InteractionCapabilities, ScreenState)
     )
 }
 
-fn hosts_known_harness(paths: &SessionPaths) -> anyhow::Result<bool> {
+pub(crate) fn hosts_known_harness(paths: &SessionPaths) -> anyhow::Result<bool> {
     if paths.harness_hooks().is_file() {
         return Ok(true);
     }
@@ -569,7 +613,7 @@ fn parse_keys(raw: &str) -> anyhow::Result<Vec<String>> {
         .map(str::to_owned)
         .collect::<Vec<_>>();
     if keys.is_empty() {
-        bail!("at least one key is required");
+        bail!(SendInvalid::new("at least one key is required"));
     }
     for key in &keys {
         let valid_named = matches!(
@@ -598,7 +642,7 @@ fn parse_keys(raw: &str) -> anyhow::Result<Vec<String>> {
             .and_then(|number| number.parse::<u8>().ok())
             .is_some_and(|number| (1..=12).contains(&number));
         if key.chars().count() != 1 && !valid_named && !valid_modified && !valid_function {
-            bail!("unsupported key `{key}`");
+            bail!(SendInvalid::new(format!("unsupported key `{key}`")));
         }
     }
     Ok(keys)
