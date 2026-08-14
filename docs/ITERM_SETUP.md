@@ -76,9 +76,24 @@ latch attach                # most recent session
 latch attach ses_01J…       # a specific session
 latch attach --watch NAME   # look without taking input control
 latch open ses_01J… --with iterm  # open a new iTerm attachment
+latch open ses_01J… --with iterm --as tab   # …as a tab in the current window
 latch stop NAME             # end that session's process group only
 latch prune                 # reclaim exited / lost session directories
 ```
+
+## Window or tab
+
+`latch open` creates a new iTerm window unless told otherwise. Pass `--as tab`
+for one invocation, or set the default once:
+
+```bash
+latch config open.behavior new-tab   # or new-window
+```
+
+A caller that holds its own window-or-tab preference — Overlord, or Latch
+Desktop — should pass `--as` rather than depend on the stored default, so the
+two settings cannot disagree. `--as tab` still opens a window when iTerm has
+none, because a tab needs a window to live in.
 
 ## Nesting
 

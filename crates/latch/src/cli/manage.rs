@@ -423,6 +423,14 @@ pub fn config(request: ConfigRequest) -> anyhow::Result<ConfigReport> {
     }
 }
 
+/// Reads one non-secret preference without creating the state root.
+///
+/// Callers use this on paths where a missing config simply means "no stored
+/// preference", so an absent file is `Ok(None)` rather than an error.
+pub fn config_value(home: &LatchHome, key: &str) -> anyhow::Result<Option<String>> {
+    Ok(read_config(&home.config_file())?.remove(key))
+}
+
 /// Reports the unchanged engine discovery contract.
 pub fn capabilities() -> CapabilitiesReport {
     CapabilitiesReport {

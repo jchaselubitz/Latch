@@ -29,6 +29,6 @@ pub use manage::{
     RenameRequest, ResizeRequest, StopRequest,
 };
 pub use nesting::{nesting_decision, NestingDecision, SESSION_ID_ENV};
-pub use open::{open, OpenRequest};
+pub use open::{open, OpenBehavior, OpenRequest};
 pub use term::RawModeGuard;
 pub use update::{update, UpdateOptions, UpdateStatus};

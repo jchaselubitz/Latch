@@ -23,7 +23,7 @@ use latch::cli::manage::{
     RenameRequest, ResizeRequest, StopRequest,
 };
 use latch::cli::nesting::{self, NestingDecision};
-use latch::cli::open::{self, OpenRequest};
+use latch::cli::open::{self, OpenBehavior, OpenRequest};
 use latch::cli::update::{self, UpdateOptions};
 use latch::engine::PROTOCOL_VERSION;
 use latch::session::manifest::{DisplayMetadata, TerminalSize};
@@ -102,6 +102,13 @@ enum Command {
         /// Viewer to open (currently `iterm`).
         #[arg(long, name = "VIEWER")]
         with: String,
+        /// Open as a `window` or a `tab`.
+        ///
+        /// Defaults to `open.behavior` in `~/.latch/config.toml`, then to
+        /// `window`. Callers that hold their own preference (Overlord, Latch
+        /// Desktop) pass it here instead of relying on the stored default.
+        #[arg(long = "as", value_name = "SHAPE")]
+        open_as: Option<String>,
         /// Emit machine-readable JSON.
         #[arg(long)]
         json: bool,
@@ -369,17 +376,25 @@ fn dispatch(command: Option<Command>) -> Result<()> {
         Some(Command::Open {
             session,
             with,
+            open_as,
             json,
         }) => {
+            let behavior = open_as.as_deref().map(OpenBehavior::parse).transpose()?;
             let report = open::open(OpenRequest {
                 home: LatchHome::from_env()?,
                 session,
                 viewer: with,
+                behavior,
             })?;
             if json {
                 println!("{}", serde_json::to_string(&report)?);
             } else {
-                println!("opened {} in {}", report.id, report.viewer);
+                println!(
+                    "opened {} in {} as a {}",
+                    report.id,
+                    report.viewer,
+                    report.behavior.replace('-', " ")
+                );
             }
             Ok(())
         }

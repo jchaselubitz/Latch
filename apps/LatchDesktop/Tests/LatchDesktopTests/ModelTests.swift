@@ -216,4 +216,57 @@ final class TerminalLauncherTests: XCTestCase {
             try TerminalLauncher.executablePath(forApplicationURL: URL(fileURLWithPath: "/tmp/not-an-app"))
         )
     }
+
+    func testScriptableTerminalsOfferEveryOpenBehavior() {
+        for terminal in [PreferredTerminal.terminal, .iTerm] {
+            XCTAssertEqual(terminal.supportedOpenBehaviors, TerminalOpenBehavior.allCases)
+            for behavior in TerminalOpenBehavior.allCases {
+                XCTAssertEqual(terminal.resolvedOpenBehavior(behavior), behavior)
+                XCTAssertNil(terminal.unsupportedReason(for: behavior))
+            }
+        }
+    }
+
+    func testUnsupportedBehaviorsFallBackToANewWindowWithAReason() {
+        XCTAssertEqual(PreferredTerminal.ghostty.supportedOpenBehaviors, [.newWindow])
+        XCTAssertEqual(PreferredTerminal.ghostty.resolvedOpenBehavior(.newTab), .newWindow)
+        XCTAssertNotNil(PreferredTerminal.ghostty.unsupportedReason(for: .newTab))
+        XCTAssertNil(PreferredTerminal.ghostty.unsupportedReason(for: .newWindow))
+
+        // A custom terminal is launched entirely by its argument template.
+        XCTAssertTrue(PreferredTerminal.custom.supportedOpenBehaviors.isEmpty)
+        for behavior in TerminalOpenBehavior.allCases {
+            XCTAssertEqual(PreferredTerminal.custom.resolvedOpenBehavior(behavior), .newWindow)
+            XCTAssertNotNil(PreferredTerminal.custom.unsupportedReason(for: behavior))
+        }
+    }
+
+    func testOpenRejectsMalformedAttachmentCommandsForEveryBehavior() {
+        for behavior in TerminalOpenBehavior.allCases {
+            XCTAssertThrowsError(
+                try TerminalLauncher.open(command: ["latch", "attach"], in: .terminal, behavior: behavior)
+            ) { error in
+                XCTAssertEqual(error as? TerminalLaunchError, .invalidCommand)
+            }
+        }
+    }
+
+    func testStoredOpenBehaviorSurvivesAnUnsupportedTerminalChoice() {
+        let defaults = UserDefaults.standard
+        let previousTerminal = defaults.string(forKey: "preferredTerminal")
+        let previousBehavior = defaults.string(forKey: "terminalOpenBehavior")
+        defer {
+            defaults.set(previousTerminal, forKey: "preferredTerminal")
+            defaults.set(previousBehavior, forKey: "terminalOpenBehavior")
+        }
+
+        let store = SessionStore()
+        store.preferredTerminal = .iTerm
+        store.terminalOpenBehavior = .newTab
+        XCTAssertEqual(store.effectiveOpenBehavior, .newTab)
+
+        store.preferredTerminal = .ghostty
+        XCTAssertEqual(store.terminalOpenBehavior, .newTab)
+        XCTAssertEqual(store.effectiveOpenBehavior, .newWindow)
+    }
 }

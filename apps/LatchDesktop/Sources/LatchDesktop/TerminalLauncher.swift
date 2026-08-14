@@ -8,6 +8,57 @@ enum PreferredTerminal: String, CaseIterable, Identifiable {
     case custom = "Custom"
 
     var id: String { rawValue }
+
+    /// The launch shapes this terminal can actually be driven into from another app.
+    var supportedOpenBehaviors: [TerminalOpenBehavior] {
+        switch self {
+        case .iTerm, .terminal: return TerminalOpenBehavior.allCases
+        case .ghostty: return [.newWindow]
+        // A custom terminal is launched entirely by the user's argument template,
+        // so Latch has nothing left to decide.
+        case .custom: return []
+        }
+    }
+
+    func supports(_ behavior: TerminalOpenBehavior) -> Bool {
+        supportedOpenBehaviors.contains(behavior)
+    }
+
+    /// Why an option is unavailable, phrased for the split-button menu.
+    func unsupportedReason(for behavior: TerminalOpenBehavior) -> String? {
+        guard !supports(behavior) else { return nil }
+        switch self {
+        case .custom: return "set by your argument template"
+        default: return "not supported by \(rawValue)"
+        }
+    }
+
+    /// The behavior actually used when the requested one is unavailable.
+    func resolvedOpenBehavior(_ behavior: TerminalOpenBehavior) -> TerminalOpenBehavior {
+        supports(behavior) ? behavior : .newWindow
+    }
+}
+
+/// How Latch asks the preferred terminal to present a session attachment.
+enum TerminalOpenBehavior: String, CaseIterable, Identifiable {
+    case newWindow
+    case newTab
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .newWindow: return "New Window"
+        case .newTab: return "New Tab"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .newWindow: return "macwindow.badge.plus"
+        case .newTab: return "plus.rectangle.on.rectangle"
+        }
+    }
 }
 
 @MainActor
@@ -31,24 +82,41 @@ enum TerminalLauncher {
     static func open(
         command: [String],
         in terminal: PreferredTerminal,
+        behavior: TerminalOpenBehavior = .newWindow,
         customExecutable: String = "",
         customTemplate: String = ""
     ) throws {
         guard command.count == 3 else { throw TerminalLaunchError.invalidCommand }
-        switch terminal {
-        case .iTerm:
+        let shellCommand = command.map(shellQuote).joined(separator: " ")
+        // Falls back to a new window rather than refusing when the terminal cannot
+        // honour the requested shape; attaching the session matters more.
+        switch (terminal, terminal.resolvedOpenBehavior(behavior)) {
+        case (.iTerm, .newWindow):
             try runAppleScript(
                 application: "iTerm",
                 statement: "create window with default profile command",
-                shellCommand: command.map(shellQuote).joined(separator: " ")
+                shellCommand: shellCommand
             )
-        case .terminal:
+        case (.iTerm, .newTab):
+            try execute("""
+            tell application "iTerm"
+                activate
+                if (count of windows) is 0 then
+                    create window with default profile command "\(appleScriptEscape(shellCommand))"
+                else
+                    tell current window to create tab with default profile command "\(appleScriptEscape(shellCommand))"
+                end if
+            end tell
+            """)
+        case (.terminal, .newWindow):
             try runAppleScript(
                 application: "Terminal",
                 statement: "do script",
-                shellCommand: command.map(shellQuote).joined(separator: " ")
+                shellCommand: shellCommand
             )
-        case .ghostty:
+        case (.terminal, .newTab):
+            try openTerminalAppTab(shellCommand: shellCommand)
+        case (.ghostty, _):
             guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.mitchellh.ghostty") else {
                 throw TerminalLaunchError.notInstalled(terminal.rawValue)
             }
@@ -60,7 +128,7 @@ enum TerminalLauncher {
                     NSApp.presentError(error)
                 }
             }
-        case .custom:
+        case (.custom, _):
             guard FileManager.default.isExecutableFile(atPath: customExecutable) else {
                 throw TerminalLaunchError.notExecutable(customExecutable)
             }
@@ -79,17 +147,64 @@ enum TerminalLauncher {
 
     }
 
+    /// Terminal.app's scripting dictionary cannot create a tab, so the tab comes from
+    /// the Command-T keystroke and `do script` then runs in the tab that selects.
+    private static func openTerminalAppTab(shellCommand: String) throws {
+        guard hasOpenTerminalAppWindow() else {
+            try runAppleScript(application: "Terminal", statement: "do script", shellCommand: shellCommand)
+            return
+        }
+        do {
+            try execute("""
+            tell application "Terminal" to activate
+            tell application "System Events" to tell process "Terminal"
+                keystroke "t" using command down
+            end tell
+            delay 0.2
+            tell application "Terminal"
+                do script "\(appleScriptEscape(shellCommand))" in front window
+            end tell
+            """)
+        } catch {
+            // Sending keystrokes needs a separate Automation grant for System Events;
+            // a new window still attaches the session when that is refused.
+            try runAppleScript(application: "Terminal", statement: "do script", shellCommand: shellCommand)
+        }
+    }
+
+    /// Whether there is a window for a new tab to join.
+    ///
+    /// The running check comes first so that a launch is never provoked here: a
+    /// Terminal that has to be started opens its own window, and adding a tab to
+    /// that would leave the launch window sitting there unused.
+    private static func hasOpenTerminalAppWindow() -> Bool {
+        guard NSWorkspace.shared.runningApplications.contains(
+            where: { $0.bundleIdentifier == "com.apple.Terminal" }
+        ) else { return false }
+        let source = """
+        tell application "Terminal" to return (count of windows) > 0
+        """
+        var error: NSDictionary?
+        guard let descriptor = NSAppleScript(source: source)?.executeAndReturnError(&error) else {
+            return false
+        }
+        return descriptor.booleanValue
+    }
+
     private static func runAppleScript(
         application: String,
         statement: String,
         shellCommand: String
     ) throws {
-        let source = """
+        try execute("""
         tell application "\(application)"
             activate
             \(statement) "\(appleScriptEscape(shellCommand))"
         end tell
-        """
+        """)
+    }
+
+    private static func execute(_ source: String) throws {
         var error: NSDictionary?
         guard NSAppleScript(source: source)?.executeAndReturnError(&error) != nil else {
             throw TerminalLaunchError.appleEvent(

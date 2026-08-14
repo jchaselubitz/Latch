@@ -116,6 +116,12 @@ pub struct OpenReport {
     pub viewer: String,
     /// Whether the operating system accepted the viewer-open request.
     pub opened: bool,
+    /// Shape the viewer was asked for: `new-window` or `new-tab`.
+    ///
+    /// Defaulted on read so reports written before the setting existed still
+    /// decode.
+    #[serde(default)]
+    pub behavior: String,
 }
 
 /// `latch rename --json`.

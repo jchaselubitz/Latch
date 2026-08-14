@@ -170,6 +170,9 @@ the CLI. `latch open --with` accepts `iterm` alone, so any delegation of viewer 
 to Latch is one viewer wide until the CLI reaches parity with `TerminalLauncher`'s
 Terminal, Ghostty, and custom-template cases. Overlord may keep opening the viewer
 itself in the interim; the stored preference shape above does not change either way.
+The narrower window-or-tab choice is no longer part of that gap: `latch open --as`
+accepts it for iTerm today, and the viewer field can carry it as
+`{"kind": "iterm", "openAs": "tab"}` when Overlord delegates the open.
 
 ## Runner integration contract
 
@@ -271,8 +274,14 @@ After successful creation, Overlord optionally asks Latch to open the selected
 viewer:
 
 ```bash
-latch open ses_01J... --with iterm --json
+latch open ses_01J... --with iterm --as tab --json
 ```
+
+`--as` takes `window` or `tab` and is how Overlord's own window-or-tab preference
+reaches Latch. Omitting it falls back to `open.behavior` in `~/.latch/config.toml`,
+then to `window`. A caller that stores the preference itself should always send
+`--as`, because the alternative is two settings that can disagree with no way for
+the user to tell which one won. The response echoes the shape as `behavior`.
 
 This is best-effort. Viewer failure produces a warning and an attach action, but the
 execution request remains launched because the process is already running.

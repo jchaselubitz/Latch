@@ -5,12 +5,52 @@
 //! presentation that may be closed and reopened without affecting the process.
 
 use anyhow::bail;
-#[cfg(target_os = "macos")]
 use anyhow::Context;
 
 use crate::cli::json::OpenReport;
 use crate::cli::manage;
 use crate::session::paths::LatchHome;
+
+/// The config key holding the default viewer-opening shape.
+pub const OPEN_BEHAVIOR_KEY: &str = "open.behavior";
+
+/// How the viewer should present the attachment.
+///
+/// The caller may state this per invocation; otherwise it comes from
+/// `open.behavior` in `~/.latch/config.toml`. Overlord and Latch Desktop both
+/// hold their own window-or-tab preference, and neither could reach this code
+/// path while the AppleScript was fixed at `create window`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OpenBehavior {
+    /// A new viewer window.
+    #[default]
+    NewWindow,
+    /// A new tab in the viewer's current window, falling back to a window when
+    /// the viewer has none open.
+    NewTab,
+}
+
+impl OpenBehavior {
+    /// The canonical wire and config spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NewWindow => "new-window",
+            Self::NewTab => "new-tab",
+        }
+    }
+
+    /// Parses a caller- or config-supplied spelling.
+    ///
+    /// Both the bare noun and the `new-` form are accepted because the flag
+    /// reads as `--as tab` while the stored key reads as `new-tab`.
+    pub fn parse(value: &str) -> anyhow::Result<Self> {
+        match value.trim().to_ascii_lowercase().replace('_', "-").as_str() {
+            "window" | "new-window" => Ok(Self::NewWindow),
+            "tab" | "new-tab" => Ok(Self::NewTab),
+            other => bail!("unsupported open behavior `{other}`; expected `window` or `tab`"),
+        }
+    }
+}
 
 /// A request to open one session in a local terminal viewer.
 #[derive(Debug, Clone)]
@@ -21,6 +61,8 @@ pub struct OpenRequest {
     pub session: String,
     /// Viewer identifier. The initial local integration supports `iterm`.
     pub viewer: String,
+    /// Caller-stated shape; `None` defers to the stored preference.
+    pub behavior: Option<OpenBehavior>,
 }
 
 /// Opens a terminal viewer attached to a session without changing that
@@ -33,18 +75,64 @@ pub fn open(request: OpenRequest) -> anyhow::Result<OpenReport> {
             request.viewer
         );
     }
+    let behavior = match request.behavior {
+        Some(behavior) => behavior,
+        None => configured_behavior(&request.home)?,
+    };
     let id = manage::resolve_existing(&request.home, &request.session)?;
 
-    open_iterm(id.as_str())?;
+    open_iterm(id.as_str(), behavior)?;
     Ok(OpenReport {
         id: id.to_string(),
         viewer,
         opened: true,
+        behavior: behavior.as_str().to_owned(),
     })
 }
 
+/// Reads the stored default. A malformed value is an error rather than a silent
+/// fallback, so a typo in the config surfaces where it can be fixed.
+fn configured_behavior(home: &LatchHome) -> anyhow::Result<OpenBehavior> {
+    match manage::config_value(home, OPEN_BEHAVIOR_KEY)? {
+        Some(value) => OpenBehavior::parse(&value)
+            .with_context(|| format!("`{OPEN_BEHAVIOR_KEY}` in {}", home.config_file().display())),
+        None => Ok(OpenBehavior::default()),
+    }
+}
+
+/// The AppleScript run for each shape.
+///
+/// iTerm can create a tab directly, but only in a window that exists; a first
+/// launch has none, so the tab script opens a window in that case rather than
+/// failing after the session is already running.
+#[cfg(any(target_os = "macos", test))]
+fn iterm_script(behavior: OpenBehavior) -> &'static str {
+    match behavior {
+        OpenBehavior::NewWindow => {
+            "on run argv\n\
+             tell application \"iTerm\"\n\
+             activate\n\
+             create window with default profile command (item 1 of argv)\n\
+             end tell\n\
+             end run"
+        }
+        OpenBehavior::NewTab => {
+            "on run argv\n\
+             tell application \"iTerm\"\n\
+             activate\n\
+             if (count of windows) is 0 then\n\
+             create window with default profile command (item 1 of argv)\n\
+             else\n\
+             tell current window to create tab with default profile command (item 1 of argv)\n\
+             end if\n\
+             end tell\n\
+             end run"
+        }
+    }
+}
+
 #[cfg(target_os = "macos")]
-fn open_iterm(session_id: &str) -> anyhow::Result<()> {
+fn open_iterm(session_id: &str, behavior: OpenBehavior) -> anyhow::Result<()> {
     use std::process::Command;
 
     let shell = std::env::var_os("SHELL")
@@ -53,7 +141,7 @@ fn open_iterm(session_id: &str) -> anyhow::Result<()> {
     let command = host_attach_command(shell, session_id);
     let output = Command::new("osascript")
         .arg("-e")
-        .arg("on run argv\ntell application \"iTerm\"\nactivate\ncreate window with default profile command (item 1 of argv)\nend tell\nend run")
+        .arg(iterm_script(behavior))
         // Passing the command as an argv item avoids interpolating session ids
         // or executable paths into AppleScript source.
         .arg(&command)
@@ -80,7 +168,7 @@ fn host_attach_command(shell: impl AsRef<std::ffi::OsStr>, session_id: &str) -> 
 }
 
 #[cfg(not(target_os = "macos"))]
-fn open_iterm(_session_id: &str) -> anyhow::Result<()> {
+fn open_iterm(_session_id: &str, _behavior: OpenBehavior) -> anyhow::Result<()> {
     bail!("opening iTerm is only supported on macOS")
 }
 
@@ -101,7 +189,71 @@ fn shell_quote(value: impl AsRef<std::ffi::OsStr>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{host_attach_command, shell_quote};
+    use super::{host_attach_command, iterm_script, shell_quote, OpenBehavior};
+
+    #[test]
+    fn open_behavior_accepts_both_the_flag_and_config_spellings() {
+        for value in ["window", "new-window", "New-Window", " new_window "] {
+            assert_eq!(OpenBehavior::parse(value).unwrap(), OpenBehavior::NewWindow);
+        }
+        for value in ["tab", "new-tab", "NEW_TAB"] {
+            assert_eq!(OpenBehavior::parse(value).unwrap(), OpenBehavior::NewTab);
+        }
+        assert_eq!(OpenBehavior::default(), OpenBehavior::NewWindow);
+        assert_eq!(OpenBehavior::NewTab.as_str(), "new-tab");
+        assert_eq!(
+            OpenBehavior::parse(OpenBehavior::NewTab.as_str()).unwrap(),
+            OpenBehavior::NewTab
+        );
+    }
+
+    #[test]
+    fn an_unknown_open_behavior_is_rejected_rather_than_silently_defaulted() {
+        let error = OpenBehavior::parse("split").expect_err("`split` is not a shape");
+        assert!(error.to_string().contains("split"), "{error}");
+    }
+
+    /// The tab script has to survive a first launch with no iTerm window, which
+    /// `create tab` alone cannot: it targets `current window`.
+    #[test]
+    fn the_tab_script_still_opens_a_window_when_iterm_has_none() {
+        let script = iterm_script(OpenBehavior::NewTab);
+
+        assert!(
+            script.contains("if (count of windows) is 0 then"),
+            "{script}"
+        );
+        assert!(
+            script.contains("tell current window to create tab with default profile command"),
+            "{script}"
+        );
+        assert!(
+            script.contains("create window with default profile command"),
+            "{script}"
+        );
+    }
+
+    #[test]
+    fn the_window_script_never_creates_a_tab() {
+        let script = iterm_script(OpenBehavior::NewWindow);
+
+        assert!(!script.contains("create tab"), "{script}");
+        assert!(
+            script.contains("create window with default profile command"),
+            "{script}"
+        );
+    }
+
+    /// Both scripts read the attach command from `argv`, never from interpolated
+    /// AppleScript source; a session id must not be able to become script text.
+    #[test]
+    fn neither_script_interpolates_the_attach_command() {
+        for behavior in [OpenBehavior::NewWindow, OpenBehavior::NewTab] {
+            let script = iterm_script(behavior);
+            assert!(script.starts_with("on run argv\n"), "{script}");
+            assert!(script.contains("(item 1 of argv)"), "{script}");
+        }
+    }
 
     #[test]
     fn shell_quote_preserves_spaces_and_single_quotes() {
@@ -212,7 +364,8 @@ mod tests {
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn non_macos_builds_report_that_iterm_cannot_be_opened() {
-        let error = super::open_iterm("ses_01JTEST").expect_err("iTerm is macOS-only");
+        let error = super::open_iterm("ses_01JTEST", super::OpenBehavior::NewWindow)
+            .expect_err("iTerm is macOS-only");
         assert!(error.to_string().contains("only supported on macOS"));
     }
 }

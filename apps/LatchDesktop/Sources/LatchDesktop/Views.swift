@@ -13,10 +13,17 @@ struct SessionsView: View {
                 SessionRow(session: session)
                     .tag(session.id)
                     .contextMenu {
+                        let canOpen = session.state.isAttachable && store.canAttachSessions
                         Button("Open in \(store.preferredTerminal.rawValue)") {
                             Task { await store.open(session.id) }
                         }
-                        .disabled(!session.state.isAttachable || !store.canAttachSessions)
+                        .disabled(!canOpen)
+                        Divider()
+                        OpenBehaviorMenuItems(
+                            store: store,
+                            sessionID: session.id,
+                            isEnabled: canOpen
+                        )
                     }
             }
             .searchable(text: $store.search, prompt: "Search sessions")
@@ -75,6 +82,9 @@ struct SessionsView: View {
                 }
             }
         }
+        // Without this the toolbar's sidebar section stops short of the split divider, so
+        // the sidebar's trailing border only exists below the toolbar.
+        .background(SidebarToolbarSeparator())
         .onChange(of: store.selection) { _ in Task { await store.loadDetails() } }
         .onAppear { handleMenuRequests() }
         .onChange(of: store.shouldPresentNewSession) { requested in
@@ -136,6 +146,60 @@ private struct EmptyStateView: View {
             Text(message).font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
         }
         .padding()
+    }
+}
+
+/// A split button: clicking it opens the session the way Settings says, while the
+/// attached menu offers every launch shape the preferred terminal understands.
+private struct OpenSessionButton: View {
+    @ObservedObject var store: SessionStore
+    let sessionID: String
+    let isEnabled: Bool
+
+    var body: some View {
+        Menu {
+            OpenBehaviorMenuItems(store: store, sessionID: sessionID, isEnabled: isEnabled)
+        } label: {
+            Label("Open in \(store.preferredTerminal.rawValue)", systemImage: "terminal")
+                .frame(maxWidth: .infinity)
+        } primaryAction: {
+            Task { await store.open(sessionID) }
+        }
+        .menuStyle(.button)
+        .buttonStyle(.borderedProminent)
+        .controlSize(.large)
+        .frame(maxWidth: .infinity)
+        .disabled(!isEnabled)
+    }
+}
+
+/// The launch shapes offered by every Open control. Unavailable shapes stay visible
+/// with the reason attached rather than disappearing.
+private struct OpenBehaviorMenuItems: View {
+    @ObservedObject var store: SessionStore
+    let sessionID: String
+    let isEnabled: Bool
+
+    var body: some View {
+        if store.preferredTerminal.supportedOpenBehaviors.isEmpty {
+            Text("Your argument template decides how this terminal opens.")
+        } else {
+            ForEach(TerminalOpenBehavior.allCases) { behavior in
+                Button {
+                    Task { await store.open(sessionID, behavior: behavior) }
+                } label: {
+                    Label(title(for: behavior), systemImage: behavior.systemImage)
+                }
+                .disabled(!isEnabled || !store.preferredTerminal.supports(behavior))
+            }
+        }
+    }
+
+    private func title(for behavior: TerminalOpenBehavior) -> String {
+        if let reason = store.preferredTerminal.unsupportedReason(for: behavior) {
+            return "\(behavior.label) — \(reason)"
+        }
+        return behavior == store.effectiveOpenBehavior ? "\(behavior.label) (Default)" : behavior.label
     }
 }
 
@@ -215,15 +279,11 @@ private struct SessionDetailView: View {
                         .background(.quaternary, in: Capsule())
                 }
 
-                Button {
-                    Task { await store.open(session.id) }
-                } label: {
-                    Label("Open in \(store.preferredTerminal.rawValue)", systemImage: "terminal")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .disabled(!session.state.isAttachable || !store.canAttachSessions)
+                OpenSessionButton(
+                    store: store,
+                    sessionID: session.id,
+                    isEnabled: session.state.isAttachable && store.canAttachSessions
+                )
 
                 Grid(alignment: .leading, horizontalSpacing: 22, verticalSpacing: 10) {
                     DetailRow(label: "Command", value: session.commandLabel)
@@ -703,12 +763,38 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            Picker("Open sessions in", selection: Binding(
+                get: { store.terminalOpenBehavior },
+                set: { store.terminalOpenBehavior = $0 }
+            )) {
+                ForEach(TerminalOpenBehavior.allCases) { behavior in
+                    Text(behavior.label + (store.preferredTerminal.supports(behavior) ? "" : " (unavailable)"))
+                        .tag(behavior)
+                }
+            }
+            .disabled(store.preferredTerminal.supportedOpenBehaviors.isEmpty)
+            Text(openBehaviorFootnote)
+                .font(.caption)
+                .foregroundStyle(.secondary)
             Text("This is the default app Latch uses when opening a session. Closing Latch never stops sessions.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
         .padding(24)
         .frame(width: 460)
+    }
+
+    private var openBehaviorFootnote: String {
+        switch store.preferredTerminal {
+        case .custom:
+            return "Your argument template decides how a custom terminal opens, so this setting does not apply."
+        case .ghostty:
+            return "Ghostty cannot be told to open a tab from another app, so sessions always open in a new window."
+        case .terminal:
+            return "The Open button uses this; its menu can still override it per session. Opening a Terminal tab sends Command-T, so macOS asks Latch to control System Events once. If that is refused, Latch opens a new window instead."
+        case .iTerm:
+            return "The Open button uses this; its menu can still override it per session."
+        }
     }
 
     @ViewBuilder private var cliUpdateStatus: some View {

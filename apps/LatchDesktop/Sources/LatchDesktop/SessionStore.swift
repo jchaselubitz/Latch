@@ -42,6 +42,7 @@ final class SessionStore: ObservableObject {
     }
 
     @Published private var preferredTerminalRaw: String
+    @Published private var terminalOpenBehaviorRaw: String
 
     private var client: LatchClient
     private var refreshRequested = false
@@ -59,6 +60,8 @@ final class SessionStore: ObservableObject {
         activeCLIPath = client.executableURL.path
         preferredTerminalRaw = UserDefaults.standard.string(forKey: "preferredTerminal")
             ?? PreferredTerminal.terminal.rawValue
+        terminalOpenBehaviorRaw = UserDefaults.standard.string(forKey: "terminalOpenBehavior")
+            ?? TerminalOpenBehavior.newWindow.rawValue
         customTerminalExecutable = UserDefaults.standard.string(forKey: "customTerminalExecutable") ?? ""
         customTerminalTemplate = UserDefaults.standard.string(forKey: "customTerminalTemplate")
             ?? "-e {latch} attach {session}"
@@ -71,6 +74,21 @@ final class SessionStore: ObservableObject {
             preferredTerminalRaw = newValue.rawValue
             UserDefaults.standard.set(newValue.rawValue, forKey: "preferredTerminal")
         }
+    }
+
+    /// The launch shape the plain Open action uses; a terminal that cannot honour it
+    /// still opens the session in a new window.
+    var terminalOpenBehavior: TerminalOpenBehavior {
+        get { TerminalOpenBehavior(rawValue: terminalOpenBehaviorRaw) ?? .newWindow }
+        set {
+            terminalOpenBehaviorRaw = newValue.rawValue
+            UserDefaults.standard.set(newValue.rawValue, forKey: "terminalOpenBehavior")
+        }
+    }
+
+    /// What the default Open action will really do in the currently preferred terminal.
+    var effectiveOpenBehavior: TerminalOpenBehavior {
+        preferredTerminal.resolvedOpenBehavior(terminalOpenBehavior)
     }
 
     var filteredSessions: [SessionSummary] {
@@ -204,12 +222,13 @@ final class SessionStore: ObservableObject {
         } catch { errorMessage = error.localizedDescription }
     }
 
-    func open(_ id: String) async {
+    func open(_ id: String, behavior: TerminalOpenBehavior? = nil) async {
         do {
             let command = await client.attachmentCommand(for: id)
             try TerminalLauncher.open(
                 command: command,
                 in: preferredTerminal,
+                behavior: behavior ?? terminalOpenBehavior,
                 customExecutable: customTerminalExecutable,
                 customTemplate: customTerminalTemplate
             )
