@@ -59,6 +59,10 @@ struct SidebarToolbarSeparator: NSViewRepresentable {
         private weak var splitView: NSSplitView?
         private weak var wrappedDelegate: NSToolbarDelegate?
         private var pendingAttempts = 0
+        /// Set once a tracking separator this coordinator did not insert is seen in the toolbar.
+        /// SwiftUI takes its own separator down and puts it back when it rebuilds the toolbar, and
+        /// slipping ours into that gap would abort the app the moment SwiftUI re-registers its own.
+        private var separatorIsProvidedBySystem = false
 
         /// Toolbar item views are laid out asynchronously, and the insertion point is read
         /// from their frames, so a first look right after the window appears can come up
@@ -95,6 +99,7 @@ struct SidebarToolbarSeparator: NSViewRepresentable {
             toolbar = nil
             splitView = nil
             wrappedDelegate = nil
+            separatorIsProvidedBySystem = false
         }
 
         // MARK: - Installation
@@ -104,14 +109,26 @@ struct SidebarToolbarSeparator: NSViewRepresentable {
         @discardableResult
         private func installSeparator() -> Bool {
             guard let toolbar, let splitView else { return false }
-            if toolbar.items.contains(where: { $0.itemIdentifier == .sidebarTrackingSeparator }) {
+            // AppKit raises `NSInternalInconsistencyException` — "Cannot register more than one
+            // NSTrackingSeparatorToolbarItem that tracks the same divider" — from
+            // `insertItem(withItemIdentifier:at:)`, and an exception out of AppKit terminates the
+            // app. Since macOS 26, SwiftUI installs the tracking separator itself under its own
+            // identifier (`com.apple.SwiftUI.splitViewSeparator-0`), so matching on our identifier
+            // alone misses it and the second insert aborts the process at launch. Match on the
+            // item class instead: any tracking separator already in the toolbar means the boundary
+            // is handled and there is nothing left for this view to do.
+            if separatorIsProvidedBySystem { return true }
+            if toolbar.items.contains(where: { $0 is NSTrackingSeparatorToolbarItem }) {
+                separatorIsProvidedBySystem = !toolbar.items.contains {
+                    $0 is NSTrackingSeparatorToolbarItem && $0.itemIdentifier == .sidebarTrackingSeparator
+                }
                 return true
             }
             guard let index = detailSectionIndex(in: toolbar, splitView: splitView) else {
                 return false
             }
             toolbar.insertItem(withItemIdentifier: .sidebarTrackingSeparator, at: index)
-            return toolbar.items.contains { $0.itemIdentifier == .sidebarTrackingSeparator }
+            return toolbar.items.contains { $0 is NSTrackingSeparatorToolbarItem }
         }
 
         private func scheduleRetry(for window: NSWindow) {
