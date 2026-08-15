@@ -1,0 +1,82 @@
+name: Control plane
+
+# The cloud control plane is an independent deployable, so it gets its own
+# workflow: the Rust and mobile jobs in ci.yml have nothing to say about it,
+# and it must not wait on them to deploy.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'services/control-plane/**'
+      - '.github/workflows/control-plane.yml'
+  pull_request:
+    paths:
+      - 'services/control-plane/**'
+      - '.github/workflows/control-plane.yml'
+
+defaults:
+  run:
+    working-directory: services/control-plane
+
+jobs:
+  verify:
+    name: Typecheck, test, build
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: latch_control_plane_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: services/control-plane/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - name: Test
+        # The PostgreSQL contract test runs against the throwaway service
+        # container; without it the suite still passes on the in-memory store.
+        env:
+          TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/latch_control_plane_test
+        run: npm test
+      - run: npm run build
+
+  deploy:
+    name: Deploy to Railway
+    needs: verify
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: control-plane-production
+      cancel-in-progress: false
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Deploy
+        # RAILWAY_TOKEN is a project token for the `latch` Railway project.
+        # Railway's own GitHub integration also redeploys on push; this step
+        # makes the deployment explicit and fails the run when it does not
+        # come up healthy.
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          if [ -z "$RAILWAY_TOKEN" ]; then
+            echo "RAILWAY_TOKEN is not configured; skipping explicit deploy." >&2
+            exit 0
+          fi
+          npm install -g @railway/cli@4
+          railway up --service "${{ vars.RAILWAY_SERVICE_NAME || 'Latch' }}" --ci

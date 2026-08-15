@@ -85,6 +85,9 @@ struct SessionsView: View {
         // Without this the toolbar's sidebar section stops short of the split divider, so
         // the sidebar's trailing border only exists below the toolbar.
         .background(SidebarToolbarSeparator())
+        // Carries the sidebar's material across the rest of the titlebar so the header reads
+        // as one surface, and steps aside when the sidebar is collapsed.
+        .background(TitlebarSidebarMaterial())
         .onChange(of: store.selection) { _ in Task { await store.loadDetails() } }
         .onAppear { handleMenuRequests() }
         .onChange(of: store.shouldPresentNewSession) { requested in
@@ -642,9 +645,11 @@ struct MenuBarSessionsView: View {
 struct SettingsView: View {
     @ObservedObject var store: SessionStore
     @ObservedObject var updates: UpdateController
+    @ObservedObject var remoteAccess: RemoteAccessController
 
     private enum Tab: String, Hashable {
         case terminal
+        case remoteAccess
         case cli
         case updates
     }
@@ -656,6 +661,9 @@ struct SettingsView: View {
             terminalTab
                 .tabItem { Label("Terminal", systemImage: "terminal") }
                 .tag(Tab.terminal)
+            RemoteAccessSettingsView(controller: remoteAccess)
+                .tabItem { Label("Remote Access", systemImage: "iphone.and.arrow.forward") }
+                .tag(Tab.remoteAccess)
             cliTab
                 .tabItem { Label("Latch CLI", systemImage: "wrench.and.screwdriver") }
                 .tag(Tab.cli)
@@ -957,7 +965,7 @@ struct SettingsView: View {
 /// Section headers and footnotes are repeated across every settings tab, so they
 /// live here to keep one typographic voice instead of ad-hoc `.font(.caption)`
 /// calls scattered through the form.
-private struct SettingsSectionHeader: View {
+struct SettingsSectionHeader: View {
     private let title: String
 
     init(_ title: String) { self.title = title }
@@ -969,7 +977,7 @@ private struct SettingsSectionHeader: View {
     }
 }
 
-private struct SettingsFootnote: View {
+struct SettingsFootnote: View {
     private let text: String
 
     init(_ text: String) { self.text = text }

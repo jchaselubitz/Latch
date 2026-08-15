@@ -4,6 +4,7 @@ import SwiftUI
 /// The settings tab: linking this phone to a computer, and what that link can do.
 struct SettingsView: View {
     @Environment(AppModel.self) private var model
+    @Environment(PairingModel.self) private var pairing
     @State private var address = ""
     @State private var token = ""
     @State private var confirmingUnlink = false
@@ -11,6 +12,8 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
+                remoteAccessSection
+
                 switch model.linkState {
                 case .linked:
                     linkedSections
@@ -19,6 +22,36 @@ struct SettingsView: View {
                 }
             }
             .navigationTitle("Settings")
+        }
+    }
+
+    // MARK: - Remote access
+
+    /// The pairing entry point. It sits alongside the gateway link rather than
+    /// replacing it: a tunnel to `latch serve` and a paired identity are two
+    /// different ways to reach the same computer, and this build supports both.
+    @ViewBuilder
+    private var remoteAccessSection: some View {
+        Section {
+            NavigationLink {
+                PairingView()
+            } label: {
+                LabeledContent("Remote access", value: pairingSummary)
+            }
+        } footer: {
+            Text("""
+            Pairing links this phone to your Mac's identity directly, using a code \
+            your Mac shows for five minutes.
+            """)
+        }
+    }
+
+    private var pairingSummary: String {
+        switch pairing.state {
+        case .paired(let record): return record.mac.displayName
+        case .revoked: return "Revoked"
+        case .confirming, .enrolling, .scanning: return "Pairing…"
+        case .idle, .failed: return "Not paired"
         }
     }
 

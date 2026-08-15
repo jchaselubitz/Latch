@@ -12,7 +12,8 @@ repository without leaving a dependency on the Latch checkout behind.
 - **Sessions** lists the sessions on the linked computer, with state, working
   directory, and idle time.
 - **Settings** links the phone to one `latch serve` gateway and shows what that
-  gateway reports it can do.
+  gateway reports it can do, and holds **Remote access**: pairing this phone
+  with a Mac's own identity by scanning the code it shows.
 - Tapping a session opens a **chat** view: the harness transcript as it streams
   in, a composer for sending a message, and buttons for answering a permission
   prompt or question when the session is blocked on one.
@@ -26,6 +27,12 @@ terminal access stays on the desktop for now.
 Package.swift                     LatchMobileKit: everything that is not a view
 Sources/LatchMobileKit/
   Generated/LatchContract.swift   generated from the schemas; never hand-edited
+  DeviceIdentity.swift            the device key, Secure Enclave and fallback
+  PairingPayload.swift            the QR payload and every reason to refuse one
+  PairingPhrase.swift             the phrase both screens show; a shared contract
+  ControlPlane.swift              enrollment, permission refresh, revocation
+  PairedDevice.swift              the paired-device record and its keychain home
+  PairingModel.swift              the flow the pairing screen binds to
   LatchGateway.swift              HTTP client, discovery, and sending
   EventStream.swift               events WebSocket, cursor, resync, reconnect
   Transcript.swift                harness events folded into chat rows
@@ -34,6 +41,7 @@ Sources/LatchMobileKit/
   AppModel.swift, ChatModel.swift the two observable models the views bind to
 App/LatchMobile.xcodeproj         the iOS app target
 App/LatchMobile/*.swift           the SwiftUI screens
+App/LatchMobile/QRScannerView.swift the camera preview that reads QR codes
 Contract/                         vendored schemas and their digests
 Tools/generate-contract.py        the contract generator and drift gate
 ```
@@ -45,7 +53,7 @@ compiling a second copy of the sources.
 ## Building and running
 
 ```bash
-swift test                                     # the client: 49 tests, 6 more live
+swift test                                     # the client; 6 more run only live
 open App/LatchMobile.xcodeproj                 # then run on a simulator or device
 ```
 
@@ -86,6 +94,93 @@ a tunnel to it, not the gateway itself:
 
 Rotating the token with `latch serve token` invalidates it for new connections
 immediately; re-link in Settings afterwards.
+
+## Pairing with a Mac
+
+Linking to a `latch serve` gateway with an address and a token is one way to
+reach a computer. Pairing is the other: the phone enrols its own long-lived
+identity with the Mac, and from then on each side authenticates the other by
+key rather than by a shared bearer token. `docs/REMOTE_ACCESS_IMPLEMENTATION_PLAN.md`
+and `docs/REMOTE_ACCESS_THREAT_MODEL.md` in the Latch repository own the rules;
+this is what the phone does about them.
+
+### The device identity
+
+On first launch the app creates an X25519 key — the identity the remote-access
+transport's `Noise_XX_25519_ChaChaPoly_BLAKE2s` handshake needs — and only its
+public half ever leaves the phone, as the 32-byte lowercase hex the Mac's
+pairing record stores.
+
+The Secure Enclave holds P-256 keys, not X25519 ones, so "the key is in the
+Enclave" is not literally available. What the app does instead is keep the
+X25519 private key sealed under a non-exportable Enclave P-256 key: the
+ciphertext in the keychain is inert on any other device and unwrappable only by
+this hardware. Where there is no Enclave — the simulator, older hardware — the
+key falls back to the keychain alone, `WhenUnlockedThisDeviceOnly`, and the
+difference is recorded on the identity and shown on the pairing screen rather
+than being quietly papered over.
+
+### The QR payload
+
+The code is the Mac's `PairingMaterial`: `formatVersion`, `pairingId`,
+`secret`, `macPublicKey`, `expiresAt`, and optionally `controlPlane` and
+`macName`. It is one-time, and the Mac gives it five minutes.
+
+Every scan is untrusted input, and the scanner re-reads the same code many
+times a second, so validation is unconditional and up front: the version gate
+comes before any other field, identifiers and keys must be hex of exactly the
+right length, an expiry that has passed and an expiry further out than the Mac
+is allowed to grant are both refused, and a `macName` headed for the
+confirmation screen is length-bounded and stripped of control characters.
+Expiry is then rechecked at confirmation, because reading the phrase takes time.
+
+### The pairing phrase
+
+Nothing the phone can check by itself rules out a control plane or relay that
+substituted its own key for the Mac's: both machines would still agree, with
+the attacker in between. The phrase is what closes that: six words derived from
+the pairing transcript — the pairing identifier and both public keys — under a
+domain-separated SHA-256, shown on both screens for the person to compare.
+
+That derivation is a cross-client contract. `PairingPhrase` in this package and
+`pairing_phrase` in `crates/latch/src/cli/remote_access.rs` implement it, and
+both test suites assert the same fixed vector against the same inputs, so the
+two cannot drift apart without a test saying so.
+
+### Enrolling
+
+The phone posts the one-time secret and its public key to the control plane:
+
+```text
+POST /v1/pairings/{pairingId}/confirm   enrol; answers with the granted device
+GET  /v1/devices/{deviceId}             re-read the grant and revocation state
+POST /v1/devices/{deviceId}/revoke      revoke this phone from this phone
+```
+
+The answer's Mac key is compared against the one in the QR code, and a
+different key stops pairing rather than saving it. What comes back — the opaque
+device id, the granted permission, and a short-lived control-plane token — is
+persisted in the keychain, alongside the Mac's pinned key. The pairing secret is
+not: it is one-time, enrollment consumed it, and keeping it would undo the point.
+
+### Permission and revocation
+
+The Mac decides what a phone may do — `observe`, `interact`, `control` — and
+the phone displays that answer rather than deciding for itself; an unrecognized
+grant degrades to `observe` rather than to the default. The grant is re-read
+when the pairing screen appears and when the app returns to the foreground, for
+the same reason gateway discovery is repeated on reconnect: state decided
+elsewhere is not assumed to have held. A control plane that no longer knows the
+device reads as a revocation; a network failure does not.
+
+Unpairing from the phone deletes the record and the device identity whether or
+not the control plane can be reached, so the local half of a revoke never
+depends on the network. Revoking on the Mac remains what closes connections
+that are already open.
+
+The camera permission is modeled rather than read inline, because a first-run
+prompt, a trip to Settings, and a device with no camera are three different
+dead ends — and in all of them the code can still be typed in by hand.
 
 ## Staying compliant with the code contract
 
@@ -171,6 +266,9 @@ in-memory dedupe window went with it.
 ## Known gaps
 
 - No terminal view. Discovery reports the endpoint; the app does not use it yet.
+- Pairing enrols an identity and persists it; the paired transport itself (the
+  Noise handshake and direct/relay paths) is not wired up on the phone yet, so a
+  paired phone still reaches sessions through the gateway link.
 - Hook responses beyond the `awaiting_input` prompt are not modeled.
 - One linked computer at a time.
 - The session list does not refresh on its own; pull to refresh.

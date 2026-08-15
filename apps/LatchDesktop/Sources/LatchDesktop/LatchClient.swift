@@ -136,6 +136,65 @@ actor LatchClient {
         [executableURL.path, "attach", id]
     }
 
+    // MARK: - Remote access
+
+    /// Reads the remote-access lifecycle without starting anything. Safe to
+    /// poll while remote access is off: it never creates the Mac identity.
+    func remoteAccessStatus() throws -> RemoteAccessStatus {
+        try request(["remote-access", "status", "--json"])
+    }
+
+    /// Turns remote access on. The CLI creates and stores the Mac device
+    /// identity on first enable (Keychain-backed private key on macOS).
+    func enableRemoteAccess() throws {
+        try run(["remote-access", "enable"])
+    }
+
+    /// The global off switch: refuses new connections, cancels pending pairing
+    /// material, and removes the supervised gateway credential.
+    func disableRemoteAccess() throws {
+        try run(["remote-access", "disable"])
+    }
+
+    func remoteDevices() throws -> [RemoteDevice] {
+        try request(["remote-access", "devices", "--json"])
+    }
+
+    func grantRemoteDevice(_ deviceID: String, permission: DevicePermission) throws {
+        try run(["remote-access", "grant", deviceID, permission.rawValue])
+    }
+
+    func revokeRemoteDevice(_ deviceID: String) throws {
+        try run(["remote-access", "revoke", deviceID])
+    }
+
+    func createRemotePairing() throws -> PairingMaterial {
+        try request(["remote-access", "pair", "create", "--json"])
+    }
+
+    func setRemoteRelayEnabled(_ enabled: Bool) throws {
+        try run(["remote-access", "relay", enabled ? "enable" : "disable"])
+    }
+
+    func remoteAudit() throws -> [RemoteAuditEvent] {
+        try request(["remote-access", "audit", "--json"])
+    }
+
+    func remoteDiagnostics() throws -> RemoteDiagnostics {
+        try request(["remote-access", "diagnostics"])
+    }
+
+    /// Runs a command whose success is the whole result. Output is discarded so
+    /// a human-readable confirmation line never has to be parsed.
+    private func run(_ arguments: [String], timeout: TimeInterval? = nil) throws {
+        _ = try ProcessRunner.run(
+            executableURL: executableURL,
+            arguments: arguments,
+            stdin: nil,
+            timeout: timeout ?? self.timeout
+        )
+    }
+
     private func request<Response: Decodable>(
         _ arguments: [String],
         stdin: Data? = nil,

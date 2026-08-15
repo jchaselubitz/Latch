@@ -5,6 +5,7 @@ import AppKit
 struct LatchDesktopApp: App {
     @StateObject private var store = SessionStore()
     @StateObject private var updates = UpdateController()
+    @StateObject private var remoteAccess = RemoteAccessController()
     @Environment(\.openWindow) private var openWindow
 
     var body: some Scene {
@@ -14,6 +15,9 @@ struct LatchDesktopApp: App {
                 .task {
                     store.start()
                     updates.startAutomaticChecks()
+                    // Remote access never turns itself on: this only resumes
+                    // supervision when the user already left it enabled.
+                    await remoteAccess.restoreIfEnabled()
                 }
         }
         .defaultSize(width: 940, height: 620)
@@ -74,7 +78,7 @@ struct LatchDesktopApp: App {
         .menuBarExtraStyle(.menu)
 
         Settings {
-            SettingsView(store: store, updates: updates)
+            SettingsView(store: store, updates: updates, remoteAccess: remoteAccess)
         }
     }
 

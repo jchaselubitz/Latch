@@ -41,7 +41,7 @@ const MAX_LAN_CONNECTIONS: usize = 32;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_AUDIT_EVENTS: usize = 1_024;
 const MAX_AUDIT_BYTES: usize = 512 * 1024;
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(test)))]
 const SECRET_SERVICE: &str = "co.cooperativ.latch.remote-access";
 
 /// Connection state exposed to a future mobile client without revealing
@@ -740,6 +740,11 @@ pub struct DeviceSummary {
     pub permission: DevicePermission,
     /// Whether this device can no longer establish a connection.
     pub revoked: bool,
+    /// Short authentication phrase for the pairing that enrolled this device.
+    /// Present only on the confirmation answer: it is what the Mac shows so
+    /// the person can check it against the phone's screen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pairing_phrase: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -818,6 +823,57 @@ pub struct DiagnosticsExport {
     pub event_counts: HashMap<String, u64>,
 }
 
+/// Owner-facing lifecycle snapshot for the desktop app.
+///
+/// This is the only surface that reveals the Mac's own public identity. It
+/// deliberately excludes the supervised gateway address, the gateway bearer
+/// token, paired-device public keys, and any session content, so a desktop
+/// status poll can never become a path to the plaintext gateway.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteAccessStatus {
+    /// Version of this status contract.
+    pub format_version: u8,
+    /// Whether new remote connections are allowed.
+    pub enabled: bool,
+    /// Whether the hosted relay path may be selected.
+    pub relay_enabled: bool,
+    /// Opaque Mac device identifier, present once an identity exists.
+    pub device_id: Option<String>,
+    /// The Mac's pinned Noise static public key, hex encoded. Phones verify
+    /// this value during pairing, so it is public by design.
+    pub public_key: Option<String>,
+    /// Identity key generation, for future rotation surfaces.
+    pub key_generation: Option<u64>,
+    /// Count of enrolled devices, including revoked ones.
+    pub paired_devices: usize,
+    /// Count of enrolled devices that can no longer connect.
+    pub revoked_devices: usize,
+    /// The LAN listener address a supervised helper is currently advertising,
+    /// or `None` when no helper is running. This is the authenticated
+    /// transport listener, never the plaintext gateway.
+    pub listener_address: Option<String>,
+}
+
+/// Readiness document written by `remote-access lan-serve` for a supervising
+/// desktop app.
+///
+/// It names the authenticated LAN listener only. The supervised gateway
+/// address and its per-launch bearer token are never written here.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LanReadiness {
+    /// Version of this readiness contract.
+    pub format_version: u8,
+    /// Bound address of the authenticated LAN listener.
+    pub address: String,
+    /// Opaque Mac device identifier serving this listener.
+    pub device_id: String,
+    /// Process id of the helper serving this listener. A reader uses it to
+    /// distinguish a live listener from a document left behind by a crash.
+    pub pid: u32,
+}
+
 #[derive(Clone)]
 struct Paths {
     root: PathBuf,
@@ -833,7 +889,7 @@ impl Paths {
     fn identity(&self) -> PathBuf {
         self.root.join("identity.json")
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(any(not(target_os = "macos"), test))]
     fn identity_secret(&self) -> PathBuf {
         self.root.join("identity.key")
     }
@@ -851,6 +907,9 @@ impl Paths {
     }
     fn runtime(&self) -> PathBuf {
         self.root.join("runtime")
+    }
+    fn lan_readiness(&self) -> PathBuf {
+        self.runtime().join("lan-ready.json")
     }
 }
 
@@ -870,6 +929,7 @@ pub fn set_enabled(home: &LatchHome, enabled: bool) -> anyhow::Result<()> {
         write_json::<Vec<PairingRecord>>(&paths.pairings(), &Vec::new())?;
         let _ = fs::remove_file(paths.runtime().join("gateway.token"));
         let _ = fs::remove_file(paths.runtime().join("gateway-ready.json"));
+        let _ = fs::remove_file(paths.lan_readiness());
     }
     audit(
         &paths,
@@ -992,7 +1052,15 @@ pub fn confirm_pairing(
         permission,
         revoked: false,
     };
-    let summary = summary(&record);
+    let mut summary = summary(&record);
+    // The phone derives the identical words from the identical transcript, so
+    // the person comparing the two screens is the check that catches a
+    // substituted Mac or device key. See `PairingPhrase` in LatchMobileKit.
+    summary.pairing_phrase = Some(pairing_phrase(
+        pairing_id,
+        &identity(&paths)?.public_key,
+        device_public_key,
+    ));
     store.devices.push(record);
     write_json(&paths.devices(), &store)?;
     audit(&paths, "pairing_confirmed", Some(&summary.device_id), "ok")?;
@@ -1086,6 +1154,58 @@ pub fn read_audit(home: &LatchHome) -> anyhow::Result<Vec<serde_json::Value>> {
         .context("invalid audit log")
 }
 
+/// Reports the owner-facing remote-access lifecycle state.
+///
+/// Reading status never creates an identity and never starts a listener, so
+/// the desktop app can poll it while remote access is off.
+pub fn status(home: &LatchHome) -> anyhow::Result<RemoteAccessStatus> {
+    let paths = Paths::new(home);
+    let settings: Settings = read_json_or_default(&paths.settings())?;
+    let store: DeviceStore = read_json_or_default(&paths.devices())?;
+    let identity: Option<Identity> = if paths.identity().is_file() {
+        Some(read_json(&paths.identity())?)
+    } else {
+        None
+    };
+    let listener_address = read_lan_readiness(&paths).map(|readiness| readiness.address);
+    Ok(RemoteAccessStatus {
+        format_version: 1,
+        enabled: settings.enabled,
+        relay_enabled: settings.relay_enabled,
+        device_id: identity.as_ref().map(|value| value.device_id.clone()),
+        public_key: identity.as_ref().map(|value| value.public_key.clone()),
+        key_generation: identity.as_ref().map(|value| value.key_generation),
+        paired_devices: store.devices.len(),
+        revoked_devices: store.devices.iter().filter(|device| device.revoked).count(),
+        listener_address,
+    })
+}
+
+/// Reads the helper's readiness document, ignoring a missing or malformed one
+/// so a stale supervisor cannot make status reporting fail.
+///
+/// A document whose helper is gone is discarded rather than reported. Without
+/// this, a helper killed hard enough to skip its own cleanup would leave the
+/// desktop app claiming a listener that nothing is serving.
+fn read_lan_readiness(paths: &Paths) -> Option<LanReadiness> {
+    let readiness = read_json::<LanReadiness>(&paths.lan_readiness()).ok()?;
+    if helper_is_running(readiness.pid) {
+        return Some(readiness);
+    }
+    let _ = fs::remove_file(paths.lan_readiness());
+    None
+}
+
+/// Signal-free liveness probe for the helper process.
+fn helper_is_running(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    // SAFETY: signal 0 performs the permission and existence checks without
+    // delivering anything to the target.
+    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+}
+
 /// Builds an inspectable, content-free support bundle locally. Upload remains
 /// an explicit caller action; this function performs no network activity.
 pub fn diagnostics_export(home: &LatchHome) -> anyhow::Result<DiagnosticsExport> {
@@ -1119,12 +1239,26 @@ pub fn serve_lan(home: LatchHome, bind: SocketAddr, latch_bin: PathBuf) -> anyho
     runtime.block_on(async move { run_lan(paths, identity, bind, latch_bin).await })
 }
 
+/// Refuses a LAN bind that would be meaningless or unsafe for the
+/// authenticated transport listener.
+///
+/// A loopback bind is rejected because the authenticated listener exists to be
+/// reachable by a paired phone; binding it to loopback would leave callers
+/// assuming remote access works while nothing can ever reach it.
+fn validate_lan_bind(bind: SocketAddr) -> anyhow::Result<()> {
+    if bind.ip().is_loopback() {
+        bail!("the authenticated LAN listener cannot be loopback-bound");
+    }
+    Ok(())
+}
+
 async fn run_lan(
     paths: Paths,
     identity: Identity,
     bind: SocketAddr,
     latch_bin: PathBuf,
 ) -> anyhow::Result<()> {
+    validate_lan_bind(bind)?;
     ensure_private_directory(&paths.runtime())?;
     let ready = paths.runtime().join("gateway-ready.json");
     let token = paths.runtime().join("gateway.token");
@@ -1142,10 +1276,17 @@ async fn run_lan(
         .with_context(|| format!("cannot bind LAN listener {bind}"))?;
     let local_addr = listener.local_addr()?;
     let _bonjour = advertise_bonjour(&identity, local_addr.port());
+    write_lan_readiness(&paths, &identity, local_addr)?;
+    let _readiness_guard = LanReadinessGuard {
+        path: paths.lan_readiness(),
+    };
     audit(&paths, "lan_listener_started", None, "ok")?;
     let connection_limit = Arc::new(Semaphore::new(MAX_LAN_CONNECTIONS));
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .context("cannot install the terminate handler")?;
 
     loop {
+        let ctrl_c = tokio::signal::ctrl_c();
         tokio::select! {
             accepted = listener.accept() => {
                 let (stream, _) = accepted?;
@@ -1178,8 +1319,15 @@ async fn run_lan(
                     bail!("supervised gateway was not loopback-bound");
                 }
             }
-            signal = tokio::signal::ctrl_c() => {
+            signal = ctrl_c => {
                 signal?;
+                let _ = gateway.kill().await;
+                audit(&paths, "lan_listener_stopped", None, "ok")?;
+                return Ok(());
+            }
+            // A supervising desktop app stops the helper with SIGTERM, so
+            // terminate must run the same cleanup as an interactive Ctrl-C.
+            _ = terminate.recv() => {
                 let _ = gateway.kill().await;
                 audit(&paths, "lan_listener_stopped", None, "ok")?;
                 return Ok(());
@@ -1297,19 +1445,73 @@ struct Readiness {
     address: String,
 }
 
+/// The bind the supervised gateway is always launched with.
+///
+/// An ephemeral loopback port is the whole isolation guarantee: the gateway
+/// speaks plaintext HTTP with a bearer token, so it must never be reachable
+/// off-host. This is a constant rather than a parameter so no caller, helper,
+/// or desktop app can widen it.
+const GATEWAY_BIND: &str = "127.0.0.1:0";
+
+/// Builds the supervised gateway argument vector.
+///
+/// Exposed separately so tests can assert the launch never requests a
+/// non-loopback bind or `--allow-remote`.
+fn gateway_args(token: &Path, ready: &Path) -> Vec<std::ffi::OsString> {
+    vec![
+        "serve".into(),
+        "--bind".into(),
+        GATEWAY_BIND.into(),
+        "--token-file".into(),
+        token.as_os_str().to_owned(),
+        "--ready-file".into(),
+        ready.as_os_str().to_owned(),
+    ]
+}
+
 async fn start_gateway(binary: &Path, token: &Path, ready: &Path) -> anyhow::Result<Child> {
     let _ = fs::remove_file(ready);
     // Rotate the internal credential before every launch. Minting here avoids
     // the public `serve` command printing a newly-created secret to stderr.
     mint_token(token)?;
     Command::new(binary)
-        .args(["serve", "--bind", "127.0.0.1:0", "--token-file"])
-        .arg(token)
-        .args(["--ready-file"])
-        .arg(ready)
+        .args(gateway_args(token, ready))
         .kill_on_drop(true)
         .spawn()
         .context("cannot start supervised loopback gateway")
+}
+
+/// Publishes the authenticated listener address for a supervising desktop app.
+fn write_lan_readiness(
+    paths: &Paths,
+    identity: &Identity,
+    address: SocketAddr,
+) -> anyhow::Result<()> {
+    if address.ip().is_loopback() {
+        bail!("refusing to advertise a loopback LAN listener");
+    }
+    write_json(
+        &paths.lan_readiness(),
+        &LanReadiness {
+            format_version: 1,
+            address: address.to_string(),
+            device_id: identity.device_id.clone(),
+            pid: std::process::id(),
+        },
+    )
+}
+
+/// Removes the readiness document when supervision ends, including on an
+/// error path, so a desktop status poll never reports a listener that no
+/// longer exists.
+struct LanReadinessGuard {
+    path: PathBuf,
+}
+
+impl Drop for LanReadinessGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
 }
 
 async fn wait_readiness(path: &Path) -> anyhow::Result<Readiness> {
@@ -1812,6 +2014,7 @@ fn summary(record: &DeviceRecord) -> DeviceSummary {
         name: record.name.clone(),
         permission: record.permission,
         revoked: record.revoked,
+        pairing_phrase: None,
     }
 }
 
@@ -1832,27 +2035,78 @@ fn pairing_secret_digest(pairing_id: &str, secret: &str) -> String {
     hex_encode(&digest.finalize())
 }
 
-#[cfg(target_os = "macos")]
+/// The 64 words the pairing phrase is drawn from. Order is part of the
+/// contract: an insertion would silently change every phrase.
+const PHRASE_WORDS: [&str; 64] = [
+    "anchor", "apple", "arrow", "atlas", "badge", "baker", "beacon", "birch", "cable", "cactus",
+    "candle", "cedar", "chalk", "cliff", "clover", "comet", "coral", "crane", "delta", "dune",
+    "ember", "falcon", "fern", "flint", "forge", "garnet", "glacier", "granite", "harbor", "hazel",
+    "ivory", "jade", "kettle", "lantern", "ledger", "lily", "lumen", "maple", "marble", "meadow",
+    "mesa", "nickel", "nomad", "oak", "onyx", "orbit", "otter", "pebble", "pilot", "prism",
+    "quartz", "quill", "raven", "ribbon", "saffron", "sable", "spruce", "summit", "thistle",
+    "timber", "tundra", "velvet", "walnut", "willow",
+];
+
+/// Six words of six bits, taken big-endian from the front of the digest.
+const PHRASE_WORD_COUNT: usize = 6;
+const PHRASE_BITS_PER_WORD: u32 = 6;
+
+/// Derives the short authentication phrase for one pairing.
+///
+/// This is a cross-client contract, not an implementation detail: the phone
+/// computes the same words from the same transcript and the user compares the
+/// two screens. Nothing else in pairing catches a control plane or relay that
+/// swapped a public key for its own — both machines would still agree — so the
+/// domain separator, the field order, and the word list are all fixed.
+/// `apps/LatchMobile/Sources/LatchMobileKit/PairingPhrase.swift` is the other
+/// half; changing one without the other breaks pairing for everyone.
+pub fn pairing_phrase(pairing_id: &str, mac_public_key: &str, device_public_key: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"latch-remote-pairing-phrase-v1");
+    for field in [pairing_id, mac_public_key, device_public_key] {
+        digest.update(b"\0");
+        digest.update(field.to_ascii_lowercase().as_bytes());
+    }
+    let bytes = digest.finalize();
+    let mut words = Vec::with_capacity(PHRASE_WORD_COUNT);
+    let mut accumulator: u32 = 0;
+    let mut bits: u32 = 0;
+    for byte in bytes {
+        accumulator = accumulator << 8 | u32::from(byte);
+        bits += 8;
+        while bits >= PHRASE_BITS_PER_WORD && words.len() < PHRASE_WORD_COUNT {
+            bits -= PHRASE_BITS_PER_WORD;
+            let index = (accumulator >> bits) & ((1 << PHRASE_BITS_PER_WORD) - 1);
+            words.push(PHRASE_WORDS[index as usize]);
+        }
+        if words.len() == PHRASE_WORD_COUNT {
+            break;
+        }
+    }
+    words.join("-")
+}
+
+#[cfg(all(target_os = "macos", not(test)))]
 fn store_identity_secret(_paths: &Paths, account: &str, secret: &str) -> anyhow::Result<()> {
     security_framework::passwords::set_generic_password(SECRET_SERVICE, account, secret.as_bytes())
         .context("cannot store the remote-access identity in macOS Keychain")
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(test)))]
 fn load_identity_secret(_paths: &Paths, account: &str) -> anyhow::Result<String> {
     let bytes = security_framework::passwords::get_generic_password(SECRET_SERVICE, account)
         .context("cannot load the remote-access identity from macOS Keychain")?;
     String::from_utf8(bytes).context("stored remote-access identity is not UTF-8")
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(any(not(target_os = "macos"), test))]
 fn store_identity_secret(paths: &Paths, _account: &str, secret: &str) -> anyhow::Result<()> {
     // Non-macOS builds are development/headless clients. Keep the same split
     // metadata boundary in an owner-only file; production macOS uses Keychain.
     write_bytes_atomic(&paths.identity_secret(), secret.as_bytes())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(any(not(target_os = "macos"), test))]
 fn load_identity_secret(paths: &Paths, _account: &str) -> anyhow::Result<String> {
     let path = paths.identity_secret();
     let metadata = fs::symlink_metadata(&path)
@@ -1930,6 +2184,99 @@ mod tests {
         let home = LatchHome::new(dir.path());
         (dir, home)
     }
+    #[test]
+    fn supervised_gateway_is_always_launched_on_an_ephemeral_loopback_port() {
+        let args = gateway_args(Path::new("/tmp/token"), Path::new("/tmp/ready"));
+        let rendered: Vec<String> = args
+            .iter()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(rendered[0], "serve");
+        let bind = rendered
+            .iter()
+            .position(|value| value == "--bind")
+            .map(|index| rendered[index + 1].clone())
+            .expect("gateway launch must pin a bind");
+        let parsed: SocketAddr = bind.parse().unwrap();
+        assert!(parsed.ip().is_loopback(), "gateway bind must be loopback");
+        assert_eq!(parsed.port(), 0, "gateway port must be ephemeral");
+        assert!(
+            !rendered.iter().any(|value| value == "--allow-remote"),
+            "the helper must never opt the gateway into a public bind"
+        );
+    }
+
+    #[test]
+    fn the_helper_never_advertises_the_gateway_and_status_tracks_the_listener() {
+        let (_dir, home) = home();
+        set_enabled(&home, true).unwrap();
+        let paths = Paths::new(&home);
+        let identity = identity(&paths).unwrap();
+        ensure_private_directory(&paths.runtime()).unwrap();
+
+        assert!(write_lan_readiness(&paths, &identity, "127.0.0.1:9100".parse().unwrap()).is_err());
+        assert!(validate_lan_bind("127.0.0.1:0".parse().unwrap()).is_err());
+        assert!(validate_lan_bind("0.0.0.0:0".parse().unwrap()).is_ok());
+
+        write_lan_readiness(&paths, &identity, "192.168.1.20:49221".parse().unwrap()).unwrap();
+        let document = fs::read_to_string(paths.lan_readiness()).unwrap();
+        assert!(!document.contains("127.0.0.1"));
+        assert!(!document.contains("token"));
+        assert!(!document.contains(&identity.public_key));
+
+        // A document left behind by a helper that is gone must not be reported
+        // as a live listener.
+        let mut orphan: LanReadiness = read_json(&paths.lan_readiness()).unwrap();
+        orphan.pid = 0;
+        write_json(&paths.lan_readiness(), &orphan).unwrap();
+        assert_eq!(status(&home).unwrap().listener_address, None);
+        assert!(!paths.lan_readiness().exists());
+        write_lan_readiness(&paths, &identity, "192.168.1.20:49221".parse().unwrap()).unwrap();
+
+        let running = status(&home).unwrap();
+        assert!(running.enabled);
+        assert_eq!(
+            running.listener_address.as_deref(),
+            Some("192.168.1.20:49221")
+        );
+        assert_eq!(
+            running.device_id.as_deref(),
+            Some(identity.device_id.as_str())
+        );
+        assert_eq!(
+            running.public_key.as_deref(),
+            Some(identity.public_key.as_str())
+        );
+
+        // Disabling remote access must retract the advertised listener along
+        // with the gateway credential.
+        set_enabled(&home, false).unwrap();
+        let stopped = status(&home).unwrap();
+        assert!(!stopped.enabled);
+        assert_eq!(stopped.listener_address, None);
+    }
+
+    #[test]
+    fn status_never_creates_an_identity_or_reveals_a_private_key() {
+        let (_dir, home) = home();
+        let initial = status(&home).unwrap();
+        assert!(!initial.enabled);
+        assert_eq!(initial.device_id, None);
+        assert_eq!(initial.paired_devices, 0);
+        assert!(!Paths::new(&home).identity().exists());
+
+        set_enabled(&home, true).unwrap();
+        let enabled = status(&home).unwrap();
+        let serialized = serde_json::to_string(&enabled).unwrap();
+        assert!(!serialized.contains("privateKey"));
+        assert!(!serialized.contains("private_key"));
+    }
+
+    /// The phrase for the fixed transcript below. `PairingPhraseTests` in the
+    /// phone app asserts the same string against the same inputs, which is how
+    /// the two implementations are kept from drifting apart.
+    const PAIRING_PHRASE_VECTOR: &str = "sable-apple-maple-garnet-maple-flint";
+
     fn phone_key() -> String {
         let params: NoiseParams = NOISE_PATTERN.parse().unwrap();
         hex_encode(&Builder::new(params).generate_keypair().unwrap().public)
@@ -1965,6 +2312,88 @@ mod tests {
             DEFAULT_PERMISSION
         )
         .is_err());
+    }
+
+    #[test]
+    fn pairing_phrase_is_transcript_bound_and_stable() {
+        // A fixed vector, asserted identically by the phone's
+        // `PairingPhraseTests`. If these two ever disagree, the words on the
+        // Mac and on the phone disagree, and the user's only real check on a
+        // substituted identity is gone.
+        let phrase = pairing_phrase(
+            "0123456789abcdef0123456789abcdef",
+            "1111111111111111111111111111111111111111111111111111111111111111",
+            "2222222222222222222222222222222222222222222222222222222222222222",
+        );
+        assert_eq!(phrase.split('-').count(), PHRASE_WORD_COUNT);
+        assert_eq!(phrase, PAIRING_PHRASE_VECTOR);
+
+        // Hex case is not meaningful, so it must not change the words.
+        assert_eq!(
+            pairing_phrase(
+                "0123456789ABCDEF0123456789ABCDEF",
+                "1111111111111111111111111111111111111111111111111111111111111111",
+                "2222222222222222222222222222222222222222222222222222222222222222",
+            ),
+            phrase
+        );
+
+        // Every field is bound: changing any one of them changes the phrase.
+        assert_ne!(
+            pairing_phrase(
+                "0123456789abcdef0123456789abcde0",
+                "1111111111111111111111111111111111111111111111111111111111111111",
+                "2222222222222222222222222222222222222222222222222222222222222222",
+            ),
+            phrase
+        );
+        assert_ne!(
+            pairing_phrase(
+                "0123456789abcdef0123456789abcdef",
+                "1111111111111111111111111111111111111111111111111111111111111112",
+                "2222222222222222222222222222222222222222222222222222222222222222",
+            ),
+            phrase
+        );
+        assert_ne!(
+            pairing_phrase(
+                "0123456789abcdef0123456789abcdef",
+                "1111111111111111111111111111111111111111111111111111111111111111",
+                "2222222222222222222222222222222222222222222222222222222222222223",
+            ),
+            phrase
+        );
+
+        // The phrase digest must not collide with the secret digest, which is
+        // taken over a nearly identical transcript.
+        assert_ne!(
+            phrase,
+            pairing_secret_digest("0123456789abcdef0123456789abcdef", "secret")
+        );
+    }
+
+    #[test]
+    fn confirmation_reports_the_phrase_and_listing_does_not() {
+        let (_dir, home) = home();
+        set_enabled(&home, true).unwrap();
+        let material = create_pairing(&home).unwrap();
+        let (public, _private) = keypair();
+        let device = confirm_pairing(
+            &home,
+            &material.pairing_id,
+            &material.secret,
+            &public,
+            "Phone",
+            DEFAULT_PERMISSION,
+        )
+        .unwrap();
+        assert_eq!(
+            device.pairing_phrase.as_deref(),
+            Some(pairing_phrase(&material.pairing_id, &material.mac_public_key, &public).as_str())
+        );
+        // The phrase belongs to one pairing transcript, not to the device, so
+        // it is absent from the ordinary device listing.
+        assert!(list_devices(&home).unwrap()[0].pairing_phrase.is_none());
     }
 
     #[test]

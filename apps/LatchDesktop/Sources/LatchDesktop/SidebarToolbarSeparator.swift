@@ -33,23 +33,6 @@ struct SidebarToolbarSeparator: NSViewRepresentable {
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
-    /// Reports the window as soon as the view is planted in one; a representable has no
-    /// window at `makeNSView` time.
-    private final class WindowProbeView: NSView {
-        var onWindowChange: ((NSWindow?) -> Void)?
-
-        override var isOpaque: Bool { false }
-        override var intrinsicContentSize: NSSize { .zero }
-
-        /// Purely a window handle: it must never take a click away from the split view.
-        override func hitTest(_ point: NSPoint) -> NSView? { nil }
-
-        override func viewDidMoveToWindow() {
-            super.viewDidMoveToWindow()
-            onWindowChange?(window)
-        }
-    }
-
     /// Owns the toolbar delegate proxying. SwiftUI keeps its own toolbar delegate, so the
     /// coordinator wraps it rather than replacing it: everything except the separator
     /// identifier is forwarded untouched.
@@ -72,7 +55,7 @@ struct SidebarToolbarSeparator: NSViewRepresentable {
 
         func attach(to window: NSWindow?) {
             guard let window, let toolbar = window.toolbar else { return }
-            guard let splitView = Self.firstSplitView(in: window.contentView) else {
+            guard let splitView = WindowSplitViewLocator.firstSplitView(in: window.contentView) else {
                 scheduleRetry(for: window)
                 return
             }
@@ -179,17 +162,6 @@ struct SidebarToolbarSeparator: NSViewRepresentable {
                     self.scheduleRetry(for: window)
                 }
             }
-        }
-
-        private static func firstSplitView(in view: NSView?) -> NSSplitView? {
-            guard let view else { return nil }
-            if let split = view as? NSSplitView, split.arrangedSubviews.count >= 2 {
-                return split
-            }
-            for subview in view.subviews {
-                if let split = firstSplitView(in: subview) { return split }
-            }
-            return nil
         }
 
         // MARK: - NSToolbarDelegate

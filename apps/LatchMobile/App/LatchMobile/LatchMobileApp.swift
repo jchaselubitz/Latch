@@ -4,18 +4,24 @@ import SwiftUI
 @main
 struct LatchMobileApp: App {
     @State private var model = AppModel()
+    @State private var pairing = PairingModel()
 
     var body: some Scene {
         WindowGroup {
             RootView()
                 .environment(model)
-                .task { await model.restore() }
+                .environment(pairing)
+                .task {
+                    await model.restore()
+                    await pairing.restore()
+                }
         }
     }
 }
 
 struct RootView: View {
     @Environment(AppModel.self) private var model
+    @Environment(PairingModel.self) private var pairing
     @Environment(\.scenePhase) private var scenePhase
     @State private var selection = Tab.sessions
 
@@ -40,6 +46,11 @@ struct RootView: View {
             // traffic, because capabilities may have changed while away.
             guard phase == .active else { return }
             Task { await model.rediscover() }
+            // A revoke or a permission change happens on the Mac while the
+            // phone is away, so returning to the foreground re-reads it for
+            // the same reason discovery is repeated: state decided elsewhere
+            // is not assumed to have held.
+            Task { await pairing.refreshPermission() }
         }
     }
 }

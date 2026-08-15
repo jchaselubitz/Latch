@@ -11,6 +11,7 @@ crates/
   latch/                   # CLI, metadata sidecar, tmux engine
 apps/LatchDesktop/         # native macOS client
 packages/                  # TypeScript presentation clients
+services/control-plane/    # cloud control plane (independent deployable)
 fixtures/harness/          # public schemas plus raw/normalized connector corpus
 fixtures/vt/               # irreplaceable recorded harness streams
 ```
@@ -29,6 +30,22 @@ The generated configuration has no status bar, prefix, or copy-mode keys. It
 sets `remain-on-exit on`, `window-size latest`, and a deliberate
 `default-terminal`. The child environment removes `TMUX`; nesting is detected
 only through `LATCH_SESSION_ID`.
+
+## Cloud services are independent deployables
+
+`services/` holds cloud services. Each has its own manifest, dependency set,
+migrations, credentials, and deployment, and each ships without the others.
+They are not root workspace members and must not depend on an `@latch/`
+package from `packages/`: the local plane is a client of a cloud API, never a
+build-time dependency of one.
+
+The control plane and the relay stay separate deployables. Their scaling and
+bandwidth profiles differ, and the split is also the privacy boundary: the
+control plane authorizes relay admission and never forwards frames, while the
+relay forwards opaque frames and never learns a pairing, a device key, or an
+account. Neither may store terminal content, transcripts, session names, or a
+Latch gateway token; `services/control-plane/src/privacy.test.ts` enforces
+that mechanically for the control plane.
 
 ## No Overlord in `crates/`
 

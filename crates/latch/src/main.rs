@@ -334,6 +334,12 @@ enum ServeCommand {
 enum RemoteAccessCommand {
     /// Enable the local remote-access service and create the Mac identity.
     Enable,
+    /// Report the remote-access lifecycle state, Mac identity, and listener.
+    Status {
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Disable new remote-access connections.
     Disable,
     /// Create short-lived QR-compatible pairing material.
@@ -774,6 +780,23 @@ fn dispatch(command: Option<Command>) -> Result<()> {
                 RemoteAccessCommand::Enable => {
                     remote_access::set_enabled(&home, true)?;
                     println!("remote access enabled");
+                    Ok(())
+                }
+                RemoteAccessCommand::Status { json } => {
+                    let status = remote_access::status(&home)?;
+                    if json {
+                        println!("{}", serde_json::to_string(&status)?);
+                    } else {
+                        println!(
+                            "remote access {}\nrelay {}\ndevice {}\npaired {} ({} revoked)\nlistener {}",
+                            if status.enabled { "enabled" } else { "disabled" },
+                            if status.relay_enabled { "enabled" } else { "disabled" },
+                            status.device_id.as_deref().unwrap_or("none"),
+                            status.paired_devices,
+                            status.revoked_devices,
+                            status.listener_address.as_deref().unwrap_or("stopped"),
+                        );
+                    }
                     Ok(())
                 }
                 RemoteAccessCommand::Disable => {

@@ -49,6 +49,12 @@
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
+	<!--
+	  The camera is used for exactly one thing: reading the short-lived pairing
+	  code your Mac displays. Nothing is recorded, kept, or sent anywhere.
+	-->
+	<key>NSCameraUsageDescription</key>
+	<string>Latch uses the camera to scan the pairing code shown on your Mac.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Latch connects to the `latch serve` gateway running on your computer.</string>
 </dict>
