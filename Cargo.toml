@@ -5,7 +5,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2608141625.0"
+version = "0.2608141742.0"
 edition = "2021"
 rust-version = "1.82"
 license = "UNLICENSED"
@@ -22,8 +22,12 @@ clap = { version = "4", features = ["derive"] }
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+snow = "0.9"
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "time", "signal"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "time", "signal", "sync", "fs", "process"] }
+mdns-sd = "0.11"
+sha2 = "0.10"
+security-framework = "3"
 
 # Dev-only
 proptest = "1"

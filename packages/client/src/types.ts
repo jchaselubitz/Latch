@@ -1,4 +1,7 @@
 import type { HarnessEvent, InteractionCapabilities } from '@latch/harness-schema';
+import type { GatewayFeatures, TerminalAccessMode } from './generated.ts';
+
+export type { GatewayFeatures, TerminalAccessMode } from './generated.ts';
 
 export type RetryPolicy = {
   initialMs: number;
@@ -95,6 +98,10 @@ export type GatewayCapabilities = {
     events: boolean;
     send: boolean;
   };
+  features: GatewayFeatures;
+  // Opaque per-process value. It lets a reconnecting client detect that the
+  // in-memory idempotency window was lost with a gateway restart.
+  gatewayInstanceId: string;
 };
 
 export type GatewayEndpoint = keyof GatewayCapabilities['endpoints'];
@@ -124,6 +131,10 @@ export type EventSubscription = {
 
 export type SendRequest = {
   sessionId: string;
+  // Callers retrying after an ambiguous network failure reuse this value. The
+  // SDK creates a cryptographically random value for message/resolve calls
+  // when it is omitted. `keys` deliberately has no retry contract.
+  idempotencyKey?: string;
 } & (
   | { message: string }
   | { keys: string }
@@ -152,6 +163,7 @@ export type LatchClient = {
     sessionId: string;
     cols?: number;
     rows?: number;
+    mode?: TerminalAccessMode;
   }): TerminalHandle;
   subscribeEvents(options: {
     sessionId: string;

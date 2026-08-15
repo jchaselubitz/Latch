@@ -58,18 +58,21 @@ export function createLatchClient(options: LatchClientOptions): LatchClient {
   async function requestJson<T>({
     path,
     method = 'GET',
-    body
+    body,
+    headers
   }: {
     path: string;
     method?: string;
     body?: unknown;
+    headers?: Record<string, string>;
   }): Promise<T> {
     const response = await fetchImpl(`${baseUrl}${path}`, {
       method,
       headers: {
         Authorization: `Bearer ${token}`,
         Accept: 'application/json',
-        ...(body !== undefined ? { 'Content-Type': 'application/json' } : {})
+        ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+        ...headers
       },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {})
     });
@@ -93,7 +96,8 @@ export function createLatchClient(options: LatchClientOptions): LatchClient {
     return requestJson<SendReport>({
       path: `/v1/sessions/${encodeURIComponent(request.sessionId)}/send`,
       method: 'POST',
-      body: sendBody({ request })
+      body: sendBody({ request }),
+      headers: idempotencyHeaders({ request })
     });
   }
 
@@ -114,13 +118,14 @@ export function createLatchClient(options: LatchClientOptions): LatchClient {
     sessionCapabilities,
     canSend: sessionCapabilities,
     send,
-    attachTerminal: ({ sessionId, cols, rows }) =>
+    attachTerminal: ({ sessionId, cols, rows, mode }) =>
       attachTerminal({
         baseUrl,
         token,
         sessionId,
         cols,
         rows,
+        mode,
         retry,
         webSocket
       }),
@@ -145,6 +150,25 @@ function sendBody({ request }: { request: SendRequest }): Record<string, unknown
     return { keys: request.keys };
   }
   return { resolve: request.resolve };
+}
+
+function idempotencyHeaders({ request }: { request: SendRequest }): Record<string, string> | undefined {
+  if ('keys' in request) {
+    return undefined;
+  }
+  return { 'Idempotency-Key': request.idempotencyKey ?? newIdempotencyKey() };
+}
+
+function newIdempotencyKey(): string {
+  if (globalThis.crypto?.randomUUID) {
+    return globalThis.crypto.randomUUID();
+  }
+  if (globalThis.crypto?.getRandomValues) {
+    const bytes = new Uint8Array(16);
+    globalThis.crypto.getRandomValues(bytes);
+    return Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
+  }
+  throw new Error('secure randomness is required to create an Idempotency-Key');
 }
 
 async function errorForResponse({

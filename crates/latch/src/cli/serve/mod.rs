@@ -9,6 +9,7 @@
 //! tunnel to it). Binding a non-loopback address requires `--allow-remote`.
 
 mod auth;
+mod contract;
 mod events;
 mod http;
 mod pty;
@@ -21,6 +22,7 @@ use anyhow::{bail, Context};
 
 use crate::session::paths::LatchHome;
 
+pub(crate) use auth::load_token;
 pub use auth::mint_token;
 
 /// How the gateway should bind and authenticate.
@@ -31,6 +33,8 @@ pub struct ServeOptions {
     pub bind: SocketAddr,
     /// File holding the bearer token.
     pub token_file: PathBuf,
+    /// Optional structured readiness document for a supervising helper.
+    pub ready_file: Option<PathBuf>,
     /// `latch` executable used to spawn `attach` under a PTY.
     pub latch_bin: PathBuf,
     /// Permit a non-loopback bind (plaintext HTTP; token in the clear).

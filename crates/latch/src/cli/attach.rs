@@ -15,6 +15,8 @@ pub struct AttachOptions {
     pub home: LatchHome,
     /// Session id or display name; omitted selects the newest session.
     pub session: Option<String>,
+    /// Attach as an observer. tmux will not accept input or resize the window.
+    pub read_only: bool,
 }
 
 /// Retry policy for `latch attach --retry`.
@@ -73,7 +75,7 @@ fn attach_session(options: AttachOptions, policy: Option<RetryPolicy>) -> anyhow
     let extra_attempts = policy.map(|policy| policy.attempts).unwrap_or(0);
     let mut attempt = 0;
     loop {
-        match attach_once(&options.home, &id) {
+        match attach_once(&options.home, &id, options.read_only) {
             Ok(()) => return Ok(()),
             Err(_)
                 if attempt < extra_attempts && engine::attach_is_retryable(&options.home, &id) =>
@@ -88,8 +90,9 @@ fn attach_session(options: AttachOptions, policy: Option<RetryPolicy>) -> anyhow
     }
 }
 
-fn attach_once(home: &LatchHome, id: &SessionId) -> anyhow::Result<()> {
+fn attach_once(home: &LatchHome, id: &SessionId, read_only: bool) -> anyhow::Result<()> {
     match engine::inspect(home, id)? {
+        Some(_) if read_only => engine::attach_read_only(home, id),
         Some(_) => engine::attach(home, id),
         None if engine::tmux_server_is_absent(home) => {
             bail!("no Latch tmux server is running")

@@ -18,6 +18,28 @@ jobs:
       - run: ./scripts/check-boundaries.sh
       - name: Generated harness contracts
         run: python3 scripts/generate-harness-types.py --check
+      # The mobile app generates its Swift types from the same schemas and
+      # vendors the copies it was generated from. This fails while the app
+      # still speaks an older contract than the one in this commit, which is
+      # what keeps a schema change from silently shipping past it.
+      - name: Mobile contract drift
+        run: python3 apps/LatchMobile/Tools/generate-contract.py --check --upstream .
+
+  mobile:
+    name: Mobile client
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test
+        run: swift test --package-path apps/LatchMobile
+      - name: Build the app
+        run: |
+          xcodebuild build \
+            -project apps/LatchMobile/App/LatchMobile.xcodeproj \
+            -scheme LatchMobile \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO
 
   rust:
     name: Rust (${{ matrix.os }})

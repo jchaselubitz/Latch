@@ -8,6 +8,7 @@ use axum::extract::ws::{close_code, CloseFrame, Message, WebSocket};
 use serde::Deserialize;
 use tokio::io::unix::AsyncFd;
 
+use super::contract::TerminalAccessMode;
 use super::pty::{PtyChild, SpawnAttachRequest};
 use crate::session::manifest::TerminalSize;
 use crate::session::paths::LatchHome;
@@ -28,6 +29,8 @@ pub struct TerminalConnect {
     pub cols: Option<u16>,
     /// Initial rows from the WebSocket query string, when provided.
     pub rows: Option<u16>,
+    /// Whether the peer may send input and resize frames.
+    pub mode: TerminalAccessMode,
 }
 
 /// `cols` / `rows` query parameters on `/v1/sessions/{id}/terminal`.
@@ -37,6 +40,9 @@ pub struct TerminalQuery {
     pub cols: Option<u16>,
     /// Initial rows. Must be paired with [`Self::cols`].
     pub rows: Option<u16>,
+    /// `control` (the compatibility default) or `read-only`.
+    #[serde(default)]
+    pub mode: TerminalAccessMode,
 }
 
 #[derive(Debug, Deserialize)]
@@ -73,6 +79,7 @@ pub async fn run(mut socket: WebSocket, connect: TerminalConnect) {
         session_id: id.as_str(),
         cols: size.cols,
         rows: size.rows,
+        read_only: connect.mode == TerminalAccessMode::ReadOnly,
     }) {
         Ok(pty) => pty,
         Err(_) => {
@@ -133,12 +140,12 @@ pub async fn run(mut socket: WebSocket, connect: TerminalConnect) {
                 match incoming {
                     None | Some(Err(_)) => break,
                     Some(Ok(Message::Binary(bytes))) => {
-                        if write_pty(&master, &bytes).await.is_err() {
+                        if connect.mode == TerminalAccessMode::Control && write_pty(&master, &bytes).await.is_err() {
                             break;
                         }
                     }
                     Some(Ok(Message::Text(text))) => {
-                        if apply_control(&master, text.as_str()).is_err() {
+                        if connect.mode == TerminalAccessMode::Control && apply_control(&master, text.as_str()).is_err() {
                             break;
                         }
                     }
@@ -160,6 +167,12 @@ async fn initial_pty_size(
     socket: &mut WebSocket,
     connect: &TerminalConnect,
 ) -> Option<TerminalSize> {
+    if connect.mode == TerminalAccessMode::ReadOnly {
+        // The observer's dimensions must not be allowed to reflow the shared
+        // tmux session. `attach -r` enforces that at tmux too; this fixed PTY
+        // size also keeps the WebSocket boundary independently safe.
+        return Some(TerminalSize::new(80, 24));
+    }
     if let Some(size) = query_size(connect) {
         return Some(size);
     }

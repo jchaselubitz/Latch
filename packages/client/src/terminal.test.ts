@@ -109,3 +109,23 @@ test('resize is a control frame and is replayed on the next connection', () => {
   assert.deepEqual(first.sent.at(-1), JSON.stringify({ type: 'resize', cols: 100, rows: 30 }));
   handle.close();
 });
+
+test('read-only terminal mode is explicit in the WebSocket contract', () => {
+  FakeSocket.instances = [];
+  const handle = attachTerminal({
+    baseUrl: 'http://127.0.0.1:4610',
+    token: 'secret',
+    sessionId: 'ses_one',
+    mode: 'read-only',
+    retry: defaultRetryPolicy,
+    webSocket: FakeSocket as unknown as new (
+      url: string,
+      protocols?: string | string[]
+    ) => WebSocket
+  });
+  assert.equal(
+    FakeSocket.instances[0]?.url,
+    'ws://127.0.0.1:4610/v1/sessions/ses_one/terminal?mode=read-only'
+  );
+  handle.close();
+});

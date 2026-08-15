@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://latch.cooperativ.dev/schemas/remote-access/v1/terminal-connection.schema.json",
+  "title": "LatchTerminalConnectionV1",
+  "description": "Query contract for the /v1 terminal WebSocket. control is the compatibility default; read-only ignores WebSocket input and resize frames.",
+  "type": "object",
+  "properties": {
+    "mode": { "enum": ["control", "read-only"], "default": "control" },
+    "cols": { "type": "integer", "minimum": 1, "maximum": 65535 },
+    "rows": { "type": "integer", "minimum": 1, "maximum": 65535 }
+  },
+  "additionalProperties": false
+}

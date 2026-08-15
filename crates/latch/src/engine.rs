@@ -345,9 +345,24 @@ pub fn launch_from_fifo(path: &Path) -> Result<()> {
 
 /// Attaches the calling terminal to a session.
 pub fn attach(home: &LatchHome, id: &SessionId) -> Result<()> {
+    attach_with_mode(home, id, false)
+}
+
+/// Attaches a terminal as an observer. tmux's read-only client mode protects
+/// the session even if a caller later writes to its PTY.
+pub fn attach_read_only(home: &LatchHome, id: &SessionId) -> Result<()> {
+    attach_with_mode(home, id, true)
+}
+
+fn attach_with_mode(home: &LatchHome, id: &SessionId, read_only: bool) -> Result<()> {
     ensure_config(home)?;
-    let status = tmux(home)?
-        .args(["attach-session", "-t", id.as_str()])
+    let mut command = tmux(home)?;
+    command.arg("attach-session");
+    if read_only {
+        command.arg("-r");
+    }
+    let status = command
+        .args(["-t", id.as_str()])
         .status()
         .with_context(|| format!("cannot attach to session {id}"))?;
     if !status.success() {

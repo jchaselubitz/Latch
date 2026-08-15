@@ -27,8 +27,14 @@ clap.workspace = true
 libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+snow.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+mdns-sd.workspace = true
+sha2.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework.workspace = true
 
 # `libc` and `tempfile` are repeated here because an integration test is its own
 # crate: it links the library target, not the library's dependency graph. The

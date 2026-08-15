@@ -237,6 +237,7 @@ elif command == "attach-session":
         print("unable to attach to session " + session, file=sys.stderr)
         raise SystemExit(1)
     state["_last_attach"] = session
+    state["_last_attach_read_only"] = "-r" in args
     entry["attached"] = entry.get("attached", 0) + 1
     save(state)
     # Echo mode makes the fake behave like a client that is actually reading

@@ -21,7 +21,12 @@ export const legacyGatewayCapabilities = (): GatewayCapabilities => ({
     terminal: true,
     events: false,
     send: false
-  }
+  },
+  features: {
+    idempotencyKeys: false,
+    readOnlyTerminal: false
+  },
+  gatewayInstanceId: 'legacy-unknown'
 });
 
 // `/v1` is an additive protocol: an endpoint is usable only when discovery

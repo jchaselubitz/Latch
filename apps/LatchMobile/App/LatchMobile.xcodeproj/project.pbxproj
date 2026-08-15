@@ -1,0 +1,278 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		ABCDEF0123456789ABCD0015 /* LatchMobileApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD0010 /* LatchMobileApp.swift */; };
+		ABCDEF0123456789ABCD0016 /* SessionsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD0011 /* SessionsView.swift */; };
+		ABCDEF0123456789ABCD0017 /* ChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD0012 /* ChatView.swift */; };
+		ABCDEF0123456789ABCD0018 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD0013 /* SettingsView.swift */; };
+		ABCDEF0123456789ABCD001B /* LatchMobileKit in Frameworks */ = {isa = PBXBuildFile; productRef = ABCDEF0123456789ABCD001A /* LatchMobileKit */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		ABCDEF0123456789ABCD0003 /* Latch.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Latch.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		ABCDEF0123456789ABCD0010 /* LatchMobileApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LatchMobileApp.swift; sourceTree = "<group>"; };
+		ABCDEF0123456789ABCD0011 /* SessionsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionsView.swift; sourceTree = "<group>"; };
+		ABCDEF0123456789ABCD0012 /* ChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatView.swift; sourceTree = "<group>"; };
+		ABCDEF0123456789ABCD0013 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		ABCDEF0123456789ABCD0014 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		ABCDEF0123456789ABCD000E /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				ABCDEF0123456789ABCD001B /* LatchMobileKit in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		ABCDEF0123456789ABCD0004 = {
+			isa = PBXGroup;
+			children = (
+				ABCDEF0123456789ABCD0005 /* LatchMobile */,
+				ABCDEF0123456789ABCD0006 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		ABCDEF0123456789ABCD0005 /* LatchMobile */ = {
+			isa = PBXGroup;
+			children = (
+				ABCDEF0123456789ABCD0010 /* LatchMobileApp.swift */,
+				ABCDEF0123456789ABCD0011 /* SessionsView.swift */,
+				ABCDEF0123456789ABCD0012 /* ChatView.swift */,
+				ABCDEF0123456789ABCD0013 /* SettingsView.swift */,
+				ABCDEF0123456789ABCD0014 /* Info.plist */,
+			);
+			path = LatchMobile;
+			sourceTree = "<group>";
+		};
+		ABCDEF0123456789ABCD0006 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				ABCDEF0123456789ABCD0003 /* Latch.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		ABCDEF0123456789ABCD0002 /* LatchMobile */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = ABCDEF0123456789ABCD0008 /* Build configuration list for PBXNativeTarget "LatchMobile" */;
+			buildPhases = (
+				ABCDEF0123456789ABCD000D /* Sources */,
+				ABCDEF0123456789ABCD000E /* Frameworks */,
+				ABCDEF0123456789ABCD000F /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = LatchMobile;
+			packageProductDependencies = (
+				ABCDEF0123456789ABCD001A /* LatchMobileKit */,
+			);
+			productName = LatchMobile;
+			productReference = ABCDEF0123456789ABCD0003 /* Latch.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		ABCDEF0123456789ABCD0001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1600;
+				LastUpgradeCheck = 1600;
+				TargetAttributes = {
+					ABCDEF0123456789ABCD0002 = {
+						CreatedOnToolsVersion = 16.0;
+					};
+				};
+			};
+			buildConfigurationList = ABCDEF0123456789ABCD0007 /* Build configuration list for PBXProject "LatchMobile" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = ABCDEF0123456789ABCD0004;
+			packageReferences = (
+				ABCDEF0123456789ABCD0019 /* XCLocalSwiftPackageReference ".." */,
+			);
+			productRefGroup = ABCDEF0123456789ABCD0006 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				ABCDEF0123456789ABCD0002 /* LatchMobile */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		ABCDEF0123456789ABCD000F /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		ABCDEF0123456789ABCD000D /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				ABCDEF0123456789ABCD0015 /* LatchMobileApp.swift in Sources */,
+				ABCDEF0123456789ABCD0016 /* SessionsView.swift in Sources */,
+				ABCDEF0123456789ABCD0017 /* ChatView.swift in Sources */,
+				ABCDEF0123456789ABCD0018 /* SettingsView.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		ABCDEF0123456789ABCD0009 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		ABCDEF0123456789ABCD000A /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_NO_COMMON_BLOCKS = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_VERSION = 5.0;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		ABCDEF0123456789ABCD000B /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = "";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = LatchMobile/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.cooperativ.latch.mobile;
+				PRODUCT_NAME = Latch;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		ABCDEF0123456789ABCD000C /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = "";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = LatchMobile/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.cooperativ.latch.mobile;
+				PRODUCT_NAME = Latch;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		ABCDEF0123456789ABCD0007 /* Build configuration list for PBXProject "LatchMobile" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				ABCDEF0123456789ABCD0009 /* Debug */,
+				ABCDEF0123456789ABCD000A /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		ABCDEF0123456789ABCD0008 /* Build configuration list for PBXNativeTarget "LatchMobile" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				ABCDEF0123456789ABCD000B /* Debug */,
+				ABCDEF0123456789ABCD000C /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		ABCDEF0123456789ABCD0019 /* XCLocalSwiftPackageReference ".." */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ..;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		ABCDEF0123456789ABCD001A /* LatchMobileKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = LatchMobileKit;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = ABCDEF0123456789ABCD0001 /* Project object */;
+}

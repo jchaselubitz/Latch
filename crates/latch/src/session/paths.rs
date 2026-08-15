@@ -150,6 +150,11 @@ impl LatchHome {
         self.root.join("serve.token")
     }
 
+    /// Owner-only state for the paired LAN remote-access prototype.
+    pub fn remote_access_dir(&self) -> PathBuf {
+        self.root.join("remote-access")
+    }
+
     /// Paths belonging to one session.
     pub fn session(&self, id: &SessionId) -> SessionPaths {
         SessionPaths::new(self.sessions_dir().join(id.as_str()))

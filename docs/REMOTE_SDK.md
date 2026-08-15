@@ -18,7 +18,8 @@ changes a WebSocket frame type, or removes an endpoint while it still reports
 `protocolVersion: 1`.
 
 `GET /v1/capabilities` is the mandatory discovery step for optional features.
-It returns `protocolVersion`, `productVersion`, and an `endpoints` map. A
+It returns `protocolVersion`, `productVersion`, an `endpoints` map, `features`,
+and an opaque `gatewayInstanceId`. A
 client may use an endpoint only when the map reports it as `true`. A missing or
 `false` `events` endpoint means show the terminal instead of chat; a missing or
 `false` `send` endpoint means render transcript-only UI; a missing session
@@ -30,6 +31,11 @@ pre-discovery, terminal-only gateway: sessions and terminal remain available;
 events, send, and session capabilities are disabled. A `protocolVersion` other
 than 1 is unsupported rather than guessed at. The exported
 `supportsGatewayEndpoint()` encodes this rule.
+
+The canonical versioned schemas for these additions live in
+[`schemas/remote-access/v1/`](../schemas/remote-access/v1/). `features` is
+where v1 advertises `idempotencyKeys` and `readOnlyTerminal`; a client uses
+neither capability unless discovery says it is available.
 
 ## Publishing decision
 
@@ -72,11 +78,20 @@ open; reconnecting clients must use the newly minted token. This avoids a
 surprise terminal disconnect while still making a leaked token unusable for
 new connections.
 
-Every v1 terminal client is a controller. Its resize can affect tmux's
-`window-size latest` dimensions, so a phone connection can reflow the desktop
-terminal. Use `latch resize --pinned` where size stability matters. A
-read-only, ignore-size viewer mode is a future protocol addition, not behavior
-silently inferred from screen size.
+Terminal mode defaults to `control` for compatibility. A client that has
+discovered `features.readOnlyTerminal` may attach with `mode: 'read-only'`.
+That mode ignores WebSocket input and resize frames and starts the tmux attach
+client in read-only mode, so an observer cannot reflow or control the session.
+Controlling clients retain the existing resize behavior; use `latch resize
+--pinned` where size stability matters.
+
+For `message` and `resolve`, the SDK sends a random `Idempotency-Key` unless a
+caller supplies one. A retry after an ambiguous network failure must reuse the
+same key. The gateway returns the initial completed response for ten minutes;
+the key cannot be reused for a different payload. This cache is intentionally
+in-memory, so a changed `gatewayInstanceId` means the caller must refresh
+state rather than replay a potentially applied operation. Arbitrary `keys`
+input remains intentionally non-idempotent.
 
 A terminal connection receives tmux's current visible screen only; it does
 not backfill scrollback. The events/chat surface is the v1 history view.

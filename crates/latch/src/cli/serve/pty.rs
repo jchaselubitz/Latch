@@ -24,6 +24,8 @@ pub struct SpawnAttachRequest<'a> {
     pub cols: u16,
     /// Initial rows.
     pub rows: u16,
+    /// Spawn tmux's read-only attach mode.
+    pub read_only: bool,
 }
 
 /// A live attach process sitting on a PTY master.
@@ -74,6 +76,7 @@ impl PtyChild {
         let mut command = Command::new(request.latch_bin);
         command
             .arg("attach")
+            .args(request.read_only.then_some("--read-only"))
             .arg(request.session_id)
             .env("TERM", DEFAULT_TERMINAL)
             .stdin(Stdio::from(slave.try_clone()?))

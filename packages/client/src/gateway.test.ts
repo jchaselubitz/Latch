@@ -40,6 +40,8 @@ type Harness = {
   sessionId: string;
   cwd: string;
   setScreen(screen: string): void;
+  pastedMessages(): string[];
+  lastAttachReadOnly(): boolean;
   dispose(): void;
 };
 
@@ -113,6 +115,19 @@ function startHarness(): Harness {
       patchState(entry => {
         entry.screen = screen;
       });
+    },
+    pastedMessages() {
+      const state = JSON.parse(readFileSync(join(home, 'server.fake.json'), 'utf8')) as Record<
+        string,
+        { pasted?: string[] }
+      >;
+      return state[sessionId]?.pasted ?? [];
+    },
+    lastAttachReadOnly() {
+      const state = JSON.parse(readFileSync(join(home, 'server.fake.json'), 'utf8')) as {
+        _last_attach_read_only?: boolean;
+      };
+      return state._last_attach_read_only ?? false;
     },
     dispose() {
       spawnSync(latchBin, ['stop', sessionId, '--json'], { env });
@@ -246,6 +261,9 @@ test('the client drives a real latch serve end to end', { skip: skip ?? false },
     const gatewayCapabilities = await client.gatewayCapabilities();
     assert.equal(gatewayCapabilities.endpoints.events, true);
     assert.equal(gatewayCapabilities.endpoints.send, true);
+    assert.equal(gatewayCapabilities.features.idempotencyKeys, true);
+    assert.equal(gatewayCapabilities.features.readOnlyTerminal, true);
+    assert.match(gatewayCapabilities.gatewayInstanceId, /^gw-[0-9a-f]+-[0-9a-f]+$/);
     assert.ok(gatewayCapabilities.protocolVersion >= 1);
 
     // How a chat client learns a session has a connector before it opens a
@@ -303,6 +321,15 @@ test('the client drives a real latch serve end to end', { skip: skip ?? false },
     const report = await client.send({ sessionId: harness.sessionId, message: 'continue' });
     assert.equal(report.sent, true);
     assert.equal(report.operation, 'message');
+
+    const retry = { sessionId: harness.sessionId, message: 'retry-safe', idempotencyKey: 'retry-1' };
+    await client.send(retry);
+    await client.send(retry);
+    assert.equal(
+      harness.pastedMessages().filter(message => message === 'retry-safe').length,
+      1,
+      'the gateway must not apply a duplicate message after an ambiguous retry'
+    );
   });
 
   await t.test('the terminal socket relays bytes in both directions', async () => {
@@ -332,6 +359,27 @@ test('the client drives a real latch serve end to end', { skip: skip ?? false },
       message: () => `no echo; saw ${JSON.stringify(seen)}`
     });
     assert.match(seen, /<attached>/);
+    terminal.close();
+  });
+
+  await t.test('a read-only terminal attach cannot become a tmux controller', async () => {
+    const terminal = client.attachTerminal({ sessionId: harness.sessionId, mode: 'read-only' });
+    await new Promise<void>(resolveOpen => {
+      terminal.onState(state => {
+        if (state === 'open') {
+          resolveOpen();
+        }
+      });
+    });
+    await withDeadline({
+      work: (async () => {
+        while (!harness.lastAttachReadOnly()) {
+          await new Promise(resolve => setTimeout(resolve, 20));
+        }
+      })(),
+      ms: 5_000,
+      message: () => 'read-only gateway attach never reached tmux read-only mode'
+    });
     terminal.close();
   });
 });

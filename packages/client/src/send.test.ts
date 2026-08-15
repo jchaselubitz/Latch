@@ -8,6 +8,7 @@ type FetchCall = {
   url: string;
   method: string;
   body?: string;
+  idempotencyKey?: string | null;
 };
 
 function jsonResponse({
@@ -53,7 +54,12 @@ test('send posts the message body without a capabilities preflight', async () =>
       const url = String(input);
       const method = init?.method ?? 'GET';
       const body = typeof init?.body === 'string' ? init.body : undefined;
-      calls.push({ url, method, body });
+      calls.push({
+        url,
+        method,
+        body,
+        idempotencyKey: new Headers(init?.headers).get('Idempotency-Key')
+      });
       assert.equal(method, 'POST');
       return jsonResponse({
         body: { sessionId: 'ses_one', operation: 'message', sent: true, resolved: false }
@@ -67,6 +73,25 @@ test('send posts the message body without a capabilities preflight', async () =>
   assert.equal(calls[0]?.url, 'http://127.0.0.1:4610/v1/sessions/ses_one/send');
   assert.equal(calls[0]?.method, 'POST');
   assert.deepEqual(JSON.parse(calls[0]?.body ?? '{}'), { message: 'hello' });
+});
+
+test('message retries can reuse a caller-supplied idempotency key', async () => {
+  const calls: FetchCall[] = [];
+  const client = clientWith({
+    fetchImpl: async (input, init) => {
+      calls.push({
+        url: String(input),
+        method: init?.method ?? 'GET',
+        idempotencyKey: new Headers(init?.headers).get('Idempotency-Key')
+      });
+      return jsonResponse({
+        body: { sessionId: 'ses_one', operation: 'message', sent: true, resolved: false }
+      });
+    }
+  });
+
+  await client.send({ sessionId: 'ses_one', message: 'hello', idempotencyKey: 'retry-1' });
+  assert.equal(calls[0]?.idempotencyKey, 'retry-1');
 });
 
 test('send still posts when canSend.ok is false so the gateway is the authority', async () => {

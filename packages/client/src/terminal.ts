@@ -3,7 +3,8 @@ import type {
   RetryPolicy,
   TerminalCloseInfo,
   TerminalHandle,
-  TerminalState
+  TerminalState,
+  TerminalAccessMode
 } from './types.ts';
 import { FATAL_CLOSE_CODES, SOCKET_OPEN, latchProtocols, sessionWsUrl } from './ws.ts';
 
@@ -15,6 +16,7 @@ type AttachTerminalOptions = {
   sessionId: string;
   cols?: number;
   rows?: number;
+  mode?: TerminalAccessMode;
   retry: RetryPolicy;
   webSocket?: new (url: string, protocols?: string | string[]) => WebSocket;
 };
@@ -60,6 +62,9 @@ export function attachTerminal(options: AttachTerminalOptions): TerminalHandle {
     if (lastSize) {
       query.cols = String(lastSize.cols);
       query.rows = String(lastSize.rows);
+    }
+    if (options.mode === 'read-only') {
+      query.mode = 'read-only';
     }
     return sessionWsUrl({
       baseUrl: options.baseUrl,
