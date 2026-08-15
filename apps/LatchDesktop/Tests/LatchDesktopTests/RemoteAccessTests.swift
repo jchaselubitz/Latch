@@ -145,6 +145,48 @@ final class RemoteAccessTests: XCTestCase {
         // Round-tripping keeps it stable for a rescan.
         let reparsed = try JSONDecoder().decode(PairingMaterial.self, from: Data(document.utf8))
         XCTAssertEqual(reparsed, material)
+
+        // The CLI cannot know where to enroll, so a code built from its answer
+        // alone says so rather than pretending otherwise.
+        XCTAssertFalse(material.carriesAddress)
+    }
+
+    /// The phone reads `controlPlane` out of the scanned document; a code
+    /// without it is the "does not say where to enroll" dead end.
+    func testAnAddressedPairingDocumentTellsThePhoneWhereToEnroll() throws {
+        let source = """
+        {"formatVersion":1,"pairingId":"pid","secret":"sec",\
+        "macPublicKey":"pub","expiresAt":1700000000}
+        """
+        let material = try JSONDecoder().decode(PairingMaterial.self, from: Data(source.utf8))
+        let addressed = material.addressed(
+            to: URL(string: "https://control.example")!,
+            macName: "  Studio Mac  "
+        )
+        let document = try addressed.pairingDocument()
+        let object = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: Data(document.utf8)) as? [String: Any]
+        )
+
+        XCTAssertEqual(
+            Set(object.keys),
+            ["formatVersion", "pairingId", "secret", "macPublicKey", "expiresAt", "controlPlane", "macName"]
+        )
+        XCTAssertEqual(object["controlPlane"] as? String, "https://control.example")
+        XCTAssertEqual(object["macName"] as? String, "Studio Mac")
+        XCTAssertTrue(addressed.carriesAddress)
+        // Adding an address must not disturb the one-time material itself.
+        XCTAssertEqual(object["secret"] as? String, "sec")
+        XCTAssertEqual(object["pairingId"] as? String, "pid")
+        XCTAssertEqual(
+            try JSONDecoder().decode(PairingMaterial.self, from: Data(document.utf8)),
+            addressed
+        )
+
+        // A blank name is dropped rather than encoded as an empty string: the
+        // phone's parser treats an empty name as no name either way.
+        let unnamed = material.addressed(to: URL(string: "https://control.example")!, macName: "  ")
+        XCTAssertNil(unnamed.macName)
     }
 
     func testPhaseReportsRunningOnlyWhenAListenerExists() {

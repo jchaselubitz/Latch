@@ -46,6 +46,24 @@ struct RemoteAccessSettingsView: View {
             }
 
             Section {
+                HStack {
+                    TextField("https://…", text: $controller.controlPlaneAddress)
+                        .textFieldStyle(.roundedBorder)
+                    Button("Save") { controller.saveControlPlaneAddress() }
+                }
+                LabeledContent("Pairing codes") {
+                    Text(controller.isControlPlaneConfigured ? "Carry this address" : "Carry no address")
+                        .foregroundStyle(controller.isControlPlaneConfigured ? .secondary : .orange)
+                }
+            } header: {
+                SettingsSectionHeader("Control Plane")
+            } footer: {
+                SettingsFootnote(
+                    "A phone enrolls against this address after scanning a pairing code, so the code has to name it. Without one, the phone reports that the code does not say where to enroll and pairing has to be finished by entering the address on the phone by hand. This Mac registers only the pairing identifier and a digest of the one-time secret — never the secret, a key, or session content."
+                )
+            }
+
+            Section {
                 if controller.activeDevices.isEmpty {
                     Text("No devices are paired.")
                         .foregroundStyle(.secondary)
@@ -120,7 +138,10 @@ struct RemoteAccessSettingsView: View {
             get: { controller.pendingPairing },
             set: { if $0 == nil { controller.dismissPairing() } }
         )) { material in
-            RemotePairingSheet(material: material) { controller.dismissPairing() }
+            RemotePairingSheet(
+                material: material,
+                progress: controller.pairingProgress
+            ) { controller.dismissPairing() }
         }
     }
 
@@ -215,6 +236,7 @@ private struct RemoteAuditList: View {
 /// secret is never written to disk by the app.
 private struct RemotePairingSheet: View {
     let material: PairingMaterial
+    let progress: RemotePairingProgress
     let dismiss: () -> Void
 
     /// The one-time document is rendered from the material already in memory.
@@ -249,6 +271,7 @@ private struct RemotePairingSheet: View {
                 .padding(10)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+            progressLabel
             Text("New devices start with Interact. Change or revoke that at any time in Remote Access settings.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -260,6 +283,49 @@ private struct RemotePairingSheet: View {
         }
         .padding(24)
         .frame(width: 460)
+    }
+
+    /// What the sheet is waiting for. The enrolled case shows the phrase
+    /// because comparing it against the phone is the step that proves the
+    /// code was scanned by the phone in the room and not relayed elsewhere.
+    @ViewBuilder
+    private var progressLabel: some View {
+        switch progress {
+        case .idle:
+            EmptyView()
+        case .waiting:
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text("Waiting for the phone to scan this…")
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        case .unaddressed:
+            Label(
+                "This code does not say where to enroll. Set a control-plane address in Remote Access settings, or enter it on the phone by hand.",
+                systemImage: "exclamationmark.triangle"
+            )
+            .font(.caption)
+            .foregroundStyle(.orange)
+            .fixedSize(horizontal: false, vertical: true)
+        case .enrolled(let name, let phrase):
+            VStack(alignment: .leading, spacing: 4) {
+                Label("\(name) is paired.", systemImage: "checkmark.circle")
+                    .foregroundStyle(.green)
+                if let phrase {
+                    Text("Check that the phone shows: \(phrase)")
+                        .font(.system(.callout, design: .monospaced))
+                        .textSelection(.enabled)
+                }
+            }
+            .font(.caption)
+            .fixedSize(horizontal: false, vertical: true)
+        case .failed(let message):
+            Label(message, systemImage: "exclamationmark.triangle")
+                .font(.caption)
+                .foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 }
 

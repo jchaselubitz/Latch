@@ -52,6 +52,25 @@ private final class StubControlPlane: ControlPlaneClient, @unchecked Sendable {
     }
 }
 
+/// Records which address the flow actually built a client for, which is the
+/// only way to tell a code's address from a typed one apart.
+private final class ControlPlaneAddressRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var addresses: [URL] = []
+
+    func record(_ address: URL) {
+        lock.lock()
+        defer { lock.unlock() }
+        addresses.append(address)
+    }
+
+    var used: [URL] {
+        lock.lock()
+        defer { lock.unlock() }
+        return addresses
+    }
+}
+
 @MainActor
 final class PairingFlowTests: XCTestCase {
     private let now = Date(timeIntervalSince1970: 1_700_000_000)
@@ -96,14 +115,20 @@ final class PairingFlowTests: XCTestCase {
         control: StubControlPlane,
         devices: MemoryPairedDeviceStore = MemoryPairedDeviceStore(),
         identities: MemoryDeviceIdentityStore = MemoryDeviceIdentityStore(),
-        camera: CameraPermission = .authorized
+        camera: CameraPermission = .authorized,
+        addresses: MemoryControlPlaneAddressStore = MemoryControlPlaneAddressStore(),
+        addressesUsed: ControlPlaneAddressRecorder? = nil
     ) -> PairingModel {
         PairingModel(
             identityStore: identities,
             deviceStore: devices,
             camera: StubCameraAuthorization(camera),
             deviceName: "Jake's iPhone",
-            clientFactory: { _ in control }
+            addressStore: addresses,
+            clientFactory: { address in
+                addressesUsed?.record(address)
+                return control
+            }
         )
     }
 
@@ -207,6 +232,95 @@ final class PairingFlowTests: XCTestCase {
             return XCTFail("expected a refusal, got \(model.state)")
         }
         XCTAssertEqual(message, ControlPlaneError.noAddress.message)
+    }
+
+    /// A Mac with no control plane configured still produces a usable code:
+    /// everything but the address is in it, and the address can be supplied on
+    /// the phone. This is the recovery path for the reported failure.
+    func testATypedAddressCompletesACodeThatCarriesNone() async throws {
+        let control = StubControlPlane()
+        control.confirmation = confirmation()
+        let addresses = MemoryControlPlaneAddressStore()
+        let used = ControlPlaneAddressRecorder()
+        let model = makeModel(control: control, addresses: addresses, addressesUsed: used)
+        await model.restore()
+
+        model.scanned(code(controlPlane: nil), now: now)
+        XCTAssertTrue(model.needsControlPlaneAddress)
+
+        // Typed without a scheme, the way it is read off a screen.
+        model.manualControlPlane = "control.example"
+        XCTAssertFalse(model.needsControlPlaneAddress)
+
+        await model.confirm(now: now)
+        guard case .paired = model.state else {
+            return XCTFail("expected a pairing, got \(model.state)")
+        }
+        XCTAssertEqual(used.used.map(\.absoluteString), ["https://control.example"])
+        // Remembered, so the next code from the same Mac does not ask again.
+        XCTAssertEqual(addresses.load()?.absoluteString, "https://control.example")
+    }
+
+    /// A typed address must never redirect a code that names its own: the
+    /// code came from the Mac being paired with, and the typed value did not.
+    func testACodeWithAnAddressIgnoresTheTypedOne() async throws {
+        let control = StubControlPlane()
+        control.confirmation = confirmation()
+        let addresses = MemoryControlPlaneAddressStore()
+        let used = ControlPlaneAddressRecorder()
+        let model = makeModel(control: control, addresses: addresses, addressesUsed: used)
+        await model.restore()
+        model.manualControlPlane = "https://typed.example"
+
+        model.scanned(code(controlPlane: "https://control.example"), now: now)
+        XCTAssertFalse(model.needsControlPlaneAddress)
+        await model.confirm(now: now)
+
+        guard case .paired = model.state else {
+            return XCTFail("expected a pairing, got \(model.state)")
+        }
+        XCTAssertEqual(used.used.map(\.absoluteString), ["https://control.example"])
+        // Nothing was learned from a code that already knew where to go.
+        XCTAssertNil(addresses.load())
+    }
+
+    /// The control plane answers a name outside its label set with a 400, and
+    /// "the control plane refused this" is the wrong thing to tell someone
+    /// whose phone is called "Jake’s iPhone".
+    func testTheEnrolledNameIsReducedToWhatTheServiceAccepts() async throws {
+        let control = StubControlPlane()
+        control.confirmation = confirmation()
+        let model = makeModel(control: control)
+        await model.restore()
+        model.deviceName = "Jake’s iPhone 📱"
+
+        model.scanned(code(), now: now)
+        await model.confirm(now: now)
+
+        let enrolled = try XCTUnwrap(control.log.enrollments.first)
+        XCTAssertEqual(enrolled.enrollment.deviceName, "Jake s iPhone")
+    }
+
+    func testAnUnusableNameFallsBackRatherThanEnrollingBlank() {
+        XCTAssertEqual(PairingModel.enrollableName("🙂🙂"), PairingModel.defaultDeviceName)
+        XCTAssertEqual(PairingModel.enrollableName("   "), PairingModel.defaultDeviceName)
+        XCTAssertEqual(PairingModel.enrollableName("Jake's iPhone"), "Jake's iPhone")
+        XCTAssertEqual(PairingModel.enrollableName(String(repeating: "a", count: 100)).count, 64)
+    }
+
+    func testATypedAddressIsRefusedUnlessItIsUsable() {
+        XCTAssertNil(ControlPlaneAddress.parse(""))
+        XCTAssertNil(ControlPlaneAddress.parse("   "))
+        XCTAssertNil(ControlPlaneAddress.parse("ftp://control.example"))
+        XCTAssertNil(ControlPlaneAddress.parse("https://"))
+        XCTAssertEqual(
+            ControlPlaneAddress.parse(" control.example/ ")?.absoluteString,
+            "https://control.example"
+        )
+        XCTAssertEqual(
+            ControlPlaneAddress.parse("http://127.0.0.1:8080")?.absoluteString,
+            "http://127.0.0.1:8080"
+        )
     }
 
     func testAConsumedPairingReportsWhatToDoAboutIt() async throws {

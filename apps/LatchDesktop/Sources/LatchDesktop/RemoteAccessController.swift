@@ -18,6 +18,10 @@ final class RemoteAccessController: ObservableObject {
     @Published var errorMessage: String?
     /// One-time pairing material, held only while the sheet is up.
     @Published var pendingPairing: PairingMaterial?
+    /// What the open pairing sheet is waiting for.
+    @Published private(set) var pairingProgress: RemotePairingProgress = .idle
+    /// The control-plane address as it should appear in the settings field.
+    @Published var controlPlaneAddress: String = ""
 
     /// Restart backoff for a helper that keeps dying. Capped so a permanently
     /// broken CLI cannot become a spin loop.
@@ -25,13 +29,23 @@ final class RemoteAccessController: ObservableObject {
     private static let readinessAttempts = 40
     private static let readinessInterval: UInt64 = 250_000_000
 
+    /// How often the open pairing sheet asks the control plane whether the
+    /// phone has enrolled yet, and how long it keeps asking. The window is the
+    /// life of the code itself: once it expires there is nothing to wait for.
+    private static let enrollmentPollInterval: UInt64 = 2_000_000_000
+    private static let enrollmentGrace: TimeInterval = 15
+
     private let client: LatchClient
+    private let controlPlane: ControlPlaneHost
     private var supervision: Task<Void, Never>?
     private var pollingTask: Task<Void, Never>?
+    private var enrollmentWatch: Task<Void, Never>?
     private var terminationObserver: NSObjectProtocol?
 
-    init(client: LatchClient = LatchClient()) {
+    init(client: LatchClient = LatchClient(), controlPlane: ControlPlaneHost = ControlPlaneHost()) {
         self.client = client
+        self.controlPlane = controlPlane
+        self.controlPlaneAddress = controlPlane.address?.absoluteString ?? ""
     }
 
     var isEnabled: Bool { status.enabled }
@@ -81,7 +95,7 @@ final class RemoteAccessController: ObservableObject {
                 stopSupervision()
                 try await client.disableRemoteAccess()
                 phase = .off
-                pendingPairing = nil
+                dismissPairing()
                 await refresh()
             }
             errorMessage = nil
@@ -203,20 +217,130 @@ final class RemoteAccessController: ObservableObject {
         }
     }
 
-    // MARK: - Devices
+    // MARK: - Control plane
 
-    func createPairing() async {
-        guard status.enabled else { return }
+    /// Saves the address typed in settings.
+    ///
+    /// Changing it deliberately forgets this Mac's credentials: tokens issued
+    /// by one deployment name nothing in another, so carrying them across
+    /// would only produce a rejected pairing later.
+    func saveControlPlaneAddress() {
+        let previous = controlPlane.address?.absoluteString
         do {
-            pendingPairing = try await client.createRemotePairing()
+            try controlPlane.setAddress(controlPlaneAddress)
+            let current = controlPlane.address?.absoluteString
+            if current != previous {
+                try controlPlane.forgetEnrollment()
+            }
+            controlPlaneAddress = current ?? ""
             errorMessage = nil
-            await refresh()
         } catch {
             errorMessage = error.localizedDescription
         }
     }
 
-    func dismissPairing() { pendingPairing = nil }
+    var isControlPlaneConfigured: Bool { controlPlane.isConfigured }
+
+    // MARK: - Pairing
+
+    /// Creates one code and, when a control plane is configured, registers it
+    /// so the phone that scans it has somewhere to enroll.
+    ///
+    /// Registration failing is not silent: a code that was not registered
+    /// cannot be completed by a phone, and showing it anyway would send the
+    /// person to a scanner that can only fail.
+    func createPairing() async {
+        guard status.enabled else { return }
+        enrollmentWatch?.cancel()
+        enrollmentWatch = nil
+        do {
+            let material = try await client.createRemotePairing()
+            guard controlPlane.isConfigured else {
+                // A Mac with no control plane still pairs, but the phone has
+                // to be told the address by hand.
+                pendingPairing = material
+                pairingProgress = .unaddressed
+                errorMessage = nil
+                await refresh()
+                return
+            }
+            guard let publicKey = status.publicKey else {
+                throw ControlPlaneHostError.noIdentity
+            }
+            // Snapshot the directory before the code is registered, not after:
+            // a phone that enrolls between the two would otherwise be counted
+            // as already known and never noticed.
+            let known = Set(((try? await controlPlane.pairedClients()) ?? []).map(\.deviceID))
+            let addressed = try await controlPlane.openPairing(
+                material,
+                publicKey: publicKey,
+                macName: Self.macName
+            )
+            pendingPairing = addressed
+            pairingProgress = .waiting
+            errorMessage = nil
+            await refresh()
+            watchForEnrollment(addressed, known: known)
+        } catch {
+            pairingProgress = .idle
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func dismissPairing() {
+        enrollmentWatch?.cancel()
+        enrollmentWatch = nil
+        pendingPairing = nil
+        pairingProgress = .idle
+    }
+
+    /// Watches for the phone to appear in the control-plane directory, then
+    /// records it locally.
+    ///
+    /// The control plane holds the directory; this Mac holds the
+    /// authorization. Until the local `pair confirm` runs, the phone has an
+    /// account row and no way through the authenticated transport, so this
+    /// step is what actually completes pairing.
+    private func watchForEnrollment(_ material: PairingMaterial, known: Set<String>) {
+        enrollmentWatch = Task { [weak self] in
+            guard let self else { return }
+            let deadline = material.expiryDate.addingTimeInterval(Self.enrollmentGrace)
+            while !Task.isCancelled, Date() < deadline {
+                try? await Task.sleep(nanoseconds: Self.enrollmentPollInterval)
+                guard !Task.isCancelled else { return }
+                guard let enrolled = try? await self.controlPlane.pairedClients() else { continue }
+                guard let phone = enrolled.first(where: { !known.contains($0.deviceID) }) else {
+                    continue
+                }
+                await self.completeEnrollment(of: phone, for: material)
+                return
+            }
+        }
+    }
+
+    private func completeEnrollment(of phone: ControlPlaneDevice, for material: PairingMaterial) async {
+        do {
+            let confirmation = try await client.confirmRemotePairing(
+                pairingID: material.pairingID,
+                secret: material.secret,
+                devicePublicKey: phone.publicKey,
+                name: phone.name,
+                permission: phone.permission ?? .interact
+            )
+            pairingProgress = .enrolled(name: confirmation.name, phrase: confirmation.pairingPhrase)
+            errorMessage = nil
+            await refresh()
+        } catch {
+            pairingProgress = .failed(error.localizedDescription)
+        }
+    }
+
+    /// What this Mac calls itself in a phone's device list.
+    private static var macName: String {
+        Host.current().localizedName ?? ProcessInfo.processInfo.hostName
+    }
+
+    // MARK: - Devices
 
     func grant(_ device: RemoteDevice, permission: DevicePermission) async {
         guard permission != device.permission else { return }

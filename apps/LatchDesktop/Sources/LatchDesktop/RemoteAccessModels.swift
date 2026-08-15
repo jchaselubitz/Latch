@@ -95,6 +95,40 @@ struct RemoteDevice: Codable, Identifiable, Equatable, Sendable {
     }
 }
 
+/// What an open pairing sheet is waiting for.
+///
+/// This is modeled rather than shown as one string because the endings differ:
+/// a code with no address is a settings problem, a code nobody scanned simply
+/// expires, and a phone that enrolled has a phrase the person must check.
+enum RemotePairingProgress: Equatable, Sendable {
+    /// No sheet, or nothing to report yet.
+    case idle
+    /// The code is displayed and registered; waiting for a phone.
+    case waiting
+    /// The code carries no control-plane address, because none is configured.
+    case unaddressed
+    /// A phone enrolled and was recorded on this Mac.
+    case enrolled(name: String, phrase: String?)
+    /// The phone enrolled with the control plane but could not be recorded.
+    case failed(String)
+}
+
+/// The answer to `latch remote-access pair confirm`. It is a device row plus
+/// the short authentication phrase for the pairing that created it, which is
+/// the value the person compares against the phone's screen.
+struct RemotePairingConfirmation: Codable, Equatable, Sendable {
+    let deviceID: String
+    let name: String
+    let permission: DevicePermission
+    let revoked: Bool
+    let pairingPhrase: String?
+
+    enum CodingKeys: String, CodingKey {
+        case name, permission, revoked, pairingPhrase
+        case deviceID = "deviceId"
+    }
+}
+
 /// One-time material a phone scans. The secret exists only in this value and is
 /// never persisted by the app.
 struct PairingMaterial: Codable, Equatable, Identifiable, Sendable {
@@ -105,22 +139,48 @@ struct PairingMaterial: Codable, Equatable, Identifiable, Sendable {
     let secret: String
     let macPublicKey: String
     let expiresAt: UInt64
+    /// Where the phone enrolls. The CLI does not know this — it has no HTTP
+    /// client — so it is attached here once the desktop app has registered the
+    /// code with the control plane it is configured for. Absent on a Mac that
+    /// pairs over the local network only, in which case the phone has to be
+    /// given an address by hand.
+    let controlPlane: String?
+    /// What this Mac calls itself, for the phone's confirmation screen.
+    /// Advisory: the pinned key, not the name, is what pairing moves.
+    let macName: String?
 
     enum CodingKeys: String, CodingKey {
-        case formatVersion, secret, macPublicKey, expiresAt
+        case formatVersion, secret, macPublicKey, expiresAt, controlPlane, macName
         case pairingID = "pairingId"
     }
 
     var expiryDate: Date { Date(timeIntervalSince1970: TimeInterval(expiresAt)) }
+
+    /// Whether a phone that scans this can tell where to enroll.
+    var carriesAddress: Bool { !(controlPlane ?? "").isEmpty }
+
+    /// The same one-time material, told where to enroll.
+    func addressed(to controlPlane: URL, macName: String?) -> PairingMaterial {
+        let trimmed = macName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return PairingMaterial(
+            formatVersion: formatVersion,
+            pairingID: pairingID,
+            secret: secret,
+            macPublicKey: macPublicKey,
+            expiresAt: expiresAt,
+            controlPlane: controlPlane.absoluteString,
+            macName: (trimmed?.isEmpty ?? true) ? nil : trimmed
+        )
+    }
 
     /// The exact document a phone consumes, as JSON with the same camelCase
     /// keys `latch remote-access pair create --json` emits. The phone parses
     /// this shape, so re-encoding rather than inventing a compact format keeps
     /// the two sides on one contract.
     ///
-    /// It carries the one-time secret and the Mac's public identity to pin —
-    /// no Mac private key, no gateway address, no bearer token, and no session
-    /// data.
+    /// It carries the one-time secret, the Mac's public identity to pin, and
+    /// the public control-plane address to enroll against — no Mac private key,
+    /// no gateway address, no bearer token, and no session data.
     func pairingDocument() throws -> String {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]

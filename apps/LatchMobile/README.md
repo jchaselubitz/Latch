@@ -147,6 +147,20 @@ That derivation is a cross-client contract. `PairingPhrase` in this package and
 both test suites assert the same fixed vector against the same inputs, so the
 two cannot drift apart without a test saying so.
 
+### Where to enroll
+
+`controlPlane` is what tells the phone where to present the secret, and only
+the Mac can put it there: Latch Desktop attaches it after registering the code
+with the control plane it is configured for, and the CLI — which has no HTTP
+client — cannot. A code that carries one is authoritative, because it came from
+the Mac being paired with.
+
+A Mac with no control plane configured produces a code that is complete in
+every other way, and that used to be a dead end reading "this pairing code does
+not say where to enroll, and no address was given." The confirmation screen now
+asks for the address instead, remembers it, and reuses it for later codes. A
+typed address never overrides one the code carries.
+
 ### Enrolling
 
 The phone posts the one-time secret and its public key to the control plane:

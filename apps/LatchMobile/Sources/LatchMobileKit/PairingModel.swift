@@ -145,13 +145,26 @@ public final class PairingModel {
 
     /// What this phone asks to be called on the Mac's device list.
     public var deviceName: String
+    /// The control-plane address typed on this phone, for a pairing code that
+    /// does not carry one.
+    ///
+    /// A Mac that has no control plane configured produces a code with no
+    /// address in it, and that code is otherwise perfectly good: the secret,
+    /// the identity to pin, and the expiry are all there. Rather than making
+    /// that a dead end, the address can be supplied here once and is reused
+    /// for later codes.
+    public var manualControlPlane: String = ""
 
     private let identityStore: DeviceIdentityStoring
     private let deviceStore: PairedDeviceStoring
     private let camera: CameraAuthorizing
     private let clientFactory: @Sendable (URL) -> ControlPlaneClient
-    /// The address to enroll against when the QR code does not carry one.
+    /// A build-time address to enroll against when the QR code does not carry
+    /// one and the person has not typed one either.
     private let fallbackControlPlane: URL?
+    /// Where `manualControlPlane` survives between launches. It is not a
+    /// secret — it is a public service address — so it is not in the keychain.
+    private let addressStore: ControlPlaneAddressStoring
     /// The last string the scanner handed over, so the same code re-read many
     /// times a second does not restart the flow or flash an error repeatedly.
     private var lastScanned: String?
@@ -162,6 +175,7 @@ public final class PairingModel {
         camera: CameraAuthorizing = SystemCameraAuthorization(),
         deviceName: String = "",
         fallbackControlPlane: URL? = nil,
+        addressStore: ControlPlaneAddressStoring = UserDefaultsControlPlaneAddressStore(),
         clientFactory: @escaping @Sendable (URL) -> ControlPlaneClient = { HTTPControlPlaneClient(baseURL: $0) }
     ) {
         self.identityStore = identityStore
@@ -169,6 +183,7 @@ public final class PairingModel {
         self.camera = camera
         self.deviceName = deviceName
         self.fallbackControlPlane = fallbackControlPlane
+        self.addressStore = addressStore
         self.clientFactory = clientFactory
     }
 
@@ -186,6 +201,9 @@ public final class PairingModel {
     public func restore() async {
         cameraPermission = camera.current()
         if deviceName.isEmpty { deviceName = Self.defaultDeviceName }
+        if manualControlPlane.isEmpty {
+            manualControlPlane = addressStore.load()?.absoluteString ?? ""
+        }
         do {
             identity = try identityStore.loadOrCreate()
         } catch let error as DeviceIdentityError {
@@ -288,21 +306,25 @@ public final class PairingModel {
             return
         }
 
-        guard let address = proposal.payload.controlPlane ?? fallbackControlPlane else {
+        guard let address = enrollmentAddress(for: proposal.payload) else {
             state = .failed(ControlPlaneError.noAddress.message)
             return
+        }
+        // A typed address is kept once it has been used: the next code from
+        // the same Mac will not carry one either.
+        if proposal.payload.controlPlane == nil {
+            addressStore.save(address)
         }
 
         state = .enrolling
         isBusy = true
         defer { isBusy = false }
 
-        let name = deviceName.trimmingCharacters(in: .whitespacesAndNewlines)
         let enrollment = PairingEnrollment(
             pairingId: proposal.payload.pairingId,
             secret: proposal.payload.secret,
             devicePublicKey: identity.publicKey,
-            deviceName: name.isEmpty ? Self.defaultDeviceName : name,
+            deviceName: Self.enrollableName(deviceName),
             phrase: proposal.phrase
         )
         do {
@@ -350,6 +372,47 @@ public final class PairingModel {
         } catch {
             state = .failed(error.localizedDescription)
         }
+    }
+
+    /// This phone's name, reduced to what the control plane will accept.
+    ///
+    /// The service takes letters, digits, spaces, and `. _ ' ( ) -`, up to 64
+    /// characters, and answers anything else with a 400. A phone called
+    /// "Jake’s iPhone" — with the typographic apostrophe iOS puts there —
+    /// would otherwise fail pairing with a message about the control plane
+    /// rather than about the name, so the name is fixed here instead.
+    static func enrollableName(_ raw: String) -> String {
+        let allowed = CharacterSet.letters
+            .union(.decimalDigits)
+            .union(CharacterSet(charactersIn: " ._'()-"))
+        let cleaned = String(
+            String.UnicodeScalarView(raw.unicodeScalars.map { allowed.contains($0) ? $0 : " " })
+        )
+        let collapsed = cleaned
+            .split(separator: " ", omittingEmptySubsequences: true)
+            .joined(separator: " ")
+        let bounded = String(collapsed.prefix(64)).trimmingCharacters(in: .whitespaces)
+        return bounded.isEmpty ? defaultDeviceName : bounded
+    }
+
+    // MARK: - Where to enroll
+
+    /// The address this payload should be enrolled against.
+    ///
+    /// The code wins when it names one: it was produced by the Mac being
+    /// paired with, and a typed address must never quietly redirect a scan
+    /// somewhere else. Only a code that is silent falls back to what the
+    /// person supplied, and then to the build's own default.
+    func enrollmentAddress(for payload: PairingPayload) -> URL? {
+        if let address = payload.controlPlane { return address }
+        return ControlPlaneAddress.parse(manualControlPlane) ?? fallbackControlPlane
+    }
+
+    /// Whether the confirmation screen has to ask for an address before the
+    /// person can pair.
+    public var needsControlPlaneAddress: Bool {
+        guard case .confirming(let proposal) = state else { return false }
+        return enrollmentAddress(for: proposal.payload) == nil
     }
 
     // MARK: - Permission state and revocation

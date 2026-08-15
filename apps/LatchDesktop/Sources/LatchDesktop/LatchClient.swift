@@ -172,6 +172,26 @@ actor LatchClient {
         try request(["remote-access", "pair", "create", "--json"])
     }
 
+    /// Records a phone in this Mac's local device store after it enrolled with
+    /// the control plane. The control plane holds the directory; the Mac holds
+    /// the authorization, and only this call creates it.
+    func confirmRemotePairing(
+        pairingID: String,
+        secret: String,
+        devicePublicKey: String,
+        name: String,
+        permission: DevicePermission
+    ) throws -> RemotePairingConfirmation {
+        try request([
+            "remote-access", "pair", "confirm",
+            "--pairing-id", pairingID,
+            "--secret", secret,
+            "--device-public-key", devicePublicKey,
+            "--name", name,
+            "--permission", permission.rawValue,
+        ])
+    }
+
     func setRemoteRelayEnabled(_ enabled: Bool) throws {
         try run(["remote-access", "relay", enabled ? "enable" : "disable"])
     }

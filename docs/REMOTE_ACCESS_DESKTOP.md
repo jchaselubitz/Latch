@@ -72,13 +72,48 @@ re-checks device state every 250 ms).
 
 ## Pairing
 
-Settings renders the CLI's pairing material verbatim: the same camelCase JSON
-`latch remote-access pair create --json` emits, shown both as a QR code and as
-selectable text. The desktop invents no format of its own, so the phone's
-`PairingPayload` parser stays the single definition of the wire shape. The QR
-code is generated in-process from a string already in memory; nothing is
-written to disk and no service is contacted, and the app never persists the
-secret.
+Settings renders the CLI's pairing material in the CLI's own camelCase JSON,
+shown both as a QR code and as selectable text. The desktop invents no format
+of its own, so the phone's `PairingPayload` parser stays the single definition
+of the wire shape. The QR code is generated in-process from a string already in
+memory; nothing is written to disk, and the app never persists the secret.
+
+### The desktop is the host adapter
+
+The CLI has no HTTP client — the every-window startup budget rules one out — so
+it cannot know a control-plane address or register anything with one. The
+material it emits therefore names no address, and a phone that scans it has
+nowhere to present the secret: that is the "this pairing code does not say where
+to enroll" failure. `ControlPlaneHost` closes the gap from this side.
+
+When a control-plane address is set in Remote Access settings, creating a code:
+
+1. enrolls this Mac once as a `host` device (`POST /v1/accounts`, then
+   `POST /v1/devices` with the CLI's public identity), keeping the account and
+   device tokens in the Keychain under `co.cooperativ.latch.control-plane`. A
+   locally rotated Mac key is carried over with
+   `POST /v1/devices/:id/rotate-key` rather than re-enrolling, which would
+   strand this Mac's pairings. Changing the address forgets the credentials,
+   because a token issued by one deployment names nothing in another;
+2. registers the displayed code with `POST /v1/pairings/requests`, sending the
+   pairing identifier and `sha256("latch/v1/pairing " + secret)` — never the
+   secret, so a control-plane breach cannot answer a scan on this Mac's behalf.
+   `expiresAt` is left to the service, which applies the same five-minute
+   ceiling without a clock disagreement rejecting the request;
+3. attaches `controlPlane` and `macName` to the material before it is rendered.
+
+Registration failing fails the code rather than displaying an unusable one. A
+Mac with no address configured still shows a code and says plainly that it
+carries no address; the phone can then be given the address by hand.
+
+### Completing the pairing locally
+
+The control plane holds the directory; this Mac holds the authorization. While
+the sheet is open the app polls `GET /v1/devices` for a client device that was
+not there before, then runs `latch remote-access pair confirm` with the phone's
+public key so the local device store — the thing the helper actually checks —
+has the phone in it. The phrase the CLI returns is shown for the person to
+compare against the phone's screen, which is what rules out a substituted key.
 
 ## Audit
 
@@ -101,7 +136,17 @@ Swift, in `apps/LatchDesktop/Tests/LatchDesktopTests/RemoteAccessTests.swift`:
   identityless disabled Mac;
 - pairing material is handed to the phone as the CLI's own camelCase JSON —
   the shape `PairingPayload` on the phone parses — and carries only the
-  one-time secret and the public identity.
+  one-time secret, the public identity, and the public control-plane address.
+
+Swift, in `apps/LatchDesktop/Tests/LatchDesktopTests/ControlPlaneHostTests.swift`:
+
+- the registered pairing carries the domain-separated digest and never the
+  secret, pinned against the vector `credentials.ts` produces;
+- a code is addressed only after registration succeeds, and pairing without a
+  configured control plane is refused rather than guessed;
+- this Mac enrolls once, rotates in place when its key changes, and never
+  reuses credentials issued by a different deployment;
+- only live client devices are reported as paired.
 
 Rust, in `crates/latch/src/cli/remote_access.rs`:
 

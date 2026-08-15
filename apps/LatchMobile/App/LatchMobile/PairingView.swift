@@ -24,7 +24,7 @@ struct PairingView: View {
             case .scanning:
                 scanningSections(name: $model.deviceName)
             case .confirming(let proposal):
-                confirmingSections(proposal)
+                confirmingSections(proposal, address: $model.manualControlPlane)
             case .enrolling:
                 busySection("Pairing with your Mac…")
             case .paired(let record):
@@ -132,7 +132,10 @@ struct PairingView: View {
     // MARK: - Confirming the phrase
 
     @ViewBuilder
-    private func confirmingSections(_ proposal: PairingProposal) -> some View {
+    private func confirmingSections(
+        _ proposal: PairingProposal,
+        address: Binding<String>
+    ) -> some View {
         Section {
             Text(proposal.phrase)
                 .font(.title2.monospaced())
@@ -156,11 +159,32 @@ struct PairingView: View {
             LabeledContent("This phone", value: model.deviceName)
         }
 
+        // A code from a Mac with no control plane configured is complete in
+        // every other way, so it asks for the missing address here rather than
+        // failing after the phrase has already been checked.
+        if model.needsControlPlaneAddress {
+            Section {
+                TextField("https://…", text: address)
+                    .textContentType(.URL)
+                    .keyboardType(.URL)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+            } header: {
+                Text("Where to enroll")
+            } footer: {
+                Text("""
+                This code does not say where to enroll. Enter your Latch control-plane \
+                address — the same one set in Remote Access on your Mac. It is remembered \
+                for next time.
+                """)
+            }
+        }
+
         Section {
             Button("The words match — pair this phone") {
                 Task { await model.confirm() }
             }
-            .disabled(model.isBusy)
+            .disabled(model.isBusy || model.needsControlPlaneAddress)
             Button("They do not match", role: .destructive) { model.cancel() }
         }
     }
