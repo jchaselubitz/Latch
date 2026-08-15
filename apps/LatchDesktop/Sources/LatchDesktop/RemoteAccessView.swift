@@ -53,7 +53,7 @@ struct RemoteAccessSettingsView: View {
                 }
                 LabeledContent("Pairing codes") {
                     Text(controller.isControlPlaneConfigured ? "Carry this address" : "Carry no address")
-                        .foregroundStyle(controller.isControlPlaneConfigured ? .secondary : .orange)
+                        .foregroundStyle(controller.isControlPlaneConfigured ? Color.secondary : Color.orange)
                 }
             } header: {
                 SettingsSectionHeader("Control Plane")
