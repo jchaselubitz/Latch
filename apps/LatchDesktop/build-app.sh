@@ -55,7 +55,7 @@ install -m 0644 "$desktop_dir/Info.plist" "$contents_dir/Info.plist"
 iconset_dir="$desktop_dir/.build/Latch.iconset"
 rm -rf -- "$iconset_dir"
 mkdir -p "$iconset_dir"
-icon_source="$desktop_dir/Assets/latch-logo-l-transparent-v1.png"
+icon_source="$desktop_dir/Assets/latch-logo-l-beveled-transparent-v1.png"
 for icon_size in 16 32 128 256 512; do
     sips --resampleHeightWidth "$icon_size" "$icon_size" "$icon_source" \
         --out "$iconset_dir/icon_${icon_size}x${icon_size}.png" >/dev/null
