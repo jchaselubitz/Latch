@@ -28,7 +28,7 @@ than code.
 Download the standalone CLI payload and the universal macOS desktop app from the same
 [GitHub Release](https://github.com/jchaselubitz/Latch/releases/latest). The
 current desktop archive is
-[Latch-0.2608150715.0-macos.zip](https://github.com/jchaselubitz/Latch/releases/download/v0.2608150715.0/Latch-0.2608150715.0-macos.zip);
+[Latch-0.2608150801.0-macos.zip](https://github.com/jchaselubitz/Latch/releases/download/v0.2608150801.0/Latch-0.2608150801.0-macos.zip);
 it contains only `Latch.app`. Drag the app to Applications, then install the CLI
 independently with:
 
