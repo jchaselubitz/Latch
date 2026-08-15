@@ -42,7 +42,11 @@ final class RemoteAccessController: ObservableObject {
     private var enrollmentWatch: Task<Void, Never>?
     private var terminationObserver: NSObjectProtocol?
 
-    init(client: LatchClient = LatchClient(), controlPlane: ControlPlaneHost = ControlPlaneHost()) {
+    convenience init() {
+        self.init(client: LatchClient(), controlPlane: ControlPlaneHost())
+    }
+
+    init(client: LatchClient, controlPlane: ControlPlaneHost) {
         self.client = client
         self.controlPlane = controlPlane
         self.controlPlaneAddress = controlPlane.address?.absoluteString ?? ""
