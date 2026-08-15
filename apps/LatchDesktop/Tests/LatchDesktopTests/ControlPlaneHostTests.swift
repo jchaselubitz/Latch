@@ -4,17 +4,37 @@ import XCTest
 /// A control plane that answers from memory, so host enrollment and pairing
 /// registration can be driven without a deployed service.
 private final class StubControlPlaneHostAPI: ControlPlaneHostAPI, @unchecked Sendable {
+    struct Enrollment: Sendable { let name: String; let publicKey: String }
+    struct Rotation: Sendable { let deviceID: String; let publicKey: String }
+    struct Pairing: Sendable {
+        let pairingID: String
+        let secretDigest: String
+        let permission: DevicePermission
+        let deviceToken: String
+    }
+
     struct Recorded: Sendable {
         var accounts: [String] = []
-        var enrollments: [(name: String, publicKey: String)] = []
-        var rotations: [(deviceID: String, publicKey: String)] = []
-        var pairings: [(pairingID: String, secretDigest: String, permission: DevicePermission)] = []
+        var enrollments: [Enrollment] = []
+        var rotations: [Rotation] = []
+        var pairings: [Pairing] = []
     }
 
     private let lock = NSLock()
     private var recorded = Recorded()
     var devices: [ControlPlaneDevice] = []
     var failure: ControlPlaneHostError?
+    /// Refused once, then cleared, so a recovery path can be driven without
+    /// leaving the stub permanently broken.
+    var refuseOnce: ControlPlaneHostError?
+
+    private func takeRefusal() -> ControlPlaneHostError? {
+        lock.lock()
+        defer { lock.unlock() }
+        let refusal = refuseOnce
+        refuseOnce = nil
+        return refusal
+    }
 
     var log: Recorded {
         lock.lock()
@@ -36,16 +56,20 @@ private final class StubControlPlaneHostAPI: ControlPlaneHostAPI, @unchecked Sen
         publicKey: String
     ) async throws -> (deviceID: String, deviceToken: String) {
         lock.lock()
-        recorded.enrollments.append((name, publicKey))
+        recorded.enrollments.append(Enrollment(name: name, publicKey: publicKey))
+        let issued = recorded.enrollments.count
         lock.unlock()
         if let failure { throw failure }
-        return ("dev_mac", "dev_token")
+        // The first enrollment keeps the names the other tests pin; a second
+        // one is distinguishable, which is the whole point of re-enrolling.
+        return issued == 1 ? ("dev_mac", "dev_token") : ("dev_mac_\(issued)", "dev_token_\(issued)")
     }
 
     func rotateHostKey(deviceToken: String, deviceID: String, publicKey: String) async throws {
         lock.lock()
-        recorded.rotations.append((deviceID, publicKey))
+        recorded.rotations.append(Rotation(deviceID: deviceID, publicKey: publicKey))
         lock.unlock()
+        if let refusal = takeRefusal() { throw refusal }
         if let failure { throw failure }
     }
 
@@ -56,8 +80,16 @@ private final class StubControlPlaneHostAPI: ControlPlaneHostAPI, @unchecked Sen
         permission: DevicePermission
     ) async throws {
         lock.lock()
-        recorded.pairings.append((pairingID, secretDigest, permission))
+        recorded.pairings.append(
+            Pairing(
+                pairingID: pairingID,
+                secretDigest: secretDigest,
+                permission: permission,
+                deviceToken: deviceToken
+            )
+        )
         lock.unlock()
+        if let refusal = takeRefusal() { throw refusal }
         if let failure { throw failure }
     }
 
@@ -228,6 +260,78 @@ final class ControlPlaneHostTests: XCTestCase {
         XCTAssertEqual(enrollment.deviceToken, "dev_token")
         XCTAssertEqual(api.log.accounts.count, 1)
         XCTAssertTrue(api.log.rotations.isEmpty)
+    }
+
+    // MARK: - Names the control plane will store
+
+    /// macOS names a Mac with the typographic apostrophe, which the control
+    /// plane's label set does not contain, so an ordinary default-named Mac
+    /// used to be refused on the very first call of a pairing.
+    func testAMacNameMacOSGivesIsEnrolledRatherThanRefused() async throws {
+        let api = StubControlPlaneHostAPI()
+        let host = makeHost(api: api)
+        try host.setAddress("https://control.example")
+
+        _ = try await host.enrollment(publicKey: macKey, name: "Jake\u{2019}s MacBook Pro")
+
+        XCTAssertEqual(api.log.accounts, ["Jake's MacBook Pro"])
+        XCTAssertEqual(api.log.enrollments.map(\.name), ["Jake's MacBook Pro"])
+    }
+
+    func testANameIsReducedToTheLabelSetTheServiceAccepts() {
+        // Folded rather than dropped, so the name stays a name.
+        XCTAssertEqual(ControlPlaneLabel.enrollable("Jake\u{2019}s MacBook Pro"), "Jake's MacBook Pro")
+        XCTAssertEqual(ControlPlaneLabel.enrollable("Studio \u{2014} Mac"), "Studio - Mac")
+        // Anything else becomes a space, and runs of spaces collapse.
+        XCTAssertEqual(ControlPlaneLabel.enrollable("Mac \u{1F5A5}\u{FE0F} Studio"), "Mac Studio")
+        XCTAssertEqual(ControlPlaneLabel.enrollable("  Studio   Mac  "), "Studio Mac")
+        // The service takes at most 64 code points.
+        XCTAssertEqual(ControlPlaneLabel.enrollable(String(repeating: "a", count: 100)).count, 64)
+        // A decomposed accent is a combining mark, which the service's letter
+        // class does not match, so the name is composed before it is reduced.
+        XCTAssertEqual(ControlPlaneLabel.enrollable("Ana\u{0301}s Mac"), "An\u{00E1}s Mac")
+        // A name that survives as nothing still has to be something.
+        XCTAssertEqual(ControlPlaneLabel.enrollable("\u{1F5A5}\u{FE0F}"), ControlPlaneLabel.fallback)
+    }
+
+    // MARK: - Credentials the control plane no longer knows
+
+    /// A redeployed or reset control plane has no row for the device this Mac
+    /// enrolled as, and it issues no replacement. Without this the Keychain
+    /// would keep a credential that can only be refused, and every pairing
+    /// from then on would fail with nothing the person could do about it.
+    func testCredentialsTheControlPlaneNoLongerKnowsAreReplaced() async throws {
+        let api = StubControlPlaneHostAPI()
+        let store = MemoryHostEnrollmentStore()
+        let host = makeHost(api: api, store: store)
+        try host.setAddress("https://control.example")
+        _ = try await host.enrollment(publicKey: macKey, name: "Studio Mac")
+
+        api.refuseOnce = .http(status: 401, path: "/v1/pairings/requests", reason: "unauthorized")
+        let addressed = try await host.openPairing(material(), publicKey: macKey, macName: "Studio Mac")
+
+        XCTAssertEqual(api.log.enrollments.count, 2)
+        XCTAssertEqual(api.log.pairings.map(\.deviceToken), ["dev_token", "dev_token_2"])
+        XCTAssertEqual(try store.load()?.deviceToken, "dev_token_2")
+        XCTAssertTrue(addressed.carriesAddress)
+    }
+
+    /// A refusal that is not about the credential is reported rather than
+    /// answered by enrolling this Mac a second time.
+    func testAnOrdinaryRefusalDoesNotReEnrollThisMac() async throws {
+        let api = StubControlPlaneHostAPI()
+        let host = makeHost(api: api)
+        try host.setAddress("https://control.example")
+        _ = try await host.enrollment(publicKey: macKey, name: "Studio Mac")
+
+        api.failure = .http(status: 403, path: "/v1/pairings/requests", reason: "too many pending pairing requests")
+        do {
+            _ = try await host.openPairing(material(), publicKey: macKey, macName: "Studio Mac")
+            XCTFail("expected the refusal to be reported")
+        } catch {
+            XCTAssertEqual(error as? ControlPlaneHostError, api.failure)
+        }
+        XCTAssertEqual(api.log.enrollments.count, 1)
     }
 
     // MARK: - Reading back the phones

@@ -170,6 +170,67 @@ enum ControlPlaneHostError: LocalizedError, Equatable, Sendable {
             return detail
         }
     }
+
+    /// Whether the answer means the credentials this Mac is holding no longer
+    /// name anything the control plane knows.
+    ///
+    /// A redeployed or reset service issues no new token to the Mac that was
+    /// enrolled against the old one, so the Keychain keeps a credential that
+    /// can only ever be refused. That is indistinguishable from a permanently
+    /// broken control plane unless it is recognized and enrolled afresh.
+    var isStaleCredential: Bool {
+        guard case .http(let status, _, _) = self else { return false }
+        return status == 401 || status == 404
+    }
+}
+
+// MARK: - Names the control plane will store
+
+/// Reduces a name to the label set the control plane accepts.
+///
+/// The service takes letters, digits, spaces, and `. _ ' ( ) -`, up to 64
+/// characters, and answers anything else with a 400. macOS names a Mac
+/// "Jake’s MacBook Pro" using the typographic apostrophe, so the default
+/// name of an ordinary Mac is refused on the very first call, and the pairing
+/// fails with a message about the control plane rather than about the name.
+///
+/// Typographic punctuation is folded to its ASCII equivalent before anything is
+/// dropped, so a name survives as a name: "Jake’s MacBook Pro" enrolls as
+/// "Jake's MacBook Pro" rather than losing the character to a space. The name is
+/// composed first for the same reason: the service matches letters, and a
+/// decomposed accent is a combining mark rather than part of one.
+enum ControlPlaneLabel {
+    /// What a Mac whose name survives as nothing is called instead.
+    static let fallback = "Latch Mac"
+
+    /// The service counts code points, so the bound is counted the same way
+    /// rather than in grapheme clusters, which can be several code points each.
+    private static let maxScalars = 64
+
+    private static let substitutions: [Character: Character] = [
+        "\u{2018}": "'", "\u{2019}": "'", "\u{02BC}": "'", "\u{00B4}": "'", "`": "'",
+        "\u{2013}": "-", "\u{2014}": "-", "\u{2212}": "-",
+    ]
+
+    private static let allowed: CharacterSet = CharacterSet.letters
+        .union(.decimalDigits)
+        .union(CharacterSet(charactersIn: " ._'()-"))
+
+    static func enrollable(_ raw: String, fallback: String = ControlPlaneLabel.fallback) -> String {
+        let composed = raw.precomposedStringWithCanonicalMapping
+        let folded = String(composed.map { substitutions[$0] ?? $0 })
+        let cleaned = String(
+            String.UnicodeScalarView(folded.unicodeScalars.map { allowed.contains($0) ? $0 : " " })
+        )
+        var bounded = cleaned
+            .split(separator: " ", omittingEmptySubsequences: true)
+            .joined(separator: " ")
+        while bounded.unicodeScalars.count > maxScalars {
+            bounded.removeLast()
+        }
+        let trimmed = bounded.trimmingCharacters(in: .whitespaces)
+        return trimmed.isEmpty ? fallback : trimmed
+    }
 }
 
 // MARK: - Wire types
@@ -435,11 +496,20 @@ final class ControlPlaneHost {
             guard existing.publicKey != publicKey else { return existing }
             // The Mac identity was rotated locally. Rotation is preferred over
             // re-enrollment because it keeps this Mac's pairings intact.
-            try await api.rotateHostKey(
-                deviceToken: existing.deviceToken,
-                deviceID: existing.deviceID,
-                publicKey: publicKey
-            )
+            do {
+                try await api.rotateHostKey(
+                    deviceToken: existing.deviceToken,
+                    deviceID: existing.deviceID,
+                    publicKey: publicKey
+                )
+            } catch let error as ControlPlaneHostError where error.isStaleCredential {
+                // There is nothing left to rotate: this Mac's device row is
+                // gone from the control plane, so it enrolls again instead of
+                // failing every future pairing with a refusal the person
+                // cannot clear from the UI.
+                try store.clear()
+                return try await freshEnrollment(api: api, address: address, publicKey: publicKey, name: name)
+            }
             let rotated = HostEnrollment(
                 address: existing.address,
                 accountToken: existing.accountToken,
@@ -451,10 +521,26 @@ final class ControlPlaneHost {
             return rotated
         }
 
-        let accountToken = try await api.createAccount(label: name)
+        return try await freshEnrollment(api: api, address: address, publicKey: publicKey, name: name)
+    }
+
+    /// Creates the account and host device this Mac will use from now on.
+    ///
+    /// The name is reduced to the label set the service stores before it is
+    /// sent. A Mac carries whatever name its owner gave it, and a name the
+    /// control plane refuses would otherwise stop pairing before the phone is
+    /// ever involved.
+    private func freshEnrollment(
+        api: ControlPlaneHostAPI,
+        address: URL,
+        publicKey: String,
+        name: String
+    ) async throws -> HostEnrollment {
+        let label = ControlPlaneLabel.enrollable(name)
+        let accountToken = try await api.createAccount(label: label)
         let host = try await api.enrollHost(
             accountToken: accountToken,
-            name: name,
+            name: label,
             publicKey: publicKey
         )
         let credentials = HostEnrollment(
@@ -477,14 +563,35 @@ final class ControlPlaneHost {
         permission: DevicePermission = .interact
     ) async throws -> PairingMaterial {
         guard let address else { throw ControlPlaneHostError.notConfigured }
+        let api = apiFactory(address)
         let credentials = try await enrollment(publicKey: publicKey, name: macName)
-        try await apiFactory(address).openPairingRequest(
+        do {
+            try await register(material, with: credentials, on: api, permission: permission)
+        } catch let error as ControlPlaneHostError where error.isStaleCredential {
+            // The stored device credential names nothing the control plane
+            // still has — a redeployed or reset service, most often. Enrolling
+            // once more is the only way back, and it restores no authorization
+            // on its own: the new host device holds no pairings until a phone
+            // scans a code for it.
+            try store.clear()
+            let renewed = try await enrollment(publicKey: publicKey, name: macName)
+            try await register(material, with: renewed, on: api, permission: permission)
+        }
+        return material.addressed(to: address, macName: macName)
+    }
+
+    private func register(
+        _ material: PairingMaterial,
+        with credentials: HostEnrollment,
+        on api: ControlPlaneHostAPI,
+        permission: DevicePermission
+    ) async throws {
+        try await api.openPairingRequest(
             deviceToken: credentials.deviceToken,
             pairingID: material.pairingID,
             secretDigest: Self.secretDigest(material.secret),
             permission: permission
         )
-        return material.addressed(to: address, macName: macName)
     }
 
     /// The phones the control plane says are paired with this Mac.

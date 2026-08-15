@@ -20,6 +20,18 @@ final class RemoteAccessController: ObservableObject {
     @Published var pendingPairing: PairingMaterial?
     /// What the open pairing sheet is waiting for.
     @Published private(set) var pairingProgress: RemotePairingProgress = .idle
+    /// True from the moment "Pair a Device" is pressed until a code is on
+    /// screen or the attempt has failed. Creating a code enrolls this Mac and
+    /// registers the code with the control plane, which is a network round
+    /// trip: without this the button looks dead for as long as that takes.
+    @Published private(set) var isPairing = false
+    /// Why the last attempt to create a code failed.
+    ///
+    /// Separate from `errorMessage` because this one is raised in front of the
+    /// person. The general error row sits at the bottom of a long settings
+    /// form, below the fold, where a failure that produced no code at all
+    /// reads as a button that does nothing.
+    @Published var pairingFailure: String?
     /// The control-plane address as it should appear in the settings field.
     @Published var controlPlaneAddress: String = ""
 
@@ -254,9 +266,17 @@ final class RemoteAccessController: ObservableObject {
     /// cannot be completed by a phone, and showing it anyway would send the
     /// person to a scanner that can only fail.
     func createPairing() async {
-        guard status.enabled else { return }
+        guard !isPairing else { return }
+        guard status.enabled else {
+            // The button is disabled in this state, so reaching here means the
+            // status went stale. Saying so beats returning in silence.
+            pairingFailure = "Remote access is off, so there is nothing for a phone to pair with. Turn it on first."
+            return
+        }
         enrollmentWatch?.cancel()
         enrollmentWatch = nil
+        isPairing = true
+        defer { isPairing = false }
         do {
             let material = try await client.createRemotePairing()
             guard controlPlane.isConfigured else {
@@ -265,6 +285,7 @@ final class RemoteAccessController: ObservableObject {
                 pendingPairing = material
                 pairingProgress = .unaddressed
                 errorMessage = nil
+                pairingFailure = nil
                 await refresh()
                 return
             }
@@ -283,11 +304,16 @@ final class RemoteAccessController: ObservableObject {
             pendingPairing = addressed
             pairingProgress = .waiting
             errorMessage = nil
+            pairingFailure = nil
             await refresh()
             watchForEnrollment(addressed, known: known)
         } catch {
+            // No code is shown, because a code that was not registered cannot
+            // be completed by a phone. The reason is raised instead, so the
+            // press always produces an answer.
             pairingProgress = .idle
             errorMessage = error.localizedDescription
+            pairingFailure = error.localizedDescription
         }
     }
 

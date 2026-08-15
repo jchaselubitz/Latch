@@ -106,6 +106,36 @@ Registration failing fails the code rather than displaying an unusable one. A
 Mac with no address configured still shows a code and says plainly that it
 carries no address; the phone can then be given the address by hand.
 
+#### The name this Mac enrolls under
+
+The control plane stores labels from a fixed set — letters, digits, spaces, and
+`. _ ' ( ) -`, up to 64 code points — and answers anything else with a 400.
+macOS names a Mac "Jake’s MacBook Pro" with the typographic apostrophe, so the
+default name of an ordinary Mac is outside that set and the first call of the
+first pairing is refused. `ControlPlaneLabel.enrollable` reduces the name before
+it is sent, folding typographic punctuation to its ASCII equivalent first so the
+name arrives as "Jake's MacBook Pro" rather than losing the character to a
+space. The phone does the same to its own name for the same reason.
+
+#### Credentials the control plane no longer knows
+
+A redeployed or reset service has no row for the device this Mac enrolled as,
+and it issues no replacement, so the Keychain would otherwise keep a credential
+that can only ever be refused — with no way to clear it from the UI. A 401 or
+404 from the registration or key-rotation call is therefore treated as a stale
+enrollment: the stored credentials are dropped and this Mac enrolls again, once.
+That restores no authorization on its own, because the new host device holds no
+pairings until a phone scans a code for it.
+
+### Failures are raised where the button is
+
+Creating a code enrolls this Mac and registers the code, both network round
+trips, and a failure produces no code at all. The button shows a progress
+indicator for as long as that takes, and a failure is raised as an alert rather
+than left to the error row at the end of the form, which is below the fold in a
+window this size. Without either, a refused pairing is indistinguishable from a
+button that does nothing.
+
 ### Completing the pairing locally
 
 The control plane holds the directory; this Mac holds the authorization. While
@@ -146,6 +176,10 @@ Swift, in `apps/LatchDesktop/Tests/LatchDesktopTests/ControlPlaneHostTests.swift
   configured control plane is refused rather than guessed;
 - this Mac enrolls once, rotates in place when its key changes, and never
   reuses credentials issued by a different deployment;
+- a Mac named the way macOS names one enrolls rather than being refused, and a
+  name is reduced to the label set the service accepts;
+- credentials the control plane no longer knows are replaced once, while an
+  ordinary refusal is reported rather than answered by re-enrolling;
 - only live client devices are reported as paired.
 
 Rust, in `crates/latch/src/cli/remote_access.rs`:

@@ -381,12 +381,21 @@ public final class PairingModel {
     /// "Jake’s iPhone" — with the typographic apostrophe iOS puts there —
     /// would otherwise fail pairing with a message about the control plane
     /// rather than about the name, so the name is fixed here instead.
+    ///
+    /// Typographic punctuation is folded to its ASCII equivalent before
+    /// anything is dropped, so the name survives as a name: that phone enrolls
+    /// as "Jake's iPhone" rather than losing the character to a space. The name
+    /// is composed first for the same reason: the service matches letters, and
+    /// a decomposed accent is a combining mark rather than part of one.
     static func enrollableName(_ raw: String) -> String {
         let allowed = CharacterSet.letters
             .union(.decimalDigits)
             .union(CharacterSet(charactersIn: " ._'()-"))
+        let folded = String(
+            raw.precomposedStringWithCanonicalMapping.map { Self.punctuationFolding[$0] ?? $0 }
+        )
         let cleaned = String(
-            String.UnicodeScalarView(raw.unicodeScalars.map { allowed.contains($0) ? $0 : " " })
+            String.UnicodeScalarView(folded.unicodeScalars.map { allowed.contains($0) ? $0 : " " })
         )
         let collapsed = cleaned
             .split(separator: " ", omittingEmptySubsequences: true)
@@ -394,6 +403,13 @@ public final class PairingModel {
         let bounded = String(collapsed.prefix(64)).trimmingCharacters(in: .whitespaces)
         return bounded.isEmpty ? defaultDeviceName : bounded
     }
+
+    /// Punctuation the platforms put in device names that the control plane's
+    /// label set does not accept, mapped to the character it stands for.
+    private static let punctuationFolding: [Character: Character] = [
+        "\u{2018}": "'", "\u{2019}": "'", "\u{02BC}": "'", "\u{00B4}": "'", "`": "'",
+        "\u{2013}": "-", "\u{2014}": "-", "\u{2212}": "-",
+    ]
 
     // MARK: - Where to enroll
 

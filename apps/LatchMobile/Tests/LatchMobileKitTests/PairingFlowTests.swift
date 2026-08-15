@@ -298,13 +298,18 @@ final class PairingFlowTests: XCTestCase {
         await model.confirm(now: now)
 
         let enrolled = try XCTUnwrap(control.log.enrollments.first)
-        XCTAssertEqual(enrolled.enrollment.deviceName, "Jake s iPhone")
+        // The apostrophe iOS puts in the name is folded to the one the service
+        // accepts rather than dropped, so the phone keeps its name.
+        XCTAssertEqual(enrolled.enrollment.deviceName, "Jake's iPhone")
     }
 
     func testAnUnusableNameFallsBackRatherThanEnrollingBlank() {
         XCTAssertEqual(PairingModel.enrollableName("🙂🙂"), PairingModel.defaultDeviceName)
         XCTAssertEqual(PairingModel.enrollableName("   "), PairingModel.defaultDeviceName)
         XCTAssertEqual(PairingModel.enrollableName("Jake's iPhone"), "Jake's iPhone")
+        XCTAssertEqual(PairingModel.enrollableName("Jake\u{2019}s iPhone"), "Jake's iPhone")
+        XCTAssertEqual(PairingModel.enrollableName("iPhone \u{2014} 15 Pro"), "iPhone - 15 Pro")
+        XCTAssertEqual(PairingModel.enrollableName("Ana\u{0301}s iPhone"), "An\u{00E1}s iPhone")
         XCTAssertEqual(PairingModel.enrollableName(String(repeating: "a", count: 100)).count, 64)
     }
 

@@ -72,10 +72,17 @@ struct RemoteAccessSettingsView: View {
                         RemoteDeviceRow(device: device, controller: controller)
                     }
                 }
-                Button("Pair a Device…") {
+                Button {
                     Task { await controller.createPairing() }
+                } label: {
+                    HStack(spacing: 6) {
+                        if controller.isPairing {
+                            ProgressView().controlSize(.small)
+                        }
+                        Text(controller.isPairing ? "Preparing a Code…" : "Pair a Device…")
+                    }
                 }
-                .disabled(!controller.isEnabled)
+                .disabled(!controller.isEnabled || controller.isPairing)
             } header: {
                 SettingsSectionHeader("Paired Devices")
             } footer: {
@@ -142,6 +149,21 @@ struct RemoteAccessSettingsView: View {
                 material: material,
                 progress: controller.pairingProgress
             ) { controller.dismissPairing() }
+        }
+        // A failed attempt shows no code at all, so it is raised here rather
+        // than left to the error row at the end of the form, which is below
+        // the fold in a window this size.
+        .alert(
+            "Latch could not create a pairing code",
+            isPresented: Binding(
+                get: { controller.pairingFailure != nil },
+                set: { presented in if !presented { controller.pairingFailure = nil } }
+            ),
+            presenting: controller.pairingFailure
+        ) { _ in
+            Button("OK", role: .cancel) { controller.pairingFailure = nil }
+        } message: { reason in
+            Text(reason)
         }
     }
 
