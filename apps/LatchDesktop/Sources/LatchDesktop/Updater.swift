@@ -131,6 +131,7 @@ enum UpdateError: LocalizedError, Equatable {
     case identityMismatch(String)
     case unsignedDownload
     case installFailed(String)
+    case relaunchFailed(String)
 
     var errorDescription: String? {
         switch self {
@@ -154,6 +155,8 @@ enum UpdateError: LocalizedError, Equatable {
             return "The downloaded update is not validly signed and was not installed."
         case .installFailed(let detail):
             return "Latch could not replace the installed application: \(detail)"
+        case .relaunchFailed(let detail):
+            return "Latch installed the update but could not schedule its relaunch: \(detail)"
         }
     }
 }
@@ -316,21 +319,34 @@ enum UpdateInstaller {
     /// Quits and reopens the app once this process is gone.
     ///
     /// The relaunch has to outlive the process being relaunched, so it is a
-    /// detached shell that waits for this PID to disappear. The bundle path is
-    /// passed as an argument rather than interpolated into the script, so a
-    /// path with quotes or spaces in it cannot become shell syntax.
+    /// detached shell that waits for this PID to disappear. `open` is used
+    /// without `-n`: forcing a new instance creates an extra Dock icon and
+    /// bypasses Launch Services' normal single-instance behavior. The PID and
+    /// bundle path are passed as arguments rather than interpolated into the
+    /// script, so a path with quotes or spaces cannot become shell syntax.
+    static let relaunchScript = """
+    while /bin/kill -0 "$1" 2>/dev/null; do /bin/sleep 0.2; done
+    exec /usr/bin/open "$2"
+    """
+
     @MainActor
-    static func relaunch(_ bundle: URL) {
+    static func relaunch(_ bundle: URL) throws {
         let pid = ProcessInfo.processInfo.processIdentifier
-        let waitThenOpen = """
-        while /bin/kill -0 \(pid) 2>/dev/null; do /bin/sleep 0.2; done
-        exec /usr/bin/open -n "$1"
-        """
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/sh")
-        process.arguments = ["-c", waitThenOpen, "latch-relaunch", bundle.path]
-        try? process.run()
-        NSApp.terminate(nil)
+        process.arguments = ["-c", relaunchScript, "latch-relaunch", String(pid), bundle.path]
+        do {
+            try process.run()
+        } catch {
+            throw UpdateError.relaunchFailed(error.localizedDescription)
+        }
+
+        // Closing the sheet before asking AppKit to terminate avoids issuing a
+        // termination request re-entrantly from its button action. Scheduling
+        // it on the next main-loop turn lets the helper observe a clean exit.
+        DispatchQueue.main.async {
+            NSApp.terminate(nil)
+        }
     }
 
     private struct ToolResult {
@@ -366,7 +382,6 @@ final class UpdateController: ObservableObject {
         case upToDate
         case available(AvailableUpdate)
         case downloading
-        case installed
         case failed(String)
     }
 
@@ -456,25 +471,20 @@ final class UpdateController: ObservableObject {
         }
     }
 
-    /// Downloads, verifies, and installs an update, then offers to relaunch.
+    /// Downloads, verifies, and installs an update, then relaunches.
     func install(_ update: AvailableUpdate) async {
         phase = .downloading
         do {
             _ = try await UpdateInstaller.install(update, replacing: bundleURL)
-            phase = .installed
+            isPresented = false
+            try UpdateInstaller.relaunch(bundleURL)
         } catch {
             phase = .failed(error.localizedDescription)
         }
     }
 
-    /// Quits and reopens the freshly installed app.
-    func relaunch() {
-        UpdateInstaller.relaunch(bundleURL)
-    }
-
     func dismiss() {
         isPresented = false
-        if case .installed = phase { return }
         phase = .idle
     }
 }

@@ -74,8 +74,10 @@ open a window when something is actually available.
 Installing expands the archive with `ditto` into a replacement directory on the
 app's own volume, requires the download to be signed by the same Team ID as the
 running app and to pass Gatekeeper assessment, then swaps the bundle with
-`replaceItemAt` and offers to relaunch. Sessions are owned by their workers, so
-they keep running across the relaunch.
+`replaceItemAt`. **Install and Relaunch** closes the update sheet, quits Latch,
+and reopens the replacement through normal Launch Services once the old process
+has exited. Sessions are owned by their workers, so they keep running across the
+relaunch.
 
 Two cases are refused before anything is downloaded: an app running from a
 quarantine translocation mount (move it to Applications first) and an app in a

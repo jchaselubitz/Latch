@@ -551,7 +551,6 @@ private struct UpdateView: View {
     private var title: String {
         switch updates.phase {
         case .available: return "Update Available"
-        case .installed: return "Update Installed"
         case .failed: return "Update Failed"
         case .upToDate: return "Latch Is Up to Date"
         default: return "Checking for Updates"
@@ -574,8 +573,6 @@ private struct UpdateView: View {
                 Text("Downloading and verifying the update…")
                 ProgressView().progressViewStyle(.linear)
             }
-        case .installed:
-            Text("The update is installed. Latch needs to relaunch to use it; your sessions keep running either way.")
         case .failed(let message):
             Text(message).foregroundStyle(.secondary)
         }
@@ -589,10 +586,6 @@ private struct UpdateView: View {
                 Task { await updates.install(update) }
             }
             .buttonStyle(.borderedProminent)
-        case .installed:
-            Button("Later") { updates.dismiss() }
-            Button("Relaunch") { updates.relaunch() }
-                .buttonStyle(.borderedProminent)
         case .downloading:
             Button("Cancel", role: .cancel) { updates.dismiss() }.disabled(true)
         default:

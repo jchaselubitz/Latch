@@ -168,6 +168,13 @@ final class UpdaterTests: XCTestCase {
             "Latch.app"
         )
     }
+
+    func testRelaunchWaitsForTheOldProcessAndUsesTheNormalAppLaunchPath() {
+        let script = UpdateInstaller.relaunchScript
+        XCTAssertTrue(script.contains("/bin/kill -0 \"$1\""))
+        XCTAssertTrue(script.contains("exec /usr/bin/open \"$2\""))
+        XCTAssertFalse(script.contains("open -n"))
+    }
 }
 
 @MainActor
