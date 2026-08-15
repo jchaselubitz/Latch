@@ -10,6 +10,7 @@ import type { Server } from 'node:http';
 
 import { createRouter } from './api.ts';
 import type { Config } from './config.ts';
+import type { TurnProvider } from './cloudflare-turn.ts';
 import { createListener } from './http/router.ts';
 import type { RequestLog } from './http/router.ts';
 import type { Store } from './store/types.ts';
@@ -19,6 +20,7 @@ export interface ServerOptions {
   readonly store: Store;
   readonly now?: () => number;
   readonly readiness?: () => Promise<{ migrations: string[] }>;
+  readonly turn?: TurnProvider | null;
   readonly log?: (entry: RequestLog) => void;
 }
 
@@ -42,6 +44,7 @@ export function createServer(options: ServerOptions): Server {
     store: options.store,
     now: options.now ?? (() => Date.now()),
     readiness: options.readiness ?? (async () => ({ migrations: [] })),
+    turn: options.turn ?? null,
   });
   const server = createHttpServer(createListener(router, options.log ?? defaultLog));
   // A slow or absent request line must not hold a connection open forever.

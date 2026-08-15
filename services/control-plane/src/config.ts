@@ -20,17 +20,14 @@ export interface Config {
   readonly databaseSslRejectUnauthorized: boolean;
   /** Run pending migrations during boot. */
   readonly migrateOnBoot: boolean;
-  /** Public base URL of the separately deployed relay. */
-  readonly relayUrl: string;
-  /**
-   * Shared secret presented by the relay deployable when it asks the control
-   * plane to authorize an endpoint admission. Never given to a device.
-   */
-  readonly relayServiceToken: string | null;
+  /** Cloudflare TURN key identifier; paired with the server-only API token. */
+  readonly cloudflareTurnKeyId: string | null;
+  /** Server-only API token scoped to the configured Cloudflare TURN key. */
+  readonly cloudflareTurnApiToken: string | null;
   /** Presence/candidate lifetime in seconds. Mirrors the local 90s window. */
   readonly presenceTtlSeconds: number;
-  /** Relay ticket lifetime in seconds. Mirrors the local 60s window. */
-  readonly relayTicketTtlSeconds: number;
+  /** Lifetime of Cloudflare-issued TURN credentials. */
+  readonly turnCredentialTtlSeconds: number;
   /** Rendezvous offer lifetime in seconds. */
   readonly rendezvousTtlSeconds: number;
   /** Maximum devices enrolled per account. */
@@ -93,9 +90,16 @@ function boolean(env: Env, key: string, fallback: boolean): boolean {
  * and a literal object in tests.
  */
 export function loadConfig(env: Env): Config {
-  const relayServiceToken = env.RELAY_SERVICE_TOKEN?.trim() ?? '';
-  if (relayServiceToken && relayServiceToken.length < 32) {
-    throw new ConfigError('RELAY_SERVICE_TOKEN must be at least 32 characters');
+  const cloudflareTurnKeyId = env.CLOUDFLARE_TURN_KEY_ID?.trim() ?? '';
+  const cloudflareTurnApiToken = env.CLOUDFLARE_TURN_API_TOKEN?.trim() ?? '';
+  if (Boolean(cloudflareTurnKeyId) !== Boolean(cloudflareTurnApiToken)) {
+    throw new ConfigError('CLOUDFLARE_TURN_KEY_ID and CLOUDFLARE_TURN_API_TOKEN must be set together');
+  }
+  if (cloudflareTurnKeyId && !/^[a-f0-9]{32}$/i.test(cloudflareTurnKeyId)) {
+    throw new ConfigError('CLOUDFLARE_TURN_KEY_ID must be a 32-character Cloudflare key id');
+  }
+  if (cloudflareTurnApiToken && cloudflareTurnApiToken.length < 32) {
+    throw new ConfigError('CLOUDFLARE_TURN_API_TOKEN must be at least 32 characters');
   }
   return {
     port: integer(env, 'PORT', 8080, 1, 65_535),
@@ -104,10 +108,10 @@ export function loadConfig(env: Env): Config {
     databasePoolSize: integer(env, 'DATABASE_POOL_SIZE', 10, 1, 100),
     databaseSslRejectUnauthorized: boolean(env, 'DATABASE_SSL_REJECT_UNAUTHORIZED', false),
     migrateOnBoot: boolean(env, 'MIGRATE_ON_BOOT', true),
-    relayUrl: optional(env, 'RELAY_URL', ''),
-    relayServiceToken: relayServiceToken ? relayServiceToken : null,
+    cloudflareTurnKeyId: cloudflareTurnKeyId || null,
+    cloudflareTurnApiToken: cloudflareTurnApiToken || null,
     presenceTtlSeconds: integer(env, 'PRESENCE_TTL_SECONDS', 90, 10, 300),
-    relayTicketTtlSeconds: integer(env, 'RELAY_TICKET_TTL_SECONDS', 60, 10, 300),
+    turnCredentialTtlSeconds: integer(env, 'CLOUDFLARE_TURN_TTL_SECONDS', 120, 10, 3600),
     rendezvousTtlSeconds: integer(env, 'RENDEZVOUS_TTL_SECONDS', 60, 10, 300),
     maxDevicesPerAccount: integer(env, 'MAX_DEVICES_PER_ACCOUNT', 32, 2, 256),
     maxCandidates: integer(env, 'MAX_CANDIDATES', 8, 1, 32),

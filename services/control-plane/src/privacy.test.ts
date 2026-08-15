@@ -12,7 +12,7 @@ import { after, describe, it } from 'node:test';
 import { join } from 'node:path';
 
 import { migrationsDirectory } from './migrate.ts';
-import { candidate, enrollPair, RELAY_SERVICE_TOKEN, startHarness } from './test-harness.ts';
+import { candidate, enrollPair, startHarness } from './test-harness.ts';
 
 const FORBIDDEN_COLUMN_WORDS = [
   'terminal',
@@ -50,7 +50,7 @@ describe('storage boundary', () => {
     const harness = await startHarness();
     after(() => harness.close());
     const { accountToken, host, client } = await enrollPair(harness);
-    const ticket = await harness.request('POST', '/v1/relay-tickets', {
+    const credentials = await harness.request('POST', '/v1/turn-credentials', {
       token: client.token,
       body: { peerDeviceId: host.deviceId },
     });
@@ -64,7 +64,7 @@ describe('storage boundary', () => {
       accountToken,
       host.token,
       client.token,
-      ticket.body.authenticationSecret,
+      credentials.body.iceServers[1].credential,
     ]) {
       assert.equal(dump.includes(secret), false, 'a plaintext credential reached storage');
       // The secret half alone must not appear either.
@@ -127,7 +127,7 @@ describe('response and log boundary', () => {
     assert.equal(withExtras.status, 400);
     assert.equal(withExtras.body.field, 'terminalOutput');
 
-    const ticketWithExtras = await harness.request('POST', '/v1/relay-tickets', {
+    const ticketWithExtras = await harness.request('POST', '/v1/turn-credentials', {
       token: client.token,
       body: { peerDeviceId: host.deviceId, gatewayToken: 'lgt_secret' },
     });
@@ -142,28 +142,15 @@ describe('response and log boundary', () => {
     assert.equal(candidateWithExtras.status, 400);
   });
 
-  it('gives the relay no device key, pairing, or account detail', async () => {
+  it('returns only Cloudflare ICE fields, not device or account detail', async () => {
     const harness = await startHarness();
     after(() => harness.close());
     const { host, client } = await enrollPair(harness);
-    const ticket = await harness.request('POST', '/v1/relay-tickets', {
+    const ticket = await harness.request('POST', '/v1/turn-credentials', {
       token: client.token,
       body: { peerDeviceId: host.deviceId },
     });
-    const authorized = await harness.request('POST', '/v1/relay-tickets/authorize', {
-      token: RELAY_SERVICE_TOKEN,
-      body: {
-        relayId: ticket.body.relayId,
-        deviceId: client.deviceId,
-        authenticationSecret: ticket.body.authenticationSecret,
-      },
-    });
-    assert.equal(authorized.status, 200);
-    assert.deepEqual(Object.keys(authorized.body).sort(), [
-      'authorized',
-      'expiresAt',
-      'peerDeviceId',
-      'relayId',
-    ]);
+    assert.equal(ticket.status, 201);
+    assert.deepEqual(Object.keys(ticket.body).sort(), ['expiresAt', 'iceServers']);
   });
 });

@@ -73,6 +73,13 @@ export interface CreateRelayTicketInput {
   readonly expiresAt: number;
 }
 
+export interface CreateTurnCredentialInput {
+  readonly accountId: string;
+  readonly deviceId: string;
+  readonly username: string;
+  readonly expiresAt: number;
+}
+
 export interface Store {
   /** Liveness/readiness probe for the backing storage. */
   ping(): Promise<void>;
@@ -131,6 +138,12 @@ export interface Store {
    * unknown or expired and `false` when the device was already admitted.
    */
   admitToRelayTicket(relayId: string, deviceId: string, now: number): Promise<boolean | null>;
+
+  /** Stores only Cloudflare's username revocation handle, never its password. */
+  createTurnCredential(input: CreateTurnCredentialInput): Promise<void>;
+  /** Atomically returns and removes active usernames for the listed devices. */
+  takeTurnCredentialUsernames(deviceIds: readonly string[], now: number): Promise<string[]>;
+  takeTurnCredentialUsernamesForAccount(accountId: string, now: number): Promise<string[]>;
 
   recordAccessEvent(event: AccessEvent): Promise<void>;
   listAccessEvents(accountId: string, limit: number): Promise<AccessEvent[]>;

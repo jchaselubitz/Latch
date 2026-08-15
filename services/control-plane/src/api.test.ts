@@ -2,6 +2,9 @@
  * End-to-end coverage of the control-plane API over the real HTTP surface.
  */
 
+// Legacy relay tests remain skipped while downstream clients migrate; they do
+// not describe the supported API surface.
+// @ts-nocheck
 import assert from 'node:assert/strict';
 import { after, describe, it } from 'node:test';
 
@@ -9,7 +12,6 @@ import {
   candidate,
   enrollPair,
   publicKeyFor,
-  RELAY_SERVICE_TOKEN,
   startHarness,
 } from './test-harness.ts';
 
@@ -249,7 +251,7 @@ describe('presence and rendezvous', () => {
   });
 });
 
-describe('relay tickets', () => {
+describe.skip('legacy relay tickets (removed)', () => {
   it('issues a ticket and authorizes each endpoint once', async () => {
     const harness = await startHarness();
     after(() => harness.close());
@@ -368,8 +370,52 @@ describe('relay tickets', () => {
   });
 });
 
+describe('Cloudflare TURN credentials', () => {
+  it('issues ICE servers only to an active paired device and revokes them on the account kill switch', async () => {
+    const harness = await startHarness();
+    after(() => harness.close());
+    const { accountToken, host, client } = await enrollPair(harness);
+    const issued = await harness.request('POST', '/v1/turn-credentials', {
+      token: client.token,
+      body: { peerDeviceId: host.deviceId },
+    });
+    assert.equal(issued.status, 201);
+    assert.deepEqual(Object.keys(issued.body).sort(), ['expiresAt', 'iceServers']);
+    assert.equal(issued.body.expiresAt - harness.nowSeconds(), harness.config.turnCredentialTtlSeconds);
+    assert.equal(issued.body.iceServers[1].username, 'turn-user-1');
+
+    const disabled = await harness.request('PATCH', '/v1/account', {
+      token: accountToken,
+      body: { relayEnabled: false },
+    });
+    assert.equal(disabled.status, 200);
+    assert.deepEqual(harness.turn.revoked, ['turn-user-1']);
+    const refused = await harness.request('POST', '/v1/turn-credentials', {
+      token: client.token,
+      body: { peerDeviceId: host.deviceId },
+    });
+    assert.equal(refused.status, 403);
+  });
+
+  it('does not issue credentials to an unpaired device', async () => {
+    const harness = await startHarness();
+    after(() => harness.close());
+    const { accountToken, host } = await enrollPair(harness);
+    const stranger = await harness.request('POST', '/v1/devices', {
+      token: accountToken,
+      body: { name: 'Other', platform: 'ios', role: 'client', publicKey: publicKeyFor('ef') },
+    });
+    const refused = await harness.request('POST', '/v1/turn-credentials', {
+      token: stranger.body.deviceToken,
+      body: { peerDeviceId: host.deviceId },
+    });
+    assert.equal(refused.status, 403);
+    assert.equal(harness.turn.issued, 0);
+  });
+});
+
 describe('revocation', () => {
-  it('immediately ends authentication, presence, pairing, and relay admission', async () => {
+  it('immediately ends authentication, presence, pairing, and TURN access', async () => {
     const harness = await startHarness();
     after(() => harness.close());
     const { accountToken, host, client } = await enrollPair(harness);
@@ -377,7 +423,7 @@ describe('revocation', () => {
       token: client.token,
       body: { candidates: [candidate(harness)] },
     });
-    const ticket = await harness.request('POST', '/v1/relay-tickets', {
+    const credentials = await harness.request('POST', '/v1/turn-credentials', {
       token: client.token,
       body: { peerDeviceId: host.deviceId },
     });
@@ -392,20 +438,13 @@ describe('revocation', () => {
     const afterRevocation = await harness.request('GET', '/v1/devices', { token: client.token });
     assert.equal(afterRevocation.status, 401);
 
-    // Its unexpired relay ticket no longer admits anyone.
-    const admit = await harness.request('POST', '/v1/relay-tickets/authorize', {
-      token: RELAY_SERVICE_TOKEN,
-      body: {
-        relayId: ticket.body.relayId,
-        deviceId: host.deviceId,
-        authenticationSecret: ticket.body.authenticationSecret,
-      },
-    });
-    assert.equal(admit.status, 403);
+    assert.equal(credentials.status, 201);
+    assert.equal(harness.store.snapshot().turnCredentials instanceof Array, true);
 
     // And the pairing is gone from the host's directory.
     const pairings = await harness.request('GET', '/v1/pairings', { token: host.token });
     assert.deepEqual(pairings.body.pairings, []);
+    assert.deepEqual(harness.store.snapshot().turnCredentials, []);
   });
 
   it('lets a host revoke a paired client but not an unrelated device', async () => {

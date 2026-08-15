@@ -7,6 +7,7 @@
 import type { AddressInfo } from 'node:net';
 
 import { loadConfig } from './config.ts';
+import type { TurnProvider } from './cloudflare-turn.ts';
 import type { Config } from './config.ts';
 import type { RequestLog } from './http/router.ts';
 import { createServer } from './server.ts';
@@ -18,6 +19,7 @@ export interface Harness {
   readonly baseUrl: string;
   /** Every request log the router emitted, for the privacy assertions. */
   readonly logs: RequestLog[];
+  readonly turn: FakeTurnProvider;
   /** Advances the harness clock by `seconds`. */
   advance(seconds: number): void;
   /** Current harness clock in unix seconds. */
@@ -30,16 +32,31 @@ export interface Harness {
   close(): Promise<void>;
 }
 
-export const RELAY_SERVICE_TOKEN = 'r'.repeat(48);
+export const CLOUDFLARE_TURN_KEY_ID = 'a'.repeat(32);
+export const CLOUDFLARE_TURN_API_TOKEN = 't'.repeat(48);
+
+export class FakeTurnProvider implements TurnProvider {
+  readonly revoked: string[] = [];
+  issued = 0;
+  async issue(_ttlSeconds: number) {
+    this.issued += 1;
+    return [
+      { urls: ['stun:stun.cloudflare.com:3478'] },
+      { urls: ['turn:turn.cloudflare.com:3478?transport=udp'], username: `turn-user-${this.issued}`, credential: `turn-password-${this.issued}-only-returned-to-device` },
+    ];
+  }
+  async revoke(username: string) { this.revoked.push(username); }
+}
 
 export async function startHarness(overrides: Record<string, string> = {}): Promise<Harness> {
   const config = loadConfig({
     DATABASE_URL: 'postgres://unused/test',
-    RELAY_URL: 'wss://relay.latch.test',
-    RELAY_SERVICE_TOKEN,
+    CLOUDFLARE_TURN_KEY_ID,
+    CLOUDFLARE_TURN_API_TOKEN,
     ...overrides,
   });
   const store = new MemoryStore();
+  const turn = new FakeTurnProvider();
   const logs: RequestLog[] = [];
   let clock = Date.UTC(2026, 0, 1, 12, 0, 0);
   const server = createServer({
@@ -47,6 +64,7 @@ export async function startHarness(overrides: Record<string, string> = {}): Prom
     store,
     now: () => clock,
     readiness: async () => ({ migrations: ['0001_initial.sql'] }),
+    turn,
     log: (entry) => logs.push(entry),
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -58,6 +76,7 @@ export async function startHarness(overrides: Record<string, string> = {}): Prom
     config,
     baseUrl,
     logs,
+    turn,
     advance(seconds) {
       clock += seconds * 1000;
     },

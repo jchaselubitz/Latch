@@ -11,9 +11,9 @@ describe('configuration', () => {
     assert.equal(config.port, 8080);
     assert.equal(config.host, '0.0.0.0');
     assert.equal(config.presenceTtlSeconds, 90);
-    assert.equal(config.relayTicketTtlSeconds, 60);
+    assert.equal(config.turnCredentialTtlSeconds, 120);
     assert.equal(config.maxDevicesPerAccount, 32);
-    assert.equal(config.relayServiceToken, null);
+    assert.equal(config.cloudflareTurnApiToken, null);
     assert.equal(config.migrateOnBoot, true);
   });
 
@@ -27,9 +27,10 @@ describe('configuration', () => {
     assert.throws(() => loadConfig({ ...base, MIGRATE_ON_BOOT: 'maybe' }), ConfigError);
   });
 
-  it('refuses a weak relay service token', () => {
-    assert.throws(() => loadConfig({ ...base, RELAY_SERVICE_TOKEN: 'short' }), ConfigError);
-    const config = loadConfig({ ...base, RELAY_SERVICE_TOKEN: 'x'.repeat(32) });
-    assert.equal(config.relayServiceToken?.length, 32);
+  it('requires a valid complete Cloudflare TURN configuration', () => {
+    assert.throws(() => loadConfig({ ...base, CLOUDFLARE_TURN_KEY_ID: 'a'.repeat(32) }), ConfigError);
+    assert.throws(() => loadConfig({ ...base, CLOUDFLARE_TURN_KEY_ID: 'bad', CLOUDFLARE_TURN_API_TOKEN: 'x'.repeat(32) }), ConfigError);
+    const config = loadConfig({ ...base, CLOUDFLARE_TURN_KEY_ID: 'a'.repeat(32), CLOUDFLARE_TURN_API_TOKEN: 'x'.repeat(32) });
+    assert.equal(config.cloudflareTurnApiToken?.length, 32);
   });
 });

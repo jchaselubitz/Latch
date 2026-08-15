@@ -2,7 +2,7 @@
 
 An independent TypeScript service that gives paired Latch devices an account,
 a directory, and enough short-lived connectivity metadata to reach each other.
-It is deployed separately from the relay and from every other Latch component,
+It is deployed separately from every endpoint and from every other Latch component,
 and it holds no terminal content and no gateway credentials.
 
 ## What it owns
@@ -17,14 +17,13 @@ and it holds no terminal content and no gateway credentials.
 - **Rendezvous** — a paired device swaps candidates with a currently-present
   peer and learns the peer's pinned identity key so it can verify the static
   key during the Noise handshake.
-- **Relay-ticket authorization** — issuance of one-minute admission material
-  for a paired couple, and the authorization call the separately deployed
-  relay makes before it admits an endpoint.
+- **Cloudflare Realtime TURN** — after paired-device authorization, issuance
+  of short-lived ICE configuration for that requesting device only.
 
 ## What it deliberately does not own
 
 Terminal bytes, transcripts, scrollback, session names, prompt answers, device
-private keys, endpoint session keys, and the Latch gateway bearer token. None
+private keys, endpoint session keys, Cloudflare TURN API token, and the Latch gateway bearer token. None
 of these has a column, a request field, or a log line here. The relay ticket is
 not a gateway credential and cannot decrypt application traffic: end-to-end
 encryption is established directly between the two endpoints, and this service
@@ -32,8 +31,10 @@ never participates in it. See
 [`docs/REMOTE_ACCESS_THREAT_MODEL.md`](../../docs/REMOTE_ACCESS_THREAT_MODEL.md);
 `src/privacy.test.ts` is the executable form of that boundary.
 
-The relay itself is a separate deployable. This service only tells it whether
-an endpoint may occupy a slot.
+The Cloudflare API token stays server-side. TURN passwords are returned only in
+the one-time credential response and are never stored; only Cloudflare-issued
+usernames are retained until expiry so a device, pairing, or account switch can
+revoke them immediately.
 
 ## API
 
@@ -65,8 +66,7 @@ only a SHA-256 digest is stored.
 | `GET` | `/v1/presence/:id` | device | Read a paired peer's presence. |
 | `POST` | `/v1/rendezvous` | device | Offer candidates to a present peer. |
 | `GET` | `/v1/rendezvous` | device | Collect and consume inbound offers. |
-| `POST` | `/v1/relay-tickets` | device | Issue relay admission material. |
-| `POST` | `/v1/relay-tickets/authorize` | relay service | Authorize one endpoint admission. |
+| `POST` | `/v1/turn-credentials` | device | Issue short-lived Cloudflare ICE servers for an active paired peer. |
 
 Errors are `{ "error": "<machine code>", "reason": "<sentence>" }`. A pairing
 confirmation distinguishes unknown/consumed/expired (`404`), a mismatched
@@ -82,7 +82,7 @@ implementation enforces.
 
 Revocation is immediate rather than eventual: a revoked device stops
 authenticating on its next request, and its presence, pending offers, and
-unexpired relay tickets are deleted in the same operation.
+issued TURN usernames are revoked at Cloudflare in the same request path.
 
 ## Local development
 
@@ -133,11 +133,23 @@ The `latch` Railway project (environment `production`) holds:
 `DATABASE_URL` on the control-plane service is a reference to
 `${{latch-postgres.DATABASE_URL}}`, so it resolves over Railway's private
 network and the database is never reached over the public internet by the
-service itself. The relay is deliberately absent: it is a separate deployable,
-and this service refuses to issue tickets until `RELAY_URL` and
-`RELAY_SERVICE_TOKEN` are set.
+service itself. Cloudflare TURN is deliberately called only by this backend;
+it refuses credential issuance until both Cloudflare variables are set.
 
 Configuration is environment-only and validated at boot — see
-[`.env.example`](.env.example) for the full list. `RELAY_URL` and
-`RELAY_SERVICE_TOKEN` stay empty until the relay is deployed; relay tickets are
-refused while they are.
+[`.env.example`](.env.example) for the full list.
+
+### Railway variables and security
+
+Set these as sealed Railway variables on the `Latch` control-plane service:
+
+| Variable | Value |
+| --- | --- |
+| `CLOUDFLARE_TURN_KEY_ID` | Cloudflare TURN key ID (not its secret). |
+| `CLOUDFLARE_TURN_API_TOKEN` | API token restricted to generating and revoking credentials for that TURN key. |
+| `CLOUDFLARE_TURN_TTL_SECONDS` | `120` (or another short session window). |
+
+Never put the API token in a mobile app, endpoint configuration, logs, or a
+repository. Use a separate Cloudflare TURN key and API token per environment;
+rotate the API token and TURN key together if either is exposed. Clients should
+perform ICE restart/credential refresh for long-lived sessions.

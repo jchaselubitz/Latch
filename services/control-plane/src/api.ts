@@ -19,6 +19,7 @@
  */
 
 import type { Config } from './config.ts';
+import type { TurnProvider } from './cloudflare-turn.ts';
 import type { Device, Permission } from './domain.ts';
 import { bearerToken, digestOf, issueCredential, newId, newSecret, subjectOf } from './credentials.ts';
 import { HttpError, Router } from './http/router.ts';
@@ -35,6 +36,7 @@ export interface ApiDependencies {
   readonly now: () => number;
   /** Names of applied migrations, for readiness reporting. */
   readonly readiness: () => Promise<{ migrations: string[] }>;
+  readonly turn: TurnProvider | null;
 }
 
 const unauthorized = (): HttpError =>
@@ -67,7 +69,7 @@ function deviceView(device: Device, permission: Permission | null): Record<strin
 }
 
 export function createRouter(dependencies: ApiDependencies): Router {
-  const { config, store, now } = dependencies;
+  const { config, store, now, turn } = dependencies;
   const limiter = new RateLimiter(config.rateLimitPerMinute, 60_000, now);
 
   /** Authenticates an account credential (`Authorization: Bearer <token>`). */
@@ -105,22 +107,6 @@ export function createRouter(dependencies: ApiDependencies): Router {
     return device;
   }
 
-  /** Authenticates the separately deployed relay service. */
-  function requireRelayService(context: RequestContext): void {
-    const token = bearerToken(context.headers.authorization);
-    if (!config.relayServiceToken) {
-      throw new HttpError(503, 'relay_not_configured', 'relay authorization is not configured');
-    }
-    if (!token || token.length !== config.relayServiceToken.length) {
-      throw unauthorized();
-    }
-    const expected = digestOf('relay-ticket', config.relayServiceToken);
-    const presented = digestOf('relay-ticket', token);
-    if (expected !== presented) {
-      throw unauthorized();
-    }
-  }
-
   /** Resolves the pairing between two devices regardless of which side asks. */
   async function pairingBetween(caller: Device, peer: Device) {
     if (caller.accountId !== peer.accountId) {
@@ -144,6 +130,13 @@ export function createRouter(dependencies: ApiDependencies): Router {
       result,
       createdAt: new Date(now()).toISOString(),
     });
+  }
+
+  async function revokeTurnCredentials(usernames: readonly string[]): Promise<void> {
+    if (!turn || usernames.length === 0) return;
+    // Cloudflare revocation is idempotent enough for retries; issue all calls
+    // concurrently so local revocation does not leave a long exposure window.
+    await Promise.all(usernames.map((username) => turn.revoke(username)));
   }
 
   const body = (context: RequestContext, allowed: readonly string[]) =>
@@ -170,7 +163,7 @@ export function createRouter(dependencies: ApiDependencies): Router {
           release: config.releaseId,
           environment: config.environment,
           migrations: migrations.length,
-          relayConfigured: Boolean(config.relayUrl),
+          relayConfigured: Boolean(config.cloudflareTurnKeyId),
         },
       };
     } catch {
@@ -219,7 +212,12 @@ export function createRouter(dependencies: ApiDependencies): Router {
   router.patch('/v1/account', async (context) => {
     const account = await requireAccount(context);
     const input = body(context, ['relayEnabled']);
-    const updated = await store.setRelayEnabled(account.id, validate.boolean(input, 'relayEnabled'));
+    const enabled = validate.boolean(input, 'relayEnabled');
+    const updated = await store.setRelayEnabled(account.id, enabled);
+    if (!enabled) {
+      const usernames = await store.takeTurnCredentialUsernamesForAccount(account.id, unixSeconds(now));
+      await revokeTurnCredentials(usernames);
+    }
     await audit(account.id, null, 'account.relay_enabled', 'allowed');
     return {
       status: 200,
@@ -355,6 +353,8 @@ export function createRouter(dependencies: ApiDependencies): Router {
       }
     }
     const revoked = await store.revokeDevice(target.id, new Date(now()).toISOString());
+    const usernames = await store.takeTurnCredentialUsernames([target.id], unixSeconds(now));
+    await revokeTurnCredentials(usernames);
     await audit(target.accountId, target.id, 'device.revoke', 'allowed');
     return { status: 200, body: deviceView(revoked ?? target, null) };
   });
@@ -547,6 +547,8 @@ export function createRouter(dependencies: ApiDependencies): Router {
     if (!removed) {
       throw new HttpError(404, 'not_found', 'no such pairing');
     }
+    const usernames = await store.takeTurnCredentialUsernames([host, client], unixSeconds(now));
+    await revokeTurnCredentials(usernames);
     await audit(caller.accountId, peer.id, 'pairing.revoke', 'allowed');
     return { status: 200, body: { hostDeviceId: host, clientDeviceId: client, revoked: true } };
   });
@@ -703,15 +705,10 @@ export function createRouter(dependencies: ApiDependencies): Router {
     return { status: 200, body: { offers: results } };
   });
 
-  // --- Relay tickets --------------------------------------------------------
+  // --- Cloudflare Realtime TURN --------------------------------------------
 
-  /**
-   * Issues short-lived relay admission material for a paired device couple.
-   * The ticket is not a gateway credential and cannot decrypt application
-   * traffic: it only reserves an opaque relay slot. The plaintext secret is
-   * returned once and stored as a digest.
-   */
-  router.post('/v1/relay-tickets', async (context) => {
+  /** Issues Cloudflare ICE configuration only after existing pairing checks. */
+  router.post('/v1/turn-credentials', async (context) => {
     const caller = await requireDevice(context);
     const input = body(context, ['peerDeviceId']);
     const peerDeviceId = validate.opaqueId(input, 'peerDeviceId');
@@ -721,91 +718,36 @@ export function createRouter(dependencies: ApiDependencies): Router {
     }
     const pairing = await pairingBetween(caller, peer);
     if (!pairing || peer.revokedAt !== null) {
-      await audit(caller.accountId, peer.id, 'relay.ticket', 'denied');
-      throw forbidden('relay admission requires an active pairing');
+      await audit(caller.accountId, peer.id, 'turn.credentials', 'denied');
+      throw forbidden('TURN credentials require an active pairing');
     }
     const account = await store.getAccount(caller.accountId);
     if (!account?.relayEnabled) {
-      await audit(caller.accountId, peer.id, 'relay.ticket', 'denied');
+      await audit(caller.accountId, peer.id, 'turn.credentials', 'denied');
       throw forbidden('relay access is disabled for this account');
     }
-    if (!config.relayUrl) {
-      throw new HttpError(503, 'relay_not_configured', 'no relay is configured');
+    if (!turn) {
+      throw new HttpError(503, 'relay_not_configured', 'Cloudflare TURN is not configured');
     }
     const nowSeconds = unixSeconds(now);
-    const relayId = newSecret().slice(0, 32);
-    const secret = newSecret();
-    const ticket = await store.createRelayTicket({
-      relayId,
-      accountId: caller.accountId,
-      hostDeviceId: pairing.hostDeviceId,
-      clientDeviceId: pairing.clientDeviceId,
-      secretDigest: digestOf('relay-ticket', secret),
-      expiresAt: nowSeconds + config.relayTicketTtlSeconds,
-    });
-    await audit(caller.accountId, peer.id, 'relay.ticket', 'allowed');
+    let iceServers;
+    try {
+      iceServers = await turn.issue(config.turnCredentialTtlSeconds);
+    } catch {
+      await audit(caller.accountId, peer.id, 'turn.credentials', 'denied');
+      throw new HttpError(503, 'relay_unavailable', 'TURN credential service is unavailable');
+    }
+    const usernames = iceServers.flatMap((server) => server.username ? [server.username] : []);
+    await Promise.all(usernames.map((username) => store.createTurnCredential({
+      accountId: caller.accountId, deviceId: caller.id, username,
+      expiresAt: nowSeconds + config.turnCredentialTtlSeconds,
+    })));
+    await audit(caller.accountId, peer.id, 'turn.credentials', 'allowed');
     return {
       status: 201,
       body: {
-        relayId: ticket.relayId,
-        // Returned exactly once; only its digest is stored.
-        authenticationSecret: secret,
-        relayUrl: config.relayUrl,
-        hostDeviceId: ticket.hostDeviceId,
-        clientDeviceId: ticket.clientDeviceId,
-        expiresAt: ticket.expiresAt,
-      },
-    };
-  });
-
-  /**
-   * Called by the separately deployed relay before it admits an endpoint.
-   * The relay presents its own service credential plus the endpoint's ticket
-   * material; it never sees a device credential, a public key, or a pairing.
-   */
-  router.post('/v1/relay-tickets/authorize', async (context) => {
-    requireRelayService(context);
-    const input = body(context, ['relayId', 'deviceId', 'authenticationSecret']);
-    const relayId = validate.relayId(input, 'relayId');
-    const deviceId = validate.opaqueId(input, 'deviceId');
-    const secret = validate.requiredString(input, 'authenticationSecret', /^[0-9a-f]{64}$/);
-    const nowSeconds = unixSeconds(now);
-    const ticket = await store.getRelayTicket(relayId, nowSeconds);
-    if (!ticket || ticket.secretDigest !== digestOf('relay-ticket', secret)) {
-      await audit(ticket?.accountId ?? null, deviceId, 'relay.admit', 'denied');
-      throw forbidden('relay ticket is unknown, expired, or does not authenticate');
-    }
-    if (deviceId !== ticket.hostDeviceId && deviceId !== ticket.clientDeviceId) {
-      await audit(ticket.accountId, deviceId, 'relay.admit', 'denied');
-      throw forbidden('device is not an endpoint of this ticket');
-    }
-    const device = await store.getDevice(deviceId);
-    if (!device || device.revokedAt !== null) {
-      await audit(ticket.accountId, deviceId, 'relay.admit', 'denied');
-      throw forbidden('device is revoked');
-    }
-    const pairing = await store.getPairing(ticket.hostDeviceId, ticket.clientDeviceId);
-    if (!pairing) {
-      await audit(ticket.accountId, deviceId, 'relay.admit', 'denied');
-      throw forbidden('pairing is no longer active');
-    }
-    const admitted = await store.admitToRelayTicket(relayId, deviceId, nowSeconds);
-    if (admitted === null) {
-      throw forbidden('relay ticket is unknown or expired');
-    }
-    if (admitted === false) {
-      await audit(ticket.accountId, deviceId, 'relay.admit', 'denied');
-      throw new HttpError(409, 'already_admitted', 'this endpoint was already admitted');
-    }
-    await audit(ticket.accountId, deviceId, 'relay.admit', 'allowed');
-    return {
-      status: 200,
-      body: {
-        authorized: true,
-        relayId: ticket.relayId,
-        peerDeviceId:
-          deviceId === ticket.hostDeviceId ? ticket.clientDeviceId : ticket.hostDeviceId,
-        expiresAt: ticket.expiresAt,
+        iceServers,
+        expiresAt: nowSeconds + config.turnCredentialTtlSeconds,
       },
     };
   });

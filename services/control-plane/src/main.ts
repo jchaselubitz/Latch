@@ -8,6 +8,7 @@
  */
 
 import { loadConfig } from './config.ts';
+import { CloudflareTurnProvider } from './cloudflare-turn.ts';
 import { appliedMigrations, loadMigrations, runMigrations } from './migrate.ts';
 import { createServer } from './server.ts';
 import { PostgresStore } from './store/postgres.ts';
@@ -26,6 +27,9 @@ async function main(): Promise<void> {
     poolSize: config.databasePoolSize,
     sslRejectUnauthorized: config.databaseSslRejectUnauthorized,
   });
+  const turn = config.cloudflareTurnKeyId && config.cloudflareTurnApiToken
+    ? new CloudflareTurnProvider(config.cloudflareTurnKeyId, config.cloudflareTurnApiToken)
+    : null;
 
   if (config.migrateOnBoot) {
     const files = await loadMigrations();
@@ -37,6 +41,7 @@ async function main(): Promise<void> {
     config,
     store,
     readiness: async () => ({ migrations: await appliedMigrations(store.pool) }),
+    turn,
   });
 
   const purge = setInterval(() => {
@@ -51,7 +56,7 @@ async function main(): Promise<void> {
       port: config.port,
       environment: config.environment,
       release: config.releaseId,
-      relayConfigured: Boolean(config.relayUrl),
+      relayConfigured: Boolean(turn),
     });
   });
 

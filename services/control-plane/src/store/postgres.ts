@@ -28,6 +28,7 @@ import type {
   CreateOfferInput,
   CreatePairingRequestInput,
   CreateRelayTicketInput,
+  CreateTurnCredentialInput,
   PublishPresenceInput,
   Store,
 } from './types.ts';
@@ -509,6 +510,31 @@ export class PostgresStore implements Store {
     return false;
   }
 
+  async createTurnCredential(input: CreateTurnCredentialInput): Promise<void> {
+    await this.#query(
+      `INSERT INTO turn_credentials (username, account_id, device_id, expires_at)
+       VALUES ($1, $2, $3, $4) ON CONFLICT (username) DO NOTHING`,
+      [input.username, input.accountId, input.deviceId, input.expiresAt],
+    );
+  }
+
+  async takeTurnCredentialUsernames(deviceIds: readonly string[], now: number): Promise<string[]> {
+    if (deviceIds.length === 0) return [];
+    const rows = await this.#query(
+      `DELETE FROM turn_credentials WHERE expires_at <= $2 OR device_id = ANY($1::TEXT[])
+       RETURNING username, expires_at`, [deviceIds, now],
+    );
+    return rows.filter((row) => Number(row.expires_at) > now).map((row) => text(row.username));
+  }
+
+  async takeTurnCredentialUsernamesForAccount(accountId: string, now: number): Promise<string[]> {
+    const rows = await this.#query(
+      `DELETE FROM turn_credentials WHERE expires_at <= $2 OR account_id = $1 RETURNING username, expires_at`,
+      [accountId, now],
+    );
+    return rows.filter((row) => Number(row.expires_at) > now).map((row) => text(row.username));
+  }
+
   async recordAccessEvent(event: AccessEvent): Promise<void> {
     await this.#query(
       `INSERT INTO access_events (account_id, device_id, action, result, created_at)
@@ -548,6 +574,7 @@ export class PostgresStore implements Store {
       'DELETE FROM pairing_requests WHERE expires_at <= $1 RETURNING 1',
       [now],
     );
-    return presence.length + offers.length + tickets.length + pairingRequests.length;
+    const turnCredentials = await this.#query('DELETE FROM turn_credentials WHERE expires_at <= $1 RETURNING 1', [now]);
+    return presence.length + offers.length + tickets.length + pairingRequests.length + turnCredentials.length;
   }
 }
