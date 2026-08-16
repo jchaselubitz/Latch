@@ -4,13 +4,14 @@ import SwiftUI
 /// The sessions tab: what is running on the linked computer.
 struct SessionsView: View {
     @Environment(AppModel.self) private var model
+    @Environment(PairingModel.self) private var pairing
 
     var body: some View {
         NavigationStack {
             Group {
                 switch model.linkState {
                 case .unlinked:
-                    UnlinkedView()
+                    UnlinkedView(pairedMac: pairedMacName)
                 case .connecting:
                     ProgressView("Connecting…")
                 case .failed(let reason):
@@ -25,6 +26,17 @@ struct SessionsView: View {
             }
             .navigationTitle("Sessions")
         }
+    }
+
+    /// The paired Mac's name, when this phone has finished pairing.
+    ///
+    /// Pairing and the gateway link are separate arrangements in this build,
+    /// so the empty state has to tell them apart: a phone that paired
+    /// successfully and a phone that was never set up are not the same
+    /// situation, and the same sentence for both makes the first look broken.
+    private var pairedMacName: String? {
+        guard case .paired(let record) = pairing.state else { return nil }
+        return record.mac.displayName
     }
 
     @ViewBuilder
@@ -112,12 +124,29 @@ private struct SessionRow: View {
 }
 
 private struct UnlinkedView: View {
+    /// The Mac this phone paired with, when there is one.
+    let pairedMac: String?
+
     var body: some View {
         MessageView(
-            icon: "laptopcomputer.and.iphone",
-            title: "No computer linked",
-            detail: "Open Settings to point this app at a `latch serve` gateway."
+            icon: pairedMac == nil ? "laptopcomputer.and.iphone" : "cable.connector",
+            title: pairedMac == nil ? "No computer linked" : "Paired, but not linked",
+            detail: detail
         )
+    }
+
+    /// Pairing enrolls this phone's identity; it does not by itself open a
+    /// path to the Mac. A paired phone reaching this screen has done nothing
+    /// wrong, so it is told what is still missing rather than being handed the
+    /// wording for a phone that never paired at all.
+    private var detail: String {
+        guard let pairedMac else {
+            return "Open Settings to point this app at a `latch serve` gateway."
+        }
+        return """
+        This phone is paired with \(pairedMac), which enrolled its identity. Sessions come \
+        from a `latch serve` gateway, which is a separate step: add its address in Settings.
+        """
     }
 }
 

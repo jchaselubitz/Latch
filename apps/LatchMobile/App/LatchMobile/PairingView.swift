@@ -207,13 +207,25 @@ struct PairingView: View {
             }
         }
 
-        Section("Paired Mac") {
+        Section {
             LabeledContent("Name", value: record.mac.displayName)
             LabeledContent("Identity", value: record.mac.shortFingerprint)
                 .monospaced()
             LabeledContent("Confirmed with", value: record.phrase)
                 .font(.footnote.monospaced())
             LabeledContent("Paired", value: record.pairedAt.formatted(date: .abbreviated, time: .shortened))
+        } header: {
+            Text("Paired Mac")
+        } footer: {
+            // What pairing does is worth stating on the screen that just
+            // succeeded: it enrolls an identity, and this build does not yet
+            // carry sessions over it. Without this, an empty Sessions tab
+            // reads as a pairing that silently failed.
+            Text("""
+            Pairing enrolls this phone's identity with your Mac. It does not carry the \
+            session list yet — that comes from a `latch serve` gateway, set up separately \
+            in Settings.
+            """)
         }
 
         Section {

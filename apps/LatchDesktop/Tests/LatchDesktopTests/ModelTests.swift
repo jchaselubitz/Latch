@@ -181,7 +181,11 @@ final class ModelTests: XCTestCase {
             let _: ListReport = try await client.list()
             XCTFail("expected a timeout")
         } catch let error as LatchClientError {
-            XCTAssertEqual(error, .timeout)
+            XCTAssertEqual(error, .timeout(operation: "list", seconds: 0.05))
+            XCTAssertEqual(
+                error.errorDescription,
+                "`latch list` did not respond within 1s and was cancelled. Retry, or run Doctor if it keeps happening."
+            )
         }
     }
 }

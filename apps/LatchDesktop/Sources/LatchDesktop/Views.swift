@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 
 struct SessionsView: View {
     @ObservedObject var store: SessionStore
@@ -944,7 +945,7 @@ struct SettingsView: View {
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
-        panel.allowedFileTypes = ["app"]
+        panel.allowedContentTypes = [.applicationBundle]
 
         guard panel.runModal() == .OK, let applicationURL = panel.url else { return }
         do {

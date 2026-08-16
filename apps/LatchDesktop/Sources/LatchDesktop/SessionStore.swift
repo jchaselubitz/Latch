@@ -46,6 +46,12 @@ final class SessionStore: ObservableObject {
 
     private var client: LatchClient
     private var refreshRequested = false
+    /// Background polls tolerate one bad answer before they say anything: a
+    /// single slow or half-answered query is normal on a busy Mac, and a
+    /// banner that appears and clears itself five seconds later reads as a
+    /// fault in Latch rather than the passing hiccup it is.
+    private var consecutiveRefreshFailures = 0
+    private static let refreshFailuresBeforeReporting = 2
     private var pollingTask: Task<Void, Never>?
     private var activationCancellable: AnyCancellable?
 
@@ -190,6 +196,7 @@ final class SessionStore: ObservableObject {
             do {
                 let report = try await client.list()
                 sessions = report.sessions
+                consecutiveRefreshFailures = 0
                 errorMessage = nil
                 if let selection, !sessions.contains(where: { $0.id == selection }) {
                     self.selection = sessions.first?.id
@@ -199,7 +206,7 @@ final class SessionStore: ObservableObject {
                 await loadDetails()
             } catch {
                 // Preserve the last good snapshot; only the diagnostic changes.
-                errorMessage = error.localizedDescription
+                reportRefreshFailure(error)
             }
         } while refreshRequested
     }
@@ -209,8 +216,20 @@ final class SessionStore: ObservableObject {
             details = nil
             return
         }
-        do { details = try await client.inspect(selection) }
-        catch { errorMessage = error.localizedDescription }
+        do {
+            details = try await client.inspect(selection)
+            consecutiveRefreshFailures = 0
+        } catch {
+            reportRefreshFailure(error)
+        }
+    }
+
+    /// Surfaces a polling failure only once it has repeated, so the banner
+    /// describes a condition the user can still act on when they read it.
+    private func reportRefreshFailure(_ error: Error) {
+        consecutiveRefreshFailures += 1
+        guard consecutiveRefreshFailures >= Self.refreshFailuresBeforeReporting else { return }
+        errorMessage = error.localizedDescription
     }
 
     func create(_ request: NewSessionRequest, openAfterCreation: Bool) async {

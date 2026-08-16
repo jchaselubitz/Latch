@@ -96,9 +96,7 @@ final class RemoteAccessSupervisor: @unchecked Sendable {
     }
 
     var isRunning: Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return process?.isRunning == true
+        lock.withLock { process?.isRunning == true }
     }
 
     /// Starts the helper and resolves when it exits. Throws immediately if the
@@ -118,17 +116,15 @@ final class RemoteAccessSupervisor: @unchecked Sendable {
         let exited = DispatchSemaphore(value: 0)
         process.terminationHandler = { _ in exited.signal() }
 
-        lock.lock()
-        stoppedIntentionally = false
-        self.process = process
-        lock.unlock()
+        lock.withLock {
+            stoppedIntentionally = false
+            self.process = process
+        }
 
         do {
             try process.run()
         } catch {
-            lock.lock()
-            self.process = nil
-            lock.unlock()
+            lock.withLock { self.process = nil }
             throw error
         }
 
@@ -144,10 +140,11 @@ final class RemoteAccessSupervisor: @unchecked Sendable {
             }
         }
 
-        lock.lock()
-        let intentional = stoppedIntentionally
-        self.process = nil
-        lock.unlock()
+        let intentional = lock.withLock {
+            let intentional = stoppedIntentionally
+            self.process = nil
+            return intentional
+        }
 
         guard !intentional else { return }
         let bounded = await captured.value.suffix(4_096)
@@ -161,10 +158,10 @@ final class RemoteAccessSupervisor: @unchecked Sendable {
     /// Stops the helper. The helper takes the supervised gateway down with it,
     /// because it spawned that child with kill-on-drop.
     func stop() {
-        lock.lock()
-        stoppedIntentionally = true
-        let running = process
-        lock.unlock()
+        let running = lock.withLock { () -> Process? in
+            stoppedIntentionally = true
+            return process
+        }
         guard let running, running.isRunning else { return }
         running.terminate()
     }

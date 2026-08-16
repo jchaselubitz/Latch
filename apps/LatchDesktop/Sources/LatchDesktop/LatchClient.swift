@@ -12,7 +12,13 @@ actor LatchClient {
     private let decoder = JSONDecoder()
     private let encoder = JSONEncoder()
 
-    init(executableURL: URL = LatchClient.defaultExecutableURL(), timeout: TimeInterval = 10) {
+    /// A management command competes with every other tmux client for the
+    /// server, so a busy Mac can push a routine read past a tight deadline.
+    /// The budget is generous because it exists to break a hang, not to pace
+    /// a healthy call.
+    static let defaultTimeout: TimeInterval = 20
+
+    init(executableURL: URL = LatchClient.defaultExecutableURL(), timeout: TimeInterval = LatchClient.defaultTimeout) {
         self.executableURL = executableURL
         self.timeout = timeout
     }
@@ -251,6 +257,9 @@ private enum ProcessRunner {
         guard FileManager.default.isExecutableFile(atPath: executableURL.path) else {
             throw LatchClientError.executableNotFound(executableURL.path)
         }
+        // The first non-flag argument is the subcommand; it is what a person
+        // needs to see when a command runs out of time.
+        let operation = arguments.first { !$0.hasPrefix("-") } ?? "command"
 
         let process = Process()
         let stdout = PipeCapture()
@@ -292,7 +301,7 @@ private enum ProcessRunner {
                 stdout.cancel()
                 stderr.cancel()
             }
-            throw LatchClientError.timeout
+            throw LatchClientError.timeout(operation: operation, seconds: timeout)
         }
         let output = stdout.finish()
         let diagnostic = stderr.finish()
@@ -341,7 +350,7 @@ private final class PipeCapture: @unchecked Sendable {
 
 enum LatchClientError: LocalizedError, Equatable {
     case executableNotFound(String)
-    case timeout
+    case timeout(operation: String, seconds: TimeInterval)
     case commandFailed(status: Int32, diagnostic: String)
     case invalidResponse(String)
     case incompatibleProtocol(expected: UInt32, actual: UInt32, productVersion: String)
@@ -351,8 +360,11 @@ enum LatchClientError: LocalizedError, Equatable {
         switch self {
         case .executableNotFound(let path):
             return "Latch CLI was not found at \(path). Choose an installed CLI in Settings or run the install command shown there."
-        case .timeout:
-            return "Latch did not respond before the management timeout. No session worker was terminated."
+        case .timeout(let operation, let seconds):
+            // The command was cancelled from outside, so what it managed to do
+            // before that is unknown; claiming otherwise would be a guess.
+            let budget = max(1, Int(seconds.rounded()))
+            return "`latch \(operation)` did not respond within \(budget)s and was cancelled. Retry, or run Doctor if it keeps happening."
         case .commandFailed(_, let diagnostic):
             return diagnostic.isEmpty ? "The Latch command failed." : diagnostic
         case .invalidResponse(let detail):

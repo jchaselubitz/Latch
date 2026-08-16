@@ -142,7 +142,7 @@ final class RemoteAccessController: ObservableObject {
                     attempt = min(attempt + 1, Self.restartDelays.count - 1)
                 } catch {
                     if Task.isCancelled { return }
-                    await self?.recordHelperFailure(error)
+                    self?.recordHelperFailure(error)
                     attempt = min(attempt + 1, Self.restartDelays.count - 1)
                 }
                 let delay = Self.restartDelays[attempt]

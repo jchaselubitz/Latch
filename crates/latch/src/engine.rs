@@ -34,6 +34,12 @@ const TMUX_ERR_NO_SERVER: &str = "no server running";
 const TMUX_ERR_NO_SESSION: &str = "can't find session";
 const TMUX_ERR_NO_SESSIONS: &str = "no sessions";
 
+/// Attempts a session query makes before a session tmux cannot yet describe
+/// is reported as gone.
+const SESSION_QUERY_ATTEMPTS: usize = 3;
+/// Pause between those attempts; the window a session spends half-created or
+/// half-destroyed is far shorter than this.
+const SESSION_QUERY_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 /// Stop polls tmux rather than sleeping on a single long timeout, so this
 /// interval is the process-churn / wait-time tradeoff.
 const STOP_POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -385,7 +391,30 @@ pub fn has_session(home: &LatchHome, id: &SessionId) -> bool {
 }
 
 /// Lists every session from the private server in one query.
+///
+/// A session caught mid-creation or mid-teardown answers with a row tmux could
+/// not fully expand. The listing is retried while any row looks like that, so
+/// a session in motion neither fails the whole query nor disappears from it
+/// for one poll; a row still half-expanded after the retries is dropped, and
+/// the caller reports that session from its own metadata.
 pub fn list(home: &LatchHome) -> Result<Vec<SessionInfo>> {
+    let mut described = Vec::new();
+    for attempt in 0..SESSION_QUERY_ATTEMPTS {
+        let (sessions, partial) = list_once(home)?;
+        described = sessions;
+        if !partial {
+            break;
+        }
+        if attempt + 1 < SESSION_QUERY_ATTEMPTS {
+            std::thread::sleep(SESSION_QUERY_RETRY_INTERVAL);
+        }
+    }
+    Ok(described)
+}
+
+/// Returns the sessions tmux could describe, and whether any row was still
+/// half-expanded.
+fn list_once(home: &LatchHome) -> Result<(Vec<SessionInfo>, bool)> {
     ensure_config(home)?;
     let output = tmux(home)?
         .args(["list-sessions", "-F", SESSION_INFO_FORMAT])
@@ -397,20 +426,58 @@ pub fn list(home: &LatchHome) -> Result<Vec<SessionInfo>> {
             classify_tmux_stderr(&diagnostic),
             Some(TmuxMiss::Server | TmuxMiss::Empty)
         ) {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), false));
         }
         return Err(tmux_error("list sessions", output));
     }
-    String::from_utf8(output.stdout)
+    let mut sessions = Vec::new();
+    let mut partial = false;
+    for line in String::from_utf8(output.stdout)
         .context("tmux returned non-UTF-8 session data")?
         .lines()
         .filter(|line| !line.is_empty())
-        .map(parse_info)
-        .collect()
+    {
+        match parse_row(line)? {
+            Some(info) => sessions.push(info),
+            None => partial = true,
+        }
+    }
+    Ok((sessions, partial))
+}
+
+/// Outcome of a single session query, keeping "tmux has no such session"
+/// apart from "tmux has it but could not describe it yet".
+enum SessionQuery {
+    /// tmux does not own the session.
+    Missing,
+    /// tmux owns the session but returned a half-expanded row.
+    Partial,
+    /// Complete live facts.
+    Found(SessionInfo),
 }
 
 /// Queries one session.
+///
+/// A session caught mid-creation or mid-teardown answers with a row tmux could
+/// not fully expand. That state lasts a moment, so the query is retried before
+/// the session is reported as gone; a caller must not see a live session blink
+/// out because the query landed inside that window.
 pub fn inspect(home: &LatchHome, id: &SessionId) -> Result<Option<SessionInfo>> {
+    for attempt in 0..SESSION_QUERY_ATTEMPTS {
+        match inspect_once(home, id)? {
+            SessionQuery::Found(info) => return Ok(Some(info)),
+            SessionQuery::Missing => return Ok(None),
+            SessionQuery::Partial => {
+                if attempt + 1 < SESSION_QUERY_ATTEMPTS {
+                    std::thread::sleep(SESSION_QUERY_RETRY_INTERVAL);
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn inspect_once(home: &LatchHome, id: &SessionId) -> Result<SessionQuery> {
     ensure_config(home)?;
     let output = tmux(home)?
         .args([
@@ -426,12 +493,15 @@ pub fn inspect(home: &LatchHome, id: &SessionId) -> Result<Option<SessionInfo>> 
     if !output.status.success() {
         let diagnostic = String::from_utf8_lossy(&output.stderr);
         if classify_tmux_stderr(&diagnostic).is_some() {
-            return Ok(None);
+            return Ok(SessionQuery::Missing);
         }
         return Err(tmux_error("inspect session", output));
     }
     let row = String::from_utf8(output.stdout).context("tmux returned non-UTF-8 session data")?;
-    parse_info(row.trim_end_matches(['\r', '\n'])).map(Some)
+    Ok(match parse_row(row.trim_end_matches(['\r', '\n']))? {
+        Some(info) => SessionQuery::Found(info),
+        None => SessionQuery::Partial,
+    })
 }
 
 /// Captures the currently visible pane for input-safety classification.
@@ -854,17 +924,39 @@ fn display_session_row(line: &str) -> String {
     line.replace(SESSION_ROW_SEPARATOR, ",")
 }
 
-fn parse_info(line: &str) -> Result<SessionInfo> {
+/// Parses one session row, distinguishing a row tmux could not fully expand
+/// from a row Latch cannot read at all.
+///
+/// tmux drops trailing empty format fields, so the columns that resolve
+/// against a session's current window and active pane simply disappear while
+/// that window is being created or torn down. Those rows are transient: the
+/// session is real, its live facts are not knowable yet, and the next query
+/// returns a complete row. They are reported as `None` so one session in
+/// motion cannot fail a whole listing. Rows that are malformed for any other
+/// reason — separators sanitized away by a non-UTF-8 client locale, junk in a
+/// numeric column — remain hard errors with the row in the message.
+fn parse_row(line: &str) -> Result<Option<SessionInfo>> {
     let fields = split_session_row(line);
     // Live panes omit trailing empty dead-time/signal fields on some tmux
     // queries; require the eight live columns and treat the rest as optional.
     if fields.len() < 8 || fields.len() > 10 {
+        if fields.len() < 8 && SessionId::parse(fields[0]).is_ok() {
+            return Ok(None);
+        }
         bail!(
             "tmux returned an unexpected session row: {}",
             display_session_row(line)
         );
     }
     let field = |index: usize| fields.get(index).copied().unwrap_or("");
+    // A complete-looking row whose live columns are blank is the same
+    // half-expanded session, caught one field later.
+    if [3, 4, 5, 6, 7]
+        .into_iter()
+        .any(|index| field(index).is_empty())
+    {
+        return Ok(None);
+    }
     let dead = field(1) == "1";
     let exited_at = (dead && !field(8).is_empty())
         .then(|| field(8).parse::<u64>())
@@ -874,7 +966,7 @@ fn parse_info(line: &str) -> Result<SessionInfo> {
     let signal = (!field(9).is_empty())
         .then(|| parse_signal(field(9)))
         .transpose()?;
-    Ok(SessionInfo {
+    Ok(Some(SessionInfo {
         id: field(0).to_owned(),
         state: if dead {
             SessionState::Exited
@@ -890,7 +982,7 @@ fn parse_info(line: &str) -> Result<SessionInfo> {
         pane_pid: field(7).parse()?,
         exited_at,
         signal,
-    })
+    }))
 }
 
 fn parse_signal(raw: &str) -> Result<i32> {
@@ -1004,7 +1096,7 @@ mod tests {
 
     #[test]
     fn live_and_dead_tmux_rows_parse_with_empty_trailing_fields() {
-        let live = parse_info(&session_row(&[
+        let live = parse_row(&session_row(&[
             "ses_19ffc24df42abdc0",
             "0",
             "",
@@ -1016,7 +1108,8 @@ mod tests {
             "",
             "",
         ]))
-        .expect("live row");
+        .expect("live row")
+        .expect("complete row");
         assert_eq!(live.id, "ses_19ffc24df42abdc0");
         assert_eq!(live.state, SessionState::Running);
         assert_eq!(live.size, TerminalSize::new(144, 25));
@@ -1024,7 +1117,7 @@ mod tests {
         assert_eq!(live.pane_pid, 43998);
         assert!(live.exit_status.is_none());
 
-        let live_short = parse_info(&session_row(&[
+        let live_short = parse_row(&session_row(&[
             "ses_19ffc24df42abdc0",
             "0",
             "",
@@ -1034,10 +1127,11 @@ mod tests {
             "1",
             "43998",
         ]))
-        .expect("live row without trailing dead fields");
+        .expect("live row without trailing dead fields")
+        .expect("complete row");
         assert_eq!(live_short.state, SessionState::Running);
 
-        let dead = parse_info(&session_row(&[
+        let dead = parse_row(&session_row(&[
             "ses_19ffc224e3183df0",
             "1",
             "127",
@@ -1049,7 +1143,8 @@ mod tests {
             "1786641534",
             "",
         ]))
-        .expect("dead row");
+        .expect("dead row")
+        .expect("complete row");
         assert_eq!(dead.state, SessionState::Exited);
         assert_eq!(dead.exit_status, Some(127));
         assert_eq!(dead.pane_pid, 33762);
@@ -1059,8 +1154,60 @@ mod tests {
     fn sanitized_session_rows_fail_with_a_readable_error() {
         // tmux with a non-UTF-8 client locale flattens U+001F to '_'; the
         // parse error must show the row instead of invisible separators.
-        let error = parse_info("ses_abc_0__110_25_1786641713_1_9__").expect_err("sanitized row");
+        let error = parse_row("ses_abc_0__110_25_1786641713_1_9__").expect_err("sanitized row");
         assert!(error.to_string().contains("unexpected session row"));
+    }
+
+    #[test]
+    fn half_expanded_session_rows_are_transient_rather_than_errors() {
+        // tmux drops trailing empty fields, so a session whose current window
+        // is not resolvable yet arrives as a bare id.
+        assert!(parse_row("ses_1a009ce1f135e990")
+            .expect("bare id is transient")
+            .is_none());
+        assert!(parse_row(&session_row(&["ses_1a009ce1f135e990", "0", ""]))
+            .expect("truncated row is transient")
+            .is_none());
+        // The same session caught one field later: every column is present but
+        // the pane-backed ones are blank.
+        assert!(parse_row(&session_row(&[
+            "ses_1a009ce1f135e990",
+            "0",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+        ]))
+        .expect("blank live columns are transient")
+        .is_none());
+    }
+
+    #[test]
+    fn transient_rows_are_skipped_without_hiding_real_sessions() {
+        let rows = [
+            "ses_1a009ce1f135e990".to_owned(),
+            session_row(&[
+                "ses_19ffc24df42abdc0",
+                "0",
+                "",
+                "144",
+                "25",
+                "1786641713",
+                "1",
+                "43998",
+            ]),
+        ];
+        let parsed: Vec<SessionInfo> = rows
+            .iter()
+            .filter_map(|line| parse_row(line).transpose())
+            .collect::<Result<_>>()
+            .expect("a session in motion cannot fail the listing");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].id, "ses_19ffc24df42abdc0");
     }
 
     #[test]
