@@ -46,11 +46,12 @@ utf8proc_sha256="abfed50b6d4da51345713661370290f4f4747263ee73dc90356299dfc7990c7
 utf8proc_source="$output_dir/utf8proc-$utf8proc_version.tar.gz"
 utf8proc_build="$output_dir/.utf8proc-$target"
 
-cargo build --locked --release --package latch --target "$target"
+cargo build --locked --release --package latch --package latch-remote --target "$target"
 
 rm -rf "$stage_dir"
 mkdir -p "$stage_dir"
 cp "target/$target/release/latch" "$stage_dir/latch"
+cp "target/$target/release/latch-remote" "$stage_dir/latch-remote"
 
 curl --fail --silent --show-error --location --proto '=https' \
   "https://github.com/tmux/tmux/releases/download/$tmux_version/tmux-$tmux_version.tar.gz" \
@@ -94,15 +95,17 @@ fi
 
 if [[ -n "${LATCH_CODESIGN_IDENTITY:-}" ]]; then
   codesign --force --options runtime --timestamp --sign "$LATCH_CODESIGN_IDENTITY" "$stage_dir/latch"
+  codesign --force --options runtime --timestamp --sign "$LATCH_CODESIGN_IDENTITY" "$stage_dir/latch-remote"
   codesign --force --options runtime --timestamp --sign "$LATCH_CODESIGN_IDENTITY" "$stage_dir/latch-tmux"
   codesign --verify --strict --verbose=2 "$stage_dir/latch"
+  codesign --verify --strict --verbose=2 "$stage_dir/latch-remote"
   codesign --verify --strict --verbose=2 "$stage_dir/latch-tmux"
 fi
 
 mkdir -p "$output_dir"
 archive_path="$(cd "$output_dir" && pwd -P)/$archive_name"
 rm -f "$archive_path"
-(cd "$stage_dir" && /usr/bin/zip -q -X "$archive_path" latch latch-tmux)
+(cd "$stage_dir" && /usr/bin/zip -q -X "$archive_path" latch latch-remote latch-tmux)
 
 if [[ -n "${LATCH_NOTARY_PROFILE:-}" ]]; then
   : "${LATCH_CODESIGN_IDENTITY:?LATCH_NOTARY_PROFILE requires LATCH_CODESIGN_IDENTITY}"

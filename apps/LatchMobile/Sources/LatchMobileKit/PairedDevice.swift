@@ -44,6 +44,13 @@ public enum DevicePermission: String, Codable, CaseIterable, Equatable, Sendable
         default: return false
         }
     }
+
+    /// An unrecognized grant degrades to the least privilege rather than to
+    /// the default: a grant this build cannot model is not a grant it may
+    /// assume is generous.
+    public static func granted(_ raw: String?) -> DevicePermission {
+        raw.flatMap(DevicePermission.init(rawValue:)) ?? .observe
+    }
 }
 
 /// The Mac this phone is paired with, as pinned at pairing time.
@@ -128,6 +135,35 @@ public struct PairedDeviceRecord: Codable, Equatable, Sendable {
 
     /// Whether this phone may still connect.
     public var isActive: Bool { !revoked }
+
+    /// The bearer token signaling calls need. A pairing that never received
+    /// one cannot reach the control plane and has to be made again.
+    func signalingAccessToken() throws -> String {
+        guard let accessToken, !accessToken.isEmpty else {
+            throw ControlPlaneError.rejected(
+                "This pairing has no control-plane credential. Pair again from a new code on your Mac."
+            )
+        }
+        return accessToken
+    }
+
+    /// The Mac's control-plane id, which is the rendezvous target. A pairing
+    /// made without a control plane has none, and that is the manual
+    /// `latch serve` path rather than a crash.
+    func signalingMacDeviceId() throws -> String {
+        guard let deviceId = mac.deviceId, !deviceId.isEmpty else {
+            throw ControlPlaneError.manualLinkOnly
+        }
+        return deviceId
+    }
+
+    /// Applies a grant reported after pairing, including from rendezvous,
+    /// using the same unknown-value degrade as `PairingConfirmation.Device`.
+    public func updating(permission: DevicePermission) -> PairedDeviceRecord {
+        var next = self
+        next.permission = permission
+        return next
+    }
 }
 
 /// Where the paired-device record lives between launches.

@@ -8,7 +8,8 @@ final class RemoteAccessTests: XCTestCase {
         let arguments = try RemoteAccessSupervisor.arguments(
             bind: RemoteAccessSupervisor.defaultBind
         )
-        XCTAssertEqual(Array(arguments.prefix(2)), ["remote-access", "lan-serve"])
+        XCTAssertEqual(Array(arguments.prefix(2)), ["--bind", "0.0.0.0:0"])
+        XCTAssertEqual(Array(arguments.suffix(2)), ["--latch-bin", "/usr/local/bin/latch"])
         // The desktop app must never launch the plaintext gateway itself, hand
         // it a bearer token, or opt it into a non-loopback bind. The gateway is
         // started only by the helper, on an ephemeral loopback port, with a

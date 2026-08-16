@@ -1,15 +1,29 @@
 # Decision: remote-access transport and contract boundary
 
-**Status:** accepted for Phase 0 design; implementation is staged in later
-paired-device objectives.
+**Status:** accepted; implementation lives in `crates/latch-transport` and is
+distributed to iOS as the owned `LatchTransportFFI.xcframework`.
 
 ## Decision
 
 Use a standards-based **WebRTC data-channel transport with ICE/STUN/TURN** for
-future direct and relay connectivity. The desktop and native client integrate
-the platform-supported WebRTC stack; TURN is used only as an opaque network
-relay. Latch adds endpoint-authenticated application encryption and binds it
-to the paired device identities before any `/v1` bytes are carried.
+direct and relay connectivity. Both endpoints compile the same pinned Rust
+core rather than integrating unrelated platform stacks. TURN is used only as
+an opaque network relay. Latch adds endpoint-authenticated application
+encryption and binds it to the paired device identities before any `/v1` bytes
+are carried.
+
+The core composes `webrtc-ice`, `webrtc-dtls`, `webrtc-sctp`, and
+`webrtc-data` directly, below `RTCPeerConnection` and SDP. DTLS supplies the
+encryption SCTP requires but is not an identity boundary: its self-signed
+certificate is deliberately not the pairing pin. Noise XX runs above the one
+reliable ordered data channel and verifies the static key against
+`PairedDeviceRecord.mac.publicKey` before gateway traffic is sent.
+
+Direct-first is enforced by information flow, not candidate preference. The
+first ICE agent receives STUN entries only. Only after that attempt records a
+failure may the client request and supply Cloudflare TURN credentials to a
+fresh agent. A relay-to-direct recovery or any other selected-pair path change
+gates application traffic until capability discovery has run again.
 
 The Latch application layer depends only on the authenticated stream boundary
 below. It does not know whether the selected path is `local`, `direct`, or

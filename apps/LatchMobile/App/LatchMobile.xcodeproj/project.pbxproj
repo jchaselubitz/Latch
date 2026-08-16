@@ -15,6 +15,7 @@
 		ABCDEF0123456789ABCD0022 /* QRScannerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD001F /* QRScannerView.swift */; };
 		ABCDEF0123456789ABCD001D /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD001C /* Assets.xcassets */; };
 		ABCDEF0123456789ABCD001B /* LatchMobileKit in Frameworks */ = {isa = PBXBuildFile; productRef = ABCDEF0123456789ABCD001A /* LatchMobileKit */; };
+		ABCDEF0123456789ABCD0024 /* LatchTransportNative in Frameworks */ = {isa = PBXBuildFile; productRef = ABCDEF0123456789ABCD0023 /* LatchTransportNative */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -35,6 +36,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				ABCDEF0123456789ABCD001B /* LatchMobileKit in Frameworks */,
+				ABCDEF0123456789ABCD0024 /* LatchTransportNative in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -90,6 +92,7 @@
 			name = LatchMobile;
 			packageProductDependencies = (
 				ABCDEF0123456789ABCD001A /* LatchMobileKit */,
+				ABCDEF0123456789ABCD0023 /* LatchTransportNative */,
 			);
 			productName = LatchMobile;
 			productReference = ABCDEF0123456789ABCD0003 /* Latch.app */;
@@ -285,6 +288,10 @@
 		ABCDEF0123456789ABCD001A /* LatchMobileKit */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = LatchMobileKit;
+		};
+		ABCDEF0123456789ABCD0023 /* LatchTransportNative */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = LatchTransportNative;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

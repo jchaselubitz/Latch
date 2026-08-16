@@ -2,10 +2,14 @@
 resolver = "2"
 members = [
     "crates/latch",
+    "crates/latch-transport",
+    "crates/latch-transport-ffi",
+    "crates/latch-transport-bindgen",
+    "crates/latch-remote",
 ]
 
 [workspace.package]
-version = "0.2608161004.0"
+version = "0.2608162138.0"
 edition = "2021"
 rust-version = "1.82"
 license = "UNLICENSED"
@@ -15,7 +19,9 @@ repository = "https://github.com/Cooperativ/Latch"
 [workspace.dependencies]
 # Third-party versions are pinned here so every crate agrees.
 anyhow = "1"
+async-trait = "0.1"
 axum = { version = "0.8", features = ["ws"] }
+bytes = "1"
 clap = { version = "4", features = ["derive"] }
 # The process plane is POSIX: `setsid`, PTY allocation, process groups, signals,
 # and `SO_PEERCRED`/`LOCAL_PEERCRED` have no portable std equivalent.
@@ -25,6 +31,14 @@ serde_json = "1"
 snow = "0.9"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "time", "signal", "sync", "fs", "process"] }
+uniffi = { version = "0.32.0", features = ["tokio"] }
+uniffi-cli = { package = "uniffi", version = "0.32.0", features = ["cli"] }
+webrtc-data = "=0.17.2"
+webrtc-dtls = "=0.12.0"
+webrtc-ice = "=0.17.2"
+webrtc-sctp = "=0.17.2"
+webrtc-util = "=0.17.1"
+webrtc-util-legacy = { package = "webrtc-util", version = "=0.11.0", features = ["conn"], default-features = false }
 mdns-sd = "0.11"
 sha2 = "0.10"
 security-framework = "3"

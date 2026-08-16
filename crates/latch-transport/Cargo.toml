@@ -1,0 +1,22 @@
+[package]
+name = "latch-transport"
+description = "Shared ICE/DTLS/SCTP remote transport for Latch desktop and iOS."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+webrtc-data.workspace = true
+webrtc-dtls.workspace = true
+webrtc-ice.workspace = true
+webrtc-sctp.workspace = true
+webrtc-util.workspace = true
+webrtc-util-legacy.workspace = true

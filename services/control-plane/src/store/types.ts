@@ -41,6 +41,8 @@ export interface PublishPresenceInput {
   readonly deviceId: string;
   readonly accountId: string;
   readonly candidates: readonly Candidate[];
+  readonly iceUfrag?: string;
+  readonly icePwd?: string;
   readonly expiresAt: number;
 }
 
@@ -51,6 +53,8 @@ export interface CreateOfferInput {
   readonly targetDeviceId: string;
   readonly requestId: string;
   readonly candidates: readonly Candidate[];
+  readonly iceUfrag?: string;
+  readonly icePwd?: string;
   readonly expiresAt: number;
 }
 

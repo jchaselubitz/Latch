@@ -98,6 +98,13 @@ pub struct StopReport {
     pub stopped: bool,
 }
 
+/// `latch stop --all --json`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StopAllReport {
+    /// Every live session the command attempted to stop.
+    pub sessions: Vec<StopReport>,
+}
+
 /// `latch remove SESSION --json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemoveReport {

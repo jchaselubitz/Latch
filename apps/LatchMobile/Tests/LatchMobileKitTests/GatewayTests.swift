@@ -122,6 +122,15 @@ final class GatewayTests: XCTestCase {
         XCTAssertEqual(request.headers["Authorization"], "Bearer t0ken")
     }
 
+    func testAnEmptyTunnelTokenDoesNotProduceAnAuthorizationHeader() async throws {
+        StubProtocol.stub(path: "/v1/capabilities", body: fullDiscovery)
+        let link = try GatewayLink(address: "http://127.0.0.1:8787", token: "")
+        let gateway = LatchGateway(transport: HTTPSGatewayTransport(link: link), session: StubProtocol.session())
+        _ = try await gateway.discover()
+        let request = try XCTUnwrap(StubProtocol.requests.first)
+        XCTAssertNil(request.headers["Authorization"])
+    }
+
     func testA404OnDiscoveryIsTheLegacyGatewayNotAFailure() async throws {
         StubProtocol.stub(path: "/v1/capabilities", status: 404, body: "not found")
         let capabilities = try await gateway().discover()

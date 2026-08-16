@@ -3,7 +3,8 @@ import Darwin
 
 actor LatchClient {
     static let minimumProtocolVersion: UInt32 = 1
-    static let minimumProductVersion = "0.2608132217.0"
+    /// The first CLI release that supports the desktop stop-all action.
+    static let minimumProductVersion = "0.2608161432.0"
     static let preferences = UserDefaults(suiteName: "co.cooperativ.latch.desktop") ?? .standard
     static let installCommand = "curl -fsSL https://raw.githubusercontent.com/jchaselubitz/Latch/main/scripts/install-cli.sh | bash"
 
@@ -87,6 +88,9 @@ actor LatchClient {
     func inspect(_ id: String) throws -> InspectReport { try request(["inspect", id, "--json"]) }
     func stop(_ id: String, force: Bool) throws -> StopReport {
         try request(["stop", id] + (force ? ["--force"] : []) + ["--json"])
+    }
+    func stopAll() throws -> StopAllReport {
+        try request(["stop", "--all", "--yes", "--json"])
     }
     func rename(_ id: String, to name: String) throws -> RenameReport {
         try request(["rename", id, name, "--json"])

@@ -558,7 +558,7 @@ export function createRouter(dependencies: ApiDependencies): Router {
   router.post('/v1/presence', async (context) => {
     const caller = await requireDevice(context);
     const nowSeconds = unixSeconds(now);
-    const input = body(context, ['candidates']);
+    const input = body(context, ['candidates', 'iceUfrag', 'icePwd']);
     const parsed = validate.candidates(input, 'candidates', {
       max: config.maxCandidates,
       now: nowSeconds,
@@ -568,10 +568,12 @@ export function createRouter(dependencies: ApiDependencies): Router {
       nowSeconds + config.presenceTtlSeconds,
       Math.max(...parsed.map((candidate) => candidate.expiresAt)),
     );
+    const ice = validate.iceCredentials(input);
     const presence = await store.publishPresence({
       deviceId: caller.id,
       accountId: caller.accountId,
       candidates: parsed,
+      ...ice,
       expiresAt,
     });
     return {
@@ -611,6 +613,7 @@ export function createRouter(dependencies: ApiDependencies): Router {
         online: true,
         identityKey: target.publicKey,
         candidates: presence.candidates,
+        ...(presence.iceUfrag ? { iceUfrag: presence.iceUfrag, icePwd: presence.icePwd } : {}),
         expiresAt: presence.expiresAt,
       },
     };
@@ -627,7 +630,7 @@ export function createRouter(dependencies: ApiDependencies): Router {
   router.post('/v1/rendezvous', async (context) => {
     const caller = await requireDevice(context);
     const nowSeconds = unixSeconds(now);
-    const input = body(context, ['targetDeviceId', 'requestId', 'candidates', 'expiresAt']);
+    const input = body(context, ['targetDeviceId', 'requestId', 'candidates', 'iceUfrag', 'icePwd', 'expiresAt']);
     const targetDeviceId = validate.opaqueId(input, 'targetDeviceId');
     if (targetDeviceId === caller.id) {
       throw new HttpError(409, 'invalid_target', 'rendezvous cannot target the calling device');
@@ -653,6 +656,7 @@ export function createRouter(dependencies: ApiDependencies): Router {
       nowSeconds,
       config.rendezvousTtlSeconds,
     );
+    const ice = validate.iceCredentials(input);
     const presence = await store.getPresence(target.id, nowSeconds);
     if (!presence) {
       await audit(caller.accountId, target.id, 'rendezvous.request', 'denied');
@@ -665,6 +669,7 @@ export function createRouter(dependencies: ApiDependencies): Router {
       targetDeviceId: target.id,
       requestId,
       candidates: parsed,
+      ...ice,
       expiresAt: requestedExpiry,
     });
     await audit(caller.accountId, target.id, 'rendezvous.request', 'allowed');
@@ -676,6 +681,7 @@ export function createRouter(dependencies: ApiDependencies): Router {
         peerIdentityKey: target.publicKey,
         permission: pairing.permission,
         candidates: presence.candidates,
+        ...(presence.iceUfrag ? { iceUfrag: presence.iceUfrag, icePwd: presence.icePwd } : {}),
         expiresAt: Math.min(presence.expiresAt, requestedExpiry),
       },
     };
@@ -699,6 +705,7 @@ export function createRouter(dependencies: ApiDependencies): Router {
         peerDeviceId: requester.id,
         peerIdentityKey: requester.publicKey,
         candidates: offer.candidates,
+        ...(offer.iceUfrag ? { iceUfrag: offer.iceUfrag, icePwd: offer.icePwd } : {}),
         expiresAt: offer.expiresAt,
       });
     }
@@ -706,6 +713,19 @@ export function createRouter(dependencies: ApiDependencies): Router {
   });
 
   // --- Cloudflare Realtime TURN --------------------------------------------
+
+  /**
+   * Provides public STUN servers before a peer is known. This is deliberately
+   * independent of the relay switch: disabling TURN fallback must not disable
+   * direct server-reflexive candidate gathering.
+   */
+  router.get('/v1/ice-servers', async (context) => {
+    await requireDevice(context);
+    if (!turn) {
+      throw new HttpError(503, 'relay_not_configured', 'Cloudflare ICE is not configured');
+    }
+    return { status: 200, body: { iceServers: turn.stunServers() } };
+  });
 
   /** Issues Cloudflare ICE configuration only after existing pairing checks. */
   router.post('/v1/turn-credentials', async (context) => {

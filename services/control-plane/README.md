@@ -19,6 +19,9 @@ and it holds no terminal content and no gateway credentials.
   key during the Noise handshake.
 - **Cloudflare Realtime TURN** — after paired-device authorization, issuance
   of short-lived ICE configuration for that requesting device only.
+- **STUN discovery** — device-authenticated public STUN configuration for
+  server-reflexive candidate gathering, deliberately available even when
+  relay fallback is disabled.
 
 ## What it deliberately does not own
 
@@ -66,6 +69,7 @@ only a SHA-256 digest is stored.
 | `GET` | `/v1/presence/:id` | device | Read a paired peer's presence. |
 | `POST` | `/v1/rendezvous` | device | Offer candidates to a present peer. |
 | `GET` | `/v1/rendezvous` | device | Collect and consume inbound offers. |
+| `GET` | `/v1/ice-servers` | device | Get STUN-only ICE servers for direct candidate gathering. |
 | `POST` | `/v1/turn-credentials` | device | Issue short-lived Cloudflare ICE servers for an active paired peer. |
 
 Errors are `{ "error": "<machine code>", "reason": "<sentence>" }`. A pairing

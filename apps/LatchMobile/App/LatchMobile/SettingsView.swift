@@ -108,8 +108,12 @@ struct SettingsView: View {
     @ViewBuilder
     private var linkedSections: some View {
         Section("Linked computer") {
-            LabeledContent("Address", value: model.link?.url.absoluteString ?? "")
-                .lineLimit(1)
+            if model.linkSource == .paired {
+                LabeledContent("Connection", value: "Secure paired connection")
+            } else {
+                LabeledContent("Address", value: model.link?.url.absoluteString ?? "")
+                    .lineLimit(1)
+            }
             if let version = model.productVersion {
                 LabeledContent("Latch", value: version)
             }
@@ -145,21 +149,25 @@ struct SettingsView: View {
             Button("Check again") {
                 Task { await model.rediscover() }
             }
-            Button("Unlink", role: .destructive) {
+            Button(model.linkSource == .paired ? "Disconnect" : "Unlink", role: .destructive) {
                 confirmingUnlink = true
             }
             .confirmationDialog(
-                "Unlink this computer?",
+                model.linkSource == .paired ? "Disconnect from this Mac?" : "Unlink this computer?",
                 isPresented: $confirmingUnlink,
                 titleVisibility: .visible
             ) {
-                Button("Unlink", role: .destructive) {
+                Button(model.linkSource == .paired ? "Disconnect" : "Unlink", role: .destructive) {
                     model.unlink()
                     address = ""
                     token = ""
                 }
             } message: {
-                Text("The saved address and token are removed from this phone.")
+                Text(
+                    model.linkSource == .paired
+                        ? "This closes the current secure connection. Your pairing stays on this phone."
+                        : "The saved address and token are removed from this phone."
+                )
             }
         }
     }

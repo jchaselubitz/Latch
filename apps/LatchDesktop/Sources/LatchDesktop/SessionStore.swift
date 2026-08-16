@@ -259,6 +259,11 @@ final class SessionStore: ObservableObject {
         catch { errorMessage = error.localizedDescription }
     }
 
+    func stopAll() async {
+        do { _ = try await client.stopAll(); await refresh() }
+        catch { errorMessage = error.localizedDescription }
+    }
+
     func rename(_ id: String, to name: String) async {
         do { _ = try await client.rename(id, to: name); await refresh() }
         catch { errorMessage = error.localizedDescription }

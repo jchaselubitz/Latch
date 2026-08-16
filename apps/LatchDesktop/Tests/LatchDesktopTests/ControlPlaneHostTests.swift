@@ -12,17 +12,26 @@ private final class StubControlPlaneHostAPI: ControlPlaneHostAPI, @unchecked Sen
         let permission: DevicePermission
         let deviceToken: String
     }
+    struct Presence: Sendable {
+        let deviceToken: String
+        let candidates: [ControlPlaneCandidate]
+        let ice: ControlPlaneIceCredentials?
+    }
 
     struct Recorded: Sendable {
         var accounts: [String] = []
         var enrollments: [Enrollment] = []
         var rotations: [Rotation] = []
         var pairings: [Pairing] = []
+        var presences: [Presence] = []
+        var presenceClears: [String] = []
+        var relaySettings: [Bool] = []
     }
 
     private let lock = NSLock()
     private var recorded = Recorded()
     var devices: [ControlPlaneDevice] = []
+    var offers: [ControlPlaneRendezvousOffer] = []
     var failure: ControlPlaneHostError?
     /// Refused once, then cleared, so a recovery path can be driven without
     /// leaving the stub permanently broken.
@@ -96,6 +105,39 @@ private final class StubControlPlaneHostAPI: ControlPlaneHostAPI, @unchecked Sen
     func devices(deviceToken: String) async throws -> [ControlPlaneDevice] {
         if let failure { throw failure }
         return devices
+    }
+
+    func publishPresence(
+        deviceToken: String,
+        candidates: [ControlPlaneCandidate],
+        ice: ControlPlaneIceCredentials?
+    ) async throws -> ControlPlanePresence {
+        lock.lock()
+        recorded.presences.append(
+            Presence(deviceToken: deviceToken, candidates: candidates, ice: ice)
+        )
+        lock.unlock()
+        if let failure { throw failure }
+        return ControlPlanePresence(expiresAt: 1_700_000_090, ttlSeconds: 90)
+    }
+
+    func clearPresence(deviceToken: String) async throws {
+        lock.lock()
+        recorded.presenceClears.append(deviceToken)
+        lock.unlock()
+        if let failure { throw failure }
+    }
+
+    func rendezvousOffers(deviceToken: String) async throws -> [ControlPlaneRendezvousOffer] {
+        if let failure { throw failure }
+        return offers
+    }
+
+    func setRelayEnabled(accountToken: String, enabled: Bool) async throws {
+        lock.lock()
+        recorded.relaySettings.append(enabled)
+        lock.unlock()
+        if let failure { throw failure }
     }
 }
 
@@ -371,4 +413,215 @@ final class ControlPlaneHostTests: XCTestCase {
         let phones = try await host.pairedClients()
         XCTAssertEqual(phones.map(\.deviceID), ["dev_phone"])
     }
+
+    // MARK: - Presence and rendezvous
+
+    func testPresenceUsesTheListenerOnlyAndRefreshesInsideTheServiceWindow() async throws {
+        let api = StubControlPlaneHostAPI()
+        let host = makeHost(api: api)
+        try host.setAddress("https://control.example")
+
+        let presence = try await host.publishPresence(
+            publicKey: macKey,
+            macName: "Studio Mac",
+            listenerAddress: "192.168.1.20:49221",
+            now: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+
+        XCTAssertEqual(presence.ttlSeconds, 90)
+        let published = try XCTUnwrap(api.log.presences.first)
+        XCTAssertEqual(published.deviceToken, "dev_token")
+        XCTAssertEqual(published.candidates.count, 1)
+        let candidate = try XCTUnwrap(published.candidates.first)
+        XCTAssertEqual(candidate.address, "192.168.1.20:49221")
+        XCTAssertEqual(candidate.expiresAt, 1_700_000_090)
+        // The listener is a TCP listener, so it is published as one rather
+        // than as a UDP candidate no peer could reach.
+        XCTAssertEqual(candidate.type, "host")
+        XCTAssertEqual(candidate.protocol, "tcp")
+        XCTAssertEqual(candidate.tcpType, "passive")
+        XCTAssertEqual(candidate.component, 1)
+        XCTAssertNotNil(candidate.priority)
+        XCTAssertNotNil(candidate.foundation)
+        XCTAssertNil(candidate.relatedAddress)
+    }
+
+    /// The ICE credentials belong to the agent, not to a presence window. A
+    /// phone that reads them at the start of a window and begins connectivity
+    /// checks at the end of it must still authenticate.
+    func testIceCredentialsAreCarriedUnchangedAcrossPresenceRefreshes() async throws {
+        let api = StubControlPlaneHostAPI()
+        let host = makeHost(api: api)
+        try host.setAddress("https://control.example")
+        let ice = ControlPlaneIceCredentials.generate()
+
+        for offset in [0, 30, 60] {
+            _ = try await host.publishPresence(
+                publicKey: macKey,
+                macName: "Studio Mac",
+                listenerAddress: "192.168.1.20:49221",
+                ice: ice,
+                now: Date(timeIntervalSince1970: 1_700_000_000 + TimeInterval(offset))
+            )
+        }
+
+        let published = api.log.presences
+        XCTAssertEqual(published.count, 3)
+        XCTAssertEqual(published.map(\.ice), Array(repeating: ice, count: 3))
+        // The foundation is derived from type, transport, and base address, so
+        // it is stable too: a peer must not see the candidate re-form.
+        XCTAssertEqual(Set(published.compactMap(\.candidates.first?.foundation)).count, 1)
+        XCTAssertTrue(ice.ufrag.count >= 4 && ice.pwd.count >= 22)
+        XCTAssertNotEqual(ice, ControlPlaneIceCredentials.generate())
+    }
+
+    /// Once the ICE agent supplies candidates, a partially-specified one is
+    /// refused here rather than costing a round trip and a 400.
+    func testPresenceRefusesAgentCandidatesMissingRequiredIceFields() async throws {
+        let api = StubControlPlaneHostAPI()
+        let host = makeHost(api: api)
+        try host.setAddress("https://control.example")
+        let malformed = [
+            // A type with no priority, foundation, component, or protocol.
+            ControlPlaneCandidate(address: "203.0.113.7:51000", expiresAt: 1_700_000_060, type: "srflx"),
+            // Related address without its port.
+            ControlPlaneCandidate(
+                address: "203.0.113.7:51000",
+                expiresAt: 1_700_000_060,
+                type: "srflx",
+                priority: 1_694_498_815,
+                foundation: "abc",
+                component: 1,
+                protocol: "udp",
+                relatedAddress: "192.168.1.20"
+            ),
+            // A loopback related address would leak nothing useful and is
+            // exactly what the address rule exists to keep out.
+            ControlPlaneCandidate(
+                address: "203.0.113.7:51000",
+                expiresAt: 1_700_000_060,
+                type: "srflx",
+                priority: 1_694_498_815,
+                foundation: "abc",
+                component: 1,
+                protocol: "udp",
+                relatedAddress: "127.0.0.1",
+                relatedPort: 49_221
+            ),
+            // tcpType on a UDP candidate.
+            ControlPlaneCandidate(
+                address: "203.0.113.7:51000",
+                expiresAt: 1_700_000_060,
+                type: "srflx",
+                priority: 1_694_498_815,
+                foundation: "abc",
+                component: 1,
+                protocol: "udp",
+                tcpType: "passive"
+            ),
+        ]
+
+        for candidate in malformed {
+            await XCTAssertThrowsErrorAsync {
+                _ = try await host.publishPresence(
+                    publicKey: self.macKey,
+                    macName: "Studio Mac",
+                    listenerAddress: "192.168.1.20:49221",
+                    agentCandidates: [candidate],
+                    now: Date(timeIntervalSince1970: 1_700_000_000)
+                )
+            }
+        }
+        XCTAssertTrue(api.log.presences.isEmpty)
+    }
+
+    func testPresenceCarriesTheAgentsGatheredCandidatesAlongsideTheHostOne() async throws {
+        let api = StubControlPlaneHostAPI()
+        let host = makeHost(api: api)
+        try host.setAddress("https://control.example")
+        let reflexive = ControlPlaneCandidate(
+            address: "203.0.113.7:51000",
+            expiresAt: 1_700_000_060,
+            type: "srflx",
+            priority: 1_694_498_815,
+            foundation: "abc",
+            component: 1,
+            protocol: "udp",
+            relatedAddress: "192.168.1.20",
+            relatedPort: 49_221
+        )
+
+        _ = try await host.publishPresence(
+            publicKey: macKey,
+            macName: "Studio Mac",
+            listenerAddress: "192.168.1.20:49221",
+            agentCandidates: [reflexive],
+            now: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+
+        let published = try XCTUnwrap(api.log.presences.first)
+        XCTAssertEqual(published.candidates.map(\.type), ["host", "srflx"])
+        XCTAssertEqual(published.candidates.last, reflexive)
+    }
+
+    func testPresenceRefusesLoopbackHostnamesAndInvalidPortsBeforePublishing() async throws {
+        let api = StubControlPlaneHostAPI()
+        let host = makeHost(api: api)
+        try host.setAddress("https://control.example")
+
+        for address in ["127.0.0.1:49221", "[::1]:49221", "mac.example:49221", "192.168.1.20:0"] {
+            await XCTAssertThrowsErrorAsync {
+                _ = try await host.publishPresence(
+                    publicKey: self.macKey,
+                    macName: "Studio Mac",
+                    listenerAddress: address
+                )
+            }
+        }
+        XCTAssertTrue(api.log.presences.isEmpty)
+    }
+
+    func testPresenceCanBeClearedWithoutReenrolling() async throws {
+        let api = StubControlPlaneHostAPI()
+        let host = makeHost(api: api)
+        try host.setAddress("https://control.example")
+        _ = try await host.enrollment(publicKey: macKey, name: "Studio Mac")
+
+        await host.clearPresence()
+
+        XCTAssertEqual(api.log.presenceClears, ["dev_token"])
+        XCTAssertEqual(api.log.enrollments.count, 1)
+    }
+
+    func testRendezvousOffersAndRelaySwitchUseHostCredentials() async throws {
+        let api = StubControlPlaneHostAPI()
+        api.offers = [
+            ControlPlaneRendezvousOffer(
+                requestID: "request-123",
+                peerDeviceID: "dev_0123456789abcdef0123456789abcdef",
+                peerIdentityKey: String(repeating: "2", count: 64),
+                candidates: [ControlPlaneCandidate(address: "10.0.0.4:4000", expiresAt: 1_700_000_050)],
+                expiresAt: 1_700_000_050
+            ),
+        ]
+        let host = makeHost(api: api)
+        try host.setAddress("https://control.example")
+        _ = try await host.enrollment(publicKey: macKey, name: "Studio Mac")
+
+        let collected = try await host.rendezvousOffers()
+        XCTAssertEqual(collected, api.offers)
+        try await host.setRelayEnabled(false)
+        XCTAssertEqual(api.log.relaySettings, [false])
+    }
+}
+
+private func XCTAssertThrowsErrorAsync(
+    _ expression: @escaping () async throws -> Void,
+    file: StaticString = #filePath,
+    line: UInt = #line
+) async {
+    do {
+        try await expression()
+        XCTFail("expected an error", file: file, line: line)
+    } catch {}
 }

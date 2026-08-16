@@ -104,4 +104,13 @@ public struct SessionSurface: Equatable, Sendable {
         self.composer = composer
         self.interactionControls = interactionControls
     }
+
+    /// Applies the grant attached to a paired route after discovery has
+    /// determined which controls the gateway implements. The Mac remains the
+    /// authority for every operation, but an observe-only phone must not
+    /// present a composer it cannot use.
+    public func restricted(to permission: DevicePermission?) -> SessionSurface {
+        guard let permission, !permission.permits(.interact) else { return self }
+        return SessionSurface(chat: chat, composer: false, interactionControls: false)
+    }
 }

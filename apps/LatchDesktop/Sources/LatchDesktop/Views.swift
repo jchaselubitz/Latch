@@ -7,6 +7,7 @@ struct SessionsView: View {
     @ObservedObject var updates: UpdateController
     @State private var showingCreate = false
     @State private var showingPrune = false
+    @State private var showingStopAll = false
 
     var body: some View {
         NavigationSplitView {
@@ -54,6 +55,10 @@ struct SessionsView: View {
                     }
                     .keyboardShortcut("n")
                     .disabled(!store.canCreateSessions)
+                    Button("Stop All…", role: .destructive) {
+                        showingStopAll = true
+                    }
+                    .disabled(!store.sessions.contains(where: { $0.state.isLive }))
                 }
             }
         } detail: {
@@ -102,6 +107,16 @@ struct SessionsView: View {
         }
         .sheet(isPresented: $showingPrune) {
             PruneView(store: store, isPresented: $showingPrune)
+        }
+        .confirmationDialog(
+            "Stop all running sessions?",
+            isPresented: $showingStopAll,
+            titleVisibility: .visible
+        ) {
+            Button("Stop All", role: .destructive) { Task { await store.stopAll() } }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Stopping ends every live child process but retains each final screen for later inspection.")
         }
         .sheet(isPresented: $updates.isPresented) {
             UpdateView(updates: updates)

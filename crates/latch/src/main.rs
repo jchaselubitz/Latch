@@ -139,10 +139,17 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Terminate a session's process group.
+    /// Terminate one session, or every live session with --all --yes.
     Stop {
         /// Session id or name.
-        session: String,
+        #[arg(required_unless_present = "all", conflicts_with = "all")]
+        session: Option<String>,
+        /// Stop every currently running session. Requires --yes.
+        #[arg(long, requires = "yes")]
+        all: bool,
+        /// Confirm a stop-all request.
+        #[arg(long)]
+        yes: bool,
         /// Skip the graceful signal and force the stop immediately.
         #[arg(long)]
         force: bool,
@@ -581,21 +588,36 @@ fn dispatch(command: Option<Command>) -> Result<()> {
         }
         Some(Command::Stop {
             session,
+            all,
+            yes: _,
             force,
             json,
         }) => {
-            let report = manage::stop(StopRequest {
-                home: LatchHome::from_env()?,
-                session,
-                force,
-            })?;
-            if json {
-                println!("{}", serde_json::to_string(&report)?);
+            let home = LatchHome::from_env()?;
+            if all {
+                let report = manage::stop_all(home, force)?;
+                if json {
+                    println!("{}", serde_json::to_string(&report)?);
+                } else {
+                    println!("stopped {} session(s)", report.sessions.len());
+                }
+                if let Some(session) = report.sessions.iter().find(|session| !session.stopped) {
+                    bail!("session {} is still running after stop", session.id);
+                }
             } else {
-                println!("{} {}", report.id, report.state);
-            }
-            if !report.stopped {
-                bail!("session {} is still running after stop", report.id);
+                let report = manage::stop(StopRequest {
+                    home,
+                    session: session.expect("clap requires a session when --all is absent"),
+                    force,
+                })?;
+                if json {
+                    println!("{}", serde_json::to_string(&report)?);
+                } else {
+                    println!("{} {}", report.id, report.state);
+                }
+                if !report.stopped {
+                    bail!("session {} is still running after stop", report.id);
+                }
             }
             Ok(())
         }

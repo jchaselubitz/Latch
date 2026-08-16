@@ -33,10 +33,12 @@ fi
 ditto -x -k "$work_dir/$archive" "$work_dir/extracted"
 codesign --verify --strict "$work_dir/extracted/latch"
 codesign --verify --strict "$work_dir/extracted/latch-tmux"
+codesign --verify --strict "$work_dir/extracted/latch-remote"
 "$work_dir/extracted/latch-tmux" -V | grep -Fx "tmux 3.7b"
 
 mkdir -p "$HOME/.local/bin"
 install -m 0755 "$work_dir/extracted/latch-tmux" "$HOME/.local/bin/latch-tmux"
+install -m 0755 "$work_dir/extracted/latch-remote" "$HOME/.local/bin/latch-remote"
 install -m 0755 "$work_dir/extracted/latch" "$HOME/.local/bin/latch"
 printf 'Installed Latch %s payload at %s\n' "$version" "$HOME/.local/bin"
 printf 'If latch is not on PATH, add $HOME/.local/bin to your shell configuration.\n'

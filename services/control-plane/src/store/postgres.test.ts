@@ -77,9 +77,13 @@ describe('postgres store', { skip: connectionString ? false : 'TEST_DATABASE_URL
       deviceId: host.id,
       accountId: account.id,
       candidates: [{ address: '198.51.100.4:52111', expiresAt: now + 90 }],
+      iceUfrag: 'hostUfrag_123',
+      icePwd: 'hostPassword_1234567890',
       expiresAt: now + 90,
     });
     assert.equal((await store.getPresence(host.id, now))?.candidates[0]?.address, '198.51.100.4:52111');
+    assert.equal((await store.getPresence(host.id, now))?.iceUfrag, 'hostUfrag_123');
+    assert.equal((await store.getPresence(host.id, now))?.icePwd, 'hostPassword_1234567890');
     // An expired row is never served even before the sweeper removes it.
     assert.equal(await store.getPresence(host.id, now + 91), null);
 
@@ -90,9 +94,14 @@ describe('postgres store', { skip: connectionString ? false : 'TEST_DATABASE_URL
       targetDeviceId: host.id,
       requestId: 'request-0001',
       candidates: [{ address: '203.0.113.9:41000', expiresAt: now + 60 }],
+      iceUfrag: 'clientUfrag_123',
+      icePwd: 'clientPassword_12345678',
       expiresAt: now + 60,
     });
-    assert.equal((await store.takeOffers(host.id, now)).length, 1);
+    const offers = await store.takeOffers(host.id, now);
+    assert.equal(offers.length, 1);
+    assert.equal(offers[0]?.iceUfrag, 'clientUfrag_123');
+    assert.equal(offers[0]?.icePwd, 'clientPassword_12345678');
     assert.equal((await store.takeOffers(host.id, now)).length, 0);
 
     const ticket = await store.createRelayTicket({

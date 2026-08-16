@@ -25,7 +25,7 @@ enum RemoteAccessSupervisorError: LocalizedError, Equatable {
 
 /// Launches and babysits the authenticated remote-access helper.
 ///
-/// The helper (`latch remote-access lan-serve`) is the only process the app
+/// The dedicated `latch-remote` helper is the only process the app
 /// starts for remote access. The helper — not this app — supervises the
 /// plaintext `latch serve` gateway on an ephemeral loopback port with a
 /// per-launch bearer token it mints itself. Keeping that split means the
@@ -43,13 +43,17 @@ final class RemoteAccessSupervisor: @unchecked Sendable {
     static let forbiddenArguments: Set<String> = ["serve", "--allow-remote", "--token-file"]
 
     private let executableURL: URL
+    private let latchExecutableURL: URL
     private let bind: String
     private let lock = NSLock()
     private var process: Process?
     private var stoppedIntentionally = false
 
     init(executableURL: URL, bind: String = RemoteAccessSupervisor.defaultBind) {
+        latchExecutableURL = executableURL
         self.executableURL = executableURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("latch-remote")
         self.bind = bind
     }
 
@@ -57,9 +61,9 @@ final class RemoteAccessSupervisor: @unchecked Sendable {
     ///
     /// Exposed for tests: the guarantee that the desktop app never publishes
     /// `latch serve` is only as good as what it actually execs.
-    static func arguments(bind: String) throws -> [String] {
+    static func arguments(bind: String, latchExecutable: String = "/usr/local/bin/latch") throws -> [String] {
         try validate(bind: bind)
-        let arguments = ["remote-access", "lan-serve", "--bind", bind]
+        let arguments = ["--bind", bind, "--latch-bin", latchExecutable]
         if let forbidden = arguments.first(where: { forbiddenArguments.contains($0) }) {
             throw RemoteAccessSupervisorError.forbiddenArgument(forbidden)
         }
@@ -102,7 +106,7 @@ final class RemoteAccessSupervisor: @unchecked Sendable {
     /// Starts the helper and resolves when it exits. Throws immediately if the
     /// launch itself is unsafe or fails.
     func run() async throws {
-        let arguments = try Self.arguments(bind: bind)
+        let arguments = try Self.arguments(bind: bind, latchExecutable: latchExecutableURL.path)
         let process = Process()
         let diagnostics = Pipe()
         process.executableURL = executableURL

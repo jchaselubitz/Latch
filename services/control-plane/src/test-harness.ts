@@ -45,6 +45,7 @@ export class FakeTurnProvider implements TurnProvider {
       { urls: ['turn:turn.cloudflare.com:3478?transport=udp'], username: `turn-user-${this.issued}`, credential: `turn-password-${this.issued}-only-returned-to-device` },
     ];
   }
+  stunServers() { return [{ urls: ['stun:stun.cloudflare.com:3478'] }]; }
   async revoke(username: string) { this.revoked.push(username); }
 }
 
@@ -150,4 +151,16 @@ export async function enrollPair(
 /** A candidate that is valid relative to the harness clock. */
 export function candidate(harness: Harness, address = '203.0.113.7:41234', lifetime = 60) {
   return { address, expiresAt: harness.nowSeconds() + lifetime };
+}
+
+/** A fully described candidate for ICE signaling contract tests. */
+export function iceCandidate(harness: Harness, address = '203.0.113.7:41234', lifetime = 60) {
+  return {
+    ...candidate(harness, address, lifetime),
+    type: 'host',
+    priority: 2_130_706_431,
+    foundation: '1',
+    component: 1,
+    protocol: 'udp',
+  };
 }

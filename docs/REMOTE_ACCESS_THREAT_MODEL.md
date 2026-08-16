@@ -31,8 +31,11 @@ repository paths, or prompt answers.
    during every connection. Authorization is checked on connection and on each
    privileged operation; a client-provided device ID is never authoritative.
 4. **Endpoints → rendezvous/relay.** The control plane coordinates candidates
-   only. The relay forwards authenticated opaque frames and cannot terminate
-   end-to-end application encryption.
+   only. Cloudflare Realtime TURN is the named third-party relay: it sees
+   ciphertext, endpoint network metadata, sizes, and timing, but cannot
+   terminate the Noise encryption or read application content. DTLS is
+   transport encryption required by SCTP, not the paired-device identity;
+   Noise XX above the data channel proves the static key pinned during pairing.
 5. **Desktop helper → readiness file.** The readiness document identifies a
    locally bound process but intentionally excludes the gateway token. The
    supervisor provisions an owner-only parent directory; the file is owner-only.

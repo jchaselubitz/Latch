@@ -67,8 +67,9 @@ public struct PairingConfirmation: Decodable, Equatable, Sendable {
             // An unrecognized permission degrades to the least privilege
             // rather than to the default: a grant this build cannot model is
             // not a grant it may assume is generous.
-            let granted = try container.decodeIfPresent(String.self, forKey: .permission)
-            permission = granted.flatMap(DevicePermission.init(rawValue:)) ?? .observe
+            permission = DevicePermission.granted(
+                try container.decodeIfPresent(String.self, forKey: .permission)
+            )
             revoked = try container.decodeIfPresent(Bool.self, forKey: .revoked) ?? false
         }
     }
@@ -115,6 +116,17 @@ public enum ControlPlaneError: Error, Equatable, Sendable {
     /// The Mac's key in the answer is not the key in the QR code. Either the
     /// service is lying about which Mac this is, or something is in the middle.
     case identityMismatch(expected: String, received: String)
+    /// The paired Mac has no current presence. Retryable: it may come online
+    /// inside the next presence window.
+    case macNotReachable(String)
+    /// Relay credentials were refused because the account kill switch is off.
+    /// Direct and LAN paths are unaffected.
+    case relayDisabled(String)
+    /// This pairing has no control-plane Mac id, so only a typed `latch serve`
+    /// address can reach it.
+    case manualLinkOnly
+    /// A candidate the phone was about to publish would be rejected.
+    case invalidCandidate(String)
     /// Any other non-2xx answer.
     case http(status: Int, path: String, reason: String)
     /// The answer did not match the contract.
@@ -139,6 +151,17 @@ public enum ControlPlaneError: Error, Equatable, Sendable {
             This Mac answered with identity \(HexCoding.abbreviate(received)), but the code \
             was for \(HexCoding.abbreviate(expected)). Pairing stopped; do not confirm it.
             """
+        case .macNotReachable(let reason):
+            let detail = reason.isEmpty ? "it has not published a way to reach it" : reason
+            return "Your Mac is not reachable right now: \(detail)."
+        case .relayDisabled(let reason):
+            return reason.isEmpty
+                ? "Relay is disabled for this account. Direct or LAN access still works if your Mac is on the same network."
+                : reason
+        case .manualLinkOnly:
+            return "This pairing has no Mac to reach over the control plane. Link with a typed latch serve address instead."
+        case .invalidCandidate(let reason):
+            return reason
         case .http(let status, let path, let reason):
             return "\(path) failed (\(status)): \(reason)"
         case .malformedResponse(let detail):
@@ -150,10 +173,11 @@ public enum ControlPlaneError: Error, Equatable, Sendable {
 
     /// Whether trying the same call again could plausibly work. Authentication
     /// and authorization failures are explicit and non-retryable, per the
-    /// remote-access failure rules.
+    /// remote-access failure rules. A missing presence window is the exception:
+    /// the Mac may publish again on its next refresh.
     public var isRetryable: Bool {
         switch self {
-        case .transport, .http: return true
+        case .transport, .http, .macNotReachable: return true
         default: return false
         }
     }
@@ -175,8 +199,12 @@ public protocol ControlPlaneClient: Sendable {
     func revoke(deviceId: String, accessToken: String) async throws
 }
 
-/// The HTTP implementation.
-public actor HTTPControlPlaneClient: ControlPlaneClient {
+/// The HTTP implementation of pairing and signaling.
+///
+/// Pairing and signaling share one client because they share one credential:
+/// the device bearer stored on `PairedDeviceRecord`. They stay separate
+/// protocols so a pairing-only stub does not have to pretend to rendezvous.
+public actor HTTPControlPlaneClient: ControlPlaneClient, SignalingClient {
     private let baseURL: URL
     private let session: URLSession
     private let decoder = JSONDecoder()
@@ -223,11 +251,11 @@ public actor HTTPControlPlaneClient: ControlPlaneClient {
         init(from decoder: Decoder) throws {}
     }
 
-    private func escape(_ value: String) -> String {
+    func escape(_ value: String) -> String {
         value.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? value
     }
 
-    private func request<T: Decodable>(
+    func request<T: Decodable>(
         path: String,
         method: String,
         body: Data?,
@@ -280,7 +308,20 @@ public actor HTTPControlPlaneClient: ControlPlaneClient {
         let code = body?["error"] as? String
         let reason = body?["reason"] as? String ?? code ?? ""
         switch status {
-        case 401, 403:
+        case 401:
+            return .rejected(
+                reason.isEmpty
+                    ? "The control plane rejected this pairing. The code may have been used already."
+                    : reason
+            )
+        case 403:
+            if Self.isRelayDisabled(code: code, reason: reason) {
+                return .relayDisabled(
+                    reason.isEmpty
+                        ? "Relay is disabled for this account. Direct or LAN access still works if your Mac is on the same network."
+                        : reason
+                )
+            }
             return .rejected(
                 reason.isEmpty
                     ? "The control plane rejected this pairing. The code may have been used already."
@@ -289,7 +330,11 @@ public actor HTTPControlPlaneClient: ControlPlaneClient {
         case 404:
             return .pairingUnavailable
         case 409:
-            return code == "already_paired" ? .alreadyPaired : .pairingUnavailable
+            if code == "already_paired" { return .alreadyPaired }
+            if code == "target_offline" {
+                return .macNotReachable(reason.isEmpty ? "target device has no current presence" : reason)
+            }
+            return .pairingUnavailable
         case 410:
             return .pairingExpired
         default:
@@ -299,5 +344,12 @@ public actor HTTPControlPlaneClient: ControlPlaneClient {
                 reason: reason.isEmpty ? "request failed" : reason
             )
         }
+    }
+
+    /// The account relay kill switch is a different recovery from a revoked
+    /// pairing: the person should try LAN/direct, not scan a new code.
+    private static func isRelayDisabled(code: String?, reason: String) -> Bool {
+        let haystack = "\(code ?? "") \(reason)".lowercased()
+        return haystack.contains("relay access is disabled") || haystack.contains("relay_disabled")
     }
 }

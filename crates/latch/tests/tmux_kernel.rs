@@ -399,6 +399,37 @@ fn stop_reports_failure_when_the_process_survives_sigkill() {
 }
 
 #[test]
+fn stop_all_requires_confirmation_and_stops_every_live_session() {
+    let harness = Harness::new();
+    let first = harness.create("sleep 30");
+    let second = harness.create("sleep 30");
+
+    let refused = harness
+        .command()
+        .args(["stop", "--all", "--json"])
+        .output()
+        .expect("run unconfirmed stop all");
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("--yes"));
+
+    let stopped = harness.json(&["stop", "--all", "--yes", "--json"]);
+    let ids = stopped["sessions"]
+        .as_array()
+        .expect("stop-all sessions")
+        .iter()
+        .map(|session| session["id"].as_str().expect("session id"))
+        .collect::<Vec<_>>();
+    assert_eq!(ids.len(), 2);
+    assert!(ids.contains(&first["session"]["id"].as_str().unwrap()));
+    assert!(ids.contains(&second["session"]["id"].as_str().unwrap()));
+    assert!(stopped["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|session| session["stopped"] == true));
+}
+
+#[test]
 fn rename_refuses_a_name_already_used_by_another_session() {
     let harness = Harness::new();
     let first = harness.create("sleep 30");

@@ -87,6 +87,7 @@ struct StopReport: Codable, Sendable {
     let state: SessionState
     let stopped: Bool
 }
+struct StopAllReport: Codable, Sendable { let sessions: [StopReport] }
 struct RenameReport: Codable, Sendable { let id: String; let name: String }
 struct RemoveReport: Codable, Sendable { let id: String; let removed: Bool }
 

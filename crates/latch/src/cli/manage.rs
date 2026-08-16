@@ -13,7 +13,7 @@ use crate::cli::attach;
 use crate::cli::json::{
     CapabilitiesReport, CapabilityFlags, ConfigReport, DoctorFinding, DoctorReport, InspectReport,
     ListReport, PruneReport, RemoveReport, RenameReport, ResizeReport, RetainedSession,
-    SessionSummary, StopReport,
+    SessionSummary, StopAllReport, StopReport,
 };
 use crate::engine::{self, SessionState, PROTOCOL_VERSION};
 use crate::session::manifest::TerminalSize;
@@ -131,6 +131,23 @@ pub fn stop(request: StopRequest) -> anyhow::Result<StopReport> {
         state: state.as_wire().to_owned(),
         stopped: state != SessionState::Running,
     })
+}
+
+/// Stops every currently running session while retaining their dead panes.
+pub fn stop_all(home: LatchHome, force: bool) -> anyhow::Result<StopAllReport> {
+    let sessions = list(ListOptions { home: home.clone() })?
+        .sessions
+        .into_iter()
+        .filter(|session| session.state == SessionState::Running.as_wire())
+        .map(|session| {
+            stop(StopRequest {
+                home: home.clone(),
+                session: session.id,
+                force,
+            })
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    Ok(StopAllReport { sessions })
 }
 
 /// Removal request.

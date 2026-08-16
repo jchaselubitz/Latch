@@ -1,0 +1,13 @@
+[package]
+name = "latch-transport-bindgen"
+description = "Host-only UniFFI generator for the Latch transport XCFramework."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[dependencies]
+uniffi-cli.workspace = true
+

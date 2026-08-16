@@ -52,6 +52,20 @@ final class RemoteAccessController: ObservableObject {
     private var supervision: Task<Void, Never>?
     private var pollingTask: Task<Void, Never>?
     private var enrollmentWatch: Task<Void, Never>?
+    /// Publishes the helper's authenticated listener, never the loopback
+    /// gateway. It is separate from supervision because a healthy helper can
+    /// temporarily have no listener to advertise.
+    private var presenceTask: Task<Void, Never>?
+    /// Offers that passed a fresh local device-state check. They are kept only
+    /// in memory for the transport layer that will consume them; a control
+    /// plane offer is never enough to authorize the local gateway.
+    private(set) var approvedRendezvousOffers: [ControlPlaneRendezvousOffer] = []
+    /// The ICE credentials presence advertises. They belong to the agent that
+    /// answers connectivity checks — the helper — so they are generated once
+    /// per helper run and survive every presence refresh in between. Rotating
+    /// them on the refresh timer would strand a phone that read them early in
+    /// a presence window and started its checks late in it.
+    private(set) var iceCredentials: ControlPlaneIceCredentials?
     private var terminationObserver: NSObjectProtocol?
 
     convenience init() {
@@ -108,6 +122,7 @@ final class RemoteAccessController: ObservableObject {
                 startSupervision()
                 await waitForListener()
             } else {
+                stopPresence(clear: true)
                 stopSupervision()
                 try await client.disableRemoteAccess()
                 phase = .off
@@ -119,6 +134,7 @@ final class RemoteAccessController: ObservableObject {
             // A failed enable must not leave a helper running behind a UI that
             // says remote access is off.
             stopSupervision()
+            stopPresence(clear: true)
             phase = .failed(error.localizedDescription)
             errorMessage = error.localizedDescription
             await refresh()
@@ -132,6 +148,9 @@ final class RemoteAccessController: ObservableObject {
         supervision = Task { [weak self] in
             var attempt = 0
             while !Task.isCancelled {
+                // A restarted helper is a new agent, so it gets new credentials
+                // here and nowhere else.
+                self?.iceCredentials = .generate()
                 let supervisor = RemoteAccessSupervisor(executableURL: executableURL)
                 RemoteAccessController.supervisorRegistry.register(supervisor)
                 defer { RemoteAccessController.supervisorRegistry.remove(supervisor) }
@@ -154,6 +173,9 @@ final class RemoteAccessController: ObservableObject {
     private func stopSupervision() {
         supervision?.cancel()
         supervision = nil
+        // No helper, no agent: the credentials would authenticate checks
+        // nothing is listening for.
+        iceCredentials = nil
         // Cancelling the task is not enough on its own: the child is only
         // reaped once it is asked to terminate.
         RemoteAccessController.terminateHelpers()
@@ -190,6 +212,69 @@ final class RemoteAccessController: ObservableObject {
         }
     }
 
+    /// Starts a refresh loop only while a real non-loopback listener exists.
+    /// The control plane returns its own TTL, so the loop wakes at a third of
+    /// that window rather than baking an environment-specific lifetime into
+    /// the desktop app.
+    private func startPresence() {
+        guard presenceTask == nil, status.enabled, status.listenerAddress != nil,
+              controlPlane.isConfigured else { return }
+        presenceTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                let ttl = await self.publishPresenceAndCollectOffers()
+                let delay = max(1, (ttl ?? 15) / 3)
+                try? await Task.sleep(nanoseconds: delay * 1_000_000_000)
+            }
+        }
+    }
+
+    private func stopPresence(clear: Bool) {
+        presenceTask?.cancel()
+        presenceTask = nil
+        approvedRendezvousOffers = []
+        guard clear else { return }
+        Task { [controlPlane] in await controlPlane.clearPresence() }
+    }
+
+    /// Publishing and collection are deliberately adjacent: an offer reaches
+    /// the future transport only after a fresh local device-state check. That
+    /// avoids treating a still-valid control-plane offer as authorization after
+    /// this Mac revoked the phone; established streams retain the CLI's 250ms
+    /// device-state check.
+    private func publishPresenceAndCollectOffers() async -> UInt64? {
+        guard status.enabled, let listener = status.listenerAddress,
+              let publicKey = status.publicKey, controlPlane.isConfigured else {
+            return nil
+        }
+        // A helper that is up but whose credentials were never generated (a
+        // restore path, most often) gets them now rather than publishing an
+        // agentless presence a phone cannot run checks against.
+        let ice = iceCredentials ?? {
+            let generated = ControlPlaneIceCredentials.generate()
+            iceCredentials = generated
+            return generated
+        }()
+        do {
+            let presence = try await controlPlane.publishPresence(
+                publicKey: publicKey,
+                macName: Self.macName,
+                listenerAddress: listener,
+                ice: ice
+            )
+            let locallyAuthorized = Set(devices.filter { !$0.revoked }.map(\.deviceID))
+            let offers = try await controlPlane.rendezvousOffers()
+            approvedRendezvousOffers = offers.filter { locallyAuthorized.contains($0.peerDeviceID) }
+            return presence.ttlSeconds
+        } catch {
+            // Presence expiry is safe-fail: the Mac becomes unavailable rather
+            // than keeping a stale route. Preserve the error for Settings and
+            // retry on a short bounded cadence.
+            errorMessage = error.localizedDescription
+            return nil
+        }
+    }
+
     private func installTerminationHandler() {
         guard terminationObserver == nil else { return }
         terminationObserver = NotificationCenter.default.addObserver(
@@ -198,6 +283,9 @@ final class RemoteAccessController: ObservableObject {
             queue: .main
         ) { _ in
             RemoteAccessController.terminateHelpers()
+            Task { @MainActor [weak self] in
+                self?.stopPresence(clear: true)
+            }
         }
     }
 
@@ -221,12 +309,16 @@ final class RemoteAccessController: ObservableObject {
             auditEvents = (try? await client.remoteAudit()) ?? auditEvents
             if !status.enabled {
                 phase = .off
+                stopPresence(clear: true)
             } else if let listener = status.listenerAddress {
                 phase = .online(listener: listener)
+                startPresence()
             } else if case .failed = phase {
                 // Keep the failure visible rather than downgrading it.
+                stopPresence(clear: true)
             } else if supervision != nil {
                 phase = .starting
+                stopPresence(clear: true)
             }
         } catch {
             errorMessage = error.localizedDescription
@@ -395,7 +487,16 @@ final class RemoteAccessController: ObservableObject {
 
     func setRelayEnabled(_ enabled: Bool) async {
         do {
-            try await client.setRemoteRelayEnabled(enabled)
+            if enabled {
+                try await controlPlane.setRelayEnabled(true)
+                try await client.setRemoteRelayEnabled(true)
+            } else {
+                // Drop local relay admission first. If the account update
+                // cannot be reached, this Mac is still protected and Settings
+                // reports that the hosted policy needs attention.
+                try await client.setRemoteRelayEnabled(false)
+                try await controlPlane.setRelayEnabled(false)
+            }
             errorMessage = nil
             await refresh()
         } catch {

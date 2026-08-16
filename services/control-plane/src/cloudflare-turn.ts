@@ -8,15 +8,25 @@ export interface IceServer {
 
 export interface TurnProvider {
   issue(ttlSeconds: number): Promise<readonly IceServer[]>;
+  /** Public STUN configuration, intentionally independent of relay policy. */
+  stunServers(): readonly IceServer[];
   revoke(username: string): Promise<void>;
 }
 
 export class CloudflareTurnProvider implements TurnProvider {
+  private readonly keyId: string;
+  private readonly apiToken: string;
+  private readonly fetchImpl: typeof fetch;
+
   constructor(
-    private readonly keyId: string,
-    private readonly apiToken: string,
-    private readonly fetchImpl: typeof fetch = fetch,
-  ) {}
+    keyId: string,
+    apiToken: string,
+    fetchImpl: typeof fetch = fetch,
+  ) {
+    this.keyId = keyId;
+    this.apiToken = apiToken;
+    this.fetchImpl = fetchImpl;
+  }
 
   async issue(ttlSeconds: number): Promise<readonly IceServer[]> {
     const response = await this.fetchImpl(
@@ -29,11 +39,18 @@ export class CloudflareTurnProvider implements TurnProvider {
     );
     if (!response.ok) throw new Error(`Cloudflare TURN credential issuance failed (${response.status})`);
     const payload: unknown = await response.json();
-    const servers = payload && typeof payload === 'object' ? (payload as { iceServers?: unknown }).iceServers : null;
-    if (!Array.isArray(servers) || !servers.every(validIceServer)) {
+    const iceServers = payload && typeof payload === 'object'
+      ? (payload as { iceServers?: unknown }).iceServers
+      : null;
+    const servers = Array.isArray(iceServers) ? iceServers : [iceServers];
+    if (!servers.every(validIceServer)) {
       throw new Error('Cloudflare TURN returned an invalid ICE server response');
     }
     return servers;
+  }
+
+  stunServers(): readonly IceServer[] {
+    return [{ urls: ['stun:stun.cloudflare.com:3478'] }];
   }
 
   async revoke(username: string): Promise<void> {

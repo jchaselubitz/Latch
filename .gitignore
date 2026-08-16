@@ -19,6 +19,8 @@ dist/
 xcuserdata/
 *.xcuserstate
 DerivedData/
+apps/LatchMobile/Native/LatchTransportFFI.xcframework/
+apps/LatchMobile/Sources/LatchTransportNative/Generated/LatchTransportFFI.swift
 
 # Python (scripts/)
 __pycache__/

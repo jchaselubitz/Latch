@@ -30,6 +30,11 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios,aarch64-apple-darwin,x86_64-apple-darwin
+      - name: Build owned transport XCFramework
+        run: ./scripts/build-latch-transport-xcframework.sh
       - name: Test
         run: swift test --package-path apps/LatchMobile
       - name: Build the app

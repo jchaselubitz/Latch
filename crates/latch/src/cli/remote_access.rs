@@ -39,6 +39,9 @@ const MAX_PAIRED_DEVICES: usize = 32;
 const MAX_PENDING_PAIRINGS: usize = 8;
 const MAX_LAN_CONNECTIONS: usize = 32;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+// This is deliberately an inactivity deadline, not a lifetime for the
+// connection. A WebSocket may be useful for much longer than ten seconds.
+const PROXY_IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const MAX_AUDIT_EVENTS: usize = 1_024;
 const MAX_AUDIT_BYTES: usize = 512 * 1024;
 #[cfg(all(target_os = "macos", not(test)))]
@@ -1299,13 +1302,13 @@ async fn run_lan(
                 };
                 tokio::spawn(async move {
                     let _permit = permit;
-                    let result = tokio::time::timeout(
-                        HANDSHAKE_TIMEOUT,
-                        proxy_connection(stream, &paths, &identity, &token, gateway_addr),
-                    )
-                    .await;
-                    if result.is_err() {
-                        let _ = audit(&paths, "connection_rejected", None, "timeout");
+                    if let Err(error) = proxy_connection(stream, &paths, &identity, &token, gateway_addr).await {
+                        let result = if error.to_string().contains("handshake timed out") {
+                            "timeout"
+                        } else {
+                            "rejected"
+                        };
+                        let _ = audit(&paths, "connection_rejected", None, result);
                     }
                 });
             }
@@ -1524,11 +1527,27 @@ async fn wait_readiness(path: &Path) -> anyhow::Result<Readiness> {
     bail!("timed out waiting for supervised gateway readiness")
 }
 
+fn bonjour_service(identity: &Identity, port: u16) -> anyhow::Result<ServiceInfo> {
+    let host_name = format!("latch-{}.local.", &identity.device_id[..12]);
+    let properties = HashMap::from([("identityKey".to_owned(), identity.public_key.clone())]);
+    // Address auto-discovery makes the SRV target resolvable on every active
+    // LAN interface. The public key is only a discovery hint; Noise still
+    // pins and verifies the paired identity during the handshake.
+    ServiceInfo::new(
+        "_latch-remote._tcp.local.",
+        &format!("latch-{}", &identity.device_id[..12]),
+        &host_name,
+        (),
+        port,
+        properties,
+    )
+    .context("cannot build Bonjour service record")
+    .map(ServiceInfo::enable_addr_auto)
+}
+
 fn advertise_bonjour(identity: &Identity, port: u16) -> anyhow::Result<ServiceDaemon> {
     let daemon = ServiceDaemon::new().context("cannot start Bonjour service")?;
-    let instance = format!("latch-{}", &identity.device_id[..12]);
-    let service = ServiceInfo::new("_latch-remote._tcp.local.", &instance, "", "", port, None)
-        .context("cannot build Bonjour service record")?;
+    let service = bonjour_service(identity, port)?;
     daemon
         .register(service)
         .context("cannot advertise Bonjour service")?;
@@ -1543,7 +1562,12 @@ async fn proxy_connection(
     gateway_addr: SocketAddr,
 ) -> anyhow::Result<()> {
     let (mut reader, mut writer) = stream.into_split();
-    let (mut state, peer_static) = responder_handshake(&mut reader, &mut writer, identity).await?;
+    let (mut state, peer_static) = tokio::time::timeout(
+        HANDSHAKE_TIMEOUT,
+        responder_handshake(&mut reader, &mut writer, identity),
+    )
+    .await
+    .map_err(|_| anyhow!("handshake timed out"))??;
     let peer_key = hex_encode(&peer_static);
     let device = lookup_device(paths, &peer_key)?.ok_or_else(|| anyhow!("unpaired device"))?;
     if device.revoked {
@@ -1574,32 +1598,42 @@ async fn proxy_connection(
 
     let state = Arc::new(Mutex::new(state));
     let outbound_state = state.clone();
-    let outbound = tokio::spawn(async move {
+    let mut outbound = tokio::spawn(async move {
         let mut buf = vec![0_u8; 16 * 1024];
         loop {
-            let read = gateway_reader.read(&mut buf).await?;
+            let read = tokio::time::timeout(PROXY_IDLE_TIMEOUT, gateway_reader.read(&mut buf))
+                .await
+                .map_err(|_| anyhow!("gateway response idle timeout"))??;
             if read == 0 {
                 return Ok::<(), anyhow::Error>(());
             }
-            let mut locked = outbound_state.lock().await;
-            encrypt_record(&mut writer, &mut locked, &buf[..read]).await?;
+            let encrypted = {
+                let mut locked = outbound_state.lock().await;
+                encrypt_transport_record(&mut locked, &buf[..read])?
+            };
+            write_frame(&mut writer, &encrypted).await?;
         }
     });
     let inbound_state = state.clone();
-    let inbound = tokio::spawn(async move {
+    let mut inbound = tokio::spawn(async move {
         loop {
-            let mut locked = inbound_state.lock().await;
-            let bytes = decrypt_record(&mut reader, &mut locked).await?;
-            drop(locked);
+            let encrypted = read_frame_with_idle_timeout(&mut reader).await?;
+            // Each direction has one task, so record ordering is preserved;
+            // the shared state lock protects Noise counters only and never
+            // spans socket I/O, which would deadlock request and response.
+            let bytes = {
+                let mut locked = inbound_state.lock().await;
+                decrypt_transport_record(&mut locked, &encrypted)?
+            };
             gateway_writer.write_all(&bytes).await?;
         }
         #[allow(unreachable_code)]
         Ok::<(), anyhow::Error>(())
     });
     let mut revocation_check = tokio::time::interval(Duration::from_millis(250));
-    tokio::select! {
-        result = outbound => result.context("encrypted response task failed")??,
-        result = inbound => result.context("encrypted request task failed")??,
+    let result = tokio::select! {
+        result = &mut outbound => result.context("encrypted response task failed")?,
+        result = &mut inbound => result.context("encrypted request task failed")?,
         _ = async {
             loop {
                 revocation_check.tick().await;
@@ -1608,9 +1642,16 @@ async fn proxy_connection(
                     _ => return Ok::<(), anyhow::Error>(()),
                 }
             }
-        } => { audit(paths, "connection_closed", Some(&device.device_id), "revoked")?; }
-    }
-    Ok(())
+        } => {
+            audit(paths, "connection_closed", Some(&device.device_id), "revoked")?;
+            Ok(())
+        }
+    };
+    // Dropping JoinHandles detaches their tasks. Abort both halves explicitly
+    // so a revoked device loses the TCP stream as soon as the state check wins.
+    outbound.abort();
+    inbound.abort();
+    result
 }
 
 fn authorize_and_inject(
@@ -1790,24 +1831,46 @@ async fn decrypt_record(
     reader: &mut tokio::net::tcp::OwnedReadHalf,
     state: &mut TransportState,
 ) -> anyhow::Result<Vec<u8>> {
-    let encrypted = read_frame(reader).await?;
+    let encrypted = read_frame_with_idle_timeout(reader).await?;
+    decrypt_transport_record(state, &encrypted)
+}
+
+fn decrypt_transport_record(
+    state: &mut TransportState,
+    encrypted: &[u8],
+) -> anyhow::Result<Vec<u8>> {
     let mut plain = vec![0_u8; MAX_RECORD];
-    let used = state.read_message(&encrypted, &mut plain)?;
+    let used = state.read_message(encrypted, &mut plain)?;
     plain.truncate(used);
     Ok(plain)
 }
 
+#[cfg(test)]
 async fn encrypt_record(
     writer: &mut tokio::net::tcp::OwnedWriteHalf,
     state: &mut TransportState,
     plain: &[u8],
 ) -> anyhow::Result<()> {
+    let encrypted = encrypt_transport_record(state, plain)?;
+    write_frame(writer, &encrypted).await
+}
+
+fn encrypt_transport_record(state: &mut TransportState, plain: &[u8]) -> anyhow::Result<Vec<u8>> {
     if plain.len() > MAX_RECORD - 32 {
         bail!("remote frame exceeds limit");
     }
     let mut encrypted = vec![0_u8; MAX_RECORD];
     let used = state.write_message(plain, &mut encrypted)?;
-    write_frame(writer, &encrypted[..used]).await
+    encrypted.truncate(used);
+    Ok(encrypted)
+}
+
+async fn read_frame_with_idle_timeout(
+    reader: &mut tokio::net::tcp::OwnedReadHalf,
+) -> anyhow::Result<Vec<u8>> {
+    tokio::time::timeout(PROXY_IDLE_TIMEOUT, read_frame(reader))
+        .await
+        .map_err(|_| anyhow!("remote connection idle timeout"))?
 }
 
 async fn read_frame(reader: &mut tokio::net::tcp::OwnedReadHalf) -> anyhow::Result<Vec<u8>> {
@@ -2286,6 +2349,162 @@ mod tests {
         let params: NoiseParams = NOISE_PATTERN.parse().unwrap();
         let pair = Builder::new(params).generate_keypair().unwrap();
         (hex_encode(&pair.private), hex_encode(&pair.public))
+    }
+
+    async fn initiator_handshake(
+        reader: &mut tokio::net::tcp::OwnedReadHalf,
+        writer: &mut tokio::net::tcp::OwnedWriteHalf,
+        private_key: &str,
+    ) -> TransportState {
+        let params: NoiseParams = NOISE_PATTERN.parse().unwrap();
+        let private = decode_static_key(private_key).unwrap();
+        let mut handshake = Builder::new(params)
+            .local_private_key(&private)
+            .build_initiator()
+            .unwrap();
+        let mut first = vec![0_u8; MAX_RECORD];
+        let first_len = handshake.write_message(&[], &mut first).unwrap();
+        write_frame(writer, &first[..first_len]).await.unwrap();
+        let second = read_frame(reader).await.unwrap();
+        let mut scratch = vec![0_u8; MAX_RECORD];
+        handshake.read_message(&second, &mut scratch).unwrap();
+        let mut third = vec![0_u8; MAX_RECORD];
+        let third_len = handshake.write_message(&[], &mut third).unwrap();
+        write_frame(writer, &third[..third_len]).await.unwrap();
+        handshake.into_transport_mode().unwrap()
+    }
+
+    async fn read_request_headers(stream: &mut TcpStream) -> Vec<u8> {
+        let mut request = Vec::new();
+        let mut chunk = [0_u8; 1024];
+        loop {
+            let read = stream.read(&mut chunk).await.unwrap();
+            assert_ne!(read, 0, "gateway peer closed before sending headers");
+            request.extend_from_slice(&chunk[..read]);
+            if request.windows(4).any(|part| part == b"\r\n\r\n") {
+                return request;
+            }
+        }
+    }
+
+    #[test]
+    fn bonjour_advertisement_is_resolvable_and_hints_the_pinned_identity() {
+        let identity = Identity {
+            device_id: "a".repeat(32),
+            private_key: String::new(),
+            public_key: "b".repeat(64),
+            key_generation: 1,
+        };
+        let service = bonjour_service(&identity, 49_221).unwrap();
+        assert_eq!(service.get_hostname(), "latch-aaaaaaaaaaaa.local.");
+        assert!(service.is_addr_auto());
+        assert_eq!(service.get_port(), 49_221);
+        assert_eq!(
+            service.get_property_val_str("identityKey"),
+            Some(identity.public_key.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn lan_proxy_round_trips_past_the_handshake_deadline_and_closes_on_revocation() {
+        let (_dir, home) = home();
+        set_enabled(&home, true).unwrap();
+        let paths = Paths::new(&home);
+        let mac_identity = identity(&paths).unwrap();
+        let (phone_private, phone_public) = keypair();
+        let pairing = create_pairing(&home).unwrap();
+        let device = confirm_pairing(
+            &home,
+            &pairing.pairing_id,
+            &pairing.secret,
+            &phone_public,
+            "LAN test phone",
+            DevicePermission::Observe,
+        )
+        .unwrap();
+
+        ensure_private_directory(&paths.runtime()).unwrap();
+        let token_path = paths.runtime().join("gateway.token");
+        write_bytes_atomic(&token_path, b"test-gateway-token").unwrap();
+        let gateway_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let gateway_addr = gateway_listener.local_addr().unwrap();
+        let gateway = tokio::spawn(async move {
+            let (mut stream, _) = gateway_listener.accept().await.unwrap();
+            let request = read_request_headers(&mut stream).await;
+            assert!(request
+                .windows(b"Authorization: Bearer test-gateway-token".len())
+                .any(|part| part == b"Authorization: Bearer test-gateway-token"));
+            stream
+                .write_all(
+                    b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            let mut ping = [0_u8; 4];
+            stream.read_exact(&mut ping).await.unwrap();
+            assert_eq!(&ping, b"ping");
+            stream.write_all(b"pong").await.unwrap();
+            let mut trailing = [0_u8; 1];
+            let _ = stream.read(&mut trailing).await;
+        });
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener_addr = listener.local_addr().unwrap();
+        let proxy_paths = paths.clone();
+        let proxy_identity = mac_identity.clone();
+        let proxy_token = token_path.clone();
+        let proxy = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            proxy_connection(
+                stream,
+                &proxy_paths,
+                &proxy_identity,
+                &proxy_token,
+                gateway_addr,
+            )
+            .await
+        });
+
+        let stream = TcpStream::connect(listener_addr).await.unwrap();
+        let (mut reader, mut writer) = stream.into_split();
+        let mut transport = initiator_handshake(&mut reader, &mut writer, &phone_private).await;
+        encrypt_record(
+            &mut writer,
+            &mut transport,
+            b"GET /v1/capabilities HTTP/1.1\r\nHost: latch\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
+        )
+        .await
+        .unwrap();
+        let response = decrypt_record(&mut reader, &mut transport).await.unwrap();
+        assert!(response.starts_with(b"HTTP/1.1 101"));
+
+        // This used to be an absolute timeout around the whole proxy. Keeping
+        // the authenticated stream alive past it proves only the handshake is
+        // deadline-bound.
+        tokio::time::sleep(HANDSHAKE_TIMEOUT + Duration::from_millis(100)).await;
+        encrypt_record(&mut writer, &mut transport, b"ping")
+            .await
+            .unwrap();
+        assert_eq!(
+            decrypt_record(&mut reader, &mut transport).await.unwrap(),
+            b"pong"
+        );
+
+        let revoked_at = tokio::time::Instant::now();
+        revoke(&home, &device.device_id).unwrap();
+        let closed =
+            tokio::time::timeout(Duration::from_millis(500), read_frame(&mut reader)).await;
+        assert!(
+            matches!(closed, Ok(Err(_))),
+            "revocation must close the peer stream"
+        );
+        assert!(
+            revoked_at.elapsed() <= Duration::from_millis(500),
+            "revocation exceeded the polling budget"
+        );
+        drop(writer);
+        assert!(proxy.await.unwrap().is_ok());
+        gateway.await.unwrap();
     }
 
     #[test]

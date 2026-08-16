@@ -7,12 +7,10 @@
  */
 
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import { after, describe, it } from 'node:test';
-import { join } from 'node:path';
 
-import { migrationsDirectory } from './migrate.ts';
-import { candidate, enrollPair, startHarness } from './test-harness.ts';
+import { loadMigrations } from './migrate.ts';
+import { candidate, enrollPair, iceCandidate, startHarness } from './test-harness.ts';
 
 const FORBIDDEN_COLUMN_WORDS = [
   'terminal',
@@ -32,7 +30,7 @@ const FORBIDDEN_COLUMN_WORDS = [
 
 describe('storage boundary', () => {
   it('has no schema column that could hold terminal content or a gateway token', async () => {
-    const sql = await readFile(join(migrationsDirectory(), '0001_initial.sql'), 'utf8');
+    const sql = (await loadMigrations()).map((migration) => migration.sql).join('\n');
     const columns = [...sql.matchAll(/^\s{4}([a-z_]+)\s+[A-Z]/gm)].map((match) => match[1]!);
     assert.equal(columns.length > 0, true);
     for (const column of columns) {
@@ -140,6 +138,60 @@ describe('response and log boundary', () => {
       },
     });
     assert.equal(candidateWithExtras.status, 400);
+  });
+
+  it('accepts only structured ICE transport metadata, never hostnames, loopback, or content fields', async () => {
+    const harness = await startHarness();
+    after(() => harness.close());
+    const { host } = await enrollPair(harness);
+
+    const loopback = await harness.request('POST', '/v1/presence', {
+      token: host.token,
+      body: { candidates: [candidate(harness, '127.0.0.1:41234')] },
+    });
+    assert.equal(loopback.status, 400);
+
+    const mappedLoopback = await harness.request('POST', '/v1/presence', {
+      token: host.token,
+      body: { candidates: [candidate(harness, '[::ffff:7f00:1]:41234')] },
+    });
+    assert.equal(mappedLoopback.status, 400);
+
+    const hostnameRelatedAddress = await harness.request('POST', '/v1/presence', {
+      token: host.token,
+      body: {
+        candidates: [{
+          ...iceCandidate(harness),
+          type: 'srflx',
+          relatedAddress: 'gateway.internal',
+          relatedPort: 41234,
+        }],
+      },
+    });
+    assert.equal(hostnameRelatedAddress.status, 400);
+
+    const loopbackRelatedAddress = await harness.request('POST', '/v1/presence', {
+      token: host.token,
+      body: {
+        candidates: [{
+          ...iceCandidate(harness),
+          type: 'srflx',
+          relatedAddress: '::1',
+          relatedPort: 41234,
+        }],
+      },
+    });
+    assert.equal(loopbackRelatedAddress.status, 400);
+
+    const contentBearingIceField = await harness.request('POST', '/v1/presence', {
+      token: host.token,
+      body: {
+        candidates: [iceCandidate(harness)],
+        iceUfrag: 'validUfrag_123',
+        icePwd: 'terminal output: whoami and cwd',
+      },
+    });
+    assert.equal(contentBearingIceField.status, 400);
   });
 
   it('returns only Cloudflare ICE fields, not device or account detail', async () => {

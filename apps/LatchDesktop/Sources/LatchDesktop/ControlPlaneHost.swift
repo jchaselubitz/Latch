@@ -251,6 +251,197 @@ struct ControlPlaneDevice: Decodable, Equatable, Sendable {
     }
 }
 
+/// A short-lived transport address advertised to a paired device.
+///
+/// `address` is still only an IP literal and port, and the ICE metadata around
+/// it is structured rather than an opaque SDP blob for exactly that reason: the
+/// address is the privacy control, and it stays inspectable. Nothing here is
+/// the loopback gateway address or its per-launch credential.
+///
+/// The ICE fields are optional as a set. A publisher with no ICE agent yet
+/// omits all of them, which the service accepts; a publisher that supplies any
+/// of them must supply all five, which `validatedForPublication()` enforces
+/// before the request leaves this Mac.
+struct ControlPlaneCandidate: Codable, Equatable, Sendable {
+    let address: String
+    let expiresAt: UInt64
+    /// `host`, `srflx`, `prflx`, or `relay`.
+    let type: String?
+    let priority: UInt32?
+    let foundation: String?
+    /// 1 (RTP) or 2 (RTCP). Latch uses a single component.
+    let component: Int?
+    let `protocol`: String?
+    let relatedAddress: String?
+    let relatedPort: Int?
+    /// Only meaningful for TCP candidates: `active`, `passive`, or `so`.
+    let tcpType: String?
+
+    init(
+        address: String,
+        expiresAt: UInt64,
+        type: String? = nil,
+        priority: UInt32? = nil,
+        foundation: String? = nil,
+        component: Int? = nil,
+        protocol proto: String? = nil,
+        relatedAddress: String? = nil,
+        relatedPort: Int? = nil,
+        tcpType: String? = nil
+    ) {
+        self.address = address
+        self.expiresAt = expiresAt
+        self.type = type
+        self.priority = priority
+        self.foundation = foundation
+        self.component = component
+        self.protocol = proto
+        self.relatedAddress = relatedAddress
+        self.relatedPort = relatedPort
+        self.tcpType = tcpType
+    }
+
+    private static let types = ["host", "srflx", "prflx", "relay"]
+    private static let protocols = ["udp", "tcp"]
+    private static let tcpTypes = ["active", "passive", "so"]
+
+    /// Applies the service's candidate rules locally so a malformed candidate
+    /// is refused here rather than costing a round trip and a 400. These are
+    /// the same all-or-nothing metadata, paired related-address, and
+    /// TCP-only-`tcpType` rules `validation.ts` enforces.
+    func validatedForPublication() throws -> ControlPlaneCandidate {
+        let required: [Bool] = [
+            type != nil, priority != nil, foundation != nil, component != nil, self.protocol != nil,
+        ]
+        if required.contains(true), required.contains(false) {
+            throw ControlPlaneHostError.malformedResponse(
+                "an ICE candidate must carry type, priority, foundation, component, and protocol together"
+            )
+        }
+        if let type, !Self.types.contains(type) {
+            throw ControlPlaneHostError.malformedResponse("\(type) is not an ICE candidate type")
+        }
+        if let proto = self.protocol, !Self.protocols.contains(proto) {
+            throw ControlPlaneHostError.malformedResponse("\(proto) is not an ICE transport")
+        }
+        if let component, component != 1, component != 2 {
+            throw ControlPlaneHostError.malformedResponse("an ICE component is 1 or 2")
+        }
+        if let foundation, foundation.isEmpty || foundation.count > 32 {
+            throw ControlPlaneHostError.malformedResponse("an ICE foundation is 1 to 32 characters")
+        }
+        if (relatedAddress == nil) != (relatedPort == nil) {
+            throw ControlPlaneHostError.malformedResponse(
+                "relatedAddress and relatedPort are published together or not at all"
+            )
+        }
+        if let relatedAddress, ControlPlaneHost.isLoopbackHost(relatedAddress) {
+            throw ControlPlaneHostError.malformedResponse("a related address must not be loopback")
+        }
+        if let tcpType {
+            guard Self.tcpTypes.contains(tcpType) else {
+                throw ControlPlaneHostError.malformedResponse("\(tcpType) is not a TCP candidate type")
+            }
+            guard self.protocol == "tcp" else {
+                throw ControlPlaneHostError.malformedResponse("tcpType applies only to TCP candidates")
+            }
+        }
+        return self
+    }
+
+    /// The wire form, with absent fields omitted rather than sent as null: the
+    /// service rejects unknown and malformed properties, and a null is neither
+    /// an integer nor a string.
+    var requestBody: [String: Any] {
+        var body: [String: Any] = ["address": address, "expiresAt": expiresAt]
+        if let type { body["type"] = type }
+        if let priority { body["priority"] = priority }
+        if let foundation { body["foundation"] = foundation }
+        if let component { body["component"] = component }
+        if let proto = self.protocol { body["protocol"] = proto }
+        if let relatedAddress { body["relatedAddress"] = relatedAddress }
+        if let relatedPort { body["relatedPort"] = relatedPort }
+        if let tcpType { body["tcpType"] = tcpType }
+        return body
+    }
+}
+
+/// The short-term ICE credentials connectivity checks authenticate with.
+///
+/// These are scoped to the lifetime of the agent that will use them — the
+/// helper process — not to a presence refresh. Rotating them on every refresh
+/// would race a phone that read them at the start of a presence window and
+/// began its checks at the end of it: its binding requests would carry a ufrag
+/// the Mac no longer recognises and every check would fail with 401.
+struct ControlPlaneIceCredentials: Equatable, Sendable {
+    let ufrag: String
+    let pwd: String
+
+    /// RFC 8445 requires at least 24 bits of ufrag and 128 bits of password;
+    /// these are 48 and 144, inside the service's length bounds.
+    static func generate() -> ControlPlaneIceCredentials {
+        ControlPlaneIceCredentials(ufrag: randomToken(bytes: 6), pwd: randomToken(bytes: 18))
+    }
+
+    private static func randomToken(bytes count: Int) -> String {
+        var generator = SystemRandomNumberGenerator()
+        let bytes = (0..<count).map { _ in UInt8.random(in: 0...255, using: &generator) }
+        // base64url: inside the service's `[A-Za-z0-9+/_=-]` alphabet, and free
+        // of characters that would need escaping in an SDP attribute line.
+        return Data(bytes).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+}
+
+/// An offer waiting for this Mac. It is deliberately transport-only: session
+/// data and gateway credentials never cross the control plane.
+struct ControlPlaneRendezvousOffer: Decodable, Equatable, Sendable {
+    let requestID: String
+    let peerDeviceID: String
+    let peerIdentityKey: String
+    let candidates: [ControlPlaneCandidate]
+    /// The offering peer's ICE credentials. Absent when that peer published no
+    /// agent of its own, which is why they are optional rather than required.
+    let iceUfrag: String?
+    let icePwd: String?
+    let expiresAt: UInt64
+
+    init(
+        requestID: String,
+        peerDeviceID: String,
+        peerIdentityKey: String,
+        candidates: [ControlPlaneCandidate],
+        iceUfrag: String? = nil,
+        icePwd: String? = nil,
+        expiresAt: UInt64
+    ) {
+        self.requestID = requestID
+        self.peerDeviceID = peerDeviceID
+        self.peerIdentityKey = peerIdentityKey
+        self.candidates = candidates
+        self.iceUfrag = iceUfrag
+        self.icePwd = icePwd
+        self.expiresAt = expiresAt
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case candidates, expiresAt, iceUfrag, icePwd
+        case requestID = "requestId"
+        case peerDeviceID = "peerDeviceId"
+        case peerIdentityKey
+    }
+}
+
+/// The control-plane's bounded presence window. The service is authoritative
+/// if this ever changes; the client uses the returned value to schedule its
+/// next refresh before expiry.
+struct ControlPlanePresence: Decodable, Equatable, Sendable {
+    let expiresAt: UInt64
+    let ttlSeconds: UInt64
+}
+
 /// The host-side calls, behind a protocol so pairing is testable without a
 /// deployed control plane.
 protocol ControlPlaneHostAPI: Sendable {
@@ -268,6 +459,14 @@ protocol ControlPlaneHostAPI: Sendable {
         permission: DevicePermission
     ) async throws
     func devices(deviceToken: String) async throws -> [ControlPlaneDevice]
+    func publishPresence(
+        deviceToken: String,
+        candidates: [ControlPlaneCandidate],
+        ice: ControlPlaneIceCredentials?
+    ) async throws -> ControlPlanePresence
+    func clearPresence(deviceToken: String) async throws
+    func rendezvousOffers(deviceToken: String) async throws -> [ControlPlaneRendezvousOffer]
+    func setRelayEnabled(accountToken: String, enabled: Bool) async throws
 }
 
 /// The HTTP implementation.
@@ -357,6 +556,58 @@ actor HTTPControlPlaneHostAPI: ControlPlaneHostAPI {
             body: nil
         )
         return response.devices
+    }
+
+    func publishPresence(
+        deviceToken: String,
+        candidates: [ControlPlaneCandidate],
+        ice: ControlPlaneIceCredentials?
+    ) async throws -> ControlPlanePresence {
+        // The credentials are sent as a pair or not at all: the service refuses
+        // one without the other, and a lone ufrag authenticates nothing.
+        var body: [String: Any] = ["candidates": candidates.map(\.requestBody)]
+        if let ice {
+            body["iceUfrag"] = ice.ufrag
+            body["icePwd"] = ice.pwd
+        }
+        return try await send(
+            path: "/v1/presence",
+            method: "POST",
+            token: deviceToken,
+            body: body
+        )
+    }
+
+    func clearPresence(deviceToken: String) async throws {
+        let _: Empty = try await send(
+            path: "/v1/presence",
+            method: "DELETE",
+            token: deviceToken,
+            body: nil
+        )
+    }
+
+    func rendezvousOffers(deviceToken: String) async throws -> [ControlPlaneRendezvousOffer] {
+        struct Response: Decodable { let offers: [ControlPlaneRendezvousOffer] }
+        // Annotated rather than inferred through the member access: the
+        // inference chain through the generic `send` is what the type checker
+        // gives up on here.
+        let response: Response = try await send(
+            path: "/v1/rendezvous",
+            method: "GET",
+            token: deviceToken,
+            body: nil
+        )
+        return response.offers
+    }
+
+    func setRelayEnabled(accountToken: String, enabled: Bool) async throws {
+        let _: Empty = try await send(
+            path: "/v1/account",
+            method: "PATCH",
+            token: accountToken,
+            body: ["relayEnabled": enabled]
+        )
     }
 
     /// A 204 or an answer this side does not read.
@@ -603,6 +854,168 @@ final class ControlPlaneHost {
         return try await apiFactory(address)
             .devices(deviceToken: credentials.deviceToken)
             .filter { $0.role == "client" && !$0.revoked }
+    }
+
+    /// Publishes only validated, non-loopback listener addresses. The service
+    /// owns the final lifetime; callers schedule the next refresh from its
+    /// returned TTL instead of assuming its deployment configuration.
+    /// - Parameters:
+    ///   - ice: the agent's credentials, or nil while this Mac has no ICE agent.
+    ///   - agentCandidates: candidates the ICE agent gathered (server-reflexive
+    ///     and relay). Empty until Phase E, which is why the host candidate is
+    ///     built here rather than by a caller.
+    func publishPresence(
+        publicKey: String,
+        macName: String,
+        listenerAddress: String,
+        ice: ControlPlaneIceCredentials? = nil,
+        agentCandidates: [ControlPlaneCandidate] = [],
+        now: Date = Date()
+    ) async throws -> ControlPlanePresence {
+        let host = try Self.presenceCandidate(listenerAddress, now: now)
+        // Validated here, before the round trip, so a malformed candidate is a
+        // local error rather than a 400 the refresh loop retries into.
+        let candidates = try ([host] + agentCandidates).map { try $0.validatedForPublication() }
+        guard candidates.count <= Self.maxCandidates else {
+            throw ControlPlaneHostError.malformedResponse(
+                "presence carries at most \(Self.maxCandidates) candidates"
+            )
+        }
+        let credentials = try await enrollment(publicKey: publicKey, name: macName)
+        guard let address else { throw ControlPlaneHostError.notConfigured }
+        return try await apiFactory(address).publishPresence(
+            deviceToken: credentials.deviceToken,
+            candidates: candidates,
+            ice: ice
+        )
+    }
+
+    /// The service's default cap. Exceeding it is a 400, so it is enforced
+    /// before the request rather than after.
+    static let maxCandidates = 8
+
+    /// Best-effort deletion is used for lifecycle cleanup. A missed delete is
+    /// still bounded by the service TTL, while the local incident switch has
+    /// already stopped the listener before this network request is made.
+    func clearPresence() async {
+        guard let address, let credentials = try? store.load(),
+              credentials.address == address.absoluteString else { return }
+        try? await apiFactory(address).clearPresence(deviceToken: credentials.deviceToken)
+    }
+
+    /// Consumes the control plane's one-shot offer queue. The caller must
+    /// still re-check every peer against the local device store before handing
+    /// an offer to a transport; the service cannot authorize this Mac's local
+    /// gateway on its own.
+    func rendezvousOffers() async throws -> [ControlPlaneRendezvousOffer] {
+        guard let address, let credentials = try store.load(),
+              credentials.address == address.absoluteString else {
+            throw ControlPlaneHostError.notConfigured
+        }
+        return try await apiFactory(address).rendezvousOffers(deviceToken: credentials.deviceToken)
+    }
+
+    /// Mirrors the local relay switch to the account-level relay issuer. This
+    /// affects only relay credentials: presence remains available for LAN and
+    /// direct paths during a relay incident.
+    func setRelayEnabled(_ enabled: Bool) async throws {
+        guard let address, let credentials = try store.load(),
+              credentials.address == address.absoluteString else { return }
+        try await apiFactory(address).setRelayEnabled(
+            accountToken: credentials.accountToken,
+            enabled: enabled
+        )
+    }
+
+    /// Validates the stricter client subset of the service's candidate format.
+    /// The service accepts only one to its configured cap (eight by default),
+    /// literal addresses, and an expiry within its presence TTL. We additionally
+    /// reject loopback because publishing an address a phone can only reach on
+    /// itself is a privacy and correctness failure.
+    static func presenceCandidate(
+        _ address: String,
+        now: Date = Date(),
+        lifetime: UInt64 = 90
+    ) throws -> ControlPlaneCandidate {
+        guard lifetime > 0, lifetime <= 90,
+              let split = splitAddress(address), !isLoopbackHost(split.host) else {
+            throw ControlPlaneHostError.malformedResponse("listener address is not a publishable non-loopback IP literal")
+        }
+        let expiresAt = UInt64(now.timeIntervalSince1970) + lifetime
+        // Described honestly as what it is: the helper's authenticated TCP
+        // listener on this machine's own interface. Until the ICE agent lands
+        // this is the only candidate, which is a host-only degenerate case of
+        // the ICE shape rather than a different one.
+        return ControlPlaneCandidate(
+            address: split.normalized,
+            expiresAt: expiresAt,
+            type: "host",
+            priority: hostPriority,
+            foundation: foundation(for: split.host, protocol: "tcp", type: "host"),
+            component: 1,
+            protocol: "tcp",
+            tcpType: "passive"
+        )
+    }
+
+    /// RFC 8445 §5.1.2.1: `(2^24)·type + (2^8)·local + (256 − component)`, with
+    /// the host type preference of 126 and a single local interface.
+    private static let hostPriority: UInt32 = (126 << 24) | (65_535 << 8) | (256 - 1)
+
+    /// ICE requires candidates that share a type, base, and transport to share
+    /// a foundation, and distinct ones to differ. Deriving it from exactly
+    /// those three inputs satisfies both halves, and keeps it stable across
+    /// presence refreshes so a peer does not see the pairing re-form.
+    nonisolated static func foundation(
+        for host: String,
+        protocol proto: String,
+        type: String
+    ) -> String {
+        var hash: UInt64 = 0xcbf2_9ce4_8422_2325
+        for byte in "\(type)|\(proto)|\(host)".utf8 {
+            hash = (hash ^ UInt64(byte)) &* 0x100_0000_01b3
+        }
+        return String(hash, radix: 36)
+    }
+
+    private static func splitAddress(_ value: String) -> (host: String, normalized: String)? {
+        if value.hasPrefix("[") {
+            guard let close = value.firstIndex(of: "]"),
+                  value.index(after: close) < value.endIndex,
+                  value[value.index(after: close)] == ":",
+                  let port = Int(value[value.index(close, offsetBy: 2)...]),
+                  (1...65_535).contains(port) else { return nil }
+            let host = String(value[value.index(after: value.startIndex)..<close])
+            guard isIPv6Literal(host) else { return nil }
+            return (host, "[\(host)]:\(port)")
+        }
+        guard let colon = value.lastIndex(of: ":"),
+              let port = Int(value[value.index(after: colon)...]),
+              (1...65_535).contains(port) else { return nil }
+        let host = String(value[..<colon])
+        guard isIPv4Literal(host) else { return nil }
+        return (host, "\(host):\(port)")
+    }
+
+    nonisolated private static func isIPv4Literal(_ value: String) -> Bool {
+        let parts = value.split(separator: ".", omittingEmptySubsequences: false)
+        return parts.count == 4 && parts.allSatisfy {
+            guard let octet = Int($0), String(octet) == $0 || $0 == "0" else { return false }
+            return (0...255).contains(octet)
+        }
+    }
+
+    private static func isIPv6Literal(_ value: String) -> Bool {
+        // The control plane performs the full wire-format check. This only
+        // prevents hostnames and obviously malformed values from leaving the
+        // Mac without pulling a network stack into the desktop adapter.
+        !value.isEmpty && value.allSatisfy { $0.isHexDigit || $0 == ":" }
+    }
+
+    nonisolated static func isLoopbackHost(_ host: String) -> Bool {
+        if host == "::1" || host.lowercased() == "0:0:0:0:0:0:0:1" { return true }
+        guard isIPv4Literal(host) else { return false }
+        return host.split(separator: ".").first == "127"
     }
 
     /// Forgets this Mac's control-plane credentials without touching the

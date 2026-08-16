@@ -56,16 +56,31 @@ export interface Pairing {
   readonly revokedAt: string | null;
 }
 
-/** A short-lived, opaque endpoint candidate. Never a gateway address. */
+/** A short-lived, structured ICE endpoint candidate. Never a gateway address. */
 export interface Candidate {
   readonly address: string;
   readonly expiresAt: number;
+  /** RFC 8445 candidate type. Omitted only by older host-candidate publishers. */
+  readonly type?: 'host' | 'srflx' | 'prflx' | 'relay';
+  /** ICE candidate priority. */
+  readonly priority?: number;
+  /** ICE candidate foundation, constrained to transport metadata characters. */
+  readonly foundation?: string;
+  readonly component?: 1 | 2;
+  readonly protocol?: 'udp' | 'tcp';
+  /** Related endpoint for server-reflexive, peer-reflexive, and relay candidates. */
+  readonly relatedAddress?: string;
+  readonly relatedPort?: number;
+  readonly tcpType?: 'active' | 'passive' | 'so';
 }
 
 export interface Presence {
   readonly deviceId: string;
   readonly accountId: string;
   readonly candidates: readonly Candidate[];
+  /** ICE credentials are short-lived transport metadata, not a peer identity. */
+  readonly iceUfrag?: string;
+  readonly icePwd?: string;
   readonly expiresAt: number;
   readonly updatedAt: string;
 }
@@ -78,6 +93,8 @@ export interface RendezvousOffer {
   readonly targetDeviceId: string;
   readonly requestId: string;
   readonly candidates: readonly Candidate[];
+  readonly iceUfrag?: string;
+  readonly icePwd?: string;
   readonly expiresAt: number;
   readonly createdAt: string;
 }

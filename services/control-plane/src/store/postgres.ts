@@ -38,6 +38,8 @@ type Row = Record<string, unknown>;
 const text = (value: unknown): string => String(value);
 const nullableTimestamp = (value: unknown): string | null =>
   value instanceof Date ? value.toISOString() : value === null || value === undefined ? null : String(value);
+const optionalText = (value: unknown): string | undefined =>
+  value === null || value === undefined ? undefined : String(value);
 const timestamp = (value: unknown): string => nullableTimestamp(value) ?? new Date(0).toISOString();
 
 function toAccount(row: Row): Account {
@@ -99,6 +101,8 @@ function toPresence(row: Row): Presence {
     deviceId: text(row.device_id),
     accountId: text(row.account_id),
     candidates: toCandidates(row.candidates),
+    iceUfrag: optionalText(row.ice_ufrag),
+    icePwd: optionalText(row.ice_pwd),
     expiresAt: Number(row.expires_at),
     updatedAt: timestamp(row.updated_at),
   };
@@ -112,6 +116,8 @@ function toOffer(row: Row): RendezvousOffer {
     targetDeviceId: text(row.target_device_id),
     requestId: text(row.request_id),
     candidates: toCandidates(row.candidates),
+    iceUfrag: optionalText(row.ice_ufrag),
+    icePwd: optionalText(row.ice_pwd),
     expiresAt: Number(row.expires_at),
     createdAt: timestamp(row.created_at),
   };
@@ -406,14 +412,16 @@ export class PostgresStore implements Store {
 
   async publishPresence(input: PublishPresenceInput): Promise<Presence> {
     const rows = await this.#query(
-      `INSERT INTO presence (device_id, account_id, candidates, expires_at, updated_at)
-       VALUES ($1, $2, $3::JSONB, $4, NOW())
+      `INSERT INTO presence (device_id, account_id, candidates, ice_ufrag, ice_pwd, expires_at, updated_at)
+       VALUES ($1, $2, $3::JSONB, $4, $5, $6, NOW())
        ON CONFLICT (device_id) DO UPDATE
          SET candidates = EXCLUDED.candidates,
+             ice_ufrag = EXCLUDED.ice_ufrag,
+             ice_pwd = EXCLUDED.ice_pwd,
              expires_at = EXCLUDED.expires_at,
              updated_at = NOW()
        RETURNING *`,
-      [input.deviceId, input.accountId, JSON.stringify(input.candidates), input.expiresAt],
+      [input.deviceId, input.accountId, JSON.stringify(input.candidates), input.iceUfrag ?? null, input.icePwd ?? null, input.expiresAt],
     );
     return toPresence(rows[0]!);
   }
@@ -433,8 +441,8 @@ export class PostgresStore implements Store {
   async createOffer(input: CreateOfferInput): Promise<RendezvousOffer> {
     const rows = await this.#query(
       `INSERT INTO rendezvous_offers
-         (id, account_id, requester_device_id, target_device_id, request_id, candidates, expires_at)
-       VALUES ($1, $2, $3, $4, $5, $6::JSONB, $7) RETURNING *`,
+         (id, account_id, requester_device_id, target_device_id, request_id, candidates, ice_ufrag, ice_pwd, expires_at)
+       VALUES ($1, $2, $3, $4, $5, $6::JSONB, $7, $8, $9) RETURNING *`,
       [
         input.id,
         input.accountId,
@@ -442,6 +450,8 @@ export class PostgresStore implements Store {
         input.targetDeviceId,
         input.requestId,
         JSON.stringify(input.candidates),
+        input.iceUfrag ?? null,
+        input.icePwd ?? null,
         input.expiresAt,
       ],
     );

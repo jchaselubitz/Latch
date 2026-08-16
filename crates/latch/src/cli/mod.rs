@@ -21,11 +21,11 @@ pub use attach::{AttachOptions, RetryPolicy};
 pub use create::{CreateOptions, CreateOutcome};
 pub use json::{
     CapabilitiesReport, ConfigReport, DoctorReport, InspectReport, ListReport, OpenReport,
-    PruneReport, RemoveReport, RenameReport, ResizeReport, SessionSummary, StopReport,
-    UpdateReport,
+    PruneReport, RemoveReport, RenameReport, ResizeReport, SessionSummary, StopAllReport,
+    StopReport, UpdateReport,
 };
 pub use manage::{
-    capabilities, config, doctor, inspect, list, prune, remove, rename, resize, stop,
+    capabilities, config, doctor, inspect, list, prune, remove, rename, resize, stop, stop_all,
     ConfigRequest, DoctorOptions, InspectOptions, ListOptions, PruneOptions, RemoveRequest,
     RenameRequest, ResizeRequest, StopRequest,
 };

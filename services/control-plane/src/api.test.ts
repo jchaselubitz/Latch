@@ -11,6 +11,7 @@ import { after, describe, it } from 'node:test';
 import {
   candidate,
   enrollPair,
+  iceCandidate,
   publicKeyFor,
   startHarness,
 } from './test-harness.ts';
@@ -141,14 +142,18 @@ describe('pairing directory', () => {
 });
 
 describe('presence and rendezvous', () => {
-  it('exchanges candidates between paired devices', async () => {
+  it('exchanges structured ICE candidates and credentials between paired devices', async () => {
     const harness = await startHarness();
     after(() => harness.close());
     const { host, client } = await enrollPair(harness);
 
     const published = await harness.request('POST', '/v1/presence', {
       token: host.token,
-      body: { candidates: [candidate(harness, '198.51.100.4:52111')] },
+      body: {
+        candidates: [iceCandidate(harness, '198.51.100.4:52111')],
+        iceUfrag: 'hostUfrag_123',
+        icePwd: 'hostPassword_1234567890',
+      },
     });
     assert.equal(published.status, 200);
     assert.equal(published.body.ttlSeconds <= harness.config.presenceTtlSeconds, true);
@@ -158,19 +163,32 @@ describe('presence and rendezvous', () => {
       body: {
         targetDeviceId: host.deviceId,
         requestId: 'request-0001',
-        candidates: [candidate(harness, '[2001:db8::1]:41999')],
+        candidates: [iceCandidate(harness, '[2001:db8::1]:41999')],
+        iceUfrag: 'clientUfrag_123',
+        icePwd: 'clientPassword_12345678',
       },
     });
     assert.equal(rendezvous.status, 200);
     assert.equal(rendezvous.body.peerDeviceId, host.deviceId);
     assert.equal(rendezvous.body.peerIdentityKey, publicKeyFor('ab'));
     assert.equal(rendezvous.body.candidates[0].address, '198.51.100.4:52111');
+    assert.equal(rendezvous.body.candidates[0].type, 'host');
+    assert.equal(rendezvous.body.iceUfrag, 'hostUfrag_123');
+    assert.equal(rendezvous.body.icePwd, 'hostPassword_1234567890');
+
+    const presence = await harness.request('GET', `/v1/presence/${host.deviceId}`, {
+      token: client.token,
+    });
+    assert.equal(presence.body.iceUfrag, 'hostUfrag_123');
+    assert.equal(presence.body.icePwd, 'hostPassword_1234567890');
 
     // The host collects the offer exactly once.
     const offers = await harness.request('GET', '/v1/rendezvous', { token: host.token });
     assert.equal(offers.body.offers.length, 1);
     assert.equal(offers.body.offers[0].requestId, 'request-0001');
     assert.equal(offers.body.offers[0].peerDeviceId, client.deviceId);
+    assert.equal(offers.body.offers[0].iceUfrag, 'clientUfrag_123');
+    assert.equal(offers.body.offers[0].icePwd, 'clientPassword_12345678');
     const again = await harness.request('GET', '/v1/rendezvous', { token: host.token });
     assert.deepEqual(again.body.offers, []);
   });
@@ -248,6 +266,32 @@ describe('presence and rendezvous', () => {
       body: { candidates: [candidate(harness, '203.0.113.9:443', 4000)] },
     });
     assert.equal(tooLong.status, 400);
+  });
+
+  it('keeps legacy host candidates valid while requiring complete ICE metadata when present', async () => {
+    const harness = await startHarness();
+    after(() => harness.close());
+    const { host } = await enrollPair(harness);
+
+    const legacy = await harness.request('POST', '/v1/presence', {
+      token: host.token,
+      body: { candidates: [candidate(harness)] },
+    });
+    assert.equal(legacy.status, 200);
+
+    const incomplete = await harness.request('POST', '/v1/presence', {
+      token: host.token,
+      body: {
+        candidates: [{ ...candidate(harness), type: 'host' }],
+      },
+    });
+    assert.equal(incomplete.status, 400);
+
+    const partialCredentials = await harness.request('POST', '/v1/presence', {
+      token: host.token,
+      body: { candidates: [candidate(harness)], iceUfrag: 'onlyUfrag_123' },
+    });
+    assert.equal(partialCredentials.status, 400);
   });
 });
 
@@ -371,6 +415,22 @@ describe.skip('legacy relay tickets (removed)', () => {
 });
 
 describe('Cloudflare TURN credentials', () => {
+  it('returns STUN discovery to an authenticated device even when relay fallback is disabled', async () => {
+    const harness = await startHarness();
+    after(() => harness.close());
+    const { accountToken, client } = await enrollPair(harness);
+    await harness.request('PATCH', '/v1/account', {
+      token: accountToken,
+      body: { relayEnabled: false },
+    });
+
+    const servers = await harness.request('GET', '/v1/ice-servers', { token: client.token });
+    assert.equal(servers.status, 200);
+    assert.deepEqual(servers.body, {
+      iceServers: [{ urls: ['stun:stun.cloudflare.com:3478'] }],
+    });
+  });
+
   it('issues ICE servers only to an active paired device and revokes them on the account kill switch', async () => {
     const harness = await startHarness();
     after(() => harness.close());

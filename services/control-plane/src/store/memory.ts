@@ -299,6 +299,8 @@ export class MemoryStore implements Store {
       deviceId: input.deviceId,
       accountId: input.accountId,
       candidates: input.candidates,
+      iceUfrag: input.iceUfrag,
+      icePwd: input.icePwd,
       expiresAt: input.expiresAt,
       updatedAt: new Date().toISOString(),
     };

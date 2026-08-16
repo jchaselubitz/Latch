@@ -203,15 +203,17 @@ private actor Driver {
             return .fatal(code: EventStreamClose.policy, reason: "invalid gateway address")
         }
         var request = URLRequest(url: url)
-        // The gateway accepts the token either as a bearer header or as the
-        // `latch.v1.<token>` subprotocol, and echoes the subprotocol back on
-        // the handshake. Both are sent: the header is what survives a proxy
-        // that drops subprotocol negotiation.
-        request.setValue("Bearer \(link.token)", forHTTPHeaderField: "Authorization")
-        request.setValue(
-            "latch.v1.\(link.token)",
-            forHTTPHeaderField: "Sec-WebSocket-Protocol"
-        )
+        // The manual path authenticates with both the bearer header and the
+        // subprotocol. A tunnel link has an empty token because its Mac-side
+        // proxy injects the credential; it refuses either caller-supplied
+        // credential, so omit both rather than sending an empty value.
+        if !link.token.isEmpty {
+            request.setValue("Bearer \(link.token)", forHTTPHeaderField: "Authorization")
+            request.setValue(
+                "latch.v1.\(link.token)",
+                forHTTPHeaderField: "Sec-WebSocket-Protocol"
+            )
+        }
         let socket = session.webSocketTask(with: request)
         task = socket
         setState(attempt == 0 ? .connecting : .reconnecting)

@@ -73,6 +73,12 @@ final class ModelTests: XCTestCase {
         )
         XCTAssertTrue(stop.stopped)
 
+        let stopAll = try decoder.decode(
+            StopAllReport.self,
+            from: Data(#"{"sessions":[{"id":"ses_1","state":"exited","stopped":true}]}"#.utf8)
+        )
+        XCTAssertEqual(stopAll.sessions.count, 1)
+
         let resize = try decoder.decode(
             ResizeReport.self,
             from: Data(#"{"id":"ses_1","cols":132,"rows":44,"pinned":true}"#.utf8)
@@ -92,7 +98,7 @@ final class ModelTests: XCTestCase {
         let report = try JSONDecoder().decode(
             CapabilitiesReport.self,
             from: Data("""
-            {"protocolVersion":1,"productVersion":"0.2608132217.0","capabilities":{
+            {"protocolVersion":1,"productVersion":"0.2608161432.0","capabilities":{
               "create":true,"openViewer":true,"localAttach":true,"cloudAttach":false,
               "selfUpdate":true,"extensions":["harness-events-v1","harness-interaction-v1"]}}
             """.utf8)
@@ -149,9 +155,9 @@ final class ModelTests: XCTestCase {
         XCTAssertTrue(report.sessions.isEmpty)
     }
 
-    func testClientRejectsThePreTmuxDesktopContract() async throws {
+    func testClientRejectsAReleaseBeforeStopAllSupport() async throws {
         let fixture = try makeCLI(response: """
-        {"protocolVersion":1,"productVersion":"0.2608131641.0","capabilities":{
+        {"protocolVersion":1,"productVersion":"0.2608161004.0","capabilities":{
           "create":true,"openViewer":true,"localAttach":true,"cloudAttach":false,
           "selfUpdate":true,"extensions":[]}}
         """)
@@ -166,7 +172,7 @@ final class ModelTests: XCTestCase {
                 error,
                 .incompatibleProduct(
                     minimum: LatchClient.minimumProductVersion,
-                    actual: "0.2608131641.0"
+                    actual: "0.2608161004.0"
                 )
             )
         }

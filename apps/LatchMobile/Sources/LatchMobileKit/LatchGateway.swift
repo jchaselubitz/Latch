@@ -41,6 +41,11 @@ public struct GatewayLink: Equatable, Sendable, Codable {
 /// refuses to build a link out of an address it cannot use.
 public actor LatchGateway {
     private let link: GatewayLink
+    // Retain the transport for as long as its gateway client exists. This is
+    // significant for the Noise implementation: it owns the loopback
+    // listener URLSession connects to, whereas the HTTPS transport is only a
+    // value wrapper around a manually entered link.
+    private let transport: any GatewayTransport
     private let session: URLSession
     private let decoder = JSONDecoder()
 
@@ -49,7 +54,17 @@ public actor LatchGateway {
     private var capabilities: GatewayCapabilities?
 
     public init(link: GatewayLink, session: URLSession = .shared) {
+        transport = HTTPSGatewayTransport(link: link)
         self.link = link
+        self.session = session
+    }
+
+    /// Uses a transport-selected gateway link. `NoiseTunnelGatewayTransport`
+    /// supplies a loopback URL and an empty token; the public HTTP contract is
+    /// otherwise exactly the same as a manually configured gateway.
+    public init(transport: any GatewayTransport, session: URLSession = .shared) {
+        self.transport = transport
+        link = transport.gatewayLink
         self.session = session
     }
 
@@ -189,7 +204,12 @@ public actor LatchGateway {
         }
         var request = URLRequest(url: url)
         request.httpMethod = method
-        request.setValue("Bearer \(link.token)", forHTTPHeaderField: "Authorization")
+        // The Noise proxy injects the supervised gateway credential on the
+        // Mac. Supplying a credential to its loopback side is refused rather
+        // than stripped, so an empty token deliberately means no header.
+        if !link.token.isEmpty {
+            request.setValue("Bearer \(link.token)", forHTTPHeaderField: "Authorization")
+        }
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         if let body {
             request.httpBody = body

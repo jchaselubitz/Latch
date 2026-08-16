@@ -280,9 +280,11 @@ in-memory dedupe window went with it.
 ## Known gaps
 
 - No terminal view. Discovery reports the endpoint; the app does not use it yet.
-- Pairing enrols an identity and persists it; the paired transport itself (the
-  Noise handshake and direct/relay paths) is not wired up on the phone yet, so a
-  paired phone still reaches sessions through the gateway link.
+- A paired phone now uses the pinned Noise tunnel for its session list and
+  chat operations. Direct ICE is attempted before Cloudflare TURN credentials
+  are requested; the manually entered `latch serve` link remains a coequal
+  route. Physical NAT, cellular, captive-portal, sleep/wake, and relay-soak
+  validation are release gates rather than completed device evidence.
 - Hook responses beyond the `awaiting_input` prompt are not modeled.
 - One linked computer at a time.
 - The session list does not refresh on its own; pull to refresh.

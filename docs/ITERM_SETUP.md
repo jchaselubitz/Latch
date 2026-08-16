@@ -78,6 +78,7 @@ latch attach --watch NAME   # look without taking input control
 latch open ses_01J… --with iterm  # open a new iTerm attachment
 latch open ses_01J… --with iterm --as tab   # …as a tab in the current window
 latch stop NAME             # end that session's process group only
+latch stop --all --yes      # confirm and end every running session
 latch prune                 # reclaim exited / lost session directories
 ```
 
