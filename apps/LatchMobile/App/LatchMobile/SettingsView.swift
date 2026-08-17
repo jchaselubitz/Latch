@@ -55,6 +55,33 @@ struct SettingsView: View {
         }
     }
 
+    /// Pairing is the usual remote-access path. A typed `latch serve` tunnel
+    /// remains available, but it is easy to paste the Mac's control-plane URL
+    /// into this field by mistake — that service enrolls phones, it does not
+    /// list sessions.
+    private var manualLinkHeader: String {
+        if case .paired = pairing.state {
+            return "Optional latch serve tunnel"
+        }
+        return "Your computer"
+    }
+
+    private var manualLinkFooter: String {
+        if case .paired(let record) = pairing.state {
+            return """
+            You're already paired with \(record.mac.displayName). That connection does \
+            not use this address. Only fill this in for a separate `latch serve` tunnel — \
+            never the control-plane URL from Mac Remote Access settings.
+            """
+        }
+        return """
+        Run `latch serve` on your computer and `latch serve token` for the token. \
+        The gateway listens on loopback only, so the address here is a tunnel to it — \
+        an SSH forward, a Tailscale address, or a reverse proxy that terminates TLS. \
+        This is not the control-plane URL shown in Mac Remote Access settings.
+        """
+    }
+
     // MARK: - Not linked
 
     @ViewBuilder
@@ -69,13 +96,9 @@ struct SettingsView: View {
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
         } header: {
-            Text("Your computer")
+            Text(manualLinkHeader)
         } footer: {
-            Text("""
-            Run `latch serve` on your computer and `latch serve token` for the token. \
-            The gateway listens on loopback only, so the address here is a tunnel to it — \
-            an SSH forward, a Tailscale address, or a reverse proxy that terminates TLS.
-            """)
+            Text(manualLinkFooter)
         }
 
         Section {

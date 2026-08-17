@@ -212,6 +212,8 @@ public enum LatchError: Error, Equatable, Sendable {
     case malformedResponse(String)
     /// The gateway reports a protocol major this build does not implement.
     case unsupportedProtocol(reported: Int, supported: Int)
+    /// The address is the Latch control plane, which has no session API.
+    case notAGateway
     /// The feature was not advertised by discovery, so it must not be used.
     case endpointUnavailable(GatewayEndpointsName)
     /// The transport failed.
@@ -233,6 +235,12 @@ public enum LatchError: Error, Equatable, Sendable {
             return """
             This gateway speaks Latch protocol \(reported); this app implements \(supported). \
             Update the app or the `latch` CLI so both sides agree.
+            """
+        case .notAGateway:
+            return """
+            That's the Latch control plane, not your Mac. Pair this phone under Remote access \
+            using the code your Mac shows, or enter a tunnel to `latch serve` — not the \
+            control-plane URL from Mac Remote Access settings.
             """
         case .endpointUnavailable(let endpoint):
             return "This gateway does not offer \(endpoint.rawValue)."

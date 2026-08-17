@@ -77,8 +77,10 @@ public actor LatchGateway {
 
     /// Runs the mandatory discovery step and caches the result.
     ///
-    /// A 404 here is not a failure: it identifies the pre-discovery gateway,
-    /// which still serves sessions and the terminal. Any other error is real.
+    /// A 404 here is not a failure when it identifies the pre-discovery
+    /// gateway, which still serves sessions and the terminal. A 404 whose
+    /// body is the control plane's unmatched-route contract is a real
+    /// failure: that service has no session API.
     @discardableResult
     public func discover() async throws -> GatewayCapabilities {
         let discovered: GatewayCapabilities
@@ -247,6 +249,13 @@ public actor LatchGateway {
             ?? code
             ?? String(data: data, encoding: .utf8)
             ?? ""
+        if GatewayCompatibility.isControlPlaneUnmatchedRoute(
+            status: status,
+            code: code,
+            reason: reason
+        ) {
+            return .notAGateway
+        }
         if status == 401 || status == 403 {
             return .unauthorized
         }

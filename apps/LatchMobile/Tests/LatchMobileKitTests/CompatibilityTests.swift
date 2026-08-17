@@ -93,6 +93,31 @@ final class CompatibilityTests: XCTestCase {
         }
     }
 
+    func testTheControlPlaneUnmatchedRouteIsNotALegacyGateway() {
+        XCTAssertTrue(
+            GatewayCompatibility.isControlPlaneUnmatchedRoute(
+                status: 404,
+                code: "not_found",
+                reason: "no such resource"
+            )
+        )
+        XCTAssertFalse(
+            GatewayCompatibility.isControlPlaneUnmatchedRoute(
+                status: 404,
+                code: nil,
+                reason: "not found"
+            ),
+            "a pre-discovery latch serve 404 must still map to the legacy surface"
+        )
+        XCTAssertFalse(
+            GatewayCompatibility.isControlPlaneUnmatchedRoute(
+                status: 404,
+                code: "not_found",
+                reason: "not_found"
+            )
+        )
+    }
+
     func testNoEventsEndpointMeansNoChatSurfaceAtAll() {
         let terminalOnly = GatewayCompatibility.sessionSurface(
             for: GatewayCompatibility.legacyCapabilities()

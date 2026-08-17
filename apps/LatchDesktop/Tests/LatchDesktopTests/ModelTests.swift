@@ -279,4 +279,64 @@ final class TerminalLauncherTests: XCTestCase {
         XCTAssertEqual(store.terminalOpenBehavior, .newTab)
         XCTAssertEqual(store.effectiveOpenBehavior, .newWindow)
     }
+
+    func testDisplayIdleLabelMatchesSidebarBuckets() {
+        XCTAssertEqual(SessionSummary.displayIdleLabel(for: 12_000), "12s idle")
+        XCTAssertEqual(SessionSummary.displayIdleLabel(for: 180_000), "3m idle")
+        XCTAssertEqual(SessionSummary.displayIdleLabel(for: 7_200_000), "2h idle")
+        XCTAssertEqual(SessionSummary.displayIdleLabel(for: 172_800_000), "2d idle")
+        XCTAssertNil(SessionSummary.displayIdleLabel(for: nil))
+    }
+
+    func testSessionDisplayEqualityIgnoresRawIdleChurnInsideOneBucket() throws {
+        let base = try JSONDecoder().decode(
+            SessionSummary.self,
+            from: Data("""
+            {"id":"ses_1","name":"demo","state":"running","cwd":"/tmp",\
+            "command_label":"zsh","created_at":"2026-08-10T00:00:00Z",\
+            "last_activity_at":"2026-08-10T00:03:00Z","idle_ms":180000}
+            """.utf8)
+        )
+        let sameMinute = try JSONDecoder().decode(
+            SessionSummary.self,
+            from: Data("""
+            {"id":"ses_1","name":"demo","state":"running","cwd":"/tmp",\
+            "command_label":"zsh","created_at":"2026-08-10T00:00:00Z",\
+            "last_activity_at":"2026-08-10T00:03:20Z","idle_ms":200000}
+            """.utf8)
+        )
+        let nextMinute = try JSONDecoder().decode(
+            SessionSummary.self,
+            from: Data("""
+            {"id":"ses_1","name":"demo","state":"running","cwd":"/tmp",\
+            "command_label":"zsh","created_at":"2026-08-10T00:00:00Z",\
+            "last_activity_at":"2026-08-10T00:04:00Z","idle_ms":240000}
+            """.utf8)
+        )
+
+        XCTAssertTrue(base.isDisplayEqual(to: sameMinute))
+        XCTAssertFalse(base.isDisplayEqual(to: nextMinute))
+        XCTAssertNotEqual(base, sameMinute)
+    }
+
+    func testAppChromeStateOnlyPublishesWhenValuesChange() {
+        let chrome = AppChromeState()
+        var runningUpdates = 0
+        var createUpdates = 0
+        let running = chrome.$runningCount.sink { _ in runningUpdates += 1 }
+        let create = chrome.$canCreateSessions.sink { _ in createUpdates += 1 }
+        defer {
+            _ = running
+            _ = create
+        }
+
+        chrome.update(runningCount: 0, canCreateSessions: false)
+        chrome.update(runningCount: 2, canCreateSessions: true)
+        chrome.update(runningCount: 2, canCreateSessions: true)
+
+        XCTAssertEqual(runningUpdates, 2)
+        XCTAssertEqual(createUpdates, 2)
+        XCTAssertEqual(chrome.runningCount, 2)
+        XCTAssertTrue(chrome.canCreateSessions)
+    }
 }

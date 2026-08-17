@@ -138,6 +138,35 @@ final class GatewayTests: XCTestCase {
         XCTAssertFalse(capabilities.endpoints.events)
     }
 
+    func testAControlPlane404OnDiscoveryIsNotALegacyGateway() async throws {
+        StubProtocol.stub(
+            path: "/v1/capabilities",
+            status: 404,
+            body: #"{"error":"not_found","reason":"no such resource"}"#
+        )
+        do {
+            _ = try await gateway().discover()
+            XCTFail("the control plane must not be treated as a pre-discovery gateway")
+        } catch let error as LatchError {
+            XCTAssertEqual(error, .notAGateway)
+        }
+    }
+
+    func testListingSessionsAgainstTheControlPlaneNamesTheWrongService() async throws {
+        StubProtocol.stub(path: "/v1/capabilities", body: fullDiscovery)
+        StubProtocol.stub(
+            path: "/v1/sessions",
+            status: 404,
+            body: #"{"error":"not_found","reason":"no such resource"}"#
+        )
+        do {
+            _ = try await gateway().listSessions()
+            XCTFail("a control-plane 404 must not be reported as a missing session route")
+        } catch let error as LatchError {
+            XCTAssertEqual(error, .notAGateway)
+        }
+    }
+
     func testAnUnsupportedProtocolMajorIsRefused() async throws {
         StubProtocol.stub(
             path: "/v1/capabilities",

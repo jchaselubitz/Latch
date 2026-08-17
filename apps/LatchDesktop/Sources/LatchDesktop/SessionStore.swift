@@ -6,7 +6,7 @@ import AppKit
 final class SessionStore: ObservableObject {
     @Published private(set) var sessions: [SessionSummary] = []
     @Published private(set) var details: InspectReport?
-    @Published var selection: String?
+    @Published var selection = Set<String>()
     @Published var search = ""
     @Published var stateFilter: SessionState?
     @Published var isRefreshing = false
@@ -46,14 +46,21 @@ final class SessionStore: ObservableObject {
 
     private var client: LatchClient
     private var refreshRequested = false
+    /// Coalesces overlapping refresh work without publishing `isRefreshing` on
+    /// every background poll — that publish alone was enough to rebuild menus.
+    private var refreshInFlight = false
     /// Background polls tolerate one bad answer before they say anything: a
     /// single slow or half-answered query is normal on a busy Mac, and a
     /// banner that appears and clears itself five seconds later reads as a
     /// fault in Latch rather than the passing hiccup it is.
     private var consecutiveRefreshFailures = 0
     private static let refreshFailuresBeforeReporting = 2
+    private static let activePollNanoseconds: UInt64 = 5_000_000_000
+    private static let idlePollNanoseconds: UInt64 = 60_000_000_000
     private var pollingTask: Task<Void, Never>?
     private var activationCancellable: AnyCancellable?
+    private weak var chrome: AppChromeState?
+    private var companionRefreshers: [@MainActor () async -> Void] = []
 
     var cliInstallCommand: String { LatchClient.installCommand }
     var selectedCLIIsExecutable: Bool {
@@ -72,6 +79,17 @@ final class SessionStore: ObservableObject {
         customTerminalTemplate = UserDefaults.standard.string(forKey: "customTerminalTemplate")
             ?? "-e {latch} attach {session}"
         latchExecutablePath = LatchClient.preferences.string(forKey: "latchExecutablePath") ?? ""
+    }
+
+    func attachChrome(_ chrome: AppChromeState) {
+        self.chrome = chrome
+        syncChrome()
+    }
+
+    /// Extra work that should ride the same cadence as session polling (for
+    /// example remote-access status) instead of running a second 5s timer.
+    func addCompanionRefresh(_ refresh: @escaping @MainActor () async -> Void) {
+        companionRefreshers.append(refresh)
     }
 
     var preferredTerminal: PreferredTerminal {
@@ -109,6 +127,15 @@ final class SessionStore: ObservableObject {
     var canCreateSessions: Bool { cliCapabilities?.capabilities.create == true }
     var canAttachSessions: Bool { cliCapabilities?.capabilities.localAttach == true }
 
+    /// Live sessions in the current sidebar selection, in list order.
+    var selectedLiveSessionIDs: [String] {
+        sessions
+            .filter { selection.contains($0.id) && $0.state.isLive }
+            .map(\.id)
+    }
+
+    var hasSelectedLiveSessions: Bool { !selectedLiveSessionIDs.isEmpty }
+
     func start() {
         guard pollingTask == nil else { return }
         activationCancellable = NotificationCenter.default
@@ -129,16 +156,22 @@ final class SessionStore: ObservableObject {
                 shouldPresentCLISetup = true
                 return
             }
-            do { cliCapabilities = try await client.validateCompatibility() }
-            catch {
-                errorMessage = error.localizedDescription
+            do {
+                let capabilities = try await client.validateCompatibility()
+                if cliCapabilities != capabilities {
+                    cliCapabilities = capabilities
+                }
+            } catch {
+                if errorMessage != error.localizedDescription {
+                    errorMessage = error.localizedDescription
+                }
                 shouldPresentCLISetup = true
                 return
             }
             cliDoctorReport = try? await client.doctor()
             await refresh()
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                try? await Task.sleep(nanoseconds: pollIntervalNanoseconds)
                 if !Task.isCancelled { await refresh() }
             }
         }
@@ -165,7 +198,11 @@ final class SessionStore: ObservableObject {
 
     func runCLIInstaller() {
         do { try TerminalLauncher.runInTerminal(cliInstallCommand) }
-        catch { errorMessage = error.localizedDescription }
+        catch {
+            if errorMessage != error.localizedDescription {
+                errorMessage = error.localizedDescription
+            }
+        }
     }
 
     func useConfiguredCLI() {
@@ -181,29 +218,38 @@ final class SessionStore: ObservableObject {
         cliCapabilities = nil
         cliDoctorReport = nil
         cliUpdateReport = nil
+        syncChrome()
         start()
     }
 
-    func refresh() async {
-        if isRefreshing {
+    func refresh(showsProgress: Bool = false) async {
+        if refreshInFlight {
             refreshRequested = true
             return
         }
-        isRefreshing = true
-        defer { isRefreshing = false }
+        refreshInFlight = true
+        if showsProgress {
+            isRefreshing = true
+        }
+        defer {
+            refreshInFlight = false
+            if isRefreshing {
+                isRefreshing = false
+            }
+        }
         repeat {
             refreshRequested = false
             do {
                 let report = try await client.list()
-                sessions = report.sessions
+                applySessionList(report.sessions)
                 consecutiveRefreshFailures = 0
-                errorMessage = nil
-                if let selection, !sessions.contains(where: { $0.id == selection }) {
-                    self.selection = sessions.first?.id
-                } else if selection == nil {
-                    selection = sessions.first?.id
+                if errorMessage != nil {
+                    errorMessage = nil
                 }
                 await loadDetails()
+                for companion in companionRefreshers {
+                    await companion()
+                }
             } catch {
                 // Preserve the last good snapshot; only the diagnostic changes.
                 reportRefreshFailure(error)
@@ -212,12 +258,17 @@ final class SessionStore: ObservableObject {
     }
 
     func loadDetails() async {
-        guard let selection else {
-            details = nil
+        guard selection.count == 1, let id = selection.first else {
+            if details != nil {
+                details = nil
+            }
             return
         }
         do {
-            details = try await client.inspect(selection)
+            let report = try await client.inspect(id)
+            if details != report {
+                details = report
+            }
             consecutiveRefreshFailures = 0
         } catch {
             reportRefreshFailure(error)
@@ -229,16 +280,22 @@ final class SessionStore: ObservableObject {
     private func reportRefreshFailure(_ error: Error) {
         consecutiveRefreshFailures += 1
         guard consecutiveRefreshFailures >= Self.refreshFailuresBeforeReporting else { return }
-        errorMessage = error.localizedDescription
+        if errorMessage != error.localizedDescription {
+            errorMessage = error.localizedDescription
+        }
     }
 
     func create(_ request: NewSessionRequest, openAfterCreation: Bool) async {
         do {
             let report = try await client.create(request)
-            selection = report.session.id
+            selection = [report.session.id]
             await refresh()
             if openAfterCreation { await open(report.session.id) }
-        } catch { errorMessage = error.localizedDescription }
+        } catch {
+            if errorMessage != error.localizedDescription {
+                errorMessage = error.localizedDescription
+            }
+        }
     }
 
     func open(_ id: String, behavior: TerminalOpenBehavior? = nil) async {
@@ -251,51 +308,100 @@ final class SessionStore: ObservableObject {
                 customExecutable: customTerminalExecutable,
                 customTemplate: customTerminalTemplate
             )
-        } catch { errorMessage = error.localizedDescription }
+        } catch {
+            if errorMessage != error.localizedDescription {
+                errorMessage = error.localizedDescription
+            }
+        }
     }
 
     func stop(_ id: String, force: Bool) async {
-        do { _ = try await client.stop(id, force: force); await refresh() }
-        catch { errorMessage = error.localizedDescription }
+        await stopSessions([id], force: force)
+    }
+
+    func stopSessions(_ ids: [String], force: Bool) async {
+        guard !ids.isEmpty else { return }
+        do {
+            for id in ids {
+                _ = try await client.stop(id, force: force)
+            }
+            await refresh()
+        } catch {
+            if errorMessage != error.localizedDescription {
+                errorMessage = error.localizedDescription
+            }
+        }
     }
 
     func stopAll() async {
         do { _ = try await client.stopAll(); await refresh() }
-        catch { errorMessage = error.localizedDescription }
+        catch {
+            if errorMessage != error.localizedDescription {
+                errorMessage = error.localizedDescription
+            }
+        }
     }
 
     func rename(_ id: String, to name: String) async {
         do { _ = try await client.rename(id, to: name); await refresh() }
-        catch { errorMessage = error.localizedDescription }
+        catch {
+            if errorMessage != error.localizedDescription {
+                errorMessage = error.localizedDescription
+            }
+        }
     }
 
     func resize(_ id: String, request: ResizeSessionRequest) async {
         do { _ = try await client.resize(id, request: request); await refresh() }
-        catch { errorMessage = error.localizedDescription }
+        catch {
+            if errorMessage != error.localizedDescription {
+                errorMessage = error.localizedDescription
+            }
+        }
     }
 
     func remove(_ id: String, force: Bool) async {
         do { _ = try await client.remove(id, force: force); await refresh() }
-        catch { errorMessage = error.localizedDescription }
+        catch {
+            if errorMessage != error.localizedDescription {
+                errorMessage = error.localizedDescription
+            }
+        }
     }
 
     func previewPrune() async {
         do { prunePreview = try await client.previewPrune() }
-        catch { errorMessage = error.localizedDescription }
+        catch {
+            if errorMessage != error.localizedDescription {
+                errorMessage = error.localizedDescription
+            }
+        }
     }
 
     func pruneAll() async {
         do { _ = try await client.pruneAll(); prunePreview = nil; await refresh() }
-        catch { errorMessage = error.localizedDescription }
+        catch {
+            if errorMessage != error.localizedDescription {
+                errorMessage = error.localizedDescription
+            }
+        }
     }
 
     func refreshCLIDiagnostics() async {
         do {
-            cliCapabilities = try await client.validateCompatibility()
+            let capabilities = try await client.validateCompatibility()
+            if cliCapabilities != capabilities {
+                cliCapabilities = capabilities
+            }
             cliDoctorReport = try await client.doctor()
-            errorMessage = nil
+            if errorMessage != nil {
+                errorMessage = nil
+            }
+            syncChrome()
         } catch {
-            errorMessage = error.localizedDescription
+            if errorMessage != error.localizedDescription {
+                errorMessage = error.localizedDescription
+            }
         }
     }
 
@@ -305,9 +411,13 @@ final class SessionStore: ObservableObject {
         defer { isCheckingCLIUpdate = false }
         do {
             cliUpdateReport = try await client.checkForUpdate()
-            errorMessage = nil
+            if errorMessage != nil {
+                errorMessage = nil
+            }
         } catch {
-            errorMessage = error.localizedDescription
+            if errorMessage != error.localizedDescription {
+                errorMessage = error.localizedDescription
+            }
         }
     }
 
@@ -319,12 +429,56 @@ final class SessionStore: ObservableObject {
         defer { isUpdatingCLI = false }
         do {
             cliUpdateReport = try await client.update()
-            cliCapabilities = try await client.validateCompatibility()
+            let capabilities = try await client.validateCompatibility()
+            if cliCapabilities != capabilities {
+                cliCapabilities = capabilities
+            }
             cliDoctorReport = try await client.doctor()
-            errorMessage = nil
+            if errorMessage != nil {
+                errorMessage = nil
+            }
+            syncChrome()
             await refresh()
         } catch {
-            errorMessage = error.localizedDescription
+            if errorMessage != error.localizedDescription {
+                errorMessage = error.localizedDescription
+            }
         }
+    }
+
+    private var pollIntervalNanoseconds: UInt64 {
+        shouldPollFrequently ? Self.activePollNanoseconds : Self.idlePollNanoseconds
+    }
+
+    /// Keep a tight loop only while Latch is in front with something on screen.
+    /// Closing the window (or deactivating) backs the poll off; becoming active
+    /// already triggers an immediate refresh via `didBecomeActiveNotification`.
+    private var shouldPollFrequently: Bool {
+        guard NSApp.isActive else { return false }
+        return NSApp.windows.contains { $0.isVisible && !$0.isMiniaturized }
+    }
+
+    private func applySessionList(_ next: [SessionSummary]) {
+        let sessionsChanged = !sessions.elementsEqual(next, by: { $0.isDisplayEqual(to: $1) })
+        if sessionsChanged {
+            sessions = next
+        }
+
+        let validIDs = Set(next.map(\.id))
+        var nextSelection = selection.intersection(validIDs)
+        if nextSelection.isEmpty {
+            nextSelection = Set(next.prefix(1).map(\.id))
+        }
+        if nextSelection != selection {
+            selection = nextSelection
+        }
+
+        if sessionsChanged {
+            syncChrome()
+        }
+    }
+
+    private func syncChrome() {
+        chrome?.update(runningCount: runningCount, canCreateSessions: canCreateSessions)
     }
 }

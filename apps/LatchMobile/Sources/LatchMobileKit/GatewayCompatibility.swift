@@ -12,10 +12,25 @@ import Foundation
 ///   endpoint may be used only when the map reports it as `true`.
 /// - A client must never probe an optional endpoint and infer support from the
 ///   error it gets back.
-/// - A gateway that 404s discovery is the pre-discovery, terminal-only build.
+/// - A gateway that 404s discovery is the pre-discovery, terminal-only build,
+///   unless the body is the control plane's unmatched-route contract.
 /// - A `protocolVersion` other than the supported major is unsupported rather
 ///   than guessed at.
 public enum GatewayCompatibility {
+    /// The control plane's unmatched-route body.
+    ///
+    /// That service has pairing and signaling routes, not a session gateway.
+    /// A 404 on `/v1/capabilities` is therefore not the pre-discovery
+    /// `latch serve` surface: treating it as one makes the phone look linked
+    /// and then fail `/v1/sessions` with the same 404.
+    public static func isControlPlaneUnmatchedRoute(
+        status: Int,
+        code: String?,
+        reason: String
+    ) -> Bool {
+        status == 404 && code == "not_found" && reason == "no such resource"
+    }
+
     /// What a gateway with no `/v1/capabilities` endpoint can do.
     ///
     /// Sessions and terminal predate discovery, so they are safe to assume.

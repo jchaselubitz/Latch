@@ -27,6 +27,35 @@ struct SessionSummary: Codable, Identifiable, Hashable, Sendable {
         case lastActivityAt = "last_activity_at"
         case idleMs = "idle_ms"
     }
+
+    /// Coarse idle label matching the sidebar row (`3m idle`, `2h idle`, …).
+    var displayIdleLabel: String? {
+        Self.displayIdleLabel(for: idleMs)
+    }
+
+    /// Equality for UI invalidation: ignore raw timestamps that change every poll
+    /// while the drawn idle text stays the same.
+    func isDisplayEqual(to other: SessionSummary) -> Bool {
+        id == other.id
+            && name == other.name
+            && title == other.title
+            && state == other.state
+            && cwd == other.cwd
+            && commandLabel == other.commandLabel
+            && createdAt == other.createdAt
+            && displayIdleLabel == other.displayIdleLabel
+    }
+
+    static func displayIdleLabel(for milliseconds: UInt64?) -> String? {
+        guard let milliseconds else { return nil }
+        let seconds = milliseconds / 1_000
+        if seconds < 60 { return "\(seconds)s idle" }
+        let minutes = seconds / 60
+        if minutes < 60 { return "\(minutes)m idle" }
+        let hours = minutes / 60
+        if hours < 24 { return "\(hours)h idle" }
+        return "\(hours / 24)d idle"
+    }
 }
 
 struct ListReport: Codable, Sendable {
@@ -49,7 +78,7 @@ struct ExitRecord: Codable, Hashable, Sendable {
     }
 }
 
-struct InspectReport: Codable, Identifiable, Sendable {
+struct InspectReport: Codable, Identifiable, Equatable, Sendable {
     let id: String
     let name: String
     let title: String?
@@ -120,13 +149,13 @@ struct PruneReport: Codable, Sendable {
     }
 }
 
-struct CapabilitiesReport: Codable, Sendable {
+struct CapabilitiesReport: Codable, Equatable, Sendable {
     let protocolVersion: UInt32
     let productVersion: String
     let capabilities: CapabilityFlags
 }
 
-struct CapabilityFlags: Codable, Sendable {
+struct CapabilityFlags: Codable, Equatable, Sendable {
     let create: Bool
     let openViewer: Bool
     let localAttach: Bool

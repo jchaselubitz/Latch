@@ -3,20 +3,28 @@ import AppKit
 
 @main
 struct LatchDesktopApp: App {
-    @StateObject private var store = SessionStore()
-    @StateObject private var updates = UpdateController()
-    @StateObject private var remoteAccess = RemoteAccessController()
+    /// Menu bar label + `.commands` observe only this small object so session
+    /// list churn cannot reach `-[NSApplication setMainMenu:]`.
+    @StateObject private var chrome = AppChromeState()
+    /// Controllers live here without being `@StateObject`s on `App`, so their
+    /// `@Published` traffic does not invalidate the scene graph at the root.
+    @State private var runtime = DesktopRuntime()
     @Environment(\.openWindow) private var openWindow
 
     var body: some Scene {
         WindowGroup("Latch", id: "sessions") {
-            SessionsView(store: store, updates: updates)
+            SessionsView(store: runtime.store, updates: runtime.updates)
                 .frame(minWidth: 760, minHeight: 480)
                 .task {
+                    let store = runtime.store
+                    let remoteAccess = runtime.remoteAccess
+                    store.attachChrome(chrome)
+                    store.addCompanionRefresh { await remoteAccess.refresh() }
                     store.start()
-                    updates.startAutomaticChecks()
+                    runtime.updates.startAutomaticChecks()
                     // Remote access never turns itself on: this only resumes
                     // supervision when the user already left it enabled.
+                    // Polling is owned by SessionStore's companion refresh.
                     await remoteAccess.restoreIfEnabled()
                 }
         }
@@ -28,7 +36,7 @@ struct LatchDesktopApp: App {
             CommandGroup(after: .appInfo) {
                 Button("Check for Updates…") {
                     openSessionsWindow()
-                    Task { await updates.check(userInitiated: true) }
+                    Task { await runtime.updates.check(userInitiated: true) }
                 }
             }
 
@@ -36,28 +44,28 @@ struct LatchDesktopApp: App {
             // menu with the action users actually need to start their work.
             CommandGroup(replacing: .newItem) {
                 Button("New Session…") {
-                    store.shouldPresentNewSession = true
+                    runtime.store.shouldPresentNewSession = true
                     openSessionsWindow()
                 }
                 .keyboardShortcut("n", modifiers: .command)
-                .disabled(!store.canCreateSessions)
+                .disabled(!chrome.canCreateSessions)
             }
 
             CommandMenu("Session") {
                 Button("Refresh") {
-                    Task { await store.refresh() }
+                    Task { await runtime.store.refresh(showsProgress: true) }
                 }
                 .keyboardShortcut("r", modifiers: .command)
 
                 Button("Prune…") {
-                    store.shouldPresentPrune = true
+                    runtime.store.shouldPresentPrune = true
                     openSessionsWindow()
                 }
             }
         }
 
         MenuBarExtra {
-            MenuBarSessionsView(store: store, updates: updates) {
+            MenuBarSessionsView(store: runtime.store, updates: runtime.updates) {
                 openWindow(id: "sessions")
                 NSApp.activate(ignoringOtherApps: true)
             } openSettings: {
@@ -65,11 +73,11 @@ struct LatchDesktopApp: App {
             } checkForUpdates: {
                 openWindow(id: "sessions")
                 NSApp.activate(ignoringOtherApps: true)
-                Task { await updates.check(userInitiated: true) }
+                Task { await runtime.updates.check(userInitiated: true) }
             }
         } label: {
             Label {
-                Text("Latch \(store.runningCount)")
+                Text("Latch \(chrome.runningCount)")
             } icon: {
                 Image(nsImage: Self.menuBarImage)
                     .renderingMode(.template)
@@ -78,7 +86,11 @@ struct LatchDesktopApp: App {
         .menuBarExtraStyle(.menu)
 
         Settings {
-            SettingsView(store: store, updates: updates, remoteAccess: remoteAccess)
+            SettingsView(
+                store: runtime.store,
+                updates: runtime.updates,
+                remoteAccess: runtime.remoteAccess
+            )
         }
     }
 

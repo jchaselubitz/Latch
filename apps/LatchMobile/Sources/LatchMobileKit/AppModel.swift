@@ -183,6 +183,15 @@ public final class AppModel {
             }
             await refreshSessions()
         } catch let error as LatchError {
+            // A saved control-plane URL must not stay as "the computer":
+            // restore would keep winning over pairing on every launch.
+            if error == .notAGateway, source == .manual {
+                try? storage.clear()
+                if let existing = self.pairedDevice {
+                    await connectPairedDevice(existing)
+                    if case .linked = linkState { return }
+                }
+            }
             linkState = .failed(error.message)
         } catch {
             linkState = .failed(error.localizedDescription)

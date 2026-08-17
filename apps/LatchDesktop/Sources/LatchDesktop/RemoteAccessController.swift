@@ -50,7 +50,6 @@ final class RemoteAccessController: ObservableObject {
     private let client: LatchClient
     private let controlPlane: ControlPlaneHost
     private var supervision: Task<Void, Never>?
-    private var pollingTask: Task<Void, Never>?
     private var enrollmentWatch: Task<Void, Never>?
     /// Publishes the helper's authenticated listener, never the loopback
     /// gateway. It is separate from supervision because a healthy helper can
@@ -102,13 +101,15 @@ final class RemoteAccessController: ObservableObject {
 
     /// Reads the CLI state and, if the user previously left remote access on,
     /// resumes supervision. Called once when Settings first appears.
+    ///
+    /// Ongoing status polls ride SessionStore's companion refresh rather than
+    /// a second 5-second timer of their own.
     func restoreIfEnabled() async {
         installTerminationHandler()
         await refresh()
         if status.enabled, supervision == nil {
             startSupervision()
         }
-        startPolling()
     }
 
     func setEnabled(_ enabled: Bool) async {
@@ -199,17 +200,6 @@ final class RemoteAccessController: ObservableObject {
         }
         phase = .failed(RemoteAccessSupervisorError.readinessTimeout.localizedDescription)
         errorMessage = RemoteAccessSupervisorError.readinessTimeout.localizedDescription
-    }
-
-    private func startPolling() {
-        guard pollingTask == nil else { return }
-        pollingTask = Task { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 5_000_000_000)
-                guard !Task.isCancelled else { return }
-                await self?.refresh()
-            }
-        }
     }
 
     /// Starts a refresh loop only while a real non-loopback listener exists.
@@ -304,24 +294,40 @@ final class RemoteAccessController: ObservableObject {
 
     func refresh() async {
         do {
-            status = try await client.remoteAccessStatus()
-            devices = try await client.remoteDevices()
-            auditEvents = (try? await client.remoteAudit()) ?? auditEvents
+            let nextStatus = try await client.remoteAccessStatus()
+            if status != nextStatus {
+                status = nextStatus
+            }
+            let nextDevices = try await client.remoteDevices()
+            if devices != nextDevices {
+                devices = nextDevices
+            }
+            if let nextAudit = try? await client.remoteAudit(), nextAudit != auditEvents {
+                auditEvents = nextAudit
+            }
             if !status.enabled {
-                phase = .off
+                assignPhase(.off)
                 stopPresence(clear: true)
             } else if let listener = status.listenerAddress {
-                phase = .online(listener: listener)
+                assignPhase(.online(listener: listener))
                 startPresence()
             } else if case .failed = phase {
                 // Keep the failure visible rather than downgrading it.
                 stopPresence(clear: true)
             } else if supervision != nil {
-                phase = .starting
+                assignPhase(.starting)
                 stopPresence(clear: true)
             }
         } catch {
-            errorMessage = error.localizedDescription
+            if errorMessage != error.localizedDescription {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func assignPhase(_ next: RemoteAccessPhase) {
+        if phase != next {
+            phase = next
         }
     }
 

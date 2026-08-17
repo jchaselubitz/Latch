@@ -194,4 +194,37 @@ final class AppModelTests: XCTestCase {
         XCTAssertNil(model.gateway)
         XCTAssertNil(model.linkSource)
     }
+
+    func testASavedControlPlaneAddressDoesNotStayLinkedOrBlockPairing() async throws {
+        let controlPlane = #"{"error":"not_found","reason":"no such resource"}"#
+        StubProtocol.stub(path: "/v1/capabilities", status: 404, body: controlPlane)
+        let saved = try GatewayLink(
+            address: "https://latch-production-7e52.up.railway.app",
+            token: "not-a-gateway-token"
+        )
+        let storage = MemoryLinkStorage(link: saved)
+        let model = AppModel(
+            storage: storage,
+            sessionFactory: { link in LatchGateway(link: link, session: StubProtocol.session()) },
+            pairedGatewayFactory: pairedGatewayFactory()
+        )
+
+        await model.restore()
+
+        guard case .failed(let reason) = model.linkState else {
+            return XCTFail("control-plane URL must not look like a linked gateway: \(model.linkState)")
+        }
+        XCTAssertTrue(reason.contains("control plane"), reason)
+        XCTAssertNil(try storage.load(), "a control-plane URL must not remain the saved computer")
+
+        StubProtocol.reset()
+        stubReachableMac()
+        await model.connectPairedDevice(pairedRecord())
+
+        guard case .linked = model.linkState else {
+            return XCTFail("pairing should connect after a control-plane link is rejected: \(model.linkState)")
+        }
+        XCTAssertEqual(model.linkSource, .paired)
+        XCTAssertEqual(model.sessions.map(\.id), ["ses_1"])
+    }
 }

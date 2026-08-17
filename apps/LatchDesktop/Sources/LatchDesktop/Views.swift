@@ -8,6 +8,7 @@ struct SessionsView: View {
     @State private var showingCreate = false
     @State private var showingPrune = false
     @State private var showingStopAll = false
+    @State private var pendingStop: PendingStopRequest?
 
     var body: some View {
         NavigationSplitView {
@@ -26,6 +27,12 @@ struct SessionsView: View {
                             sessionID: session.id,
                             isEnabled: canOpen
                         )
+                        if session.state.isLive {
+                            Divider()
+                            Button("Stop…", role: .destructive) {
+                                pendingStop = stopTargets(for: session)
+                            }
+                        }
                     }
             }
             .searchable(text: $store.search, prompt: "Search sessions")
@@ -55,6 +62,10 @@ struct SessionsView: View {
                     }
                     .keyboardShortcut("n")
                     .disabled(!store.canCreateSessions)
+                    Button("Stop Selected…", role: .destructive) {
+                        pendingStop = PendingStopRequest(sessionIDs: store.selectedLiveSessionIDs)
+                    }
+                    .disabled(!store.hasSelectedLiveSessions)
                     Button("Stop All…", role: .destructive) {
                         showingStopAll = true
                     }
@@ -62,7 +73,12 @@ struct SessionsView: View {
                 }
             }
         } detail: {
-            if let details = store.details, details.id == store.selection {
+            if store.selection.count > 1 {
+                MultiSessionSelectionView(store: store)
+            } else if store.selection.count == 1,
+                      let selectedID = store.selection.first,
+                      let details = store.details,
+                      details.id == selectedID {
                 SessionDetailView(store: store, session: details)
             } else {
                 EmptyStateView(
@@ -75,7 +91,7 @@ struct SessionsView: View {
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 Button {
-                    Task { await store.refresh() }
+                    Task { await store.refresh(showsProgress: true) }
                 } label: {
                     Label("Refresh", systemImage: "arrow.clockwise")
                 }
@@ -118,6 +134,27 @@ struct SessionsView: View {
         } message: {
             Text("Stopping ends every live child process but retains each final screen for later inspection.")
         }
+        .confirmationDialog(
+            pendingStopTitle,
+            isPresented: pendingStopBinding,
+            titleVisibility: .visible
+        ) {
+            if let pendingStop {
+                Button("Stop", role: .destructive) {
+                    let ids = pendingStop.sessionIDs
+                    self.pendingStop = nil
+                    Task { await store.stopSessions(ids, force: false) }
+                }
+                Button("Force Stop", role: .destructive) {
+                    let ids = pendingStop.sessionIDs
+                    self.pendingStop = nil
+                    Task { await store.stopSessions(ids, force: true) }
+                }
+            }
+            Button("Cancel", role: .cancel) { pendingStop = nil }
+        } message: {
+            Text(pendingStopMessage)
+        }
         .sheet(isPresented: $updates.isPresented) {
             UpdateView(updates: updates)
         }
@@ -138,6 +175,39 @@ struct SessionsView: View {
         )
     }
 
+    private var pendingStopBinding: Binding<Bool> {
+        Binding(
+            get: { pendingStop != nil },
+            set: { if !$0 { pendingStop = nil } }
+        )
+    }
+
+    private var pendingStopTitle: String {
+        guard let pendingStop else { return "Stop Session" }
+        if pendingStop.sessionIDs.count == 1,
+           let name = store.sessions.first(where: { $0.id == pendingStop.sessionIDs[0] })?.name {
+            return "Stop \(name)?"
+        }
+        return "Stop \(pendingStop.sessionIDs.count) sessions?"
+    }
+
+    private var pendingStopMessage: String {
+        if pendingStop?.sessionIDs.count == 1 {
+            return "Stopping ends the child process but retains its final screen for later inspection."
+        }
+        return "Stopping ends each child process but retains its final screen for later inspection."
+    }
+
+    private func stopTargets(for session: SessionSummary) -> PendingStopRequest {
+        let ids: [String]
+        if store.selection.contains(session.id), store.selection.count > 1 {
+            ids = store.selectedLiveSessionIDs
+        } else {
+            ids = session.state.isLive ? [session.id] : []
+        }
+        return PendingStopRequest(sessionIDs: ids)
+    }
+
     private func handleMenuRequests() {
         if store.shouldPresentNewSession {
             store.shouldPresentNewSession = false
@@ -150,6 +220,72 @@ struct SessionsView: View {
                 showingPrune = store.prunePreview != nil
             }
         }
+    }
+}
+
+private struct PendingStopRequest: Identifiable {
+    let id = UUID()
+    let sessionIDs: [String]
+}
+
+private struct MultiSessionSelectionView: View {
+    @ObservedObject var store: SessionStore
+    @State private var showingStop = false
+
+    private var selectedSessions: [SessionSummary] {
+        store.sessions.filter { store.selection.contains($0.id) }
+    }
+
+    private var liveCount: Int {
+        selectedSessions.filter(\.state.isLive).count
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text("\(store.selection.count) sessions selected")
+                .font(.largeTitle)
+                .fontWeight(.semibold)
+            Text(summary)
+                .foregroundStyle(.secondary)
+            if liveCount > 0 {
+                Button("Stop Selected…", role: .destructive) {
+                    showingStop = true
+                }
+                .buttonStyle(.bordered)
+            }
+            List(selectedSessions) { session in
+                SessionRow(session: session)
+            }
+            .listStyle(.inset)
+        }
+        .padding(28)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .confirmationDialog(
+            "Stop \(liveCount) session\(liveCount == 1 ? "" : "s")?",
+            isPresented: $showingStop,
+            titleVisibility: .visible
+        ) {
+            Button("Stop", role: .destructive) {
+                Task { await store.stopSessions(store.selectedLiveSessionIDs, force: false) }
+            }
+            Button("Force Stop", role: .destructive) {
+                Task { await store.stopSessions(store.selectedLiveSessionIDs, force: true) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Stopping ends each child process but retains its final screen for later inspection.")
+        }
+    }
+
+    private var summary: String {
+        let running = selectedSessions.filter { $0.state == .running }.count
+        let exited = selectedSessions.filter { $0.state == .exited }.count
+        let lost = selectedSessions.filter { $0.state == .lost }.count
+        var parts: [String] = []
+        if running > 0 { parts.append("\(running) running") }
+        if exited > 0 { parts.append("\(exited) exited") }
+        if lost > 0 { parts.append("\(lost) lost") }
+        return parts.joined(separator: ", ")
     }
 }
 
@@ -259,16 +395,7 @@ private struct SessionRow: View {
         }
     }
 
-    private var idleDescription: String? {
-        guard let milliseconds = session.idleMs else { return nil }
-        let seconds = milliseconds / 1_000
-        if seconds < 60 { return "\(seconds)s idle" }
-        let minutes = seconds / 60
-        if minutes < 60 { return "\(minutes)m idle" }
-        let hours = minutes / 60
-        if hours < 24 { return "\(hours)h idle" }
-        return "\(hours / 24)d idle"
-    }
+    private var idleDescription: String? { session.displayIdleLabel }
 }
 
 private struct SessionDetailView: View {
@@ -642,7 +769,7 @@ struct MenuBarSessionsView: View {
             store.shouldPresentPrune = true
             openMainWindow()
         }
-        Button("Refresh") { Task { await store.refresh() } }
+        Button("Refresh") { Task { await store.refresh(showsProgress: true) } }
         Button("Open Latch") { openMainWindow() }
         Button("Check for Updates…") { checkForUpdates() }
         Button("Settings…") { openSettings() }
