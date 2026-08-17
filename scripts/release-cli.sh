@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the distributable Latch payload: CLI plus pinned private tmux.
+# Build the distributable Latch payload: CLI, remote helper, and pinned private tmux.
 #
 # Usage: scripts/release-cli.sh [target]
 #

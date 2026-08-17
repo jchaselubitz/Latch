@@ -1,20 +1,20 @@
-//! `latch update` — replace this binary with the newest published release.
+//! `latch update` — replace this install with the newest published release.
 //!
-//! Latch is installed by copying one file, so it has to be updated by
-//! replacing one file. That is the whole feature, and the risk is entirely in
-//! the details: the archive must be the one the release published, the swap
-//! must not leave a half-written binary where a working one was, and a copy
-//! that somebody else owns — a Homebrew cellar, the helper inside
-//! `Latch.app` — must be refused rather than quietly diverged from its
-//! package.
+//! Latch is installed as one signed payload — `latch`, `latch-remote`, and
+//! `latch-tmux` — so it has to be updated by replacing that payload. That is
+//! the whole feature, and the risk is entirely in the details: the archive
+//! must be the one the release published, the swap must not leave a
+//! half-written binary where a working one was, and a copy that somebody else
+//! owns — a Homebrew cellar, the helper inside `Latch.app` — must be refused
+//! rather than quietly diverged from its package.
 //!
-//! Three checks stand between the network and the installed binary:
+//! Three checks stand between the network and the installed binaries:
 //!
 //! 1. the archive's SHA-256 must match the release's own `checksums.txt`;
 //! 2. when the running binary carries a Developer ID signature, the downloaded
-//!    one must carry a valid signature from the same team;
-//! 3. the replacement is staged beside the target and moved into place with
-//!    `rename`, so the installed path is either the old binary or the new one.
+//!    ones must carry a valid signature from the same team;
+//! 3. each replacement is staged beside the target and moved into place with
+//!    `rename`, so every installed path is either the old binary or the new one.
 //!
 //! Networking is `curl`, and unpacking is `ditto`/`tar`. Both are part of
 //! macOS, and the alternative is a TLS stack and an archive reader linked into
@@ -32,8 +32,11 @@ use std::process::{Command, Stdio};
 use anyhow::{anyhow, bail, Context, Result};
 
 use crate::cli::json::UpdateReport;
-use crate::engine::BUNDLED_TMUX_NAME;
+use crate::engine::{BUNDLED_REMOTE_NAME, BUNDLED_TMUX_NAME};
 use release::{host_target, Release, Version, DEFAULT_RELEASE_REPO};
+
+/// Extra files that ship beside `latch` in a release archive.
+const PAYLOAD_SIBLINGS: &[&str] = &[BUNDLED_TMUX_NAME, BUNDLED_REMOTE_NAME];
 
 /// What an update run was asked to do.
 #[derive(Debug, Clone)]
@@ -259,9 +262,11 @@ fn payload_is_complete(executable: Option<&Path>) -> bool {
         return false;
     };
     let executable = fs::canonicalize(&executable).unwrap_or(executable);
-    executable
-        .parent()
-        .is_some_and(|parent| parent.join(BUNDLED_TMUX_NAME).is_file())
+    executable.parent().is_some_and(|parent| {
+        PAYLOAD_SIBLINGS
+            .iter()
+            .all(|name| parent.join(name).is_file())
+    })
 }
 
 /// Refuses to replace a binary that something else is responsible for.
@@ -324,15 +329,20 @@ fn install(
     unpack(&archive_path, &unpacked)?;
 
     let replacement = unpacked.join("latch");
-    let replacement_tmux = unpacked.join(BUNDLED_TMUX_NAME);
-    if !replacement.is_file() || !replacement_tmux.is_file() {
+    let siblings: Vec<(&str, PathBuf, PathBuf)> = PAYLOAD_SIBLINGS
+        .iter()
+        .map(|name| (*name, unpacked.join(name), parent.join(name)))
+        .collect();
+    if !replacement.is_file() || siblings.iter().any(|(_, source, _)| !source.is_file()) {
         bail!(
-            "{} did not contain the complete `latch` and `{BUNDLED_TMUX_NAME}` payload",
+            "{} did not contain the complete `latch`, `{BUNDLED_TMUX_NAME}`, and `{BUNDLED_REMOTE_NAME}` payload",
             archive.name
         );
     }
     verify_signature(target, &replacement)?;
-    verify_signature(target, &replacement_tmux)?;
+    for (_, source, _) in &siblings {
+        verify_signature(target, source)?;
+    }
 
     // Match the mode of what is being replaced, so an install that was
     // deliberately group-readable-only stays that way; fall back to the mode
@@ -342,38 +352,48 @@ fn install(
         .unwrap_or(0o755);
     fs::set_permissions(&replacement, fs::Permissions::from_mode(mode))
         .with_context(|| format!("could not set permissions on {}", replacement.display()))?;
-    fs::set_permissions(&replacement_tmux, fs::Permissions::from_mode(0o755)).with_context(
-        || {
-            format!(
-                "could not set permissions on {}",
-                replacement_tmux.display()
-            )
-        },
-    )?;
-
-    let tmux_target = parent.join(BUNDLED_TMUX_NAME);
-    let tmux_backup = staging.path().join("previous-tmux");
-    if tmux_target.is_file() {
-        fs::copy(&tmux_target, &tmux_backup)
-            .with_context(|| format!("could not stage {}", tmux_target.display()))?;
+    for (_, source, _) in &siblings {
+        fs::set_permissions(source, fs::Permissions::from_mode(0o755))
+            .with_context(|| format!("could not set permissions on {}", source.display()))?;
     }
-    fs::rename(&replacement_tmux, &tmux_target)
-        .with_context(|| format!("could not replace {}", tmux_target.display()))?;
-    if let Err(error) = fs::rename(&replacement, target) {
-        if tmux_backup.is_file() {
-            let _ = fs::rename(&tmux_backup, &tmux_target);
-        } else {
-            let _ = fs::remove_file(&tmux_target);
+
+    let mut backups = Vec::new();
+    for (name, source, destination) in &siblings {
+        let backup = staging.path().join(format!("previous-{name}"));
+        if destination.is_file() {
+            fs::copy(destination, &backup)
+                .with_context(|| format!("could not stage {}", destination.display()))?;
         }
+        if let Err(error) = fs::rename(source, destination) {
+            restore_siblings(&backups);
+            return Err(error)
+                .with_context(|| format!("could not replace {}", destination.display()));
+        }
+        backups.push((backup, destination.clone()));
+    }
+    if let Err(error) = fs::rename(&replacement, target) {
+        restore_siblings(&backups);
         return Err(error).with_context(|| {
             format!(
-                "could not replace {}. The bundled tmux was rolled back; re-run with write access to {}",
+                "could not replace {}. The bundled payload was rolled back; re-run with write access to {}",
                 target.display(),
                 parent.display()
             )
         });
     }
     Ok(target.to_path_buf())
+}
+
+/// Restores payload siblings after a failed swap. Best-effort: a restore
+/// error must not hide the install failure that triggered it.
+fn restore_siblings(backups: &[(PathBuf, PathBuf)]) {
+    for (backup, destination) in backups.iter().rev() {
+        if backup.is_file() {
+            let _ = fs::rename(backup, destination);
+        } else {
+            let _ = fs::remove_file(destination);
+        }
+    }
 }
 
 /// Hashes the downloaded archive and compares it with the release's manifest.
@@ -602,6 +622,8 @@ mod tests {
         fs::write(&staged, body).expect("stage binary");
         let staged_tmux = dir.path().join(BUNDLED_TMUX_NAME);
         fs::write(&staged_tmux, b"tmux 3.7b").expect("stage tmux");
+        let staged_remote = dir.path().join(BUNDLED_REMOTE_NAME);
+        fs::write(&staged_remote, b"the remote helper").expect("stage remote");
         let archive_name = format!("latch-{version}-{FIXTURE_TARGET}.tar.gz");
         let archive = dir.path().join(&archive_name);
         let status = Command::new("tar")
@@ -609,7 +631,7 @@ mod tests {
             .arg(&archive)
             .args(["-C"])
             .arg(dir.path())
-            .args(["latch", BUNDLED_TMUX_NAME])
+            .args(["latch", BUNDLED_TMUX_NAME, BUNDLED_REMOTE_NAME])
             .status()
             .expect("tar");
         assert!(status.success(), "tar must produce the fixture archive");
@@ -647,6 +669,9 @@ mod tests {
         let tmux = directory.join(BUNDLED_TMUX_NAME);
         fs::write(&tmux, b"the old tmux").expect("write old tmux");
         fs::set_permissions(&tmux, fs::Permissions::from_mode(0o755)).expect("chmod tmux");
+        let remote = directory.join(BUNDLED_REMOTE_NAME);
+        fs::write(&remote, b"the old remote").expect("write old remote");
+        fs::set_permissions(&remote, fs::Permissions::from_mode(0o755)).expect("chmod remote");
         path
     }
 
@@ -664,6 +689,10 @@ mod tests {
         assert_eq!(
             fs::read(dir.path().join(BUNDLED_TMUX_NAME)).expect("read tmux"),
             b"tmux 3.7b"
+        );
+        assert_eq!(
+            fs::read(dir.path().join(BUNDLED_REMOTE_NAME)).expect("read remote"),
+            b"the remote helper"
         );
         assert_eq!(
             fs::metadata(&target).expect("stat").permissions().mode() & 0o777,
@@ -724,6 +753,27 @@ mod tests {
             fs::read(dir.path().join(BUNDLED_TMUX_NAME)).unwrap(),
             b"tmux 3.7b"
         );
+        assert_eq!(
+            fs::read(dir.path().join(BUNDLED_REMOTE_NAME)).unwrap(),
+            b"the remote helper"
+        );
+    }
+
+    #[test]
+    fn a_current_cli_with_a_missing_remote_helper_repairs_the_complete_payload() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let target = installed_binary(dir.path());
+        fs::remove_file(dir.path().join(BUNDLED_REMOTE_NAME)).expect("remove remote");
+        let source = release_with("0.2608101202.0", b"the repaired binary", false);
+
+        let report = update_from(options_for(&target, "0.2608101202.0"), &source).expect("repair");
+
+        assert_eq!(report.status, "installed");
+        assert_eq!(fs::read(&target).unwrap(), b"the repaired binary");
+        assert_eq!(
+            fs::read(dir.path().join(BUNDLED_REMOTE_NAME)).unwrap(),
+            b"the remote helper"
+        );
     }
 
     #[test]
@@ -777,7 +827,9 @@ mod tests {
             .expect("read dir")
             .filter_map(Result::ok)
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
-            .filter(|name| name != "latch" && name != BUNDLED_TMUX_NAME)
+            .filter(|name| {
+                name != "latch" && name != BUNDLED_TMUX_NAME && name != BUNDLED_REMOTE_NAME
+            })
             .collect();
         assert!(leftovers.is_empty(), "left behind {leftovers:?}");
     }

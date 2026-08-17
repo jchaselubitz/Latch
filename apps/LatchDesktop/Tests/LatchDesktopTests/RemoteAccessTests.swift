@@ -20,6 +20,14 @@ final class RemoteAccessTests: XCTestCase {
         XCTAssertFalse(arguments.contains { $0.contains("127.0.0.1") })
     }
 
+    func testMissingHelperIsNamedInsteadOfARawLaunchError() {
+        let url = URL(fileURLWithPath: "/tmp/missing-latch-remote")
+        XCTAssertEqual(
+            RemoteAccessSupervisorError.helperMissing(url).localizedDescription,
+            "The remote-access helper is missing or not executable at \(url.path). It is installed next to the Latch CLI; run `latch update` or the installer in Settings → Latch CLI to repair the complete payload."
+        )
+    }
+
     func testHelperBindUsesAnEphemeralPortAndRefusesLoopback() {
         XCTAssertEqual(RemoteAccessSupervisor.defaultBind, "0.0.0.0:0")
         XCTAssertNoThrow(try RemoteAccessSupervisor.validate(bind: "0.0.0.0:0"))

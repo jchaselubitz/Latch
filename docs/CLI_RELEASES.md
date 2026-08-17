@@ -27,6 +27,8 @@ Verify the archive before installing it. The release includes `checksums.txt`:
 shasum -a 256 -c checksums.txt
 unzip latch-<version>-<target>.zip
 install -m 755 latch ~/.local/bin/latch
+install -m 755 latch-remote ~/.local/bin/latch-remote
+install -m 755 latch-tmux ~/.local/bin/latch-tmux
 latch --version
 ```
 
@@ -39,10 +41,11 @@ archive in the release workflow. Verify it with
 
 After the first install, `latch update` does the same work in one command: it
 reads the newest release, downloads the archive for this Mac, verifies it
-against the release's own `checksums.txt`, and replaces the running binary
-with an atomic rename. `latch update --check` reports what is available
-without installing it, and `latch update --force` reinstalls the published
-version over a copy that has gone wrong.
+against the release's own `checksums.txt`, and replaces `latch`, `latch-remote`,
+and `latch-tmux` with an atomic rename of each. `latch update --check` reports
+what is available without installing it, and `latch update --force` reinstalls
+the published version over a copy that has gone wrong. A current CLI that is
+missing `latch-remote` or `latch-tmux` is treated as incomplete and repaired.
 
 Two things it deliberately will not do. It refuses a binary something else
 owns, such as a Homebrew cellar copy. And when the installed binary is

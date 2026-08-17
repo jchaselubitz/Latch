@@ -15,7 +15,7 @@ latch events auth-refactor --json  # normalized live agent events
 printf '%s' 'continue' | latch send auth-refactor --message -
 latch send auth-refactor --resolve permission-1='Allow once'
 latch remove old-session    # remove one exited/lost session
-latch update                # replace the CLI + private tmux payload
+latch update                # replace the CLI, remote helper, and tmux payload
 ```
 
 Point your terminal profile's command at `latch` and every window you open is
@@ -28,7 +28,7 @@ than code.
 Download the standalone CLI payload and the universal macOS desktop app from the same
 [GitHub Release](https://github.com/jchaselubitz/Latch/releases/latest). The
 current desktop archive is
-[Latch-0.2608162138.0-macos.zip](https://github.com/jchaselubitz/Latch/releases/download/v0.2608162138.0/Latch-0.2608162138.0-macos.zip);
+[Latch-0.2608170815.0-macos.zip](https://github.com/jchaselubitz/Latch/releases/download/v0.2608170815.0/Latch-0.2608170815.0-macos.zip);
 it contains only `Latch.app`. Drag the app to Applications, then install the CLI
 independently with:
 
@@ -38,13 +38,13 @@ curl -fsSL https://raw.githubusercontent.com/jchaselubitz/Latch/main/scripts/ins
 
 The installer chooses the Apple Silicon or Intel archive, verifies it against
 the release's `checksums.txt`, verifies both Developer ID signatures, and
-installs `latch` plus its pinned private `latch-tmux` kernel in
-`~/.local/bin`. Latch always invokes that sibling binary by absolute path; it
+installs `latch`, the `latch-remote` helper, and its pinned private `latch-tmux` kernel in
+`~/.local/bin`. Latch always invokes that sibling tmux binary by absolute path; it
 never discovers or joins a tmux server the user runs.
 
 ## Updating
 
-`latch update` replaces the complete two-binary payload with the newest release published
+`latch update` replaces the complete three-binary payload with the newest release published
 at [Latch releases](https://github.com/jchaselubitz/Latch/releases). It
 verifies the archive against the checksums that release publishes, and — when
 the installed binary is Developer ID signed — refuses a download signed by

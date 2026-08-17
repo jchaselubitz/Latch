@@ -100,10 +100,10 @@ bounded printable text before they are stored or rendered.
 
 ## Distribution is one signed payload
 
-Every release archive contains `latch` and pinned `latch-tmux`. Both binaries
-carry the same Developer ID and are covered by the notarized archive. The
-updater verifies the archive checksum and both signatures, stages both files,
-and rolls back the tmux replacement if replacing the CLI fails.
+Every release archive contains `latch`, `latch-remote`, and pinned `latch-tmux`. All three
+binaries carry the same Developer ID and are covered by the notarized archive. The
+updater verifies the archive checksum and all signatures, stages every file,
+and rolls back the siblings if replacing the CLI fails.
 
 ## Filesystem modes
 

@@ -770,7 +770,7 @@ struct SettingsView: View {
                 SettingsSectionHeader("Executable")
             } footer: {
                 SettingsFootnote(
-                    "Latch Desktop uses the independently installed CLI selected here. CLI updates replace both the command and its pinned tmux payload."
+                    "Latch Desktop uses the independently installed CLI selected here. CLI updates replace the command, the remote-access helper, and the pinned tmux payload."
                 )
             }
 

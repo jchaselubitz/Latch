@@ -4,6 +4,7 @@ import Foundation
 enum RemoteAccessSupervisorError: LocalizedError, Equatable {
     case unsafeBind(String)
     case forbiddenArgument(String)
+    case helperMissing(URL)
     case readinessTimeout
     case exited(status: Int32, diagnostic: String)
 
@@ -13,6 +14,8 @@ enum RemoteAccessSupervisorError: LocalizedError, Equatable {
             return "Refusing to start remote access: \(bind) is not a usable listener address for the authenticated transport."
         case .forbiddenArgument(let argument):
             return "Refusing to start remote access: `\(argument)` would expose the plaintext gateway."
+        case .helperMissing(let url):
+            return "The remote-access helper is missing or not executable at \(url.path). It is installed next to the Latch CLI; run `latch update` or the installer in Settings → Latch CLI to repair the complete payload."
         case .readinessTimeout:
             return "Remote access started but never advertised a listener. Nothing was exposed."
         case .exited(let status, let diagnostic):
@@ -107,6 +110,9 @@ final class RemoteAccessSupervisor: @unchecked Sendable {
     /// launch itself is unsafe or fails.
     func run() async throws {
         let arguments = try Self.arguments(bind: bind, latchExecutable: latchExecutableURL.path)
+        guard FileManager.default.isExecutableFile(atPath: executableURL.path) else {
+            throw RemoteAccessSupervisorError.helperMissing(executableURL)
+        }
         let process = Process()
         let diagnostics = Pipe()
         process.executableURL = executableURL

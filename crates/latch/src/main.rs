@@ -226,10 +226,10 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Update the CLI and bundled tmux payload.
+    /// Update the CLI and bundled payload.
     ///
-    /// The complete archive is verified before either binary is replaced, and
-    /// package-manager-owned copies are refused.
+    /// The complete archive is verified before `latch`, `latch-remote`, or
+    /// `latch-tmux` is replaced, and package-manager-owned copies are refused.
     Update {
         /// Report what is available without installing it.
         #[arg(long)]

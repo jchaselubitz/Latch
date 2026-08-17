@@ -351,6 +351,21 @@ pub fn doctor(options: DoctorOptions) -> anyhow::Result<DoctorReport> {
             None
         }
     };
+    if let Ok(executable) = std::env::current_exe().and_then(fs::canonicalize) {
+        if let Some(parent) = executable.parent() {
+            let remote = parent.join(engine::BUNDLED_REMOTE_NAME);
+            if !remote.is_file() {
+                findings.push(DoctorFinding {
+                    code: "remote_helper_missing".to_owned(),
+                    severity: "error".to_owned(),
+                    message: format!(
+                        "bundled remote-access helper {} is missing; run `latch update` to repair the complete payload",
+                        remote.display()
+                    ),
+                });
+            }
+        }
+    }
     let root = options.home.root();
     if !root.exists() {
         findings.push(DoctorFinding {

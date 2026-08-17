@@ -27,6 +27,8 @@ pub const TMUX_VERSION: &str = "3.7b";
 pub const DEFAULT_TERMINAL: &str = "xterm-256color";
 /// Bundled binary name next to `latch`.
 pub const BUNDLED_TMUX_NAME: &str = "latch-tmux";
+/// Bundled remote-access helper name next to `latch`.
+pub const BUNDLED_REMOTE_NAME: &str = "latch-remote";
 
 /// tmux 3.7b stderr fragments used to classify empty-server outcomes.
 /// Revisit these when bumping [`TMUX_VERSION`].
