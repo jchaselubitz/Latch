@@ -253,10 +253,17 @@ final class TerminalLauncherTests: XCTestCase {
 
     func testOpenRejectsMalformedAttachmentCommandsForEveryBehavior() {
         for behavior in TerminalOpenBehavior.allCases {
-            XCTAssertThrowsError(
-                try TerminalLauncher.open(command: ["latch", "attach"], in: .terminal, behavior: behavior)
-            ) { error in
-                XCTAssertEqual(error as? TerminalLaunchError, .invalidCommand)
+            for openInBackground in [false, true] {
+                XCTAssertThrowsError(
+                    try TerminalLauncher.open(
+                        command: ["latch", "attach"],
+                        in: .terminal,
+                        behavior: behavior,
+                        openInBackground: openInBackground
+                    )
+                ) { error in
+                    XCTAssertEqual(error as? TerminalLaunchError, .invalidCommand)
+                }
             }
         }
     }
@@ -278,6 +285,51 @@ final class TerminalLauncherTests: XCTestCase {
         store.preferredTerminal = .ghostty
         XCTAssertEqual(store.terminalOpenBehavior, .newTab)
         XCTAssertEqual(store.effectiveOpenBehavior, .newWindow)
+    }
+
+    func testStoredBackgroundLaunchPreferenceRoundTrips() {
+        let defaults = UserDefaults.standard
+        let previous = defaults.object(forKey: "terminalOpenInBackground")
+        defer {
+            if let previous = previous as? Bool {
+                defaults.set(previous, forKey: "terminalOpenInBackground")
+            } else {
+                defaults.removeObject(forKey: "terminalOpenInBackground")
+            }
+        }
+
+        defaults.removeObject(forKey: "terminalOpenInBackground")
+        let store = SessionStore()
+        XCTAssertFalse(store.terminalOpenInBackground)
+
+        store.terminalOpenInBackground = true
+        XCTAssertTrue(defaults.bool(forKey: "terminalOpenInBackground"))
+        XCTAssertTrue(SessionStore().terminalOpenInBackground)
+    }
+
+    func testBackgroundLaunchOmitsActivateFromScriptableTerminals() {
+        let command = "latch attach ses_1"
+        let foreground = TerminalLauncher.applicationScript(
+            application: "Terminal",
+            statement: "do script",
+            shellCommand: command,
+            activates: true
+        )
+        let background = TerminalLauncher.applicationScript(
+            application: "Terminal",
+            statement: "do script",
+            shellCommand: command,
+            activates: false
+        )
+        XCTAssertTrue(foreground.contains("\n    activate\n"))
+        XCTAssertFalse(background.contains("activate"))
+        XCTAssertTrue(background.contains("do script"))
+
+        let iTermForeground = TerminalLauncher.iTermTabScript(shellCommand: command, activates: true)
+        let iTermBackground = TerminalLauncher.iTermTabScript(shellCommand: command, activates: false)
+        XCTAssertTrue(iTermForeground.contains("\n    activate\n"))
+        XCTAssertFalse(iTermBackground.contains("activate"))
+        XCTAssertTrue(iTermBackground.contains("create tab with default profile command"))
     }
 
     func testDisplayIdleLabelMatchesSidebarBuckets() {

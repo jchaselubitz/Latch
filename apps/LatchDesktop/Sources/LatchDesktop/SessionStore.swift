@@ -29,6 +29,9 @@ final class SessionStore: ObservableObject {
     @Published var customTerminalTemplate: String {
         didSet { UserDefaults.standard.set(customTerminalTemplate, forKey: "customTerminalTemplate") }
     }
+    @Published var terminalOpenInBackground: Bool {
+        didSet { UserDefaults.standard.set(terminalOpenInBackground, forKey: "terminalOpenInBackground") }
+    }
     @Published var latchExecutablePath: String {
         didSet {
             if latchExecutablePath.isEmpty {
@@ -78,6 +81,7 @@ final class SessionStore: ObservableObject {
         customTerminalExecutable = UserDefaults.standard.string(forKey: "customTerminalExecutable") ?? ""
         customTerminalTemplate = UserDefaults.standard.string(forKey: "customTerminalTemplate")
             ?? "-e {latch} attach {session}"
+        terminalOpenInBackground = UserDefaults.standard.bool(forKey: "terminalOpenInBackground")
         latchExecutablePath = LatchClient.preferences.string(forKey: "latchExecutablePath") ?? ""
     }
 
@@ -306,7 +310,8 @@ final class SessionStore: ObservableObject {
                 in: preferredTerminal,
                 behavior: behavior ?? terminalOpenBehavior,
                 customExecutable: customTerminalExecutable,
-                customTemplate: customTerminalTemplate
+                customTemplate: customTerminalTemplate,
+                openInBackground: terminalOpenInBackground
             )
         } catch {
             if errorMessage != error.localizedDescription {

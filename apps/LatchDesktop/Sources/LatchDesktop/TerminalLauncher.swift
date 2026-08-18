@@ -84,10 +84,20 @@ enum TerminalLauncher {
         in terminal: PreferredTerminal,
         behavior: TerminalOpenBehavior = .newWindow,
         customExecutable: String = "",
-        customTemplate: String = ""
+        customTemplate: String = "",
+        openInBackground: Bool = false
     ) throws {
         guard command.count == 3 else { throw TerminalLaunchError.invalidCommand }
         let shellCommand = command.map(shellQuote).joined(separator: " ")
+        let activates = !openInBackground
+        let previousApp = openInBackground ? NSWorkspace.shared.frontmostApplication : nil
+        // Ghostty's launch is asynchronous, so focus is restored again in its
+        // completion handler if it still stole it after open() has returned.
+        defer {
+            if openInBackground, terminal != .ghostty {
+                restoreFocus(to: previousApp)
+            }
+        }
         // Falls back to a new window rather than refusing when the terminal cannot
         // honour the requested shape; attaching the session matters more.
         switch (terminal, terminal.resolvedOpenBehavior(behavior)) {
@@ -95,37 +105,35 @@ enum TerminalLauncher {
             try runAppleScript(
                 application: "iTerm",
                 statement: "create window with default profile command",
-                shellCommand: shellCommand
+                shellCommand: shellCommand,
+                activates: activates
             )
         case (.iTerm, .newTab):
-            try execute("""
-            tell application "iTerm"
-                activate
-                if (count of windows) is 0 then
-                    create window with default profile command "\(appleScriptEscape(shellCommand))"
-                else
-                    tell current window to create tab with default profile command "\(appleScriptEscape(shellCommand))"
-                end if
-            end tell
-            """)
+            try execute(iTermTabScript(shellCommand: shellCommand, activates: activates))
         case (.terminal, .newWindow):
             try runAppleScript(
                 application: "Terminal",
                 statement: "do script",
-                shellCommand: shellCommand
+                shellCommand: shellCommand,
+                activates: activates
             )
         case (.terminal, .newTab):
-            try openTerminalAppTab(shellCommand: shellCommand)
+            try openTerminalAppTab(shellCommand: shellCommand, activates: activates)
         case (.ghostty, _):
             guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.mitchellh.ghostty") else {
                 throw TerminalLaunchError.notInstalled(terminal.rawValue)
             }
             let configuration = NSWorkspace.OpenConfiguration()
-            configuration.activates = true
+            configuration.activates = activates
             configuration.arguments = ["-e"] + command
             NSWorkspace.shared.openApplication(at: url, configuration: configuration) { _, error in
-                if let error {
-                    NSApp.presentError(error)
+                Task { @MainActor in
+                    if openInBackground {
+                        restoreFocus(to: previousApp)
+                    }
+                    if let error {
+                        NSApp.presentError(error)
+                    }
                 }
             }
         case (.custom, _):
@@ -144,32 +152,83 @@ enum TerminalLauncher {
             process.arguments = arguments
             try process.run()
         }
-
     }
 
     /// Terminal.app's scripting dictionary cannot create a tab, so the tab comes from
     /// the Command-T keystroke and `do script` then runs in the tab that selects.
-    private static func openTerminalAppTab(shellCommand: String) throws {
+    private static func openTerminalAppTab(shellCommand: String, activates: Bool) throws {
         guard hasOpenTerminalAppWindow() else {
-            try runAppleScript(application: "Terminal", statement: "do script", shellCommand: shellCommand)
+            try runAppleScript(
+                application: "Terminal",
+                statement: "do script",
+                shellCommand: shellCommand,
+                activates: activates
+            )
             return
         }
         do {
-            try execute("""
-            tell application "Terminal" to activate
-            tell application "System Events" to tell process "Terminal"
-                keystroke "t" using command down
-            end tell
-            delay 0.2
-            tell application "Terminal"
-                do script "\(appleScriptEscape(shellCommand))" in front window
-            end tell
-            """)
+            // Command-T only reaches Terminal when it is frontmost, so the tab
+            // script still activates; background opens restore focus afterwards.
+            try execute(terminalTabScript(shellCommand: shellCommand, activates: true))
         } catch {
             // Sending keystrokes needs a separate Automation grant for System Events;
             // a new window still attaches the session when that is refused.
-            try runAppleScript(application: "Terminal", statement: "do script", shellCommand: shellCommand)
+            try runAppleScript(
+                application: "Terminal",
+                statement: "do script",
+                shellCommand: shellCommand,
+                activates: activates
+            )
         }
+    }
+
+    /// AppleScript that runs `statement` in `application`, optionally bringing it forward.
+    static func applicationScript(
+        application: String,
+        statement: String,
+        shellCommand: String,
+        activates: Bool
+    ) -> String {
+        let lines = [
+            "tell application \"\(application)\"",
+            activates ? "    activate" : nil,
+            "    \(statement) \"\(appleScriptEscape(shellCommand))\"",
+            "end tell"
+        ]
+        return lines.compactMap { $0 }.joined(separator: "\n")
+    }
+
+    static func iTermTabScript(shellCommand: String, activates: Bool) -> String {
+        let lines = [
+            "tell application \"iTerm\"",
+            activates ? "    activate" : nil,
+            "    if (count of windows) is 0 then",
+            "        create window with default profile command \"\(appleScriptEscape(shellCommand))\"",
+            "    else",
+            "        tell current window to create tab with default profile command \"\(appleScriptEscape(shellCommand))\"",
+            "    end if",
+            "end tell"
+        ]
+        return lines.compactMap { $0 }.joined(separator: "\n")
+    }
+
+    static func terminalTabScript(shellCommand: String, activates: Bool) -> String {
+        let lines = [
+            activates ? "tell application \"Terminal\" to activate" : nil,
+            "tell application \"System Events\" to tell process \"Terminal\"",
+            "    keystroke \"t\" using command down",
+            "end tell",
+            "delay 0.2",
+            "tell application \"Terminal\"",
+            "    do script \"\(appleScriptEscape(shellCommand))\" in front window",
+            "end tell"
+        ]
+        return lines.compactMap { $0 }.joined(separator: "\n")
+    }
+
+    private static func restoreFocus(to application: NSRunningApplication?) {
+        guard let application, !application.isTerminated else { return }
+        application.activate(options: [.activateIgnoringOtherApps])
     }
 
     /// Whether there is a window for a new tab to join.
@@ -194,14 +253,17 @@ enum TerminalLauncher {
     private static func runAppleScript(
         application: String,
         statement: String,
-        shellCommand: String
+        shellCommand: String,
+        activates: Bool = true
     ) throws {
-        try execute("""
-        tell application "\(application)"
-            activate
-            \(statement) "\(appleScriptEscape(shellCommand))"
-        end tell
-        """)
+        try execute(
+            applicationScript(
+                application: application,
+                statement: statement,
+                shellCommand: shellCommand,
+                activates: activates
+            )
+        )
     }
 
     private static func execute(_ source: String) throws {

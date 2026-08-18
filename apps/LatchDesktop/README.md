@@ -12,14 +12,16 @@ any other `.app`; Latch resolves its bundled executable and lets you set the
 safe argument template it needs to launch `latch attach`.
 
 Settings also chooses whether a session opens as a **New Window** or a **New
-Tab**. The **Open in …** control is a split button: clicking it uses that
-default, and its menu opens a single session the other way without changing the
-setting. Terminal and iTerm2 support both shapes; Terminal has no scripting
-command for tabs, so a tab is opened with a Command-T keystroke, which asks for
-Automation access to System Events once and falls back to a new window if that
-is refused. Ghostty cannot be told to open a tab from another app, and a custom
-terminal is launched entirely by its argument template, so both always open
-whatever their launch arguments produce.
+Tab**, and whether it **opens in the background** instead of taking focus. The
+**Open in …** control is a split button: clicking it uses that default, and its
+menu opens a single session the other way without changing the setting. Terminal
+and iTerm2 support both shapes; Terminal has no scripting command for tabs, so a
+tab is opened with a Command-T keystroke, which asks for Automation access to
+System Events once and falls back to a new window if that is refused. Ghostty
+cannot be told to open a tab from another app, and a custom terminal is launched
+entirely by its argument template, so both always open whatever their launch
+arguments produce. Background opens leave the terminal behind the app you were
+using; a Terminal tab may flash briefly so Command-T can run.
 
 ## Development
 
@@ -124,8 +126,8 @@ the CLI, the remote-access helper, and its pinned tmux payload.
 The Swift package tests cover the current list, stop, resize, doctor,
 capabilities, and update JSON contracts; manifest wire names; terminal command
 escaping/template parsing; the per-terminal window/tab support matrix and its
-new-window fallback; and the updater's release resolution, version
-ordering, and pre-download refusals.
+new-window fallback; background-launch AppleScript that omits `activate`; and
+the updater's release resolution, version ordering, and pre-download refusals.
 Run them on macOS with:
 
 ```sh

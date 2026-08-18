@@ -807,7 +807,7 @@ struct SettingsView: View {
                 .tabItem { Label("Updates", systemImage: "arrow.down.circle") }
                 .tag(Tab.updates)
         }
-        .frame(width: 580, height: 470)
+        .frame(width: 580, height: 500)
     }
 
     // MARK: - Terminal
@@ -835,6 +835,8 @@ struct SettingsView: View {
                     }
                 }
                 .disabled(store.preferredTerminal.supportedOpenBehaviors.isEmpty)
+
+                Toggle("Open in background", isOn: $store.terminalOpenInBackground)
             } header: {
                 SettingsSectionHeader("Opening Sessions")
             } footer: {
@@ -1035,15 +1037,17 @@ struct SettingsView: View {
     }
 
     private var openBehaviorFootnote: String {
+        let background =
+            "Open in background attaches the session without bringing the terminal to the front."
         switch store.preferredTerminal {
         case .custom:
-            return "Your argument template decides how a custom terminal opens, so this setting does not apply."
+            return "Your argument template decides how a custom terminal opens, so the window-or-tab setting does not apply. \(background)"
         case .ghostty:
-            return "Ghostty cannot be told to open a tab from another app, so sessions always open in a new window."
+            return "Ghostty cannot be told to open a tab from another app, so sessions always open in a new window. \(background)"
         case .terminal:
-            return "The Open button uses this; its menu can still override it per session. Opening a Terminal tab sends Command-T, so macOS asks Latch to control System Events once. If that is refused, Latch opens a new window instead."
+            return "The Open button uses the window-or-tab setting; its menu can still override it per session. Opening a Terminal tab sends Command-T, so macOS asks Latch to control System Events once. If that is refused, Latch opens a new window instead. \(background) A Terminal tab may flash briefly so the keystroke can run."
         case .iTerm:
-            return "The Open button uses this; its menu can still override it per session."
+            return "The Open button uses the window-or-tab setting; its menu can still override it per session. \(background)"
         }
     }
 
