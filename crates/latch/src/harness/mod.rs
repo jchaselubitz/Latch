@@ -614,8 +614,13 @@ impl LedgerView {
             if line.trim().is_empty() {
                 continue;
             }
-            let event: HarnessEvent = serde_json::from_str(line)
-                .with_context(|| format!("malformed event ledger line {}", self.lines))?;
+            let Ok(event) = serde_json::from_str::<HarnessEvent>(line) else {
+                // The ledger is a derived presentation cache. A process may
+                // have been terminated while appending an older record; keep
+                // valid later rows readable and let reconciliation restore the
+                // missing event from the transcript or hook sidecar.
+                continue;
+            };
             *self
                 .counts
                 .entry(serde_json::to_string(&event)?)
@@ -641,16 +646,58 @@ fn append_event_ledger(paths: &SessionPaths, events: &[HarnessEvent]) -> anyhow:
     let path = paths.harness_events();
     let mut file = OpenOptions::new()
         .create(true)
+        .read(true)
         .append(true)
         .mode(FILE_MODE)
         .open(&path)
         .with_context(|| format!("cannot append event ledger {}", path.display()))?;
+    truncate_incomplete_jsonl_tail(&mut file)
+        .with_context(|| format!("cannot repair event ledger {}", path.display()))?;
     for event in events {
-        serde_json::to_writer(&mut file, event)?;
-        file.write_all(b"\n")?;
+        let mut line = serde_json::to_vec(event)?;
+        line.push(b'\n');
+        file.write_all(&line)?;
     }
     file.flush()?;
     fs::set_permissions(path, fs::Permissions::from_mode(FILE_MODE))?;
+    Ok(())
+}
+
+/// Drop an interrupted final JSONL record before a later append makes it look
+/// complete. Event subscribers are intentionally short-lived and may be
+/// terminated while reconciling; the exclusive ledger lock prevents another
+/// writer from racing this repair.
+fn truncate_incomplete_jsonl_tail(file: &mut fs::File) -> io::Result<()> {
+    let len = file.metadata()?.len();
+    if len == 0 {
+        return Ok(());
+    }
+
+    file.seek(SeekFrom::End(-1))?;
+    let mut last = [0_u8; 1];
+    file.read_exact(&mut last)?;
+    if last[0] == b'\n' {
+        file.seek(SeekFrom::End(0))?;
+        return Ok(());
+    }
+
+    let mut end = len;
+    let mut buffer = [0_u8; 8 * 1024];
+    while end > 0 {
+        let start = end.saturating_sub(buffer.len() as u64);
+        let width = (end - start) as usize;
+        file.seek(SeekFrom::Start(start))?;
+        file.read_exact(&mut buffer[..width])?;
+        if let Some(index) = buffer[..width].iter().rposition(|byte| *byte == b'\n') {
+            file.set_len(start + index as u64 + 1)?;
+            file.seek(SeekFrom::End(0))?;
+            return Ok(());
+        }
+        end = start;
+    }
+
+    file.set_len(0)?;
+    file.seek(SeekFrom::Start(0))?;
     Ok(())
 }
 
@@ -1444,6 +1491,73 @@ mod tests {
                 & 0o777,
             FILE_MODE
         );
+    }
+
+    #[test]
+    fn ledger_append_repairs_an_interrupted_final_record() {
+        let directory = tempfile::tempdir().unwrap();
+        let home = LatchHome::new(directory.path().join("latch"));
+        home.ensure().unwrap();
+        let paths = fixture_session(&home);
+        fs::write(
+            paths.harness_events(),
+            b"{\"sessionId\":\"old\",\"at\":\"2026-08-13T10:00:00Z\",\"harnessVersion\":\"2.1\",\"connectorEpoch\":1,\"type\":\"status\",\"status\":\"running\"}\n{\"sessionId\":\"interrupted\"",
+        )
+        .unwrap();
+        let event = HarnessEvent {
+            session_id: "new".to_owned(),
+            at: "2026-08-13T10:00:01Z".to_owned(),
+            harness_version: "2.1".to_owned(),
+            connector_epoch: CONNECTOR_EPOCH,
+            payload: HarnessEventPayload::Status {
+                status: "completed".to_owned(),
+            },
+        };
+
+        append_event_ledger(&paths, &[event.clone()]).unwrap();
+
+        let events = read_event_ledger(&paths).unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[1], event);
+        let raw = fs::read_to_string(paths.harness_events()).unwrap();
+        assert!(!raw.contains("interrupted"));
+        assert!(raw.ends_with('\n'));
+    }
+
+    #[test]
+    fn ledger_read_skips_an_existing_malformed_record() {
+        let directory = tempfile::tempdir().unwrap();
+        let home = LatchHome::new(directory.path().join("latch"));
+        home.ensure().unwrap();
+        let paths = fixture_session(&home);
+        let first = HarnessEvent {
+            session_id: "first".to_owned(),
+            at: "2026-08-13T10:00:00Z".to_owned(),
+            harness_version: "2.1".to_owned(),
+            connector_epoch: CONNECTOR_EPOCH,
+            payload: HarnessEventPayload::Status {
+                status: "running".to_owned(),
+            },
+        };
+        let second = HarnessEvent {
+            session_id: "second".to_owned(),
+            at: "2026-08-13T10:00:01Z".to_owned(),
+            harness_version: "2.1".to_owned(),
+            connector_epoch: CONNECTOR_EPOCH,
+            payload: HarnessEventPayload::Status {
+                status: "completed".to_owned(),
+            },
+        };
+        let raw = format!(
+            "{}\n{{\"sessionId\":\"interrupted\"\n{}\n",
+            serde_json::to_string(&first).unwrap(),
+            serde_json::to_string(&second).unwrap()
+        );
+        fs::write(paths.harness_events(), raw).unwrap();
+
+        let events = read_event_ledger(&paths).unwrap();
+
+        assert_eq!(events, vec![first, second]);
     }
 
     #[test]

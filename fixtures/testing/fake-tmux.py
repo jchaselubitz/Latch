@@ -240,6 +240,8 @@ elif command == "attach-session":
     state["_last_attach_read_only"] = "-r" in args
     entry["attached"] = entry.get("attached", 0) + 1
     save(state)
+    signal_path = socket + ".latch-first-viewer-" + session + ".signal"
+    open(signal_path, "a").close()
     # Echo mode makes the fake behave like a client that is actually reading
     # the terminal: the gateway's relay is only proven if bytes travel from the
     # WebSocket, through the PTY, into this process, and back out.
@@ -254,6 +256,15 @@ elif command == "attach-session":
                 break
             os.write(1, b"<echo>" + chunk)
     raise SystemExit(0)
+elif command == "wait-for":
+    channel = args[-1]
+    signal_path = socket + "." + channel + ".signal"
+    if "-S" in args:
+        open(signal_path, "a").close()
+    else:
+        while not os.path.exists(signal_path):
+            time.sleep(0.01)
+        os.unlink(signal_path)
 elif command == "resize-window":
     session = args[args.index("-t") + 1]
     state[session]["cols"] = int(args[args.index("-x") + 1])

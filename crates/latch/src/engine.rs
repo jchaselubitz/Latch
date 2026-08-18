@@ -49,6 +49,16 @@ const STOP_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const STOP_GRACE_POLLS: usize = 100;
 /// SIGKILL window (~2 s), used for `--force` and the post-TERM escalation.
 const STOP_FORCE_POLLS: usize = 40;
+/// How long an integration-created session gives its first viewer to attach
+/// before it starts the hosted command headlessly.
+///
+/// Overlord creates the durable session first and opens the viewer second. A
+/// short gate makes that normal path match a direct terminal launch: shell
+/// startup and agent trust/permission UI begin only once there is a terminal
+/// capable of showing them. The timeout preserves create-without-open flows.
+const FIRST_VIEWER_GRACE: Duration = Duration::from_secs(5);
+const FIRST_VIEWER_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(20);
+const ATTACH_OBSERVATION_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Why a tmux query produced no session rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -329,6 +339,7 @@ pub fn launch_from_fifo(path: &Path) -> Result<()> {
     let mut manifest = manifest::read(&mut file)?;
     drop(file);
     let _ = fs::remove_file(path);
+    wait_for_first_viewer(&manifest);
     ensure_interactive_login_shell(&mut manifest.launch.argv);
 
     let mut command = Command::new(&manifest.launch.argv[0]);
@@ -369,14 +380,110 @@ fn attach_with_mode(home: &LatchHome, id: &SessionId, read_only: bool) -> Result
     if read_only {
         command.arg("-r");
     }
-    let status = command
+    let mut child = command
         .args(["-t", id.as_str()])
-        .status()
+        .spawn()
         .with_context(|| format!("cannot attach to session {id}"))?;
+    let deadline = std::time::Instant::now() + ATTACH_OBSERVATION_TIMEOUT;
+    loop {
+        if let Some(status) = child
+            .try_wait()
+            .with_context(|| format!("cannot wait for attachment to session {id}"))?
+        {
+            if status.success() {
+                signal_first_viewer(home, id);
+                return Ok(());
+            }
+            bail!("tmux could not attach to session {id}");
+        }
+        if attached_clients(home, id).is_some_and(|attached| attached > 0) {
+            signal_first_viewer(home, id);
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(FIRST_VIEWER_WAIT_POLL_INTERVAL);
+    }
+    let status = child
+        .wait()
+        .with_context(|| format!("cannot wait for attachment to session {id}"))?;
     if !status.success() {
         bail!("tmux could not attach to session {id}");
     }
     Ok(())
+}
+
+/// Overlord's create-then-open launch is deliberately two operations. Hold its
+/// internal launcher briefly so the shell and agent cannot present (or block
+/// on) first-run UI before the viewer exists. This is best effort: inability to
+/// coordinate with tmux must never turn a durable headless launch into a
+/// failure.
+fn wait_for_first_viewer(manifest: &LaunchManifest) {
+    if manifest.display.source.kind != "overlord" {
+        return;
+    }
+    let Ok(home) = LatchHome::from_env() else {
+        return;
+    };
+    let Some(id) = std::env::var(SESSION_ID_ENV)
+        .ok()
+        .and_then(|value| SessionId::parse(&value).ok())
+    else {
+        return;
+    };
+    let Ok(mut waiter) = tmux(&home).and_then(|mut command| {
+        command.args(["wait-for", &first_viewer_channel(&id)]);
+        command.spawn().context("cannot wait for the first viewer")
+    }) else {
+        return;
+    };
+    let deadline = std::time::Instant::now() + FIRST_VIEWER_GRACE;
+    loop {
+        match waiter.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(FIRST_VIEWER_WAIT_POLL_INTERVAL);
+            }
+            Ok(None) | Err(_) => {
+                let _ = waiter.kill();
+                let _ = waiter.wait();
+                return;
+            }
+        }
+    }
+}
+
+fn signal_first_viewer(home: &LatchHome, id: &SessionId) {
+    let Ok(mut command) = tmux(home) else {
+        return;
+    };
+    command.args(["wait-for", "-S", &first_viewer_channel(id)]);
+    let _ = command.status();
+}
+
+fn first_viewer_channel(id: &SessionId) -> String {
+    format!("latch-first-viewer-{id}")
+}
+
+fn attached_clients(home: &LatchHome, id: &SessionId) -> Option<usize> {
+    let output = tmux(home)
+        .ok()?
+        .args([
+            "display-message",
+            "-p",
+            "-t",
+            id.as_str(),
+            "-F",
+            "#{session_attached}",
+        ])
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8(output.stdout).ok()?.trim().parse().ok())
+        .flatten()
 }
 
 /// Returns whether tmux still owns a named session.

@@ -43,13 +43,20 @@ impl Harness {
     }
 
     fn create(&self, shell: &str) -> Value {
-        self.create_session(CreateSession {
-            shell,
-            command_label: "redacted",
-        })
+        self.create_session_from_source(
+            CreateSession {
+                shell,
+                command_label: "redacted",
+            },
+            "test",
+        )
     }
 
     fn create_session(&self, request: CreateSession<'_>) -> Value {
+        self.create_session_from_source(request, "test")
+    }
+
+    fn create_session_from_source(&self, request: CreateSession<'_>, source_kind: &str) -> Value {
         let manifest = json!({
             "format_version": 1,
             "launch": {
@@ -64,7 +71,7 @@ impl Harness {
                 "name": "agent",
                 "title": "Kernel acceptance",
                 "command_label": request.command_label,
-                "source": {"kind": "test", "external_run_id": "run-1"}
+                "source": {"kind": source_kind, "external_run_id": "run-1"}
             }
         });
         let mut child = self
@@ -142,6 +149,38 @@ impl Harness {
         let state: Value = serde_json::from_slice(&fs::read(path).expect("read fake tmux state"))
             .expect("parse fake tmux state");
         state[id].clone()
+    }
+}
+
+#[test]
+fn overlord_launch_waits_until_the_first_viewer_is_attached() {
+    let harness = Harness::new();
+    let started = harness._temp.path().join("agent-started");
+    let command = format!("touch {}; sleep 30", started.display());
+    let created = harness.create_session_from_source(
+        CreateSession {
+            shell: &command,
+            command_label: "codex",
+        },
+        "overlord",
+    );
+    let id = created["session"]["id"].as_str().unwrap();
+
+    thread::sleep(Duration::from_millis(100));
+    assert!(
+        !started.exists(),
+        "the hosted command started before a viewer attached"
+    );
+
+    let output = harness.command().args(["attach", id]).output().unwrap();
+    assert_success(&output);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !started.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the hosted command did not start after the viewer attached"
+        );
+        thread::sleep(Duration::from_millis(20));
     }
 }
 

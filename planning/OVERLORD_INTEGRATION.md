@@ -373,6 +373,14 @@ The Latch create call replaces only the final process/terminal spawn. Queueing,
 claiming, worktrees, context construction, and protocol attachment remain Overlord's.
 Harness observation is subscribed via `latch events`, not a session-channel bootstrap.
 
+Because create necessarily returns the durable session ID before Overlord can open
+its viewer, Latch gives sessions whose manifest source is `overlord` a five-second
+first-viewer grace period. The internal launcher proceeds as soon as a tmux client is
+actually attached; if no viewer arrives, it proceeds headlessly when the grace period
+expires. This keeps normal launches from running shell startup or presenting agent
+trust/permission UI before any terminal can show it, without making viewer opening a
+requirement for persistent or automation-only sessions.
+
 ## Mapping Latch and Overlord session identities
 
 The products have different session concepts and should not reuse one ID:
