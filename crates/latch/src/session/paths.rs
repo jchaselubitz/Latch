@@ -226,6 +226,22 @@ impl SessionPaths {
         self.dir.join("launch.pipe")
     }
 
+    /// Per-phase launch timings appended by create, open, and the launcher.
+    pub fn launch_timings(&self) -> PathBuf {
+        self.dir.join("launch-timings.jsonl")
+    }
+
+    /// Marker written while a viewer open is in flight.
+    pub fn viewer_open(&self) -> PathBuf {
+        self.dir.join("viewer-open.json")
+    }
+
+    /// Viewer-open diagnostics, kept on disk because the viewer may fail after
+    /// `latch open` has already returned.
+    pub fn viewer_log(&self) -> PathBuf {
+        self.dir.join("viewer-open.log")
+    }
+
     /// Raw Claude hook records captured for this session.
     pub fn harness_hooks(&self) -> PathBuf {
         self.dir.join("harness-hooks.jsonl")

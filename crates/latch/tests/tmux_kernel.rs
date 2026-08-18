@@ -135,6 +135,24 @@ impl Harness {
         fs::write(path, serde_json::to_vec(&metadata).unwrap()).expect("write metadata");
     }
 
+    /// Stands in for `latch open`, which cannot run its macOS viewer here.
+    fn announce_viewer_open(&self, id: &str) {
+        let path = self.home.join("sessions").join(id).join("viewer-open.json");
+        fs::write(
+            path,
+            json!({"viewer": "iterm", "behavior": "new-window", "at": "2026-08-18T12:00:00Z"})
+                .to_string(),
+        )
+        .expect("write viewer marker");
+    }
+
+    fn launch_timings(&self, id: &str) -> Vec<Value> {
+        self.json(&["inspect", id, "--json"])["launch_timings"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+    }
+
     fn patch_state(&self, id: &str, patch: impl FnOnce(&mut Value)) {
         let path = self.home.join("server.fake.json");
         let mut state: Value =
@@ -182,6 +200,87 @@ fn overlord_launch_waits_until_the_first_viewer_is_attached() {
         );
         thread::sleep(Duration::from_millis(20));
     }
+}
+
+/// A viewer that is slower to appear than the unannounced grace must still be
+/// waited for: `latch open` stamps the marker before it asks for a window, and
+/// the launcher has to read that as "a terminal is coming" rather than starting
+/// the agent into a pane nobody is watching yet.
+#[test]
+fn an_announced_viewer_open_extends_the_wait_past_the_unannounced_grace() {
+    let harness = Harness::new();
+    let started = harness._temp.path().join("agent-started");
+    let command = format!("touch {}; sleep 30", started.display());
+    let created = harness.create_session_from_source(
+        CreateSession {
+            shell: &command,
+            command_label: "codex",
+        },
+        "overlord",
+    );
+    let id = created["session"]["id"].as_str().unwrap();
+    harness.announce_viewer_open(id);
+
+    // Comfortably past the unannounced grace, and still holding.
+    thread::sleep(Duration::from_millis(4_500));
+    assert!(
+        !started.exists(),
+        "the hosted command started while a viewer open was still in flight"
+    );
+
+    assert_success(&harness.command().args(["attach", id]).output().unwrap());
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !started.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the hosted command did not start after the viewer attached"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    let timings = harness.launch_timings(id);
+    let wait = timings
+        .iter()
+        .find(|phase| phase["phase"] == "launch.first_viewer_wait")
+        .expect("the launcher recorded its wait");
+    assert_eq!(wait["outcome"], "attached");
+    assert!(
+        timings.iter().any(|phase| phase["phase"] == "create.total"),
+        "create did not record its own phases: {timings:?}"
+    );
+}
+
+/// Nothing opens a viewer for a background launch, so the gate has to give up
+/// on its own — quickly, because every second of it is launch latency.
+#[test]
+fn a_launch_with_no_viewer_coming_starts_without_waiting_out_a_long_timeout() {
+    let harness = Harness::new();
+    let started = harness._temp.path().join("agent-started");
+    let command = format!("touch {}; sleep 30", started.display());
+    let created = harness.create_session_from_source(
+        CreateSession {
+            shell: &command,
+            command_label: "codex",
+        },
+        "overlord",
+    );
+    let id = created["session"]["id"].as_str().unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while !started.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "an unannounced launch never started headlessly"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    let timings = harness.launch_timings(id);
+    let wait = timings
+        .iter()
+        .find(|phase| phase["phase"] == "launch.first_viewer_wait")
+        .expect("the launcher recorded its wait");
+    assert_eq!(wait["outcome"], "headless");
 }
 
 fn assert_success(output: &Output) {

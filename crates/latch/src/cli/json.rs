@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::session::manifest::TerminalSize;
 use crate::session::meta::ExitRecord;
+use crate::session::timing::LaunchPhase;
 
 /// One row of `latch list --json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,6 +82,11 @@ pub struct InspectReport {
     /// reported the session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attached: Option<usize>,
+    /// Per-phase launch timings, oldest first, recorded by `create`, `open`,
+    /// and the session's own launcher. Empty for sessions created before the
+    /// sidecar existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub launch_timings: Vec<LaunchPhase>,
 }
 
 /// `latch stop --json`.
@@ -123,6 +129,12 @@ pub struct OpenReport {
     pub viewer: String,
     /// Whether the operating system accepted the viewer-open request.
     pub opened: bool,
+    /// True when the viewer had not appeared yet by the time this command
+    /// returned. The request was accepted and the session is running; the
+    /// window is simply still being presented. Defaulted on read so reports
+    /// written before the field existed still decode.
+    #[serde(default)]
+    pub pending: bool,
     /// Shape the viewer was asked for: `new-window` or `new-tab`.
     ///
     /// Defaulted on read so reports written before the setting existed still

@@ -18,6 +18,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use crate::session::manifest::{self, LaunchManifest, TerminalSize};
 use crate::session::meta::{self, ExitRecord, MetaRequest, SessionMeta};
 use crate::session::paths::{LatchHome, SessionId, SessionPaths, FILE_MODE, SESSION_ID_ENV};
+use crate::session::{timing, viewer};
 
 /// Public protocol contract version retained across the kernel swap.
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -49,16 +50,32 @@ const STOP_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const STOP_GRACE_POLLS: usize = 100;
 /// SIGKILL window (~2 s), used for `--force` and the post-TERM escalation.
 const STOP_FORCE_POLLS: usize = 40;
-/// How long an integration-created session gives its first viewer to attach
-/// before it starts the hosted command headlessly.
+/// How long an integration-created session waits for a viewer that has not yet
+/// announced itself.
 ///
 /// Overlord creates the durable session first and opens the viewer second. A
 /// short gate makes that normal path match a direct terminal launch: shell
 /// startup and agent trust/permission UI begin only once there is a terminal
-/// capable of showing them. The timeout preserves create-without-open flows.
-const FIRST_VIEWER_GRACE: Duration = Duration::from_secs(5);
+/// capable of showing them. This bound only has to cover the gap between
+/// `create` returning and `open` stamping its marker — one process spawn —
+/// because an announced open extends the wait to [`FIRST_VIEWER_MAX_WAIT`].
+/// Nothing waits longer than this when no viewer is coming at all, which is
+/// what `create` without `open` (a background launch) looks like.
+const FIRST_VIEWER_GRACE: Duration = Duration::from_secs(3);
+/// Ceiling on the wait once `latch open` has announced an in-flight viewer.
+///
+/// A cold terminal application can take far longer to present a window than
+/// the unannounced grace allows, and starting the agent into a pane nobody can
+/// see yet is exactly the failure this gate exists to prevent. The ceiling
+/// keeps a viewer that never arrives from stranding the session.
+const FIRST_VIEWER_MAX_WAIT: Duration = Duration::from_secs(30);
 const FIRST_VIEWER_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(20);
 const ATTACH_OBSERVATION_TIMEOUT: Duration = Duration::from_secs(1);
+/// Gap between attachment checks while the tmux client starts. Each check is a
+/// tmux query process, so it is spaced far wider than the launcher's `try_wait`
+/// poll: a viewer that is opening does not need to be noticed within 20 ms, and
+/// spawning fifty processes to find that out competes with the client itself.
+const ATTACH_OBSERVATION_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Why a tmux query produced no session rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -234,12 +251,18 @@ pub struct SendKeysRequest<'a> {
 
 /// Creates a detached tmux session and transfers launch material over a FIFO.
 pub fn create(request: CreateRequest) -> Result<CreateResult> {
+    // Creation is one of three processes that decide how long a launch takes,
+    // so each of its phases is timed into the session's sidecar. The phases are
+    // recorded once the session directory exists — the work before that is
+    // covered by `create.total`.
+    let mut watch = timing::Stopwatch::start();
     request.home.ensure()?;
     ensure_config(&request.home)?;
     ensure_tmux_available()?;
     let mut manifest = request.manifest;
     materialize_environment(&mut manifest);
     crate::harness::prepare_claude_launch(&request.home, &mut manifest)?;
+    let prepare = watch.lap();
 
     let (id, paths) = loop {
         let id = SessionId::generate();
@@ -257,6 +280,7 @@ pub fn create(request: CreateRequest) -> Result<CreateResult> {
         created_at: &created_at,
     });
     meta::write_once(&paths, &metadata)?;
+    timing::record(&paths, "create.prepare", prepare, None);
 
     let fifo = paths.launch_fifo();
     if let Err(error) = make_fifo(&fifo) {
@@ -311,6 +335,7 @@ pub fn create(request: CreateRequest) -> Result<CreateResult> {
             return Err(error).context("cannot start the bundled tmux");
         }
     }
+    timing::record(&paths, "create.tmux_new_session", watch.lap(), None);
 
     let launch_result = (|| -> Result<()> {
         let mut writer = open_fifo_writer(&fifo)?;
@@ -324,6 +349,8 @@ pub fn create(request: CreateRequest) -> Result<CreateResult> {
         let _ = fs::remove_dir_all(paths.dir());
         return Err(error);
     }
+    timing::record(&paths, "create.launch_handoff", watch.lap(), None);
+    timing::record(&paths, "create.total", watch.total(), None);
 
     Ok(CreateResult {
         id,
@@ -403,7 +430,7 @@ fn attach_with_mode(home: &LatchHome, id: &SessionId, read_only: bool) -> Result
         if std::time::Instant::now() >= deadline {
             break;
         }
-        std::thread::sleep(FIRST_VIEWER_WAIT_POLL_INTERVAL);
+        std::thread::sleep(ATTACH_OBSERVATION_POLL_INTERVAL);
     }
     let status = child
         .wait()
@@ -415,8 +442,8 @@ fn attach_with_mode(home: &LatchHome, id: &SessionId, read_only: bool) -> Result
 }
 
 /// Overlord's create-then-open launch is deliberately two operations. Hold its
-/// internal launcher briefly so the shell and agent cannot present (or block
-/// on) first-run UI before the viewer exists. This is best effort: inability to
+/// internal launcher so the shell and agent cannot present (or block on)
+/// first-run UI before the viewer exists. This is best effort: inability to
 /// coordinate with tmux must never turn a durable headless launch into a
 /// failure.
 fn wait_for_first_viewer(manifest: &LaunchManifest) {
@@ -432,26 +459,66 @@ fn wait_for_first_viewer(manifest: &LaunchManifest) {
     else {
         return;
     };
-    let Ok(mut waiter) = tmux(&home).and_then(|mut command| {
-        command.args(["wait-for", &first_viewer_channel(&id)]);
+    let paths = home.session(&id);
+    let watch = timing::Stopwatch::start();
+    let outcome = await_first_viewer(&home, &id, &paths);
+    timing::record(
+        &paths,
+        "launch.first_viewer_wait",
+        watch.total(),
+        Some(outcome),
+    );
+    viewer::clear(&paths);
+}
+
+/// Blocks until the session's first viewer attaches, or until waiting stops
+/// being justified. Returns the reason the wait ended, which is recorded beside
+/// its duration so a slow launch can be attributed afterwards.
+fn await_first_viewer(home: &LatchHome, id: &SessionId, paths: &SessionPaths) -> &'static str {
+    let Ok(mut waiter) = tmux(home).and_then(|mut command| {
+        command.args(["wait-for", &first_viewer_channel(id)]);
         command.spawn().context("cannot wait for the first viewer")
     }) else {
-        return;
+        return "unavailable";
     };
-    let deadline = std::time::Instant::now() + FIRST_VIEWER_GRACE;
+    let started = std::time::Instant::now();
+    let ceiling = started + FIRST_VIEWER_MAX_WAIT;
+    let mut deadline = started + FIRST_VIEWER_GRACE;
+    let mut announced = false;
     loop {
         match waiter.try_wait() {
-            Ok(Some(_)) => return,
-            Ok(None) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(FIRST_VIEWER_WAIT_POLL_INTERVAL);
-            }
-            Ok(None) | Err(_) => {
-                let _ = waiter.kill();
-                let _ = waiter.wait();
-                return;
+            Ok(Some(_)) => return "attached",
+            Ok(None) => {}
+            Err(_) => {
+                stop_waiter(&mut waiter);
+                return "unavailable";
             }
         }
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            // `latch open` stamps its marker before asking the operating system
+            // for a window, so an announced open means a terminal is genuinely
+            // on its way and the grace was simply shorter than this machine's
+            // viewer startup.
+            if !announced && now < ceiling && viewer::is_pending(paths) {
+                announced = true;
+                deadline = ceiling;
+                continue;
+            }
+            stop_waiter(&mut waiter);
+            return if announced {
+                "viewer_timeout"
+            } else {
+                "headless"
+            };
+        }
+        std::thread::sleep(FIRST_VIEWER_WAIT_POLL_INTERVAL);
     }
+}
+
+fn stop_waiter(waiter: &mut std::process::Child) {
+    let _ = waiter.kill();
+    let _ = waiter.wait();
 }
 
 fn signal_first_viewer(home: &LatchHome, id: &SessionId) {
@@ -466,7 +533,10 @@ fn first_viewer_channel(id: &SessionId) -> String {
     format!("latch-first-viewer-{id}")
 }
 
-fn attached_clients(home: &LatchHome, id: &SessionId) -> Option<usize> {
+/// Number of tmux clients attached to a session, or `None` when the private
+/// server cannot answer. Used to confirm that a viewer really arrived rather
+/// than that a viewer command merely exited.
+pub fn attached_clients(home: &LatchHome, id: &SessionId) -> Option<usize> {
     let output = tmux(home)
         .ok()?
         .args([

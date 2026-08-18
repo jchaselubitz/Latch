@@ -286,6 +286,15 @@ the user to tell which one won. The response echoes the shape as `behavior`.
 This is best-effort. Viewer failure produces a warning and an attach action, but the
 execution request remains launched because the process is already running.
 
+`latch open` is spawned synchronously by the runner, which cannot report the launch
+until it exits, so the command never waits on the viewer indefinitely. It returns as
+soon as the viewer is confirmed — a tmux client attached, or the viewer launcher
+exited cleanly — and after eight seconds it returns `"pending": true` instead,
+leaving the viewer to finish presenting on its own. A viewer that fails later writes
+its diagnostics to `viewer-open.log` in the session directory rather than to a pipe
+that is already gone. `pending` is additive; a caller that ignores it sees the same
+`opened: true` it always did.
+
 This reverses the current success boundary:
 
 ```text
@@ -374,12 +383,52 @@ claiming, worktrees, context construction, and protocol attachment remain Overlo
 Harness observation is subscribed via `latch events`, not a session-channel bootstrap.
 
 Because create necessarily returns the durable session ID before Overlord can open
-its viewer, Latch gives sessions whose manifest source is `overlord` a five-second
-first-viewer grace period. The internal launcher proceeds as soon as a tmux client is
-actually attached; if no viewer arrives, it proceeds headlessly when the grace period
-expires. This keeps normal launches from running shell startup or presenting agent
-trust/permission UI before any terminal can show it, without making viewer opening a
-requirement for persistent or automation-only sessions.
+its viewer, Latch holds the internal launcher for sessions whose manifest source is
+`overlord` until a viewer attaches. This keeps normal launches from running shell
+startup or presenting agent trust/permission UI before any terminal can show it,
+without making viewer opening a requirement for persistent or automation-only
+sessions.
+
+The wait is bounded in two stages rather than by one fixed timeout, because the two
+cases it has to separate have very different shapes:
+
+- **Unannounced (3 s).** This only has to cover the gap between `create` returning
+  and `open` starting — one process spawn. A background launch, where no viewer is
+  ever opened, waits this long and no longer.
+- **Announced (30 s ceiling).** `latch open` writes `viewer-open.json` into the
+  session directory *before* asking the operating system for a window. The launcher
+  reads that marker as "a terminal is genuinely on its way" and keeps waiting, which
+  is what a cold terminal application needs. The ceiling keeps a viewer that never
+  arrives from stranding the session.
+
+Either way the launcher proceeds the instant a tmux client is actually attached.
+
+### Launch timings
+
+Launch latency is split across three processes — `latch create`, `latch open`, and
+the launcher under tmux — so no single exit status explains a slow start. Each
+appends the phases it owns to `launch-timings.jsonl` in the session directory, and
+`latch inspect <session> --json` returns them as `launch_timings`:
+
+```json
+{
+  "launch_timings": [
+    { "phase": "create.prepare", "ms": 18, "at": "2026-08-18T12:16:11Z" },
+    { "phase": "create.tmux_new_session", "ms": 44, "at": "2026-08-18T12:16:11Z" },
+    { "phase": "create.launch_handoff", "ms": 6, "at": "2026-08-18T12:16:11Z" },
+    { "phase": "create.total", "ms": 71, "at": "2026-08-18T12:16:11Z" },
+    { "phase": "open.resolve", "ms": 9, "at": "2026-08-18T12:16:12Z" },
+    { "phase": "open.viewer", "ms": 2140, "at": "2026-08-18T12:16:14Z", "outcome": "arrived" },
+    { "phase": "launch.first_viewer_wait", "ms": 2380, "at": "2026-08-18T12:16:14Z", "outcome": "attached" }
+  ]
+}
+```
+
+`outcome` is what distinguishes "waited and a viewer arrived" (`attached`,
+`arrived`) from "waited and gave up" (`headless`, `viewer_timeout`, `pending`), which
+is the fact a slow-launch report needs. When an Overlord launch is slow, compare
+`create.total` and `open.viewer` against the runner's own launching → launched
+interval: time unaccounted for by these phases was spent outside Latch.
 
 ## Mapping Latch and Overlord session identities
 

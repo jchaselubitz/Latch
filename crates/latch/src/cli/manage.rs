@@ -19,6 +19,7 @@ use crate::engine::{self, SessionState, PROTOCOL_VERSION};
 use crate::session::manifest::TerminalSize;
 use crate::session::meta;
 use crate::session::paths::{LatchHome, SessionId, DIR_MODE, FILE_MODE};
+use crate::session::timing;
 
 /// Default dead-pane retention.
 pub const DEFAULT_EXITED_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
@@ -104,6 +105,7 @@ pub fn inspect(options: InspectOptions) -> anyhow::Result<InspectReport> {
         size: info.as_ref().map(|value| value.size),
         exit: info.as_ref().and_then(engine::exit_record),
         attached: info.as_ref().map(|value| value.attached),
+        launch_timings: timing::read(&options.home.session(&id)),
     })
 }
 

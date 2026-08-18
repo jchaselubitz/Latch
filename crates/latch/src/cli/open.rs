@@ -4,12 +4,33 @@
 //! worker spawn is the durable launch boundary, while a GUI viewer is optional
 //! presentation that may be closed and reopened without affecting the process.
 
+#[cfg(target_os = "macos")]
+use std::time::Duration;
+
 use anyhow::bail;
 use anyhow::Context;
 
 use crate::cli::json::OpenReport;
 use crate::cli::manage;
-use crate::session::paths::LatchHome;
+use crate::session::paths::{LatchHome, SessionId, SessionPaths};
+use crate::session::{timing, viewer};
+
+/// How long `latch open` waits for proof that the viewer arrived before
+/// returning and leaving it to finish on its own.
+///
+/// Opening a window is presentation, but the caller is Overlord's runner: it
+/// spawns this command synchronously and cannot report the launch until the
+/// command exits. A cold or busy terminal application can hold an AppleScript
+/// call for minutes, which used to hold the execution request in `launching`
+/// for exactly as long — long enough to run into the launch TTL. The session is
+/// already durable by this point, so a viewer that is still starting is
+/// reported as pending rather than waited out.
+#[cfg(target_os = "macos")]
+const VIEWER_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(8);
+/// Gap between checks for an attached viewer. Each check spawns a tmux query,
+/// so this trades a little latency for far fewer processes.
+#[cfg(target_os = "macos")]
+const VIEWER_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 /// The config key holding the default viewer-opening shape.
 pub const OPEN_BEHAVIOR_KEY: &str = "open.behavior";
@@ -65,11 +86,43 @@ pub struct OpenRequest {
     pub behavior: Option<OpenBehavior>,
 }
 
+/// How far a viewer open got before this command returned.
+///
+/// Only the macOS viewer can reach `Arrived`; elsewhere `open_iterm` refuses
+/// outright, so the variant is unconstructed rather than unreachable.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ViewerArrival {
+    /// The viewer attached, or its launcher exited successfully.
+    Arrived,
+    /// The launcher is still working; the window has not been seen yet.
+    Pending,
+}
+
+impl ViewerArrival {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Arrived => "arrived",
+            Self::Pending => "pending",
+        }
+    }
+}
+
+/// Everything the platform viewer needs to present one session.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+struct ViewerRequest<'a> {
+    home: &'a LatchHome,
+    id: &'a SessionId,
+    paths: &'a SessionPaths,
+    behavior: OpenBehavior,
+}
+
 /// Opens a terminal viewer attached to a session without changing that
 /// session's lifecycle.
 pub fn open(request: OpenRequest) -> anyhow::Result<OpenReport> {
-    let viewer = request.viewer.to_ascii_lowercase();
-    if viewer != "iterm" {
+    let mut watch = timing::Stopwatch::start();
+    let viewer_kind = request.viewer.to_ascii_lowercase();
+    if viewer_kind != "iterm" {
         bail!(
             "unsupported viewer `{}`; supported viewers: iterm",
             request.viewer
@@ -80,12 +133,31 @@ pub fn open(request: OpenRequest) -> anyhow::Result<OpenReport> {
         None => configured_behavior(&request.home)?,
     };
     let id = manage::resolve_existing(&request.home, &request.session)?;
+    let paths = request.home.session(&id);
+    timing::record(&paths, "open.resolve", watch.lap(), None);
 
-    open_iterm(id.as_str(), behavior)?;
+    // Announced before the viewer is asked for, so the session's launcher can
+    // tell a terminal that is on its way from one that is never coming.
+    let _ = viewer::announce(&paths, &viewer_kind, behavior.as_str());
+    let arrival = match open_iterm(ViewerRequest {
+        home: &request.home,
+        id: &id,
+        paths: &paths,
+        behavior,
+    }) {
+        Ok(arrival) => arrival,
+        Err(error) => {
+            timing::record(&paths, "open.viewer", watch.lap(), Some("failed"));
+            viewer::clear(&paths);
+            return Err(error);
+        }
+    };
+    timing::record(&paths, "open.viewer", watch.lap(), Some(arrival.as_str()));
     Ok(OpenReport {
         id: id.to_string(),
-        viewer,
+        viewer: viewer_kind,
         opened: true,
+        pending: arrival == ViewerArrival::Pending,
         behavior: behavior.as_str().to_owned(),
     })
 }
@@ -132,28 +204,77 @@ fn iterm_script(behavior: OpenBehavior) -> &'static str {
 }
 
 #[cfg(target_os = "macos")]
-fn open_iterm(session_id: &str, behavior: OpenBehavior) -> anyhow::Result<()> {
-    use std::process::Command;
+fn open_iterm(request: ViewerRequest<'_>) -> anyhow::Result<ViewerArrival> {
+    use std::fs::OpenOptions;
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::process::{Command, Stdio};
+    use std::time::Instant;
 
     let shell = std::env::var_os("SHELL")
         .filter(|value| std::path::Path::new(value).is_absolute())
         .unwrap_or_else(|| "/bin/zsh".into());
-    let command = host_attach_command(shell, session_id);
-    let output = Command::new("osascript")
+    let command = host_attach_command(shell, request.id.as_str());
+    // osascript keeps running after this command returns on the pending path,
+    // so its diagnostics go to a file rather than a pipe this process owns:
+    // a failure that happens later is still readable beside the session, and
+    // no write of ours can be lost to a closed pipe.
+    let log = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .mode(crate::session::paths::FILE_MODE)
+        .open(request.paths.viewer_log())
+        .ok();
+    let mut child = Command::new("osascript")
         .arg("-e")
-        .arg(iterm_script(behavior))
+        .arg(iterm_script(request.behavior))
         // Passing the command as an argv item avoids interpolating session ids
         // or executable paths into AppleScript source.
         .arg(&command)
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(log.map_or_else(Stdio::null, Stdio::from))
+        .spawn()
         .context("cannot invoke osascript to open iTerm")?;
-    if !output.status.success() {
-        bail!(
-            "iTerm did not open the Latch session: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
+
+    let deadline = Instant::now() + VIEWER_CONFIRMATION_TIMEOUT;
+    loop {
+        if let Some(status) = child
+            .try_wait()
+            .context("cannot wait for the viewer to open")?
+        {
+            if status.success() {
+                return Ok(ViewerArrival::Arrived);
+            }
+            bail!(
+                "iTerm did not open the Latch session: {}",
+                viewer_diagnostic(request.paths)
+            );
+        }
+        // An attached client is better evidence than the launcher's exit: the
+        // viewer is already showing the session, whatever osascript is still
+        // finishing.
+        if crate::engine::attached_clients(request.home, request.id).is_some_and(|count| count > 0)
+        {
+            return Ok(ViewerArrival::Arrived);
+        }
+        if Instant::now() >= deadline {
+            return Ok(ViewerArrival::Pending);
+        }
+        std::thread::sleep(VIEWER_POLL_INTERVAL);
     }
-    Ok(())
+}
+
+/// The last thing the viewer launcher wrote, trimmed for a one-line error.
+#[cfg(target_os = "macos")]
+fn viewer_diagnostic(paths: &SessionPaths) -> String {
+    let text = std::fs::read_to_string(paths.viewer_log()).unwrap_or_default();
+    let detail = text.trim().lines().next_back().unwrap_or("").trim();
+    if detail.is_empty() {
+        format!("see {}", paths.viewer_log().display())
+    } else {
+        detail.to_owned()
+    }
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -168,7 +289,7 @@ fn host_attach_command(shell: impl AsRef<std::ffi::OsStr>, session_id: &str) -> 
 }
 
 #[cfg(not(target_os = "macos"))]
-fn open_iterm(_session_id: &str, _behavior: OpenBehavior) -> anyhow::Result<()> {
+fn open_iterm(_request: ViewerRequest<'_>) -> anyhow::Result<ViewerArrival> {
     bail!("opening iTerm is only supported on macOS")
 }
 
@@ -364,8 +485,73 @@ mod tests {
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn non_macos_builds_report_that_iterm_cannot_be_opened() {
-        let error = super::open_iterm("ses_01JTEST", super::OpenBehavior::NewWindow)
-            .expect_err("iTerm is macOS-only");
+        let directory = tempfile::tempdir().unwrap();
+        let home = crate::session::paths::LatchHome::new(directory.path().join("latch"));
+        let id = crate::session::paths::SessionId::parse("ses_01JTEST").unwrap();
+        let paths = home.session(&id);
+
+        let error = super::open_iterm(super::ViewerRequest {
+            home: &home,
+            id: &id,
+            paths: &paths,
+            behavior: super::OpenBehavior::NewWindow,
+        })
+        .expect_err("iTerm is macOS-only");
+
         assert!(error.to_string().contains("only supported on macOS"));
+    }
+
+    /// A viewer that never appears must not leave the session's launcher
+    /// waiting on an announcement nobody will follow through on.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn a_refused_viewer_open_clears_the_in_flight_marker() {
+        use crate::session::viewer;
+
+        let directory = tempfile::tempdir().unwrap();
+        let home = crate::session::paths::LatchHome::new(directory.path().join("latch"));
+        home.ensure().unwrap();
+        let id = crate::session::paths::SessionId::parse("ses_01JTEST").unwrap();
+        let paths = home.session(&id);
+        paths.ensure().unwrap();
+        crate::session::meta::write_once(
+            &paths,
+            &crate::session::meta::derive(crate::session::meta::MetaRequest {
+                id: id.as_str(),
+                launch: &crate::session::manifest::LaunchManifest::new(
+                    crate::session::manifest::LaunchRequest {
+                        argv: vec!["/bin/sh".to_owned()],
+                        cwd: directory.path().to_path_buf(),
+                        size: crate::session::manifest::TerminalSize { cols: 80, rows: 24 },
+                    },
+                )
+                .launch,
+                display: &crate::session::manifest::DisplayMetadata::default(),
+                created_at: "2026-08-18T12:00:00Z",
+            }),
+        )
+        .unwrap();
+
+        let error = super::open(super::OpenRequest {
+            home: home.clone(),
+            session: id.to_string(),
+            viewer: "iterm".to_owned(),
+            behavior: Some(super::OpenBehavior::NewWindow),
+        })
+        .expect_err("iTerm is macOS-only");
+
+        assert!(error.to_string().contains("only supported on macOS"));
+        assert!(
+            !viewer::is_pending(&paths),
+            "the marker outlived the refusal"
+        );
+        let phases = crate::session::timing::read(&paths);
+        assert_eq!(
+            phases
+                .iter()
+                .find(|phase| phase.phase == "open.viewer")
+                .and_then(|phase| phase.outcome.as_deref()),
+            Some("failed")
+        );
     }
 }

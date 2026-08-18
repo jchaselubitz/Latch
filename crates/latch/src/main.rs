@@ -535,6 +535,13 @@ fn dispatch(command: Option<Command>) -> Result<()> {
             })?;
             if json {
                 println!("{}", serde_json::to_string(&report)?);
+            } else if report.pending {
+                println!(
+                    "opening {} in {} as a {} (the viewer is still starting)",
+                    report.id,
+                    report.viewer,
+                    report.behavior.replace('-', " ")
+                );
             } else {
                 println!(
                     "opened {} in {} as a {}",
