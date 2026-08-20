@@ -14,6 +14,12 @@ struct SessionsView: View {
                     UnlinkedView(pairedMac: pairedMacName)
                 case .connecting:
                     ProgressView("Connecting…")
+                case .incompatible(let mismatch):
+                    MessageView(
+                        icon: mismatch.icon,
+                        title: mismatch.title,
+                        detail: mismatch.detail
+                    )
                 case .failed(let reason):
                     MessageView(
                         icon: "exclamationmark.triangle",
