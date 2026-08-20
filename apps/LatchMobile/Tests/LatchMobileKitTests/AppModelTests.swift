@@ -195,6 +195,73 @@ final class AppModelTests: XCTestCase {
         XCTAssertNil(model.linkSource)
     }
 
+    /// Discovery answering with a newer major, as a Mac that has crossed a
+    /// protocol boundary this build predates.
+    private let futureDiscovery = """
+    {"protocolVersion":2,"productVersion":"2.0.0",
+     "endpoints":{"sessions":true,"sessionCapabilities":true,"terminal":true,
+                  "events":true,"send":true},
+     "features":{"idempotencyKeys":true,"readOnlyTerminal":true},
+     "gatewayInstanceId":"gw-future"}
+    """
+
+    func testANewerGatewayAsksThePersonToUpdateThisPhone() async throws {
+        // This is the shape of the coordinated v2 release seen from a phone
+        // that has not been updated yet. The Mac is reachable and healthy, so
+        // reporting "cannot reach that computer" would send someone to debug
+        // their network for a problem the App Store fixes.
+        StubProtocol.stub(path: "/v1/capabilities", body: futureDiscovery)
+        let saved = try GatewayLink(address: "http://127.0.0.1:8787", token: "token")
+        let storage = MemoryLinkStorage(link: saved)
+        let model = AppModel(
+            storage: storage,
+            sessionFactory: { link in LatchGateway(link: link, session: StubProtocol.session()) },
+            pairedGatewayFactory: pairedGatewayFactory()
+        )
+
+        await model.restore()
+
+        guard case .incompatible(let mismatch) = model.linkState else {
+            return XCTFail("a newer gateway must not read as a connection failure: \(model.linkState)")
+        }
+        XCTAssertEqual(mismatch, .updatePhone(reported: 2, supported: 1))
+        XCTAssertNotNil(
+            try storage.load(),
+            "the saved computer is still correct; only this build is behind"
+        )
+        XCTAssertEqual(
+            model.surface,
+            SessionSurface(chat: false, composer: false, interactionControls: false),
+            "nothing may be offered across a protocol major"
+        )
+    }
+
+    func testAPairedNewerGatewayReportsTheSameThingAndKeepsThePairing() async {
+        // The paired path builds its own link, so it has a second copy of the
+        // failure handling. It has to classify a mismatch the same way, or the
+        // message a person sees depends on which route reached the Mac.
+        StubProtocol.stub(path: "/v1/capabilities", body: futureDiscovery)
+        let model = model()
+
+        await model.connectPairedDevice(pairedRecord())
+
+        guard case .incompatible(let mismatch) = model.linkState else {
+            return XCTFail("paired route must report the mismatch too: \(model.linkState)")
+        }
+        XCTAssertEqual(mismatch, .updatePhone(reported: 2, supported: 1))
+
+        // Updating the app is the remedy, so the pairing must survive to be
+        // reconnected afterwards rather than being dropped as a bad route.
+        StubProtocol.reset()
+        stubReachableMac()
+        await model.reconnectPairedTransport()
+
+        guard case .linked = model.linkState else {
+            return XCTFail("the pairing should reconnect once the versions agree: \(model.linkState)")
+        }
+        XCTAssertEqual(model.linkSource, .paired)
+    }
+
     func testASavedControlPlaneAddressDoesNotStayLinkedOrBlockPairing() async throws {
         let controlPlane = #"{"error":"not_found","reason":"no such resource"}"#
         StubProtocol.stub(path: "/v1/capabilities", status: 404, body: controlPlane)

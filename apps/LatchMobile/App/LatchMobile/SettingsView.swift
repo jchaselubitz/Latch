@@ -117,6 +117,22 @@ struct SettingsView: View {
             .disabled(address.isEmpty || token.isEmpty || model.linkState == .connecting)
         }
 
+        // A version disagreement is not a link problem, so it does not get the
+        // red "that failed" treatment. The computer is reachable; the person
+        // needs one specific update, and the row says which side it is on.
+        if case .incompatible(let mismatch) = model.linkState {
+            Section {
+                Label {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(mismatch.title).font(.footnote.weight(.medium))
+                        Text(mismatch.detail).font(.footnote).foregroundStyle(.secondary)
+                    }
+                } icon: {
+                    Image(systemName: mismatch.icon)
+                }
+            }
+        }
+
         if case .failed(let reason) = model.linkState {
             Section {
                 Label(reason, systemImage: "exclamationmark.triangle")

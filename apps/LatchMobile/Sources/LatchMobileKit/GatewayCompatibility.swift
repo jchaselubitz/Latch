@@ -104,6 +104,88 @@ public enum GatewayCompatibility {
     }
 }
 
+/// Which side is behind when a gateway and this build disagree on the protocol
+/// major.
+///
+/// Both directions produce the same technical outcome — `supports` returns
+/// false for every endpoint, terminal included — but only one of them is
+/// something the person holding the phone can act on, and the two need
+/// different instructions. The gateway being *ahead* is the ordinary case
+/// rather than the exotic one: the Mac's `latch` CLI updates itself and this
+/// app updates through the App Store, so the Mac routinely crosses a major
+/// first.
+public enum ProtocolMismatch: Equatable, Sendable {
+    /// The gateway speaks a newer major. This phone is the side to update.
+    case updatePhone(reported: Int, supported: Int)
+    /// The gateway speaks an older major. The Mac's `latch` CLI is the side to
+    /// update.
+    case updateComputer(reported: Int, supported: Int)
+
+    /// Classifies a disagreement by which side is behind.
+    public init(reported: Int, supported: Int) {
+        self = reported > supported
+            ? .updatePhone(reported: reported, supported: supported)
+            : .updateComputer(reported: reported, supported: supported)
+    }
+
+    /// The major the gateway reported.
+    public var reported: Int {
+        switch self {
+        case .updatePhone(let reported, _), .updateComputer(let reported, _): return reported
+        }
+    }
+
+    /// The major this build implements.
+    public var supported: Int {
+        switch self {
+        case .updatePhone(_, let supported), .updateComputer(_, let supported): return supported
+        }
+    }
+
+    /// SF Symbol for the screen that reports this.
+    public var icon: String {
+        switch self {
+        case .updatePhone: return "arrow.down.circle"
+        case .updateComputer: return "laptopcomputer.trianglebadge.exclamationmark"
+        }
+    }
+
+    /// The headline. It names the action rather than the symptom: the computer
+    /// is reachable and healthy, so "cannot reach that computer" would send
+    /// someone to debug their network instead of opening the App Store.
+    public var title: String {
+        switch self {
+        case .updatePhone: return "Update Latch on this phone"
+        case .updateComputer: return "Update Latch on your computer"
+        }
+    }
+
+    /// What to do about it, and why the terminal went away with everything
+    /// else. The terminal is the fallback people reach for, so its absence is
+    /// explained here rather than discovered on the session screen.
+    public var detail: String {
+        switch self {
+        case .updatePhone:
+            return """
+            Your computer is reachable and running a newer version of Latch. Update this app \
+            from the App Store to use it again. Sessions and the terminal stay unavailable \
+            until both sides match.
+            """
+        case .updateComputer:
+            return """
+            This app is newer than the Latch on your computer. Run `latch update` there, then \
+            reopen this screen. Sessions and the terminal stay unavailable until both sides \
+            match.
+            """
+        }
+    }
+
+    /// One line for a form row, where the full explanation does not fit.
+    public var summary: String {
+        "\(title). Gateway protocol \(reported); this app implements \(supported)."
+    }
+}
+
 /// Which parts of the session screen discovery permits.
 public struct SessionSurface: Equatable, Sendable {
     /// Show the transcript. Without it the session is terminal-only, which

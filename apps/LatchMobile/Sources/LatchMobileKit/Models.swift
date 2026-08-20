@@ -219,6 +219,16 @@ public enum LatchError: Error, Equatable, Sendable {
     /// The transport failed.
     case transport(String)
 
+    /// The version disagreement behind this error, when that is what it is.
+    ///
+    /// Callers use this to render an actionable screen instead of a generic
+    /// failure: a protocol mismatch is not a connection problem, and treating
+    /// it as one costs the person a network-debugging detour.
+    public var protocolMismatch: ProtocolMismatch? {
+        guard case .unsupportedProtocol(let reported, let supported) = self else { return nil }
+        return ProtocolMismatch(reported: reported, supported: supported)
+    }
+
     public var message: String {
         switch self {
         case .invalidURL(let url):
@@ -232,10 +242,11 @@ public enum LatchError: Error, Equatable, Sendable {
         case .malformedResponse(let detail):
             return "The gateway sent an unexpected response: \(detail)"
         case .unsupportedProtocol(let reported, let supported):
-            return """
-            This gateway speaks Latch protocol \(reported); this app implements \(supported). \
-            Update the app or the `latch` CLI so both sides agree.
-            """
+            // Name the side that can act. The old symmetric wording ("update
+            // the app or the CLI") left the person to work out which half was
+            // theirs, on a screen that had already told them the computer was
+            // unreachable.
+            return ProtocolMismatch(reported: reported, supported: supported).summary
         case .notAGateway:
             return """
             That's the Latch control plane, not your Mac. Pair this phone under Remote access \

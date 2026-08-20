@@ -4,6 +4,13 @@
 [`CONVERSATION_IMPLEMENTATION_PLAN.md`](./CONVERSATION_IMPLEMENTATION_PLAN.md)
 against the code on `main`.
 
+**Status:** both documents have been amended to revision 2; changes carry an
+**[R2]** marker and correspond to the recommendations in
+[Part 6](#part-6--recommendations-by-owning-layer). Worklist row 1 — the
+ship-ahead phone build — is implemented in `LatchMobileKit` and is Phase S of
+the plan. Everything else in the worklist is written into the phases and not yet
+built. This document is kept as the reasoning behind those edits.
+
 **Verdict:** the core judgment is right. The current pipeline really is
 `O(transcript)` per append — `reconcile_if_changed` reads the whole transcript
 and re-derives every event on every change

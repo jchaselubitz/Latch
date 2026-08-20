@@ -76,6 +76,51 @@ final class CompatibilityTests: XCTestCase {
         }
     }
 
+    func testAProtocolMismatchNamesTheSideThatCanAct() {
+        // Both directions disable everything, but only one of them is the
+        // person's to fix, and they are holding exactly one of the two
+        // devices. A gateway ahead of the app is the ordinary case: the CLI
+        // updates itself, this app waits on the App Store.
+        let behind = ProtocolMismatch(reported: 2, supported: 1)
+        XCTAssertEqual(behind, .updatePhone(reported: 2, supported: 1))
+        XCTAssertEqual(behind.title, "Update Latch on this phone")
+        XCTAssertTrue(
+            behind.detail.contains("App Store"),
+            "the phone-side remedy has to name where the update comes from"
+        )
+
+        let ahead = ProtocolMismatch(reported: 1, supported: 2)
+        XCTAssertEqual(ahead, .updateComputer(reported: 1, supported: 2))
+        XCTAssertEqual(ahead.title, "Update Latch on your computer")
+        XCTAssertTrue(ahead.detail.contains("latch update"))
+    }
+
+    func testTheMismatchExplainsWhyTheTerminalWentAwayToo() {
+        // The terminal is the fallback people reach for when chat is broken.
+        // `supports` disables it along with everything else across a major, so
+        // its absence is explained where the mismatch is reported rather than
+        // discovered on the session screen.
+        for mismatch in [
+            ProtocolMismatch(reported: 2, supported: 1),
+            ProtocolMismatch(reported: 1, supported: 2)
+        ] {
+            XCTAssertTrue(
+                mismatch.detail.contains("terminal"),
+                "\(mismatch.title) must account for the terminal being unavailable"
+            )
+        }
+    }
+
+    func testTheUnsupportedProtocolErrorCarriesTheMismatch() {
+        // The generic message path and the actionable screen must not drift:
+        // both derive from one classification.
+        let error = LatchError.unsupportedProtocol(reported: 2, supported: 1)
+        XCTAssertEqual(error.protocolMismatch, .updatePhone(reported: 2, supported: 1))
+        XCTAssertTrue(error.message.contains("Update Latch on this phone"))
+        XCTAssertNil(LatchError.unauthorized.protocolMismatch)
+        XCTAssertNil(LatchError.notAGateway.protocolMismatch)
+    }
+
     func testTheLegacyGatewayKeepsSessionsAndTerminalOnly() {
         // A 404 on /v1/capabilities identifies the pre-discovery gateway.
         // Sessions and terminal predate discovery; everything introduced with

@@ -18,6 +18,11 @@ public final class AppModel {
         case unlinked
         case connecting
         case linked(GatewayCapabilities)
+        /// The computer answered, and this build cannot speak to it. Kept
+        /// separate from `failed` because it is not a connection problem and
+        /// must not be reported as one: the remedy is an update, on a named
+        /// side, and the saved link stays valid.
+        case incompatible(ProtocolMismatch)
         case failed(String)
     }
 
@@ -88,7 +93,7 @@ public final class AppModel {
             let link = try GatewayLink(address: address, token: token)
             await connect(to: link, persist: true)
         } catch let error as LatchError {
-            linkState = .failed(error.message)
+            linkState = Self.linkFailure(error)
         } catch {
             linkState = .failed(error.localizedDescription)
         }
@@ -152,12 +157,20 @@ public final class AppModel {
                 pairedConnectionGeneration: generation
             )
         } catch let error as LatchError {
-            linkState = .failed(error.message)
+            linkState = Self.linkFailure(error)
         } catch let error as NoiseTunnelError {
             linkState = .failed(error.message)
         } catch {
             linkState = .failed(error.localizedDescription)
         }
+    }
+
+    /// Classifies a discovery failure. A protocol disagreement is the one
+    /// failure where the computer is fine, so it gets its own state rather
+    /// than a string the UI cannot tell apart from a dead network.
+    private static func linkFailure(_ error: LatchError) -> LinkState {
+        if let mismatch = error.protocolMismatch { return .incompatible(mismatch) }
+        return .failed(error.message)
     }
 
     private func finishConnecting(
@@ -192,7 +205,7 @@ public final class AppModel {
                     if case .linked = linkState { return }
                 }
             }
-            linkState = .failed(error.message)
+            linkState = Self.linkFailure(error)
         } catch {
             linkState = .failed(error.localizedDescription)
         }
