@@ -107,6 +107,44 @@ public struct LANRemoteNoiseChannelProvider: RemoteNoiseChannelProvider, @unchec
     }
 }
 
+/// Installs an `NWListener` handler before the listener starts, while allowing
+/// the transport that owns accepted connections to be created after the
+/// listener has selected its ephemeral port.
+///
+/// Network.framework requires a connection handler at `start()` time. The
+/// gateway link cannot be constructed until the listener becomes ready and
+/// exposes that port, so this router bridges the initialization cycle without
+/// dropping an early connection or starting the listener in an invalid state.
+final class DeferredConnectionHandler<Connection>: @unchecked Sendable {
+    typealias Handler = @Sendable (Connection) -> Void
+
+    private let lock = NSLock()
+    private var pending: [Connection] = []
+    private var handler: Handler?
+
+    func receive(_ connection: Connection) {
+        lock.lock()
+        guard let handler else {
+            pending.append(connection)
+            lock.unlock()
+            return
+        }
+        lock.unlock()
+        handler(connection)
+    }
+
+    func install(_ handler: @escaping Handler) {
+        lock.lock()
+        precondition(self.handler == nil, "the deferred connection handler was installed twice")
+        self.handler = handler
+        let queued = pending
+        pending.removeAll(keepingCapacity: false)
+        lock.unlock()
+
+        queued.forEach(handler)
+    }
+}
+
 /// User-facing local errors from the paired tunnel.
 public enum NoiseTunnelError: Error, Equatable, Sendable, LocalizedError {
     case invalidTarget
@@ -189,28 +227,16 @@ public final class NoiseTunnelGatewayTransport: GatewayTransport, @unchecked Sen
         }
         let staticKey = try identityStore.privateKey()
         let pin = try pairedDevice.pinnedMacPublicKey()
-
-        let parameters = NWParameters.tcp
-        parameters.requiredLocalEndpoint = .hostPort(
-            host: .ipv4(IPv4Address("127.0.0.1")!),
-            port: .any
-        )
-        let listener = try NWListener(using: parameters, on: .any)
-        try await waitUntilReady(listener)
-        guard let port = listener.port else { throw NoiseTunnelError.listenerUnavailable }
-        let link = GatewayLink(
-            url: URL(string: "http://127.0.0.1:\(port.rawValue)")!,
-            token: ""
-        )
+        let listenerAndLink = try await makeLoopbackListener()
         let transport = NoiseTunnelGatewayTransport(
-            listener: listener,
+            listener: listenerAndLink.listener,
             target: target,
             channelProvider: nil,
             staticKey: staticKey,
             pinnedMacPublicKey: pin,
-            gatewayLink: link
+            gatewayLink: listenerAndLink.link
         )
-        listener.newConnectionHandler = { [weak transport] connection in
+        listenerAndLink.router.install { [weak transport] connection in
             guard let transport else {
                 connection.cancel()
                 return
@@ -243,7 +269,13 @@ public final class NoiseTunnelGatewayTransport: GatewayTransport, @unchecked Sen
             pinnedMacPublicKey: pin,
             gatewayLink: listenerAndLink.link
         )
-        transport.installHandler()
+        listenerAndLink.router.install { [weak transport] connection in
+            guard let transport else {
+                connection.cancel()
+                return
+            }
+            Task { await transport.accept(connection) }
+        }
         return transport
     }
 
@@ -254,29 +286,29 @@ public final class NoiseTunnelGatewayTransport: GatewayTransport, @unchecked Sen
         listener.cancel()
     }
 
-    private static func makeLoopbackListener() async throws -> (listener: NWListener, link: GatewayLink) {
+    private static func makeLoopbackListener() async throws -> (
+        listener: NWListener,
+        link: GatewayLink,
+        router: DeferredConnectionHandler<NWConnection>
+    ) {
         let parameters = NWParameters.tcp
         parameters.requiredLocalEndpoint = .hostPort(
             host: .ipv4(IPv4Address("127.0.0.1")!),
             port: .any
         )
         let listener = try NWListener(using: parameters, on: .any)
+        let router = DeferredConnectionHandler<NWConnection>()
+        // Network.framework requires this before `start()`. The transport is
+        // installed into the router immediately after the selected port is
+        // available and before the loopback URL is exposed to URLSession.
+        listener.newConnectionHandler = { connection in router.receive(connection) }
         try await waitUntilReady(listener)
         guard let port = listener.port else { throw NoiseTunnelError.listenerUnavailable }
         return (
             listener,
-            GatewayLink(url: URL(string: "http://127.0.0.1:\(port.rawValue)")!, token: "")
+            GatewayLink(url: URL(string: "http://127.0.0.1:\(port.rawValue)")!, token: ""),
+            router
         )
-    }
-
-    private func installHandler() {
-        listener.newConnectionHandler = { [weak self] connection in
-            guard let self else {
-                connection.cancel()
-                return
-            }
-            Task { await self.accept(connection) }
-        }
     }
 
     private static func waitUntilReady(_ listener: NWListener) async throws {
@@ -505,9 +537,11 @@ private extension NWConnection {
     }
 }
 
-/// Bonjour is only a reachability optimization. A service must advertise the
-/// paired Mac's identity key before it is offered as a candidate, and the
-/// subsequent Noise handshake still verifies that exact key cryptographically.
+/// Bonjour is only a reachability optimization. A matching identity TXT hint
+/// is preferred and an explicit mismatch is ignored, but iOS may initially
+/// surface a result before its TXT metadata. Such an unknown result is still
+/// safe to try because the Noise handshake verifies the paired key before any
+/// application bytes are forwarded.
 public final class BonjourMacDiscovery: @unchecked Sendable {
     public static let serviceType = "_latch-remote._tcp"
 
@@ -519,7 +553,7 @@ public final class BonjourMacDiscovery: @unchecked Sendable {
     /// discoverable Mac into a misleading offline result.
     public func candidates(
         matching pinnedMacPublicKey: String,
-        for duration: Duration = .seconds(2)
+        for duration: Duration = .seconds(5)
     ) async throws -> [NoiseTunnelTarget] {
         let pin = try NoiseXX.normalizedPin(pinnedMacPublicKey)
         let parameters = NWParameters.tcp
@@ -527,16 +561,25 @@ public final class BonjourMacDiscovery: @unchecked Sendable {
         let browser = NWBrowser(for: .bonjour(type: Self.serviceType, domain: nil), using: parameters)
         let collector = BonjourCandidateCollector()
         browser.browseResultsChangedHandler = { results, _ in
-            let targets = results.compactMap { result -> NoiseTunnelTarget? in
-                guard Self.identityKey(in: result) == pin else { return nil }
-                return NoiseTunnelTarget(endpoint: result.endpoint)
-            }
+            let classified = results.map { ($0, Self.identityKey(in: $0)) }
+            let targets = classified
+                .filter { Self.shouldAttempt(advertisedIdentityKey: $0.1, normalizedPin: pin) }
+                .sorted { left, right in
+                    // A cryptographically matching hint wins over an unknown
+                    // one. Noise remains authoritative for both.
+                    (left.1 == pin ? 0 : 1) < (right.1 == pin ? 0 : 1)
+                }
+                .map { NoiseTunnelTarget(endpoint: $0.0.endpoint) }
             Task { await collector.replace(with: targets) }
         }
         browser.start(queue: DispatchQueue(label: "dev.cooperativ.latch.bonjour"))
         defer { browser.cancel() }
         try? await Task.sleep(for: duration)
         return await collector.values
+    }
+
+    static func shouldAttempt(advertisedIdentityKey: String?, normalizedPin: String) -> Bool {
+        advertisedIdentityKey == nil || advertisedIdentityKey == normalizedPin
     }
 
     private static func identityKey(in result: NWBrowser.Result) -> String? {

@@ -146,6 +146,12 @@ final class ControlPlaneTests: XCTestCase {
         }
     }
 
+    func testLocalizedDescriptionPreservesTheControlPlaneReason() {
+        let error = ControlPlaneError.rejected("a valid bearer credential is required")
+
+        XCTAssertEqual(error.localizedDescription, error.message)
+    }
+
     func testReadingTheDeviceCarriesTheAccessToken() async throws {
         StubProtocol.stub(
             path: "/v1/devices/d00d",

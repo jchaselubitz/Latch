@@ -102,7 +102,7 @@ public struct PairingConfirmation: Decodable, Equatable, Sendable {
 }
 
 /// Why a control-plane call failed.
-public enum ControlPlaneError: Error, Equatable, Sendable {
+public enum ControlPlaneError: Error, Equatable, Sendable, LocalizedError {
     /// No control-plane address is known for this pairing.
     case noAddress
     /// The pairing record is gone: consumed, cancelled, or never existed.
@@ -170,6 +170,13 @@ public enum ControlPlaneError: Error, Equatable, Sendable {
             return detail
         }
     }
+
+    /// Preserve the recovery-oriented message when this error crosses a
+    /// generic `Error` boundary, including the phone's loopback HTTP proxy.
+    /// Without `LocalizedError`, Foundation renders only an opaque enum case
+    /// number such as `ControlPlaneError error 4` and discards the reason the
+    /// control plane returned.
+    public var errorDescription: String? { message }
 
     /// Whether trying the same call again could plausibly work. Authentication
     /// and authorization failures are explicit and non-retryable, per the

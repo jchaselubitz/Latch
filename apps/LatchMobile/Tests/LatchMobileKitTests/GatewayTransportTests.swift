@@ -3,6 +3,35 @@ import XCTest
 @testable import LatchMobileKit
 
 final class GatewayTransportTests: XCTestCase {
+    func testListenerConnectionsWaitUntilTheTransportHandlerIsInstalled() {
+        let router = DeferredConnectionHandler<Int>()
+        let received = LockedConnectionValues()
+
+        router.receive(1)
+        router.install { received.append($0) }
+        router.receive(2)
+
+        XCTAssertEqual(received.values, [1, 2])
+    }
+
+    func testBonjourIdentityHintIsOptionalButAnExplicitMismatchIsSkipped() {
+        let pin = String(repeating: "a", count: 64)
+
+        XCTAssertTrue(
+            BonjourMacDiscovery.shouldAttempt(advertisedIdentityKey: pin, normalizedPin: pin)
+        )
+        XCTAssertTrue(
+            BonjourMacDiscovery.shouldAttempt(advertisedIdentityKey: nil, normalizedPin: pin),
+            "Noise authenticates a result whose TXT metadata has not arrived yet"
+        )
+        XCTAssertFalse(
+            BonjourMacDiscovery.shouldAttempt(
+                advertisedIdentityKey: String(repeating: "b", count: 64),
+                normalizedPin: pin
+            )
+        )
+    }
+
     func testRelayIsWithheldUntilDirectFailure() async throws {
         let policy = RemoteTransportPolicy()
         do {
@@ -61,5 +90,22 @@ final class GatewayTransportTests: XCTestCase {
         ) { error in
             XCTAssertEqual(error as? NoiseTunnelError, .callerSuppliedCredential)
         }
+    }
+}
+
+private final class LockedConnectionValues: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [Int] = []
+
+    var values: [Int] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
+
+    func append(_ value: Int) {
+        lock.lock()
+        storage.append(value)
+        lock.unlock()
     }
 }

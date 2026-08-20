@@ -26,12 +26,16 @@ public final class NativeRemoteChannelProvider: RemoteNoiseChannelProvider, @unc
     }
 
     public func openChannel() async throws -> any RemoteNoiseChannel {
-        do {
-            return try await openNativeChannel()
-        } catch {
-            guard let lanFallback else { throw error }
+        // Bonjour/TCP is the same-network fast path: it reaches the Mac's
+        // authenticated listener directly and still performs the pinned Noise
+        // handshake above this provider. ICE is the fallback only when no LAN
+        // service was discovered. Starting ICE first made a healthy LAN wait
+        // for its ten-second direct timeout, and the desktop does not yet hand
+        // collected rendezvous offers to an ICE responder.
+        if let lanFallback {
             return try await lanFallback.openChannel()
         }
+        return try await openNativeChannel()
     }
 
     private func openNativeChannel() async throws -> any RemoteNoiseChannel {
@@ -73,9 +77,12 @@ public final class NativeRemoteChannelProvider: RemoteNoiseChannelProvider, @unc
         local: LocalDescription,
         expectedPath: SelectedPath
     ) async throws -> NativeRemoteNoiseChannel {
+        let candidates = LatchMobileKit.TransportCandidate.preferredForPublication(
+            local.candidates.map(Self.signalingCandidate)
+        )
         let answer = try await signaling.offerRendezvous(
             for: record,
-            candidates: local.candidates.map(Self.signalingCandidate),
+            candidates: candidates,
             iceUfrag: local.credentials.ufrag,
             icePwd: local.credentials.password
         )

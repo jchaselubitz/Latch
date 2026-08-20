@@ -413,6 +413,45 @@ final class SignalingTests: XCTestCase {
         )
     }
 
+    func testPublicationSelectionBoundsGatheredCandidatesWithoutLosingRouteTypes() {
+        func gathered(
+            _ index: Int,
+            type: String,
+            priority: UInt32,
+            protocol proto: String = "udp"
+        ) -> TransportCandidate {
+            TransportCandidate(
+                address: "203.0.113.\(index + 1):\(41_000 + index)",
+                expiresAt: UInt64(now.timeIntervalSince1970) + 60,
+                type: type,
+                priority: priority,
+                foundation: "candidate\(index)",
+                component: 1,
+                protocol: proto,
+                relatedAddress: type == "host" ? nil : "10.0.0.\(index + 1)",
+                relatedPort: type == "host" ? nil : 40_000 + index,
+                tcpType: proto == "tcp" ? "passive" : nil
+            )
+        }
+
+        let gatheredCandidates = (0..<8).map {
+            gathered($0, type: "host", priority: UInt32(2_000 - $0))
+        } + [
+            gathered(8, type: "srflx", priority: 1_000),
+            gathered(9, type: "relay", priority: 100, protocol: "tcp")
+        ]
+
+        let selected = TransportCandidate.preferredForPublication(gatheredCandidates)
+
+        XCTAssertEqual(selected.count, SignalingWindows.maxCandidates)
+        XCTAssertEqual(Set(selected.compactMap(\.type)), Set(["host", "srflx", "relay"]))
+        XCTAssertTrue(selected.contains { $0.type == "relay" && $0.protocol == "tcp" })
+        XCTAssertEqual(selected.first?.priority, 2_000)
+        XCTAssertNoThrow(
+            try TransportCandidate.prepare(selected, now: now, maxLifetime: 60)
+        )
+    }
+
     func testICECredentialsMustBeValidPairsBeforeTheNetworkCall() async throws {
         do {
             _ = try await client().publishPresence(

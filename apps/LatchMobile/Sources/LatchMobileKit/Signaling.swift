@@ -171,6 +171,62 @@ public struct TransportCandidate: Codable, Equatable, Sendable {
         return try candidates.map { try $0.validated(now: now, maxLifetime: maxLifetime) }
     }
 
+    /// Reduces an ICE agent's gathered routes to the control-plane limit.
+    ///
+    /// Candidate priority supplies the normal ICE ordering, but taking only a
+    /// priority-sorted prefix can discard every lower-priority reflexive or
+    /// relay route when a device has many host interfaces. Reserve the best
+    /// candidate of each type first, then each type/transport combination,
+    /// before filling remaining slots by priority. The subsequent `prepare`
+    /// call remains the authority for validation and rejecting other callers
+    /// that fail to bound their own payloads.
+    public static func preferredForPublication(
+        _ candidates: [TransportCandidate],
+        maxCount: Int = SignalingWindows.maxCandidates
+    ) -> [TransportCandidate] {
+        guard maxCount > 0, candidates.count > maxCount else {
+            return maxCount > 0 ? candidates : []
+        }
+
+        let ranked = candidates.enumerated().sorted { left, right in
+            let leftPriority = left.element.priority ?? 0
+            let rightPriority = right.element.priority ?? 0
+            if leftPriority != rightPriority { return leftPriority > rightPriority }
+            return left.offset < right.offset
+        }
+        var selectedOffsets = Set<Int>()
+        var selected: [TransportCandidate] = []
+
+        func append(_ entry: (offset: Int, element: TransportCandidate)) {
+            guard selected.count < maxCount, selectedOffsets.insert(entry.offset).inserted else {
+                return
+            }
+            selected.append(entry.element)
+        }
+
+        var types = Set<String>()
+        for entry in ranked where selected.count < maxCount {
+            if types.insert(entry.element.type ?? "unknown").inserted {
+                append(entry)
+            }
+        }
+
+        var typeTransports = Set(
+            selected.map { "\($0.type ?? "unknown")|\($0.protocol ?? "unknown")" }
+        )
+        for entry in ranked where selected.count < maxCount {
+            let key = "\(entry.element.type ?? "unknown")|\(entry.element.protocol ?? "unknown")"
+            if typeTransports.insert(key).inserted {
+                append(entry)
+            }
+        }
+
+        for entry in ranked where selected.count < maxCount {
+            append(entry)
+        }
+        return selected
+    }
+
     /// A rendezvous `requestId` the control plane will accept.
     public static func requestId() -> String {
         "rdv-\(UUID().uuidString)"

@@ -55,7 +55,16 @@
 	-->
 	<key>NSCameraUsageDescription</key>
 	<string>Latch uses the camera to scan the pairing code shown on your Mac.</string>
+	<!--
+	  The paired LAN route browses for the authenticated listener published by
+	  Latch Desktop. iOS requires every Bonjour type an app browses for to be
+	  declared here; without this entry NWBrowser is denied before discovery.
+	-->
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_latch-remote._tcp</string>
+	</array>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Latch connects to the `latch serve` gateway running on your computer.</string>
+	<string>Latch securely discovers and connects to your paired computer on the local network.</string>
 </dict>
 </plist>
