@@ -745,11 +745,6 @@ struct MenuBarSessionsView: View {
     let checkForUpdates: () -> Void
 
     var body: some View {
-        Text("\(store.runningCount) running session\(store.runningCount == 1 ? "" : "s")")
-        if let update = updates.pendingUpdate {
-            Button("Update to Latch \(update.version.description)…") { checkForUpdates() }
-        }
-        Divider()
         ForEach(store.sessions.prefix(6)) { session in
             Button {
                 Task { await store.open(session.id) }
@@ -759,22 +754,25 @@ struct MenuBarSessionsView: View {
             .disabled(!session.state.isAttachable || !store.canAttachSessions)
         }
         if store.sessions.isEmpty { Text("No sessions") }
+        if let update = updates.pendingUpdate {
+            Button("Update to Latch \(update.version.description)…") { checkForUpdates() }
+        }
         Divider()
-        Button("New Session…") {
+        Button {
             store.shouldPresentNewSession = true
             openMainWindow()
+        } label: {
+            Label("New Session…", systemImage: "plus")
         }
         .disabled(!store.canCreateSessions)
-        Button("Prune…") {
-            store.shouldPresentPrune = true
-            openMainWindow()
+        Button {
+            openSettings()
+        } label: {
+            Label("Settings…", systemImage: "gear")
         }
-        Button("Refresh") { Task { await store.refresh(showsProgress: true) } }
-        Button("Open Latch") { openMainWindow() }
-        Button("Check for Updates…") { checkForUpdates() }
-        Button("Settings…") { openSettings() }
-        Divider()
         Button("Quit Latch") { NSApp.terminate(nil) }
+        Divider()
+        Button("Open Latch") { openMainWindow() }
     }
 }
 
