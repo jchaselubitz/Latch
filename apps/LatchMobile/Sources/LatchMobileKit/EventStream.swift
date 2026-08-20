@@ -6,6 +6,8 @@ public enum EventStreamClose {
     public static let normal = 1000
     /// Policy rejection, such as a bad token.
     public static let policy = 1008
+    /// The connector is known, but its transcript is not on this computer yet.
+    public static let transcriptNotFound = 1013
     /// The session does not exist. Retrying will not create it.
     public static let sessionNotFound = 4404
     /// The session has no harness connector, so it can never produce events.
@@ -41,15 +43,22 @@ public struct RetryPolicy: Sendable {
     public let initial: Duration
     public let max: Duration
     public let multiplier: Double
+    /// A new local Claude session may create its transcript shortly after the
+    /// terminal appears. Bound that grace period so a transcript living in a
+    /// container or on another machine does not leave the UI reconnecting
+    /// forever.
+    public let transcriptNotFoundAttempts: Int
 
     public init(
         initial: Duration = .milliseconds(250),
         max: Duration = .seconds(10),
-        multiplier: Double = 2
+        multiplier: Double = 2,
+        transcriptNotFoundAttempts: Int = 8
     ) {
         self.initial = initial
         self.max = max
         self.multiplier = multiplier
+        self.transcriptNotFoundAttempts = Swift.max(1, transcriptNotFoundAttempts)
     }
 
     /// Delay before attempt number `attempt`, counting from 1.
@@ -63,6 +72,10 @@ public struct RetryPolicy: Sendable {
             Double(max.components.seconds) + Double(max.components.attoseconds) / 1e18
         )
         return .milliseconds(Int(capped * 1000))
+    }
+
+    func missingTranscriptIsFatal(failures: Int) -> Bool {
+        failures >= transcriptNotFoundAttempts
     }
 }
 
@@ -123,6 +136,7 @@ private actor Driver {
     private var task: URLSessionWebSocketTask?
     private var stopped = false
     private var attempt = 0
+    private var transcriptNotFoundCount = 0
     private var state: EventStreamState = .connecting
 
     private(set) var cursor: Int
@@ -224,6 +238,7 @@ private actor Driver {
                 let message = try await socket.receive()
                 if state != .open {
                     attempt = 0
+                    transcriptNotFoundCount = 0
                     setState(.open)
                 }
                 guard case .string(let text) = message else { continue }
@@ -249,6 +264,14 @@ private actor Driver {
                 }
                 if EventStreamClose.fatal.contains(code) {
                     return .fatal(code: code, reason: reason)
+                }
+                if code == EventStreamClose.transcriptNotFound {
+                    transcriptNotFoundCount += 1
+                    if retry.missingTranscriptIsFatal(failures: transcriptNotFoundCount) {
+                        return .fatal(code: code, reason: reason)
+                    }
+                } else {
+                    transcriptNotFoundCount = 0
                 }
                 return .retryable
             }

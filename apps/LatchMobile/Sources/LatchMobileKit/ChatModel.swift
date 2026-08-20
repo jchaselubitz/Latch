@@ -63,6 +63,14 @@ public final class ChatModel {
     public func start() async {
         guard pump == nil else { return }
         await refreshCapabilities()
+        if let events = capabilities?.events, !events.ok {
+            streamState = .closed
+            endedReason = Self.describe(
+                code: EventStreamClose.noConnector,
+                reason: events.reason ?? ""
+            )
+            return
+        }
         do {
             let stream = try await gateway.events(sessionId: session.id)
             self.stream = stream
@@ -88,7 +96,6 @@ public final class ChatModel {
 
     /// Re-runs the per-session preflight.
     public func refreshCapabilities() async {
-        guard surface.interactionControls || surface.composer else { return }
         do {
             capabilities = try await gateway.sessionCapabilities(sessionId: session.id)
         } catch LatchError.endpointUnavailable {
@@ -159,7 +166,9 @@ public final class ChatModel {
         case EventStreamClose.sessionNotFound:
             return "This session is no longer on the computer."
         case EventStreamClose.noConnector:
-            return "This session has no agent attached, so there is nothing to watch."
+            return "Latch does not have a transcript connector for this session."
+        case EventStreamClose.transcriptNotFound:
+            return "Claude's transcript is not available on this computer. This can happen when Claude runs in a container or through a remote pre-command."
         case EventStreamClose.policy:
             return "The gateway closed the stream: \(reason.isEmpty ? "not permitted" : reason)"
         case EventStreamClose.normal:

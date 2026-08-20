@@ -176,7 +176,7 @@ final class LiveGatewayTests: XCTestCase {
             // A session with no connector closes 4408, which is a legitimate
             // outcome the screen explains rather than an error.
             XCTAssertTrue(
-                ended.contains("no agent attached"),
+                ended.contains("transcript connector"),
                 "unexpected stream end: \(ended)"
             )
         }

@@ -331,6 +331,17 @@ final class GatewayTests: XCTestCase {
         XCTAssertEqual(sessions.map(\.id), ["ses_1"])
     }
 
+    func testTranscriptRetryPolicyHasABoundedMissingTranscriptGracePeriod() {
+        let policy = RetryPolicy(transcriptNotFoundAttempts: 0)
+        XCTAssertEqual(policy.transcriptNotFoundAttempts, 1)
+        XCTAssertTrue(policy.missingTranscriptIsFatal(failures: 1))
+
+        let normal = RetryPolicy()
+        XCTAssertEqual(normal.transcriptNotFoundAttempts, 8)
+        XCTAssertFalse(normal.missingTranscriptIsFatal(failures: 7))
+        XCTAssertTrue(normal.missingTranscriptIsFatal(failures: 8))
+    }
+
     func testInvalidatingDiscoveryForcesItToRunAgain() async throws {
         // Required after an interruption: capabilities may have changed while
         // the phone was offline, so the old answers must not be reused.
