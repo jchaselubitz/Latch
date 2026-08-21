@@ -98,7 +98,7 @@ final class ModelTests: XCTestCase {
         let report = try JSONDecoder().decode(
             CapabilitiesReport.self,
             from: Data("""
-            {"protocolVersion":1,"productVersion":"0.2608161432.0","capabilities":{
+            {"protocolVersion":2,"productVersion":"0.2608161432.0","capabilities":{
               "create":true,"openViewer":true,"localAttach":true,"cloudAttach":false,
               "selfUpdate":true,"extensions":["harness-events-v1","harness-interaction-v1"]}}
             """.utf8)
@@ -155,9 +155,45 @@ final class ModelTests: XCTestCase {
         XCTAssertTrue(report.sessions.isEmpty)
     }
 
+    func testClientAcceptsProtocolTwo() async throws {
+        let fixture = try makeCLI(response: """
+        {"protocolVersion":2,"productVersion":"0.2608161432.0","capabilities":{
+          "create":true,"openViewer":true,"localAttach":true,"cloudAttach":false,
+          "selfUpdate":true,"extensions":[]}}
+        """)
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+
+        let report = try await LatchClient(executableURL: fixture.executable).validateCompatibility()
+        XCTAssertEqual(report.protocolVersion, LatchClient.supportedProtocolVersion)
+    }
+
+    func testClientRejectsProtocolOne() async throws {
+        let fixture = try makeCLI(response: """
+        {"protocolVersion":1,"productVersion":"0.2608161432.0","capabilities":{
+          "create":true,"openViewer":true,"localAttach":true,"cloudAttach":false,
+          "selfUpdate":true,"extensions":[]}}
+        """)
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+
+        let client = LatchClient(executableURL: fixture.executable)
+        do {
+            _ = try await client.validateCompatibility()
+            XCTFail("expected an incompatible protocol error")
+        } catch let error as LatchClientError {
+            XCTAssertEqual(
+                error,
+                .incompatibleProtocol(
+                    expected: LatchClient.supportedProtocolVersion,
+                    actual: 1,
+                    productVersion: "0.2608161432.0"
+                )
+            )
+        }
+    }
+
     func testClientRejectsAReleaseBeforeStopAllSupport() async throws {
         let fixture = try makeCLI(response: """
-        {"protocolVersion":1,"productVersion":"0.2608161004.0","capabilities":{
+        {"protocolVersion":2,"productVersion":"0.2608161004.0","capabilities":{
           "create":true,"openViewer":true,"localAttach":true,"cloudAttach":false,
           "selfUpdate":true,"extensions":[]}}
         """)

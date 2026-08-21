@@ -2,7 +2,7 @@ import Foundation
 import Darwin
 
 actor LatchClient {
-    static let minimumProtocolVersion: UInt32 = 1
+    static let supportedProtocolVersion: UInt32 = 2
     /// The first CLI release that supports the desktop stop-all action.
     static let minimumProductVersion = "0.2608161432.0"
     static let preferences = UserDefaults(suiteName: "co.cooperativ.latch.desktop") ?? .standard
@@ -66,9 +66,9 @@ actor LatchClient {
 
     func validateCompatibility() throws -> CapabilitiesReport {
         let report: CapabilitiesReport = try request(["capabilities", "--json"])
-        guard report.protocolVersion == Self.minimumProtocolVersion else {
+        guard report.protocolVersion == Self.supportedProtocolVersion else {
             throw LatchClientError.incompatibleProtocol(
-                expected: Self.minimumProtocolVersion,
+                expected: Self.supportedProtocolVersion,
                 actual: report.protocolVersion,
                 productVersion: report.productVersion
             )
