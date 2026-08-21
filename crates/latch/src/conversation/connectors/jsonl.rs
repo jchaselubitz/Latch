@@ -952,7 +952,8 @@ impl Connector for JsonlConnector {
                     .map(|last| last.elapsed() >= Duration::from_millis(1_500))
                     .unwrap_or(true));
         if refresh_screen {
-            let screen = engine::capture_pane(&self.home, &self.session)?;
+            let screen =
+                engine::capture_pane_with_timeout(&self.home, &self.session, budget.deadline)?;
             mutations.extend(self.observe_screen(&screen));
             self.last_screen_refresh = Some(Instant::now());
         }
@@ -991,7 +992,7 @@ impl Connector for JsonlConnector {
         ]
     }
 
-    fn apply(&mut self, action: ConnectorAction) -> Result<ApplyResult> {
+    fn apply(&mut self, action: ConnectorAction, deadline: Duration) -> Result<ApplyResult> {
         let text = match action.id.as_str() {
             ACTION_SEND_MESSAGE
                 if self.source.is_some()
@@ -1027,18 +1028,28 @@ impl Connector for JsonlConnector {
         };
         // Pushed state can become stale while the operation is in flight, so
         // validate the live pane immediately before affecting tmux.
-        let screen = engine::capture_pane(&self.home, &self.session)?;
+        let started = Instant::now();
+        let remaining = || {
+            deadline
+                .checked_sub(started.elapsed())
+                .filter(|remaining| !remaining.is_zero())
+                .ok_or_else(|| anyhow::anyhow!("connector action deadline exceeded"))
+        };
+        let screen = engine::capture_pane_with_timeout(&self.home, &self.session, remaining()?)?;
         if action.id == ACTION_SEND_MESSAGE {
             if !screen.lines().any(|line| is_empty_composer(self.id, line)) {
                 return Ok(ApplyResult::Refused {
                     reason: format!("the {} composer is no longer empty", self.id),
                 });
             }
-            engine::paste_message(PasteMessageRequest {
-                home: &self.home,
-                id: &self.session,
-                message: text.as_bytes(),
-            })?;
+            engine::paste_message_with_timeout(
+                PasteMessageRequest {
+                    home: &self.home,
+                    id: &self.session,
+                    message: text.as_bytes(),
+                },
+                remaining()?,
+            )?;
         } else {
             let request = self.pending_request.as_ref().expect("checked above");
             if !screen_contains_request(&screen, request) {
@@ -1052,11 +1063,14 @@ impl Connector for JsonlConnector {
                         .to_owned(),
                 });
             };
-            engine::send_keys(engine::SendKeysRequest {
-                home: &self.home,
-                id: &self.session,
-                keys: &[key],
-            })?;
+            engine::send_keys_with_timeout(
+                engine::SendKeysRequest {
+                    home: &self.home,
+                    id: &self.session,
+                    keys: &[key],
+                },
+                remaining()?,
+            )?;
             self.pending_request = None;
         }
         self.screen_can_send = Some(false);

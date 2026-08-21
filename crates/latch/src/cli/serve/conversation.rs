@@ -23,7 +23,7 @@ use crate::conversation::{
     ConnectorAction, ConversationHub, ConversationId, MutationEffect, OperationEpoch,
     OperationOutcome, Ordinal, PollBudget, ResumePosition, RetainedMutation, Revision,
     SnapshotCause, SubscribeOutcome, SubscriberEvent, ACTION_RESOLVE_REQUEST, ACTION_SEND_MESSAGE,
-    SNAPSHOT_PAGE,
+    MAX_MESSAGE_TEXT_BYTES, SNAPSHOT_PAGE,
 };
 use crate::session::paths::LatchHome;
 
@@ -31,10 +31,10 @@ use crate::session::paths::LatchHome;
 const WS_CLOSE_SESSION_NOT_FOUND: u16 = 4404;
 /// Largest client frame accepted before the socket is closed. It leaves room
 /// for the schema's one-mebibyte message text plus its JSON envelope.
-const MAX_CLIENT_FRAME: usize = 1_200_000;
+const MAX_CLIENT_FRAME: usize = 24 * 1024;
 /// Schema bounds, restated here because a frame is rejected before the Hub or
 /// any connector sees it.
-const MAX_TEXT: usize = 1_048_576;
+const MAX_TEXT: usize = MAX_MESSAGE_TEXT_BYTES;
 const MAX_CHOICE: usize = 4_096;
 const MAX_ID: usize = 256;
 const MAX_HISTORY_LIMIT: u16 = 100;
@@ -697,7 +697,7 @@ mod tests {
                 })
                 .collect()
         }
-        fn apply(&mut self, _action: ConnectorAction) -> Result<ApplyResult> {
+        fn apply(&mut self, _action: ConnectorAction, _deadline: Duration) -> Result<ApplyResult> {
             Ok(ApplyResult::Accepted {
                 correlation: Some(ConversationItemId::native("submitted-1")),
             })

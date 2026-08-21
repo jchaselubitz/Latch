@@ -13,7 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
-use super::{CheckpointDelta, ConversationSnapshot, StampedMutation};
+use super::{CheckpointDelta, ConversationSnapshot, StampedMutation, MAX_CONVERSATION_BATCH_BYTES};
 
 pub const MAX_JOURNAL_BYTES: u64 = 2 * 1024 * 1024;
 pub const MAX_JOURNAL_RECORDS: usize = 10_000;
@@ -131,7 +131,7 @@ impl ConversationCache {
     pub fn append(&self, batch: &CacheBatch) -> Result<()> {
         fs::create_dir_all(&self.dir)?;
         let payload = serde_json::to_vec(batch)?;
-        if payload.len() > 64 * 1024 {
+        if payload.len() > MAX_CONVERSATION_BATCH_BYTES {
             bail!("conversation transition batch exceeds bound");
         }
         let generation = self

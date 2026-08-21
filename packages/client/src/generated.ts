@@ -1,5 +1,5 @@
 // Generated from schemas/remote-access/v2/*.schema.json; do not edit by hand.
-// Canonical schema set SHA-256: 3d8030a162f35eba90359e42af84208a9159880cd81a9abce9dbd6b8920a1890
+// Canonical schema set SHA-256: 9748aeed7a8177c6a99df66613bec8a1bedc75dfb6d6f05a2adf7c4f37da4d77
 
 
 export type TerminalAccessMode = 'control' | 'read-only';

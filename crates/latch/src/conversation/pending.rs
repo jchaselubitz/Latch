@@ -54,7 +54,11 @@ impl Connector for PendingConnector {
             })
             .collect()
     }
-    fn apply(&mut self, _action: ConnectorAction) -> Result<ApplyResult> {
+    fn apply(
+        &mut self,
+        _action: ConnectorAction,
+        _deadline: std::time::Duration,
+    ) -> Result<ApplyResult> {
         Ok(ApplyResult::Refused {
             reason: REASON.to_owned(),
         })

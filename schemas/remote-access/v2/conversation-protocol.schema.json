@@ -111,7 +111,7 @@
         "type": { "const": "send_message" },
         "operationEpoch": { "$ref": "#/$defs/operationEpoch" },
         "operationId": { "$ref": "#/$defs/operationId" },
-        "text": { "type": "string", "minLength": 1, "maxLength": 1048576 }
+        "text": { "type": "string", "minLength": 1, "maxLength": 16384 }
       },
       "additionalProperties": false
     },

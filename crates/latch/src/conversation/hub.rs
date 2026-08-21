@@ -21,6 +21,13 @@ use crate::cli::serve::routes::Grant;
 
 pub const MAX_SUBSCRIBER_MESSAGES: usize = 128;
 pub const MAX_SUBSCRIBER_BYTES: usize = 256 * 1024;
+/// One aggregate budget vocabulary is used from wire validation through
+/// fanout and persistence. Individual items fit comfortably in a transition
+/// batch; snapshots/pages are byte-bounded rather than count-only.
+pub const MAX_MESSAGE_TEXT_BYTES: usize = 16 * 1024;
+pub const MAX_CONVERSATION_ITEM_BYTES: usize = 32 * 1024;
+pub const MAX_CONVERSATION_BATCH_BYTES: usize = 256 * 1024;
+pub const MAX_CONVERSATION_SNAPSHOT_BYTES: usize = 512 * 1024;
 pub const MAX_OPERATION_RECORDS: usize = 512;
 pub const OPERATION_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
 /// Retained mutation history a reconnecting subscriber can replay instead of
@@ -96,6 +103,10 @@ pub struct OperationRecord {
     pub epoch: OperationEpoch,
     pub at_ms: u128,
     pub outcome: OperationOutcome,
+    #[serde(default)]
+    pub action: Option<ConnectorAction>,
+    #[serde(default)]
+    pub reconciled: bool,
 }
 #[derive(Clone, Debug)]
 pub enum SubscriberEvent {
@@ -120,7 +131,9 @@ struct Subscriber {
 }
 struct SessionActor {
     projection: Projection,
-    connector: Arc<Mutex<Box<dyn Connector>>>,
+    observation_connector: Arc<Mutex<Box<dyn Connector>>>,
+    action_connector: Option<Arc<Mutex<Box<dyn Connector>>>>,
+    latest_connector_checkpoint: Vec<u8>,
     actions: Vec<ActionDescriptor>,
     cache: ConversationCache,
     subscribers: HashMap<u64, Subscriber>,
@@ -179,15 +192,32 @@ impl ConversationHub {
         {
             return Ok(());
         }
-        let connector = (self.connector_factory)(id);
-        let state = initial_state(connector.detect());
-        self.watch(id.clone(), connector, state)
+        let observation_connector = (self.connector_factory)(id);
+        let action_connector = (self.connector_factory)(id);
+        let state = initial_state(observation_connector.detect());
+        self.watch_with_connectors(
+            id.clone(),
+            observation_connector,
+            Some(action_connector),
+            state,
+        )
     }
     /// Starts one lazy actor for a session. Additional subscribers reuse it.
+    #[cfg(test)]
     pub fn watch(
         &self,
         id: ConversationId,
         connector: Box<dyn Connector>,
+        state: ConversationState,
+    ) -> Result<()> {
+        self.watch_with_connectors(id, connector, None, state)
+    }
+
+    fn watch_with_connectors(
+        &self,
+        id: ConversationId,
+        connector: Box<dyn Connector>,
+        mut action_connector: Option<Box<dyn Connector>>,
         state: ConversationState,
     ) -> Result<()> {
         let mut hub = self.inner.lock().expect("hub poisoned");
@@ -201,11 +231,17 @@ impl ConversationHub {
                 return Ok(None);
             };
             connector.restore_checkpoint(&checkpoint)?;
+            if let Some(action) = action_connector.as_mut() {
+                action.restore_checkpoint(&checkpoint)?;
+            }
             let mut projection = Projection::from_snapshot(snapshot);
             let mut operations = decode_operations(operations);
             for batch in batches {
                 if let Some(delta) = batch.checkpoint_delta.as_ref() {
                     connector.apply_checkpoint_delta(delta)?;
+                    if let Some(action) = action_connector.as_mut() {
+                        action.apply_checkpoint_delta(delta)?;
+                    }
                 }
                 for mutation in batch.mutations {
                     projection.apply_stamped(mutation)?;
@@ -229,16 +265,19 @@ impl ConversationHub {
             .iter()
             .map(serde_json::to_value)
             .collect::<Result<Vec<_>, _>>()?;
+        let connector_checkpoint = connector.checkpoint_snapshot()?;
         cache.compact(
-            &projection.snapshot(CACHE_PAGE),
+            &projection.snapshot_bounded(CACHE_PAGE, MAX_CONVERSATION_SNAPSHOT_BYTES),
             &persisted,
-            &connector.checkpoint_snapshot()?,
+            &connector_checkpoint,
         )?;
         hub.sessions.insert(
             id,
             SessionActor {
                 projection,
-                connector: Arc::new(Mutex::new(connector)),
+                observation_connector: Arc::new(Mutex::new(connector)),
+                action_connector: action_connector.map(|connector| Arc::new(Mutex::new(connector))),
+                latest_connector_checkpoint: connector_checkpoint,
                 actions,
                 cache,
                 subscribers: HashMap::new(),
@@ -264,7 +303,10 @@ impl ConversationHub {
                 let hub = self.inner.lock().ok()?;
                 Some((
                     key,
-                    hub.sessions.get(id)?.projection.snapshot(SNAPSHOT_PAGE),
+                    hub.sessions
+                        .get(id)?
+                        .projection
+                        .snapshot_bounded(SNAPSHOT_PAGE, MAX_CONVERSATION_SNAPSHOT_BYTES),
                 ))
             }
         }
@@ -324,11 +366,20 @@ impl ConversationHub {
         limit: usize,
     ) -> Option<(Vec<ConversationItem>, bool)> {
         let hub = self.inner.lock().ok()?;
-        Some(hub.sessions.get(id)?.projection.page_before(before, limit))
+        Some(hub.sessions.get(id)?.projection.page_before_bounded(
+            before,
+            limit,
+            MAX_CONVERSATION_SNAPSHOT_BYTES,
+        ))
     }
     pub fn snapshot(&self, id: &ConversationId, limit: usize) -> Option<ConversationSnapshot> {
         let hub = self.inner.lock().ok()?;
-        Some(hub.sessions.get(id)?.projection.snapshot(limit))
+        Some(
+            hub.sessions
+                .get(id)?
+                .projection
+                .snapshot_bounded(limit, MAX_CONVERSATION_SNAPSHOT_BYTES),
+        )
     }
     /// Grants exactly one caller the right to run this session's observation
     /// loop. Later subscribers share its output instead of polling the source.
@@ -385,15 +436,12 @@ impl ConversationHub {
                 .iter()
                 .map(serde_json::to_value)
                 .collect::<Result<Vec<_>, _>>()?;
-            let checkpoint = actor
-                .connector
-                .lock()
-                .map_err(|_| anyhow::anyhow!("connector worker poisoned"))?
-                .checkpoint_snapshot()?;
             actor.cache.compact(
-                &actor.projection.snapshot(CACHE_PAGE),
+                &actor
+                    .projection
+                    .snapshot_bounded(CACHE_PAGE, MAX_CONVERSATION_SNAPSHOT_BYTES),
                 &operations,
-                &checkpoint,
+                &actor.latest_connector_checkpoint,
             )?;
         }
         for id in &ids {
@@ -407,7 +455,7 @@ impl ConversationHub {
         id: &ConversationId,
         mutations: Vec<super::ConnectorMutation>,
     ) -> Result<()> {
-        self.apply_poll_with_delta(id, mutations, None)
+        self.apply_poll_with_checkpoint(id, mutations, None, None)
     }
     fn apply_poll_with_delta(
         &self,
@@ -415,16 +463,84 @@ impl ConversationHub {
         mutations: Vec<super::ConnectorMutation>,
         checkpoint_delta: Option<super::CheckpointDelta>,
     ) -> Result<()> {
+        self.apply_poll_with_checkpoint(id, mutations, checkpoint_delta, None)
+    }
+    fn apply_poll_with_checkpoint(
+        &self,
+        id: &ConversationId,
+        mutations: Vec<super::ConnectorMutation>,
+        checkpoint_delta: Option<super::CheckpointDelta>,
+        connector_checkpoint: Option<Vec<u8>>,
+    ) -> Result<()> {
+        if serde_json::to_vec(&mutations)?.len() > MAX_CONVERSATION_BATCH_BYTES {
+            anyhow::bail!("conversation transition batch exceeds aggregate byte budget");
+        }
+        for mutation in &mutations {
+            if let super::ConnectorMutation::Upsert(item) = mutation {
+                if serde_json::to_vec(item)?.len() > MAX_CONVERSATION_ITEM_BYTES {
+                    anyhow::bail!("conversation item exceeds aggregate byte budget");
+                }
+            }
+        }
         let mut hub = self.inner.lock().expect("hub poisoned");
         let actor = hub
             .sessions
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("unknown conversation"))?;
+        if let Some(checkpoint) = connector_checkpoint {
+            actor.latest_connector_checkpoint = checkpoint;
+        }
         // One source poll is one durable transition batch. Appending the
         // checkpoint delta for every emitted item would turn a normal
         // multi-block Claude record into O(mutations²) journal work.
+        let mut reconciliation_candidates: Vec<_> = actor
+            .operations
+            .iter()
+            .filter_map(|record| match &record.outcome {
+                OperationOutcome::Accepted {
+                    correlation: Some(id),
+                } if !record.reconciled => actor.projection.item(id).and_then(|item| {
+                    if let super::ConversationItemKind::Message {
+                        role: super::MessageRole::User,
+                        text,
+                        ..
+                    } = &item.kind
+                    {
+                        Some((record.id.clone(), id.clone(), text.clone()))
+                    } else {
+                        None
+                    }
+                }),
+                _ => None,
+            })
+            .collect();
         let mut applied = Vec::with_capacity(mutations.len());
-        for mutation in mutations {
+        let mut reconciled_records = Vec::new();
+        for mut mutation in mutations {
+            if let super::ConnectorMutation::Upsert(item) = &mut mutation {
+                if let super::ConversationItemKind::Message {
+                    role: super::MessageRole::User,
+                    text,
+                    status: super::MessageStatus::Observed,
+                } = &item.kind
+                {
+                    if let Some(index) = reconciliation_candidates
+                        .iter()
+                        .position(|(_, _, submitted_text)| submitted_text == text)
+                    {
+                        let (operation_id, correlation, _) =
+                            reconciliation_candidates.remove(index);
+                        let record = actor
+                            .operations
+                            .iter_mut()
+                            .find(|record| record.id == operation_id)
+                            .expect("candidate operation exists");
+                        item.id = correlation;
+                        record.reconciled = true;
+                        reconciled_records.push(serde_json::to_value(record.clone())?);
+                    }
+                }
+            }
             applied.push(actor.projection.apply_connector(mutation)?);
         }
         if !applied.is_empty() || checkpoint_delta.is_some() {
@@ -434,7 +550,7 @@ impl ConversationHub {
                     .map(|change| change.stamped.clone())
                     .collect(),
                 checkpoint_delta,
-                operation_records: vec![],
+                operation_records: reconciled_records,
             })?;
             for change in applied {
                 publish(actor, change);
@@ -451,21 +567,28 @@ impl ConversationHub {
             hub.sessions
                 .get(&id)
                 .ok_or_else(|| anyhow::anyhow!("unknown conversation"))?
-                .connector
+                .observation_connector
                 .clone()
         };
         let deadline = budget.deadline;
         let task = tokio::task::spawn_blocking(move || {
-            connector
+            let mut connector = connector
                 .lock()
-                .map_err(|_| anyhow::anyhow!("connector worker poisoned"))?
-                .poll(budget)
+                .map_err(|_| anyhow::anyhow!("connector worker poisoned"))?;
+            let result = connector.poll(budget)?;
+            let checkpoint = connector.checkpoint_snapshot()?;
+            Ok::<_, anyhow::Error>((result, checkpoint))
         });
         match tokio::time::timeout(deadline, task).await {
-            Ok(Ok(Ok(result))) => {
+            Ok(Ok(Ok((result, checkpoint)))) => {
                 let checkpoint_delta =
                     (!result.checkpoint_delta.is_empty()).then_some(result.checkpoint_delta);
-                self.apply_poll_with_delta(&id, result.mutations, checkpoint_delta)
+                self.apply_poll_with_checkpoint(
+                    &id,
+                    result.mutations,
+                    checkpoint_delta,
+                    Some(checkpoint),
+                )
             }
             Ok(Ok(Err(error))) => self.degrade(&id, format!("observation failed: {error}")),
             Ok(Err(_)) => self.degrade(&id, "observation worker stopped".into()),
@@ -487,19 +610,27 @@ impl ConversationHub {
         if begun != OperationOutcome::Started {
             return Ok(begun);
         }
-        let connector = {
+        let (connector, checkpoint) = {
             let hub = self.inner.lock().expect("hub poisoned");
-            hub.sessions
+            let actor = hub
+                .sessions
                 .get(&id)
-                .ok_or_else(|| anyhow::anyhow!("unknown conversation"))?
-                .connector
-                .clone()
+                .ok_or_else(|| anyhow::anyhow!("unknown conversation"))?;
+            (
+                actor
+                    .action_connector
+                    .as_ref()
+                    .unwrap_or(&actor.observation_connector)
+                    .clone(),
+                actor.latest_connector_checkpoint.clone(),
+            )
         };
         let task = tokio::task::spawn_blocking(move || {
-            connector
+            let mut connector = connector
                 .lock()
-                .map_err(|_| anyhow::anyhow!("connector worker poisoned"))?
-                .apply(action)
+                .map_err(|_| anyhow::anyhow!("connector worker poisoned"))?;
+            connector.restore_checkpoint(&checkpoint)?;
+            connector.apply(action, deadline)
         });
         let result = match tokio::time::timeout(deadline, task).await {
             Ok(Ok(result)) => result,
@@ -581,11 +712,22 @@ impl ConversationHub {
                     .unwrap_or_else(|| "action unavailable".into()),
             });
         }
+        if actor
+            .operations
+            .iter()
+            .any(|record| record.outcome == OperationOutcome::Started)
+        {
+            return Ok(OperationOutcome::Refused {
+                reason: "another conversation action is still in flight".into(),
+            });
+        }
         let record = OperationRecord {
             id: operation_id,
             epoch: epoch.clone(),
             at_ms: now_ms(),
             outcome: OperationOutcome::Started,
+            action: Some(action.clone()),
+            reconciled: false,
         };
         actor.operations.push_back(record.clone());
         actor.cache.append(&super::CacheBatch {
@@ -607,18 +749,64 @@ impl ConversationHub {
             .sessions
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("unknown conversation"))?;
-        let outcome = match result {
+        let connector_outcome = match result {
             Ok(ApplyResult::Accepted { correlation }) => OperationOutcome::Accepted { correlation },
             Ok(ApplyResult::Refused { reason }) => OperationOutcome::Refused { reason },
             Err(_) => OperationOutcome::Ambiguous,
         };
-        if let Some(record) = actor.operations.iter_mut().find(|r| r.id == operation_id) {
-            record.outcome = outcome.clone();
-            actor.cache.append(&super::CacheBatch {
-                mutations: vec![],
-                checkpoint_delta: None,
-                operation_records: vec![serde_json::to_value(record)?],
-            })?;
+        let mut published = None;
+        let outcome =
+            if let Some(record) = actor.operations.iter_mut().find(|r| r.id == operation_id) {
+                let outcome = match connector_outcome {
+                    OperationOutcome::Accepted { correlation: None }
+                        if record
+                            .action
+                            .as_ref()
+                            .is_some_and(|action| action.id == super::ACTION_SEND_MESSAGE) =>
+                    {
+                        let item_id =
+                            ConversationItemId::derived("hub", record.epoch.as_str(), &record.id);
+                        let text = record
+                            .action
+                            .as_ref()
+                            .and_then(|action| action.payload.get("text"))
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned();
+                        let change = actor.projection.apply_connector(
+                            super::ConnectorMutation::Upsert(super::ObservedItem {
+                                id: item_id.clone(),
+                                created_at: crate::engine::format_rfc3339(SystemTime::now()),
+                                kind: super::ConversationItemKind::Message {
+                                    role: super::MessageRole::User,
+                                    text,
+                                    status: super::MessageStatus::Submitted,
+                                },
+                            }),
+                        )?;
+                        published = Some(change);
+                        OperationOutcome::Accepted {
+                            correlation: Some(item_id),
+                        }
+                    }
+                    other => other,
+                };
+                record.outcome = outcome.clone();
+                record.action = None;
+                actor.cache.append(&super::CacheBatch {
+                    mutations: published
+                        .iter()
+                        .map(|change| change.stamped.clone())
+                        .collect(),
+                    checkpoint_delta: None,
+                    operation_records: vec![serde_json::to_value(record)?],
+                })?;
+                outcome
+            } else {
+                connector_outcome
+            };
+        if let Some(change) = published {
+            publish(actor, change);
         }
         Ok(outcome)
     }
@@ -633,7 +821,9 @@ impl ConversationHub {
         let state = actor.projection.state();
         let generation = actor.projection.generation();
         let revision = actor.projection.revision();
-        let snapshot = actor.projection.snapshot(SNAPSHOT_PAGE);
+        let snapshot = actor
+            .projection
+            .snapshot_bounded(SNAPSHOT_PAGE, MAX_CONVERSATION_SNAPSHOT_BYTES);
         let Some(sub) = actor.subscribers.get_mut(&subscriber) else {
             return vec![];
         };
@@ -668,7 +858,9 @@ fn publish(actor: &mut SessionActor, applied: super::AppliedMutation) {
     if let MutationEffect::Reset(_) = &applied.effect {
         actor.retained.clear();
         actor.retained_bytes = 0;
-        let snapshot = actor.projection.snapshot(SNAPSHOT_PAGE);
+        let snapshot = actor
+            .projection
+            .snapshot_bounded(SNAPSHOT_PAGE, MAX_CONVERSATION_SNAPSHOT_BYTES);
         fanout(
             actor,
             SubscriberEvent::Snapshot(snapshot, SnapshotCause::Generation),
@@ -698,7 +890,9 @@ fn publish(actor: &mut SessionActor, applied: super::AppliedMutation) {
 /// Decides what a subscriber at `position` must receive.
 fn resolve_position(actor: &SessionActor, position: &ResumePosition) -> SubscribeOutcome {
     let snapshot = |cause| SubscribeOutcome::Snapshot {
-        snapshot: actor.projection.snapshot(SNAPSHOT_PAGE),
+        snapshot: actor
+            .projection
+            .snapshot_bounded(SNAPSHOT_PAGE, MAX_CONVERSATION_SNAPSHOT_BYTES),
         cause,
     };
     let (Some(generation), Some(after)) = (position.generation, position.after_revision) else {
@@ -807,15 +1001,12 @@ fn compact_if_needed(actor: &mut SessionActor) -> Result<()> {
             .iter()
             .map(serde_json::to_value)
             .collect::<Result<Vec<_>, _>>()?;
-        let checkpoint = actor
-            .connector
-            .lock()
-            .map_err(|_| anyhow::anyhow!("connector worker poisoned"))?
-            .checkpoint_snapshot()?;
         actor.cache.compact(
-            &actor.projection.snapshot(CACHE_PAGE),
+            &actor
+                .projection
+                .snapshot_bounded(CACHE_PAGE, MAX_CONVERSATION_SNAPSHOT_BYTES),
             &records,
-            &checkpoint,
+            &actor.latest_connector_checkpoint,
         )?;
     }
     Ok(())
@@ -871,10 +1062,11 @@ mod tests {
     use super::*;
     use anyhow::Result;
     use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
     use crate::conversation::{
         ActionDescriptor, CheckpointDelta, ConnectorIdentity, ConnectorMutation, Detection,
-        MessageRole, MessageStatus, ObservedItem, PollBudget, PollResult,
+        MessageRole, MessageStatus, ObservedItem, PollBudget, PollResult, ACTION_SEND_MESSAGE,
     };
 
     struct FakeConnector;
@@ -897,13 +1089,59 @@ mod tests {
         }
         fn actions(&self) -> Vec<ActionDescriptor> {
             vec![ActionDescriptor {
-                id: "send".into(),
+                id: ACTION_SEND_MESSAGE.into(),
                 required_grant: Grant::Interact,
                 enabled: true,
                 reason: None,
             }]
         }
-        fn apply(&mut self, _: ConnectorAction) -> Result<ApplyResult> {
+        fn apply(&mut self, _: ConnectorAction, _: Duration) -> Result<ApplyResult> {
+            Ok(ApplyResult::Accepted { correlation: None })
+        }
+        fn reconcile(
+            &self,
+            _: &[ConversationItemId],
+            _: &[ConversationItemId],
+        ) -> Vec<ConnectorMutation> {
+            vec![]
+        }
+        fn checkpoint_snapshot(&self) -> Result<Vec<u8>> {
+            Ok(vec![])
+        }
+    }
+
+    struct LaneConnector {
+        slow_poll: bool,
+    }
+    impl Connector for LaneConnector {
+        fn detect(&self) -> Detection {
+            Detection::Supported(ConnectorIdentity {
+                id: "lanes".into(),
+                version: "1".into(),
+            })
+        }
+        fn poll(&mut self, _: PollBudget) -> Result<PollResult> {
+            if self.slow_poll {
+                std::thread::sleep(Duration::from_millis(250));
+            }
+            Ok(PollResult {
+                mutations: vec![],
+                checkpoint_delta: CheckpointDelta {
+                    source_offsets: vec![],
+                    active_branch_delta: vec![],
+                    connector_state: None,
+                },
+            })
+        }
+        fn actions(&self) -> Vec<ActionDescriptor> {
+            vec![ActionDescriptor {
+                id: ACTION_SEND_MESSAGE.into(),
+                required_grant: Grant::Interact,
+                enabled: true,
+                reason: None,
+            }]
+        }
+        fn apply(&mut self, _: ConnectorAction, _: Duration) -> Result<ApplyResult> {
             Ok(ApplyResult::Accepted { correlation: None })
         }
         fn reconcile(
@@ -942,7 +1180,7 @@ mod tests {
         let (observe, snapshot) = hub.subscribe(&id, Grant::Observe).unwrap();
         let (healthy, _) = hub.subscribe(&id, Grant::Interact).unwrap();
         let action = ConnectorAction {
-            id: "send".into(),
+            id: ACTION_SEND_MESSAGE.into(),
             payload: json!({"text":"x"}),
         };
         assert!(matches!(
@@ -987,6 +1225,49 @@ mod tests {
             [SubscriberEvent::StateOnly { .. }]
         ));
         assert!(!hub.drain(&id, healthy).is_empty());
+    }
+
+    #[test]
+    fn item_and_snapshot_byte_budgets_are_enforced_before_persistence() {
+        let temp = tempfile::tempdir().unwrap();
+        let hub = ConversationHub::new(temp.path()).unwrap();
+        let id = ConversationId::new("ses_budgets");
+        hub.watch(
+            id.clone(),
+            Box::new(FakeConnector),
+            ConversationState::starting(None),
+        )
+        .unwrap();
+        let oversized = ConnectorMutation::Upsert(ObservedItem {
+            id: ConversationItemId::native("oversized"),
+            created_at: "now".into(),
+            kind: super::super::ConversationItemKind::Message {
+                role: MessageRole::Assistant,
+                text: "x".repeat(MAX_CONVERSATION_ITEM_BYTES),
+                status: MessageStatus::Complete,
+            },
+        });
+        assert!(hub.apply_poll(&id, vec![oversized]).is_err());
+        assert_eq!(hub.snapshot(&id, 10).unwrap().revision, Revision::zero());
+
+        for n in 0..80 {
+            hub.apply_poll(
+                &id,
+                vec![ConnectorMutation::Upsert(ObservedItem {
+                    id: ConversationItemId::native(format!("bounded-{n}")),
+                    created_at: "now".into(),
+                    kind: super::super::ConversationItemKind::Message {
+                        role: MessageRole::Assistant,
+                        text: "x".repeat(8 * 1024),
+                        status: MessageStatus::Complete,
+                    },
+                })],
+            )
+            .unwrap();
+        }
+        let snapshot = hub.snapshot(&id, 100).unwrap();
+        assert!(serde_json::to_vec(&snapshot).unwrap().len() <= MAX_CONVERSATION_SNAPSHOT_BYTES);
+        assert!(snapshot.has_more_before);
     }
     #[test]
     fn resume_replays_retained_mutations_and_re_bases_when_it_cannot() {
@@ -1121,6 +1402,60 @@ mod tests {
         assert_eq!(std::fs::read(journal).unwrap(), before);
     }
 
+    #[tokio::test]
+    async fn production_factory_keeps_actions_independent_of_a_slow_observer() {
+        let temp = tempfile::tempdir().unwrap();
+        let created = Arc::new(AtomicUsize::new(0));
+        let factory_count = created.clone();
+        let hub = ConversationHub::with_connector_factory(
+            temp.path(),
+            Arc::new(move |_| {
+                Box::new(LaneConnector {
+                    slow_poll: factory_count.fetch_add(1, AtomicOrdering::SeqCst) == 0,
+                })
+            }),
+        )
+        .unwrap();
+        let id = ConversationId::new("ses_lanes");
+        hub.ensure_watched(&id).unwrap();
+        let (subscriber, snapshot) = hub.subscribe(&id, Grant::Interact).unwrap();
+        let polling_hub = hub.clone();
+        let polling_id = id.clone();
+        let poll = tokio::spawn(async move {
+            polling_hub
+                .poll_once(
+                    polling_id,
+                    PollBudget {
+                        max_records: 1,
+                        deadline: Duration::from_secs(1),
+                    },
+                )
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let outcome = hub
+            .dispatch_action(
+                id,
+                subscriber,
+                snapshot.operation_epoch,
+                "op-independent".into(),
+                ConnectorAction {
+                    id: ACTION_SEND_MESSAGE.into(),
+                    payload: json!({"text":"hello"}),
+                },
+                Duration::from_millis(100),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            OperationOutcome::Accepted {
+                correlation: Some(_)
+            }
+        ));
+        poll.await.unwrap().unwrap();
+    }
+
     #[test]
     fn restart_turns_started_operation_ambiguous() {
         let temp = tempfile::tempdir().unwrap();
@@ -1137,7 +1472,7 @@ mod tests {
             let (subscriber, snapshot) = hub.subscribe(&id, Grant::Interact).unwrap();
             epoch = snapshot.operation_epoch;
             let action = ConnectorAction {
-                id: "send".into(),
+                id: ACTION_SEND_MESSAGE.into(),
                 payload: json!({}),
             };
             assert_eq!(
@@ -1155,7 +1490,7 @@ mod tests {
         .unwrap();
         let (subscriber, snapshot) = hub.subscribe(&id, Grant::Interact).unwrap();
         let action = ConnectorAction {
-            id: "send".into(),
+            id: ACTION_SEND_MESSAGE.into(),
             payload: json!({}),
         };
         assert_eq!(snapshot.operation_epoch, epoch);
@@ -1164,6 +1499,82 @@ mod tests {
                 .unwrap(),
             OperationOutcome::Ambiguous
         );
+    }
+
+    #[test]
+    fn accepted_send_atomically_publishes_and_reconciles_a_canonical_item() {
+        let temp = tempfile::tempdir().unwrap();
+        let id = ConversationId::new("ses_submitted");
+        let hub = ConversationHub::new(temp.path()).unwrap();
+        hub.watch(
+            id.clone(),
+            Box::new(FakeConnector),
+            ConversationState::starting(None),
+        )
+        .unwrap();
+        let (subscriber, snapshot) = hub.subscribe(&id, Grant::Interact).unwrap();
+        let action = ConnectorAction {
+            id: ACTION_SEND_MESSAGE.into(),
+            payload: json!({"text":"same text"}),
+        };
+        assert_eq!(
+            hub.begin_action(
+                &id,
+                subscriber,
+                &snapshot.operation_epoch,
+                "op-canonical".into(),
+                &action,
+            )
+            .unwrap(),
+            OperationOutcome::Started
+        );
+        let accepted = hub
+            .finish_action(
+                &id,
+                "op-canonical",
+                Ok(ApplyResult::Accepted { correlation: None }),
+            )
+            .unwrap();
+        let OperationOutcome::Accepted {
+            correlation: Some(item_id),
+        } = accepted
+        else {
+            panic!("accepted send must return its durable item id");
+        };
+        let submitted = hub.snapshot(&id, 10).unwrap();
+        assert_eq!(submitted.items.len(), 1);
+        assert_eq!(submitted.items[0].id, item_id);
+        assert!(matches!(
+            submitted.items[0].kind,
+            super::super::ConversationItemKind::Message {
+                status: MessageStatus::Submitted,
+                ..
+            }
+        ));
+
+        hub.apply_poll(
+            &id,
+            vec![ConnectorMutation::Upsert(ObservedItem {
+                id: ConversationItemId::native("agent-native-id"),
+                created_at: "now".into(),
+                kind: super::super::ConversationItemKind::Message {
+                    role: MessageRole::User,
+                    text: "same text".into(),
+                    status: MessageStatus::Observed,
+                },
+            })],
+        )
+        .unwrap();
+        let observed = hub.snapshot(&id, 10).unwrap();
+        assert_eq!(observed.items.len(), 1);
+        assert_eq!(observed.items[0].id, item_id);
+        assert!(matches!(
+            observed.items[0].kind,
+            super::super::ConversationItemKind::Message {
+                status: MessageStatus::Observed,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -1187,7 +1598,7 @@ mod tests {
                 &old_epoch,
                 "old-operation".into(),
                 &ConnectorAction {
-                    id: "send".into(),
+                    id: ACTION_SEND_MESSAGE.into(),
                     payload: json!({}),
                 },
             )
@@ -1217,7 +1628,7 @@ mod tests {
                 &old_epoch,
                 "old-operation".into(),
                 &ConnectorAction {
-                    id: "send".into(),
+                    id: ACTION_SEND_MESSAGE.into(),
                     payload: json!({}),
                 },
             )

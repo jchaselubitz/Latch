@@ -11,7 +11,7 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
 
@@ -686,11 +686,20 @@ fn inspect_once(home: &LatchHome, id: &SessionId) -> Result<SessionQuery> {
 
 /// Captures the currently visible pane for input-safety classification.
 pub fn capture_pane(home: &LatchHome, id: &SessionId) -> Result<String> {
+    capture_pane_with_timeout(home, id, Duration::from_secs(30))
+}
+
+/// Captures the visible pane while retaining ownership of the tmux client so a
+/// connector deadline can terminate it instead of merely abandoning a waiter.
+pub fn capture_pane_with_timeout(
+    home: &LatchHome,
+    id: &SessionId,
+    timeout: Duration,
+) -> Result<String> {
     ensure_config(home)?;
-    let output = tmux(home)?
-        .args(["capture-pane", "-p", "-J", "-t", id.as_str()])
-        .output()
-        .context("cannot capture the private tmux pane")?;
+    let mut command = tmux(home)?;
+    command.args(["capture-pane", "-p", "-J", "-t", id.as_str()]);
+    let output = output_with_timeout(command, timeout, "capture the private tmux pane")?;
     if !output.status.success() {
         return Err(tmux_error("capture session screen", output));
     }
@@ -701,6 +710,15 @@ pub fn capture_pane(home: &LatchHome, id: &SessionId) -> Result<String> {
 ///
 /// The message remains on stdin and never appears in a process argument.
 pub fn paste_message(request: PasteMessageRequest<'_>) -> Result<()> {
+    paste_message_with_timeout(request, Duration::from_secs(30))
+}
+
+/// Deadline-bounded form used by Conversation Hub action workers.
+pub fn paste_message_with_timeout(
+    request: PasteMessageRequest<'_>,
+    timeout: Duration,
+) -> Result<()> {
+    let started = Instant::now();
     let buffer = format!(
         "latch-message-{}-{}",
         std::process::id(),
@@ -713,16 +731,13 @@ pub fn paste_message(request: PasteMessageRequest<'_>) -> Result<()> {
     command
         .args(["load-buffer", "-b", &buffer, "-"])
         .stdin(Stdio::piped());
-    let mut child = command
-        .spawn()
-        .context("cannot load a private tmux paste buffer")?;
-    child
-        .stdin
-        .take()
-        .context("tmux paste buffer stdin is unavailable")?
-        .write_all(request.message)?;
-    let status = child.wait().context("cannot wait for tmux paste buffer")?;
-    if !status.success() {
+    let output = output_with_input_timeout(
+        command,
+        request.message,
+        remaining_timeout(started, timeout)?,
+        "load a private tmux paste buffer",
+    )?;
+    if !output.status.success() {
         bail!("cannot load a private tmux paste buffer");
     }
 
@@ -736,18 +751,20 @@ pub fn paste_message(request: PasteMessageRequest<'_>) -> Result<()> {
         "-t",
         request.id.as_str(),
     ]);
-    if let Err(error) = run_tmux(paste, "paste message") {
+    if let Err(error) =
+        run_tmux_with_timeout(paste, "paste message", remaining_timeout(started, timeout)?)
+    {
         if let Ok(mut cleanup) = tmux(request.home) {
             cleanup.args(["delete-buffer", "-b", &buffer]);
             let _ = cleanup.status();
         }
         return Err(error);
     }
-    send_keys(SendKeysRequest {
+    send_keys_with_timeout(SendKeysRequest {
         home: request.home,
         id: request.id,
         keys: &["Enter".to_owned()],
-    })
+    }, remaining_timeout(started, timeout)?)
     .with_context(|| {
         "message was pasted into the composer but not submitted; recover in the terminal with Ctrl-U"
     })
@@ -755,6 +772,11 @@ pub fn paste_message(request: PasteMessageRequest<'_>) -> Result<()> {
 
 /// Sends validated key names into one pane.
 pub fn send_keys(request: SendKeysRequest<'_>) -> Result<()> {
+    send_keys_with_timeout(request, Duration::from_secs(30))
+}
+
+/// Deadline-bounded form used by Conversation Hub action workers.
+pub fn send_keys_with_timeout(request: SendKeysRequest<'_>, timeout: Duration) -> Result<()> {
     if request.keys.is_empty() {
         bail!("at least one key is required");
     }
@@ -762,7 +784,7 @@ pub fn send_keys(request: SendKeysRequest<'_>) -> Result<()> {
     command
         .args(["send-keys", "-t", request.id.as_str(), "--"])
         .args(request.keys);
-    run_tmux(command, "send keys")
+    run_tmux_with_timeout(command, "send keys", timeout)
 }
 
 /// Resizes a session and optionally pins manual geometry.
@@ -1013,6 +1035,87 @@ fn run_tmux(mut command: Command, action: &str) -> Result<()> {
     Ok(())
 }
 
+fn run_tmux_with_timeout(command: Command, action: &str, timeout: Duration) -> Result<()> {
+    let output = output_with_timeout(command, timeout, action)?;
+    if !output.status.success() {
+        return Err(tmux_error(action, output));
+    }
+    Ok(())
+}
+
+fn remaining_timeout(started: Instant, timeout: Duration) -> Result<Duration> {
+    timeout
+        .checked_sub(started.elapsed())
+        .filter(|remaining| !remaining.is_zero())
+        .context("connector operation deadline exceeded")
+}
+
+fn output_with_timeout(mut command: Command, timeout: Duration, action: &str) -> Result<Output> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    output_with_input_timeout(command, &[], timeout, action)
+}
+
+fn output_with_input_timeout(
+    mut command: Command,
+    input: &[u8],
+    timeout: Duration,
+    action: &str,
+) -> Result<Output> {
+    // Give the short-lived client its own process group so a timeout also
+    // terminates any helper it launched while preserving the tmux server.
+    command.process_group(0);
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    if !input.is_empty() {
+        command.stdin(Stdio::piped());
+    }
+    let mut child = command
+        .spawn()
+        .with_context(|| format!("cannot {action} with the bundled tmux"))?;
+    if !input.is_empty() {
+        child
+            .stdin
+            .take()
+            .context("tmux stdin is unavailable")?
+            .write_all(input)?;
+    }
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let stdout_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        if let Some(mut stream) = stdout {
+            let _ = std::io::Read::read_to_end(&mut stream, &mut bytes);
+        }
+        bytes
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        if let Some(mut stream) = stderr {
+            let _ = std::io::Read::read_to_end(&mut stream, &mut bytes);
+        }
+        bytes
+    });
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().context("cannot wait for bundled tmux")? {
+            break status;
+        }
+        if started.elapsed() >= timeout {
+            let _ = unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
+            bail!("cannot {action}: connector operation deadline exceeded");
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    Ok(Output {
+        status,
+        stdout: stdout_reader.join().unwrap_or_default(),
+        stderr: stderr_reader.join().unwrap_or_default(),
+    })
+}
+
 fn tmux_error(action: &str, output: Output) -> anyhow::Error {
     let diagnostic = String::from_utf8_lossy(&output.stderr);
     anyhow!("cannot {action}: {}", diagnostic.trim())
@@ -1221,6 +1324,17 @@ pub fn format_rfc3339(time: SystemTime) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deadline_owned_process_is_killed_before_returning() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "sleep 5"]);
+        let started = Instant::now();
+        let error = output_with_timeout(command, Duration::from_millis(30), "run deadline fixture")
+            .expect_err("the child must time out");
+        assert!(error.to_string().contains("deadline exceeded"));
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
 
     #[test]
     fn tmux_stderr_markers_classify_empty_server_outcomes() {

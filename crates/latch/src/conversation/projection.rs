@@ -239,13 +239,39 @@ impl Projection {
         });
     }
     pub fn snapshot(&self, limit: usize) -> ConversationSnapshot {
+        self.snapshot_bounded(limit, usize::MAX)
+    }
+    pub(crate) fn item(&self, id: &ConversationItemId) -> Option<&ConversationItem> {
+        self.ids.get(id).and_then(|ordinal| self.items.get(ordinal))
+    }
+    pub fn snapshot_bounded(&self, limit: usize, max_bytes: usize) -> ConversationSnapshot {
         let len = self.items.len();
-        let skip = len.saturating_sub(limit);
+        let count_skip = len.saturating_sub(limit);
+        let candidates: Vec<_> = self.items.values().skip(count_skip).cloned().collect();
+        let envelope_bytes = serde_json::to_vec(&self.state)
+            .map(|value| value.len())
+            .unwrap_or(4096)
+            .saturating_add(1024);
+        let item_budget = max_bytes.saturating_sub(envelope_bytes);
+        let mut used = 0usize;
+        let mut keep = Vec::new();
+        for item in candidates.into_iter().rev() {
+            let bytes = serde_json::to_vec(&item)
+                .map(|value| value.len())
+                .unwrap_or(max_bytes);
+            if !keep.is_empty() && used.saturating_add(bytes) > item_budget {
+                break;
+            }
+            used = used.saturating_add(bytes);
+            keep.push(item);
+        }
+        keep.reverse();
+        let skip = len.saturating_sub(keep.len());
         ConversationSnapshot {
             generation: self.generation,
             revision: self.revision,
             operation_epoch: self.operation_epoch.clone(),
-            items: self.items.values().skip(skip).cloned().collect(),
+            items: keep,
             state: self.state.clone(),
             has_more_before: skip > 0,
         }
@@ -277,13 +303,36 @@ impl Projection {
         }
     }
     pub fn page_before(&self, before: Ordinal, limit: usize) -> (Vec<ConversationItem>, bool) {
+        self.page_before_bounded(before, limit, usize::MAX)
+    }
+    pub fn page_before_bounded(
+        &self,
+        before: Ordinal,
+        limit: usize,
+        max_bytes: usize,
+    ) -> (Vec<ConversationItem>, bool) {
         let all: Vec<_> = self
             .items
             .range(..before)
             .map(|(_, item)| item.clone())
             .collect();
-        let start = all.len().saturating_sub(limit);
-        (all[start..].to_vec(), start > 0)
+        let count_start = all.len().saturating_sub(limit);
+        let item_budget = max_bytes.saturating_sub(1024);
+        let mut used = 0usize;
+        let mut keep = Vec::new();
+        for item in all[count_start..].iter().rev() {
+            let bytes = serde_json::to_vec(item)
+                .map(|value| value.len())
+                .unwrap_or(max_bytes);
+            if !keep.is_empty() && used.saturating_add(bytes) > item_budget {
+                break;
+            }
+            used = used.saturating_add(bytes);
+            keep.push(item.clone());
+        }
+        keep.reverse();
+        let skipped = all.len().saturating_sub(keep.len());
+        (keep, skipped > 0)
     }
 }
 

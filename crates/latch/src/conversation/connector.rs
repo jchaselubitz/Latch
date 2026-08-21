@@ -63,7 +63,7 @@ pub struct ActionDescriptor {
     pub enabled: bool,
     pub reason: Option<String>,
 }
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ConnectorAction {
     pub id: String,
     pub payload: serde_json::Value,
@@ -84,7 +84,7 @@ pub trait Connector: Send {
     fn detect(&self) -> Detection;
     fn poll(&mut self, budget: PollBudget) -> Result<PollResult>;
     fn actions(&self) -> Vec<ActionDescriptor>;
-    fn apply(&mut self, action: ConnectorAction) -> Result<ApplyResult>;
+    fn apply(&mut self, action: ConnectorAction, deadline: Duration) -> Result<ApplyResult>;
     fn reconcile(
         &self,
         outstanding: &[ConversationItemId],

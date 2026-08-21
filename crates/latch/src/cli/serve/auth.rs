@@ -11,7 +11,7 @@ use axum::http::{header, HeaderMap, HeaderValue};
 use crate::session::paths::{DIR_MODE, FILE_MODE};
 
 const TOKEN_BYTES: usize = 32;
-const SUBPROTOCOL_PREFIX: &str = "latch.v1.";
+const SUBPROTOCOL_PREFIX: &str = "latch.v2.";
 
 /// Creates or replaces the serve token and returns the new value.
 pub fn mint_token(path: &Path) -> anyhow::Result<String> {
@@ -65,7 +65,7 @@ pub fn presented_token(headers: &HeaderMap) -> Option<String> {
     subprotocol_token(headers)
 }
 
-/// The `latch.v1.<token>` subprotocol, when the client offered one.
+/// The protocol-major-2 `latch.v2.<token>` subprotocol, when offered.
 pub fn selected_subprotocol(headers: &HeaderMap) -> Option<String> {
     parse_protocols(headers.get(header::SEC_WEBSOCKET_PROTOCOL)?)
         .into_iter()
@@ -152,8 +152,8 @@ fn hex_encode(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{origin_allowed, token_matches};
-    use axum::http::HeaderValue;
+    use super::{origin_allowed, presented_token, selected_subprotocol, token_matches};
+    use axum::http::{header, HeaderMap, HeaderValue};
 
     #[test]
     fn token_compare_rejects_length_mismatch_and_empty_expected() {
@@ -182,5 +182,26 @@ mod tests {
             Some(&HeaderValue::from_static("https://phone.example")),
             false
         ));
+    }
+
+    #[test]
+    fn websocket_auth_accepts_only_the_v2_subprotocol() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::SEC_WEBSOCKET_PROTOCOL,
+            HeaderValue::from_static("chat, latch.v2.secret"),
+        );
+        assert_eq!(presented_token(&headers).as_deref(), Some("secret"));
+        assert_eq!(
+            selected_subprotocol(&headers).as_deref(),
+            Some("latch.v2.secret")
+        );
+
+        headers.insert(
+            header::SEC_WEBSOCKET_PROTOCOL,
+            HeaderValue::from_static("latch.v1.secret"),
+        );
+        assert_eq!(presented_token(&headers), None);
+        assert_eq!(selected_subprotocol(&headers), None);
     }
 }
