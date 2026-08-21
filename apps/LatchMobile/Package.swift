@@ -4,8 +4,8 @@ import PackageDescription
 import Foundation
 
 // LatchMobileKit holds everything the phone app does that is not a view: the
-// generated wire contract, the gateway client, the event stream, and the
-// transcript reducer. Keeping it a plain library means `swift test` exercises
+// generated wire contract, gateway client, transport, and compatibility rules.
+// Keeping it a plain library means `swift test` exercises
 // the client without a simulator, and the Xcode app target consumes it as a
 // local package rather than compiling a second copy of the sources.
 let nativeFrameworkPath = "Native/LatchTransportFFI.xcframework"

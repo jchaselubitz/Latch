@@ -243,29 +243,15 @@ impl SessionPaths {
     }
 
     /// Raw Claude hook records captured for this session.
-    pub fn harness_hooks(&self) -> PathBuf {
-        self.dir.join("harness-hooks.jsonl")
+    pub fn conversation_source_hooks(&self) -> PathBuf {
+        self.dir.join("conversation-source-hooks.jsonl")
     }
 
-    /// Persistent normalized event ledger used for stable cursors.
-    pub fn harness_events(&self) -> PathBuf {
-        self.dir.join("harness-events.ndjson")
-    }
-
-    /// Advisory writer lock for the normalized event ledger.
-    pub fn harness_events_lock(&self) -> PathBuf {
-        self.dir.join("harness-events.lock")
-    }
-
-    /// Applied request-bound answers, used to reject repeated resolutions.
-    pub fn harness_resolutions(&self) -> PathBuf {
-        self.dir.join("harness-resolutions.ndjson")
-    }
-
-    /// Advisory lock held by `latch send` while applying capability-gated input.
-    /// Read-only capability queries do not take this lock.
-    pub fn harness_interaction_lock(&self) -> PathBuf {
-        self.dir.join("harness-interaction.lock")
+    /// Agent-supplied authoritative source binding for a conversation connector.
+    /// This is intentionally a Latch sidecar, never a guessed path derived from
+    /// a working directory.
+    pub fn conversation_source_binding(&self) -> PathBuf {
+        self.dir.join("conversation-source-binding.json")
     }
 
     /// Creates the private session directory.

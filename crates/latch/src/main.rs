@@ -1,6 +1,6 @@
 //! `latch` — persistent terminal sessions.
 //!
-//! One binary: the CLI, plus hidden `__launch` and `__harness-hook` entry
+//! One binary: the CLI, plus hidden `__launch` and `__conversation-hook` entry
 //! points for session spawn and Claude Code hooks.
 //!
 //! Bare `latch` creates a persistent shell and attaches to it, because the
@@ -10,7 +10,6 @@
 //!
 //! Behaviour behind each arm lives in [`latch::cli`].
 
-use std::io::Read;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -243,11 +242,10 @@ enum Command {
     },
     /// Report the protocol versions and features this build supports.
     ///
-    /// Overlord's execution provider calls this before offering Latch as a
-    /// launch target (`OVERLORD_INTEGRATION.md`, discovery).
+    /// This is engine discovery for launch providers and the `/v2` gateway. It
+    /// is not a conversation surface: the session-level capability command was
+    /// removed with the rest of the protocol-major-1 conversation CLI.
     Capabilities {
-        /// Session id or name for interaction capabilities.
-        session: Option<String>,
         /// Emit machine-readable JSON.
         #[arg(long)]
         json: bool,
@@ -291,34 +289,6 @@ enum Command {
         #[command(subcommand)]
         command: RemoteAccessCommand,
     },
-    /// Stream normalized harness events as newline-delimited JSON.
-    Events {
-        /// Latch session id/name or Claude Code session id.
-        session: String,
-        /// Emit the stable HarnessEvent JSON contract.
-        #[arg(long)]
-        json: bool,
-        /// Resume after this many deterministic events.
-        #[arg(long, default_value_t = 0)]
-        from: usize,
-    },
-    /// Send capability-gated input to a hosted session.
-    Send {
-        /// Session id or name.
-        session: String,
-        /// Read a free-text message from stdin; the value must be `-`.
-        #[arg(long, value_name = "PATH")]
-        message: Option<String>,
-        /// Comma- or space-separated key names such as `C-c,Enter`.
-        #[arg(long, value_name = "KEYS")]
-        keys: Option<String>,
-        /// Resolve one pending request as `<requestId>=<choice>`.
-        #[arg(long, value_name = "REQUEST=CHOICE")]
-        resolve: Option<String>,
-        /// Emit machine-readable JSON.
-        #[arg(long)]
-        json: bool,
-    },
     /// Launch a child from an ephemeral private FIFO. Internal only.
     #[command(hide = true, name = "__launch")]
     Launch {
@@ -327,8 +297,11 @@ enum Command {
         manifest_fifo: String,
     },
     /// Capture one Claude hook record. Internal only.
-    #[command(hide = true, name = "__harness-hook")]
-    HarnessHook,
+    #[command(hide = true, name = "__conversation-hook")]
+    ConversationHook,
+    /// Capture one Codex source binding or observation record. Internal only.
+    #[command(hide = true, name = "__codex-conversation-hook")]
+    CodexConversationHook,
 }
 
 #[derive(Subcommand)]
@@ -834,14 +807,10 @@ fn dispatch(command: Option<Command>) -> Result<()> {
                     Ok(())
                 }
                 RemoteAccessCommand::Pair {
-                    command: PairCommand::Create { json },
+                    command: PairCommand::Create { json: _ },
                 } => {
                     let material = remote_access::create_pairing(&home)?;
-                    if json {
-                        println!("{}", serde_json::to_string(&material)?);
-                    } else {
-                        println!("{}", serde_json::to_string(&material)?);
-                    }
+                    println!("{}", serde_json::to_string(&material)?);
                     Ok(())
                 }
                 RemoteAccessCommand::Pair {
@@ -964,124 +933,30 @@ fn dispatch(command: Option<Command>) -> Result<()> {
                 }
             }
         }
-        Some(Command::Capabilities { session, json }) => match session {
-            Some(session) => {
-                let capabilities =
-                    latch::harness::interaction_capabilities(latch::harness::InteractionOptions {
-                        home: LatchHome::from_env()?,
-                        session,
-                    })?;
-                if json {
-                    println!("{}", serde_json::to_string(&capabilities)?);
-                } else {
-                    println!(
-                        "sendMessage={} sendKeys={} resolve={}",
-                        capabilities.send_message, capabilities.send_keys, capabilities.resolve
-                    );
-                    if !capabilities.can_send.ok {
-                        println!(
-                            "input unavailable: {}",
-                            capabilities
-                                .can_send
-                                .reason
-                                .as_deref()
-                                .unwrap_or("unknown reason")
-                        );
-                    }
-                }
-                Ok(())
-            }
-            None => {
-                let report = manage::capabilities();
-                if json {
-                    println!("{}", serde_json::to_string(&report)?);
-                } else {
-                    println!(
-                        "protocol {} product {} create={} localAttach={} cloudAttach={}",
-                        report.protocol_version,
-                        report.product_version,
-                        report.capabilities.create,
-                        report.capabilities.local_attach,
-                        report.capabilities.cloud_attach
-                    );
-                }
-                Ok(())
-            }
-        },
-        Some(Command::Events {
-            session,
-            json,
-            from,
-        }) => {
-            if !json {
-                bail!("the event stream is machine-readable; pass --json");
-            }
-            latch::harness::stream(latch::harness::EventsOptions {
-                home: LatchHome::from_env()?,
-                session,
-                from,
-                transcript: None,
-                poll_interval: latch::harness::DEFAULT_POLL_INTERVAL,
-            })
-        }
-        Some(Command::Send {
-            session,
-            message,
-            keys,
-            resolve,
-            json,
-        }) => {
-            let supplied = usize::from(message.is_some())
-                + usize::from(keys.is_some())
-                + usize::from(resolve.is_some());
-            if supplied != 1 {
-                bail!("choose exactly one of --message, --keys, or --resolve");
-            }
-            let action = if let Some(path) = message {
-                if path != "-" {
-                    bail!("--message accepts only `-`; pipe message text over stdin");
-                }
-                let mut text = String::new();
-                std::io::stdin()
-                    .take(1024 * 1024 + 1)
-                    .read_to_string(&mut text)?;
-                latch::harness::SendAction::Message(text)
-            } else if let Some(keys) = keys {
-                latch::harness::SendAction::Keys(keys)
-            } else {
-                let value = resolve.expect("one send operation was supplied");
-                let (request_id, choice) = value
-                    .split_once('=')
-                    .filter(|(request_id, choice)| !request_id.is_empty() && !choice.is_empty())
-                    .context("--resolve must be `<requestId>=<choice>`")?;
-                latch::harness::SendAction::Resolve {
-                    request_id: request_id.to_owned(),
-                    choice: choice.to_owned(),
-                }
-            };
-            let report = latch::harness::send(latch::harness::SendOptions {
-                home: LatchHome::from_env()?,
-                session,
-                action,
-            })?;
+        Some(Command::Capabilities { json }) => {
+            let report = manage::capabilities();
             if json {
                 println!("{}", serde_json::to_string(&report)?);
-            } else if report.resolved {
-                println!(
-                    "resolved {} for {}",
-                    report.request_id.as_deref().unwrap_or("request"),
-                    report.session_id
-                );
             } else {
-                println!("sent {} to {}", report.operation, report.session_id);
+                println!(
+                    "protocol {} product {} create={} localAttach={} cloudAttach={}",
+                    report.protocol_version,
+                    report.product_version,
+                    report.capabilities.create,
+                    report.capabilities.local_attach,
+                    report.capabilities.cloud_attach
+                );
             }
             Ok(())
         }
         Some(Command::Launch { manifest_fifo }) => {
             latch::engine::launch_from_fifo(std::path::Path::new(&manifest_fifo))
         }
-        Some(Command::HarnessHook) => {
-            latch::harness::capture_claude_hook(&LatchHome::from_env()?, std::io::stdin())
+        Some(Command::ConversationHook) => {
+            latch::observer::capture_claude_hook(&LatchHome::from_env()?, std::io::stdin())
+        }
+        Some(Command::CodexConversationHook) => {
+            latch::observer::capture_codex_hook(&LatchHome::from_env()?, std::io::stdin())
         }
     }
 }

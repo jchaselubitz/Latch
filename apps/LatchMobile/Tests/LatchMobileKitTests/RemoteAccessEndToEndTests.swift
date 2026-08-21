@@ -92,9 +92,11 @@ final class RemoteAccessEndToEndTests: XCTestCase {
         XCTAssertEqual(model.linkSource, .paired)
         XCTAssertEqual(model.sessions.map(\.id), ["ses_1"])
 
-        let gateway = try XCTUnwrap(model.gateway)
-        let sent = try await gateway.send(sessionId: "ses_1", operation: .message("hello Mac"))
-        XCTAssertTrue(sent.sent)
+        model.suspendConversations()
+        model.suspendPairedTransport()
+        await model.resumeAfterSuspension()
+        XCTAssertEqual(model.linkSource, .paired)
+        XCTAssertEqual(model.sessions.map(\.id), ["ses_1"])
 
         pairingControl.markRevoked()
         await pairing.refreshPermission()
@@ -107,10 +109,9 @@ final class RemoteAccessEndToEndTests: XCTestCase {
         XCTAssertTrue(requests.contains { $0.path == "/v1/presence" && $0.headers["Authorization"] == "Bearer phone-access-token" })
         XCTAssertTrue(requests.contains { $0.path == "/v1/presence/dev_mac" && $0.headers["Authorization"] == "Bearer phone-access-token" })
         XCTAssertTrue(requests.contains { $0.path == "/v1/rendezvous" && $0.headers["Authorization"] == "Bearer phone-access-token" })
-        XCTAssertTrue(requests.contains { $0.path == "/v1/sessions/ses_1/send" })
         XCTAssertFalse(
             requests.contains { request in
-                ["/v1/capabilities", "/v1/sessions", "/v1/sessions/ses_1/send"].contains(request.path)
+                ["/v2/capabilities", "/v2/sessions"].contains(request.path)
                     && request.headers["Authorization"] != nil
             },
             "the paired tunnel never sends the gateway credential from the phone"
@@ -153,20 +154,19 @@ final class RemoteAccessEndToEndTests: XCTestCase {
             """
         )
         StubProtocol.stub(
-            path: "/v1/capabilities",
+            path: "/v2/capabilities",
             body: """
-            {"protocolVersion":1,"productVersion":"1.0.0",
-             "endpoints":{"sessions":true,"sessionCapabilities":true,"terminal":true,"events":true,"send":true},
-             "features":{"idempotencyKeys":true,"readOnlyTerminal":true},"gatewayInstanceId":"paired-gateway"}
+            {"protocolVersion":2,"productVersion":"2.0.0",
+             "capabilities":{"create":true,"openViewer":true,"localAttach":true,
+              "cloudAttach":false,"selfUpdate":true,"extensions":[]},
+             "endpoints":{"sessions":true,"terminal":true,"conversation":false},
+             "features":{"readOnlyTerminal":true},"gatewayInstanceId":"paired-gateway",
+             "operationRetentionSeconds":600}
             """
         )
         StubProtocol.stub(
-            path: "/v1/sessions",
+            path: "/v2/sessions",
             body: #"{"sessions":[{"id":"ses_1","name":"work","state":"running","cwd":"/work","command_label":"latch","created_at":"2026-08-16T12:00:00Z"}]}"#
-        )
-        StubProtocol.stub(
-            path: "/v1/sessions/ses_1/send",
-            body: #"{"sessionId":"ses_1","operation":"message","sent":true,"resolved":false}"#
         )
     }
 }

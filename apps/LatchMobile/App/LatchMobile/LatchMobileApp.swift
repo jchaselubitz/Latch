@@ -50,18 +50,20 @@ struct RootView: View {
                 // Drop them before suspension rather than advertising the
                 // prior path as live when iOS has already reclaimed it.
                 model.suspendPairedTransport()
+                model.suspendConversations()
             }
             // Coming back from the background is a reconnect. The contract
             // requires repeating discovery before resuming application
             // traffic, because capabilities may have changed while away.
             guard phase == .active else { return }
-            Task { await model.reconnectPairedTransport() }
-            Task { await model.rediscover() }
-            // A revoke or a permission change happens on the Mac while the
-            // phone is away, so returning to the foreground re-reads it for
-            // the same reason discovery is repeated: state decided elsewhere
-            // is not assumed to have held.
-            Task { await pairing.refreshPermission() }
+            Task {
+                await model.resumeAfterSuspension()
+                // A revoke or a permission change happens on the Mac while the
+                // phone is away, so returning to the foreground re-reads it for
+                // the same reason discovery is repeated: state decided elsewhere
+                // is not assumed to have held.
+                await pairing.refreshPermission()
+            }
         }
         .onChange(of: pairing.record) { _, record in
             Task { await model.connectPairedDevice(record) }

@@ -1,6 +1,6 @@
 import Foundation
 
-/// One row of `GET /v1/sessions`.
+/// One row of `GET /v2/sessions`.
 ///
 /// The session list is the CLI's `latch list --json` report, which is
 /// snake_case on the wire, unlike the camelCase discovery and interaction
@@ -69,131 +69,12 @@ public struct SessionSummary: Decodable, Equatable, Identifiable, Sendable {
     }
 }
 
-/// `GET /v1/sessions`.
+/// `GET /v2/sessions`.
 public struct ListReport: Decodable, Equatable, Sendable {
     public let sessions: [SessionSummary]
 
     public init(sessions: [SessionSummary]) {
         self.sessions = sessions
-    }
-}
-
-/// Whether a harness connector can produce events for one session.
-public struct EventsAvailability: Decodable, Equatable, Sendable {
-    public let ok: Bool
-    public let reason: String?
-    public let harness: String?
-    /// The epoch a stored cursor must match. Replaying a cursor from a
-    /// different epoch would interleave two unrelated timelines.
-    public let connectorEpoch: Int?
-
-    public init(
-        ok: Bool,
-        reason: String? = nil,
-        harness: String? = nil,
-        connectorEpoch: Int? = nil
-    ) {
-        self.ok = ok
-        self.reason = reason
-        self.harness = harness
-        self.connectorEpoch = connectorEpoch
-    }
-}
-
-/// `GET /v1/sessions/{id}/capabilities`.
-///
-/// The interaction fields are flattened into this document on the wire, so it
-/// decodes them from the same container rather than a nested key.
-public struct SessionCapabilities: Decodable, Equatable, Sendable {
-    public let interaction: InteractionCapabilities
-    public let events: EventsAvailability
-
-    public init(interaction: InteractionCapabilities, events: EventsAvailability) {
-        self.interaction = interaction
-        self.events = events
-    }
-
-    private enum CodingKeys: String, CodingKey {
-        case events
-    }
-
-    public init(from decoder: Decoder) throws {
-        interaction = try InteractionCapabilities(from: decoder)
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        events = try container.decodeIfPresent(EventsAvailability.self, forKey: .events)
-            ?? EventsAvailability(ok: false, reason: "the gateway did not report events")
-    }
-}
-
-/// One `POST /v1/sessions/{id}/send` operation.
-public enum SendOperation: Equatable, Sendable {
-    case message(String)
-    case keys(String)
-    case resolve(requestId: String, choice: String)
-
-    /// The contract's operation name.
-    public var name: String {
-        switch self {
-        case .message: return "message"
-        case .keys: return "keys"
-        case .resolve: return "resolve"
-        }
-    }
-
-    /// Whether a retry of this operation is safe to deduplicate.
-    ///
-    /// `keys` is intentionally non-idempotent: raw keypresses have no
-    /// request identity, and the gateway rejects a key sent with one.
-    public var acceptsIdempotencyKey: Bool {
-        switch self {
-        case .message, .resolve: return true
-        case .keys: return false
-        }
-    }
-
-    /// The request body, matching `send-request.schema.json`.
-    public var body: [String: JSONValue] {
-        switch self {
-        case .message(let text):
-            return ["message": .string(text)]
-        case .keys(let keys):
-            return ["keys": .string(keys)]
-        case .resolve(let requestId, let choice):
-            return [
-                "resolve": .object([
-                    "requestId": .string(requestId),
-                    "choice": .string(choice)
-                ])
-            ]
-        }
-    }
-}
-
-/// The gateway's confirmation for one send.
-public struct SendReport: Decodable, Equatable, Sendable {
-    public let sessionId: String
-    public let operation: String
-    public let requestId: String?
-    public let choice: String?
-    /// Whether the operation reached the terminal.
-    public let sent: Bool
-    /// Whether a request-bound resolution was applied.
-    public let resolved: Bool
-
-    public init(
-        sessionId: String,
-        operation: String,
-        requestId: String? = nil,
-        choice: String? = nil,
-        sent: Bool,
-        resolved: Bool
-    ) {
-        self.sessionId = sessionId
-        self.operation = operation
-        self.requestId = requestId
-        self.choice = choice
-        self.sent = sent
-        self.resolved = resolved
     }
 }
 

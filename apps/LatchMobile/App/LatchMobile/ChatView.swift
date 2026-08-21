@@ -1,96 +1,104 @@
 import LatchMobileKit
 import SwiftUI
 
-/// One session's conversation: what the agent is doing, and a way to reply.
+/// Hub-owned conversation rendering. The view does not fold transcript records
+/// or decide whether an interaction is allowed; those answers arrive in the
+/// store's pushed state over the one v2 socket.
 struct ChatView: View {
     let session: SessionSummary
 
     @Environment(AppModel.self) private var appModel
-    @State private var model: ChatModel?
+    @State private var store: ConversationStore?
     @State private var draft = ""
     @FocusState private var composerFocused: Bool
 
     var body: some View {
         Group {
-            if let model {
-                content(model)
+            if let store {
+                conversation(store)
             } else if appModel.surface.chat {
-                ProgressView()
+                ProgressView("Opening conversation…")
             } else {
-                MessageView(
-                    icon: "text.bubble",
-                    title: "Chat unavailable",
-                    detail: """
-                    This gateway does not report an events endpoint, so there is no \
-                    transcript to show. Update the `latch` CLI on your computer.
-                    """
+                terminalFallback(
+                    title: "Conversation unavailable",
+                    detail: "This Mac does not offer the v2 Conversation Hub. Use terminal attach on the Mac for this session."
                 )
             }
         }
         .navigationTitle(session.displayName)
         .navigationBarTitleDisplayMode(.inline)
         .task {
-            guard model == nil, appModel.surface.chat, let gateway = appModel.gateway else {
-                return
-            }
-            let created = ChatModel(
-                session: session,
-                gateway: gateway,
-                surface: appModel.surface
-            )
-            model = created
-            await created.start()
+            guard store == nil else { return }
+            store = appModel.conversationStore(for: session)
+            store?.start()
         }
-        .onDisappear { model?.stop() }
     }
 
     @ViewBuilder
-    private func content(_ model: ChatModel) -> some View {
-        VStack(spacing: 0) {
-            TranscriptList(model: model)
+    private func conversation(_ store: ConversationStore) -> some View {
+        if store.state?.connector == nil, store.socketState == .open {
+            terminalFallback(
+                title: "Conversation unsupported",
+                detail: "This session's connector cannot provide a conversation. Terminal attach remains available for recovery."
+            )
+        } else {
+            VStack(spacing: 0) {
+                ConversationList(store: store)
 
-            if let request = model.transcript.pendingRequest, model.canResolve {
-                RequestPrompt(request: request) { choice in
-                    Task { await model.resolve(requestId: request.requestId, choice: choice) }
+                if let request = store.pendingRequest {
+                    RequestControls(request: request, store: store)
                 }
-            }
 
-            Composer(
-                draft: $draft,
-                focused: $composerFocused,
-                enabled: model.canCompose && !model.isSending,
-                reason: model.composerReason
-            ) {
-                let text = draft
-                draft = ""
-                Task { await model.send(text) }
+                if !store.operations.isEmpty {
+                    OperationNotices(store: store)
+                }
+
+                Composer(store: store, draft: $draft, focused: $composerFocused)
+            }
+            .safeAreaInset(edge: .top, spacing: 0) {
+                ConnectionStatus(store: store)
             }
         }
-        .safeAreaInset(edge: .top, spacing: 0) {
-            StatusStrip(model: model)
-        }
+    }
+
+    private func terminalFallback(title: String, detail: String) -> some View {
+        ContentUnavailableView(
+            title,
+            systemImage: "terminal",
+            description: Text(detail)
+        )
     }
 }
 
-/// The scrolling transcript, pinned to the newest row.
-private struct TranscriptList: View {
-    let model: ChatModel
+private struct ConversationList: View {
+    let store: ConversationStore
 
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 10) {
-                    ForEach(model.transcript.entries) { entry in
-                        TranscriptRow(entry: entry)
-                            .id(entry.id)
+                    if store.hasMoreBefore {
+                        Button("Load earlier messages") { store.loadOlder() }
+                            .buttonStyle(.bordered)
+                            .frame(maxWidth: .infinity)
+                    }
+                    ForEach(store.items) { item in
+                        ConversationRow(item: item)
+                            .id(item.id)
                     }
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 12)
             }
-            .onChange(of: model.transcript.entries.last?.id) { _, id in
+            .onChange(of: store.prependAnchor) { _, anchor in
+                // Restoring the old first row after a history prepend keeps the
+                // reader's viewport stable instead of jumping toward the past.
+                guard let anchor else { return }
+                proxy.scrollTo(anchor, anchor: .top)
+            }
+            .onChange(of: store.items.last?.id) { _, id in
                 guard let id else { return }
-                withAnimation(.easeOut(duration: 0.2)) {
+                withAnimation(.easeOut(duration: 0.18)) {
                     proxy.scrollTo(id, anchor: .bottom)
                 }
             }
@@ -98,174 +106,134 @@ private struct TranscriptList: View {
     }
 }
 
-private struct TranscriptRow: View {
-    let entry: TranscriptEntry
+private struct ConversationRow: View {
+    let item: ConversationItem
 
     var body: some View {
-        switch entry.kind {
-        case .user(let text):
-            Bubble(text: text, alignment: .trailing)
-        case .assistant(let text):
-            Bubble(text: text, alignment: .leading)
-        case .tool(let name, let detail, let finished):
-            ToolRow(name: name, detail: detail, finished: finished)
-        case .status(let status):
-            NoteRow(icon: "circle.dotted", text: status.replacingOccurrences(of: "_", with: " "))
-        case .request(let request):
-            RequestRow(request: request)
-        case .unrecognized(let type):
-            // Additive event types are contract-legal. Showing the type is
-            // more honest than pretending the agent did nothing.
-            NoteRow(icon: "questionmark.circle", text: "unrecognized event: \(type)")
-        }
-    }
-}
-
-private struct Bubble: View {
-    let text: String
-    let alignment: HorizontalAlignment
-
-    var body: some View {
-        HStack {
-            if alignment == .trailing { Spacer(minLength: 40) }
-            Text(text)
-                .textSelection(.enabled)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 9)
-                .background(
-                    alignment == .trailing
-                        ? AnyShapeStyle(Color.accentColor.opacity(0.16))
-                        : AnyShapeStyle(.quaternary),
-                    in: RoundedRectangle(cornerRadius: 16, style: .continuous)
-                )
-            if alignment == .leading { Spacer(minLength: 40) }
-        }
-    }
-}
-
-private struct ToolRow: View {
-    let name: String
-    let detail: String
-    let finished: Bool
-
-    var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Image(systemName: finished ? "checkmark.circle" : "circle.dashed")
-                .foregroundStyle(finished ? .secondary : .tertiary)
-                .font(.caption)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(name).font(.caption.weight(.medium))
-                if !detail.isEmpty {
-                    Text(detail)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
+        switch item.kind {
+        case .message(let role, let text, _):
+            HStack {
+                if role == "user" { Spacer(minLength: 38) }
+                Text(text)
+                    .textSelection(.enabled)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 9)
+                    .background(
+                        role == "user" ? AnyShapeStyle(Color.accentColor.opacity(0.16)) : AnyShapeStyle(.quaternary),
+                        in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    )
+                if role != "user" { Spacer(minLength: 38) }
+            }
+        case .tool(let name, let summary, let status, _):
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: status == "complete" ? "checkmark.circle" : "circle.dashed")
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(name).font(.caption.weight(.medium))
+                    if !summary.isEmpty { Text(summary).font(.caption2).foregroundStyle(.secondary).lineLimit(2) }
+                }
+                Spacer(minLength: 0)
+            }
+            .foregroundStyle(.secondary)
+        case .request(_, let type, let prompt, _, let status):
+            VStack(alignment: .leading, spacing: 4) {
+                Label(type == "permission" ? "Permission requested" : "Question", systemImage: type == "permission" ? "lock.shield" : "questionmark.bubble")
+                    .font(.caption.weight(.medium))
+                Text(prompt).font(.callout)
+                if status != "pending" {
+                    Text(status.replacingOccurrences(of: "_", with: " "))
+                        .font(.caption2).foregroundStyle(.secondary)
                 }
             }
-            Spacer(minLength: 0)
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.yellow.opacity(0.12), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         }
-        .padding(.leading, 2)
     }
 }
 
-private struct NoteRow: View {
-    let icon: String
-    let text: String
+private struct RequestControls: View {
+    let request: ConversationItem
+    let store: ConversationStore
 
     var body: some View {
-        HStack(spacing: 6) {
-            Image(systemName: icon)
-            Text(text)
-            Spacer(minLength: 0)
-        }
-        .font(.caption2)
-        .foregroundStyle(.tertiary)
-    }
-}
-
-private struct RequestRow: View {
-    let request: TranscriptEntry.Request
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Label(
-                request.kind == .permission ? "Permission requested" : "Question",
-                systemImage: request.kind == .permission ? "lock.shield" : "questionmark.bubble"
-            )
-            .font(.caption.weight(.medium))
-            Text(request.prompt).font(.callout)
-            if let answered = request.answered {
-                Text("Answered: \(answered)")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+        Group {
+            if case .request(let requestID, _, let prompt, let choices, _) = request.kind {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(prompt).font(.footnote).lineLimit(3)
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            ForEach(choices.isEmpty ? ["yes", "no"] : choices, id: \.self) { choice in
+                                Button(choice) { store.resolve(requestID: requestID, choice: choice) }
+                                    .buttonStyle(.borderedProminent)
+                                    .controlSize(.small)
+                                    .disabled(!store.canResolve)
+                            }
+                        }
+                    }
+                    if let reason = store.resolveReason, !store.canResolve {
+                        Text(reason).font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.thinMaterial)
             }
         }
-        .padding(12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.yellow.opacity(0.12), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 }
 
-/// Buttons for the request the agent is currently blocked on.
-private struct RequestPrompt: View {
-    let request: TranscriptEntry.Request
-    let choose: (String) -> Void
+private struct OperationNotices: View {
+    let store: ConversationStore
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(request.prompt)
-                .font(.footnote)
-                .lineLimit(3)
-            // A harness that supplied no closed set still needs an answer, so
-            // fall back to the two the CLI itself offers.
-            let choices = request.choices.isEmpty ? ["yes", "no"] : request.choices
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    ForEach(choices, id: \.self) { choice in
-                        Button(choice) { choose(choice) }
-                            .buttonStyle(.borderedProminent)
-                            .controlSize(.small)
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(store.operations) { operation in
+                if operation.status != .sending {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Image(systemName: operation.status == .ambiguous ? "questionmark.diamond" : "exclamationmark.triangle")
+                        Text(operation.reason ?? "Message needs review.")
+                        Spacer(minLength: 0)
+                        Button("Retry") { store.retry(operation.id) }
+                            .buttonStyle(.bordered)
                     }
+                    .font(.caption)
                 }
             }
         }
         .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 8)
         .background(.thinMaterial)
     }
 }
 
 private struct Composer: View {
+    let store: ConversationStore
     @Binding var draft: String
     @FocusState.Binding var focused: Bool
-    let enabled: Bool
-    let reason: String?
-    let submit: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            if let reason, !enabled {
-                Text(reason)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 4)
+            if let reason = store.sendReason, !store.canSend {
+                Text(reason).font(.caption2).foregroundStyle(.secondary).padding(.horizontal, 4)
             }
             HStack(spacing: 8) {
                 TextField("Message", text: $draft, axis: .vertical)
                     .lineLimit(1...5)
                     .textFieldStyle(.plain)
                     .focused($focused)
-                    .disabled(!enabled)
+                    .disabled(!store.canSend)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
                     .background(.quaternary, in: Capsule())
-
-                Button(action: submit) {
-                    Image(systemName: "arrow.up.circle.fill")
-                        .font(.title2)
+                Button {
+                    let text = draft
+                    draft = ""
+                    store.send(text: text)
+                } label: {
+                    Image(systemName: "arrow.up.circle.fill").font(.title2)
                 }
-                .disabled(!enabled || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(!store.canSend || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }
         .padding(.horizontal, 12)
@@ -274,41 +242,21 @@ private struct Composer: View {
     }
 }
 
-/// A thin strip showing why the transcript is not live, when it is not.
-private struct StatusStrip: View {
-    let model: ChatModel
+private struct ConnectionStatus: View {
+    let store: ConversationStore
 
     var body: some View {
-        Group {
-            if let ended = model.endedReason {
-                strip(text: ended, icon: "xmark.circle")
-            } else if let error = model.error {
-                strip(text: error, icon: "exclamationmark.triangle")
-            } else if model.streamState != .open {
-                strip(text: label(model.streamState), icon: "antenna.radiowaves.left.and.right")
+        if let error = store.connectionError {
+            HStack(spacing: 6) {
+                Image(systemName: "antenna.radiowaves.left.and.right")
+                Text(error).lineLimit(2)
+                Spacer(minLength: 0)
             }
-        }
-    }
-
-    private func strip(text: String, icon: String) -> some View {
-        HStack(spacing: 6) {
-            Image(systemName: icon)
-            Text(text).lineLimit(2)
-            Spacer(minLength: 0)
-        }
-        .font(.caption2)
-        .padding(.horizontal, 14)
-        .padding(.vertical, 6)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.thinMaterial)
-    }
-
-    private func label(_ state: EventStreamState) -> String {
-        switch state {
-        case .connecting: return "Connecting…"
-        case .reconnecting: return "Reconnecting…"
-        case .closed: return "Disconnected"
-        case .open: return ""
+            .font(.caption2)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.thinMaterial)
         }
     }
 }

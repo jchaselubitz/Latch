@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://latch.cooperativ.dev/schemas/remote-access/v2/gateway-readiness.schema.json",
+  "title": "LatchGatewayReadinessV2",
+  "description": "Private supervisor handoff written after latch serve binds. It never contains a gateway token.",
+  "type": "object",
+  "required": ["formatVersion", "address", "url", "protocolVersion", "gatewayInstanceId"],
+  "properties": {
+    "formatVersion": { "const": 2 },
+    "address": { "type": "string" },
+    "url": { "type": "string", "pattern": "^http://" },
+    "protocolVersion": { "const": 2 },
+    "gatewayInstanceId": { "type": "string", "pattern": "^gw-[0-9a-f]+-[0-9a-f]+$" }
+  },
+  "additionalProperties": false
+}

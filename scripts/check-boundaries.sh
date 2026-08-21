@@ -37,6 +37,29 @@ if [ -f package.json ] && [ ! -d packages ]; then
     report 'a root package.json exists without packages/; the local plane must stay Node-free'
 fi
 
+# --- Conversation v2 is a clean break ---------------------------------------
+#
+# The retired v1 TypeScript SDK was not a compatibility layer. Keeping one
+# source module or workspace around makes it easy to accidentally publish the
+# old event/cursor/send contract again.
+for retired_path in \
+    packages/chat-react \
+    packages/harness-schema \
+    examples/remote-sdk-react \
+    packages/client/src/events.ts \
+    packages/client/src/send.ts \
+    packages/client/src/compatibility.ts; do
+    if [ -e "$retired_path" ]; then
+        report "$retired_path is a retired v1 conversation surface"
+    fi
+done
+
+if [ -d packages/client ] &&
+    grep -rInE 'subscribeEvents|supportsGatewayEndpoint|LatchSendError|/v1/' \
+        packages/client/src --include='*.ts' 2>/dev/null; then
+    report '@latch/client exposes a retired v1 conversation API'
+fi
+
 # --- Cloud services stay independent deployables ------------------------------
 #
 # services/ holds deployable cloud services. Each ships on its own, so it must

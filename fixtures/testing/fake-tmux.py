@@ -226,6 +226,8 @@ elif command == "has-session":
     missing_session(session)
 elif command == "attach-session":
     session = args[args.index("-t") + 1]
+    state["_attach_attempts"] = state.get("_attach_attempts", 0) + 1
+    save(state)
     if session not in state or not isinstance(state.get(session), dict) or "pid" not in state[session]:
         missing_session(session)
     entry = state[session]

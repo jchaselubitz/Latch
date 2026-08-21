@@ -21,7 +21,7 @@ use crate::session::paths::{LatchHome, SessionId, SessionPaths, FILE_MODE, SESSI
 use crate::session::{timing, viewer};
 
 /// Public protocol contract version retained across the kernel swap.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 /// Pinned tmux release bundled by the distribution.
 pub const TMUX_VERSION: &str = "3.7b";
 /// Deliberate child terminal type.
@@ -261,7 +261,7 @@ pub fn create(request: CreateRequest) -> Result<CreateResult> {
     ensure_tmux_available()?;
     let mut manifest = request.manifest;
     materialize_environment(&mut manifest);
-    crate::harness::prepare_claude_launch(&request.home, &mut manifest)?;
+    crate::observer::prepare_claude_launch(&request.home, &mut manifest)?;
     let prepare = watch.lap();
 
     let (id, paths) = loop {
@@ -272,6 +272,7 @@ pub fn create(request: CreateRequest) -> Result<CreateResult> {
         }
     };
     paths.ensure()?;
+    crate::observer::record_launch_source_binding(&paths, &manifest)?;
     let created_at = now_rfc3339();
     let metadata = meta::derive(MetaRequest {
         id: id.as_str(),
@@ -748,7 +749,7 @@ pub fn paste_message(request: PasteMessageRequest<'_>) -> Result<()> {
         keys: &["Enter".to_owned()],
     })
     .with_context(|| {
-        "message was pasted into the composer but not submitted; recover with `latch send --keys C-u`"
+        "message was pasted into the composer but not submitted; recover in the terminal with Ctrl-U"
     })
 }
 

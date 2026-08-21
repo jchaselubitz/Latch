@@ -64,9 +64,9 @@ final class GatewayTransportTests: XCTestCase {
 
     func testTunnelRequestWaitsForACompleteHeaderThenForwardsItOnce() throws {
         var validator = TunnelRequestValidator()
-        XCTAssertNil(try validator.append(Data("GET /v1/capabilities HTTP/1.1\r\nHost: loop".utf8)))
+        XCTAssertNil(try validator.append(Data("GET /v2/capabilities HTTP/1.1\r\nHost: loop".utf8)))
         let first = try XCTUnwrap(try validator.append(Data("back\r\n\r\nbody".utf8)))
-        XCTAssertEqual(String(data: first, encoding: .utf8), "GET /v1/capabilities HTTP/1.1\r\nHost: loopback\r\n\r\nbody")
+        XCTAssertEqual(String(data: first, encoding: .utf8), "GET /v2/capabilities HTTP/1.1\r\nHost: loopback\r\n\r\nbody")
         XCTAssertEqual(
             try validator.append(Data("later request bytes".utf8)),
             Data("later request bytes".utf8),

@@ -1,8 +1,8 @@
 # Latch Mobile
 
-A SwiftUI iPhone app for watching and replying to Latch sessions from away from
-the desk. It is the first experiment in remote Latch access, deliberately small:
-two tabs, and a chat screen per session.
+A SwiftUI iPhone app for discovering and opening Latch sessions away from the
+desk. Phase 0 establishes the protocol-major-2 contract while the Conversation
+Hub is built in later phases.
 
 Everything the app needs lives in this folder, so it can be moved to its own
 repository without leaving a dependency on the Latch checkout behind.
@@ -14,12 +14,11 @@ repository without leaving a dependency on the Latch checkout behind.
 - **Settings** links the phone to one `latch serve` gateway and shows what that
   gateway reports it can do, and holds **Remote access**: pairing this phone
   with a Mac's own identity by scanning the code it shows.
-- Tapping a session opens a **chat** view: the harness transcript as it streams
-  in, a composer for sending a message, and buttons for answering a permission
-  prompt or question when the session is blocked on one.
+- Tapping a session opens a conversation placeholder. Chat, composer, and
+  interaction controls appear only after a host advertises its v2 Conversation
+  Hub; this client does not probe or fall back to protocol major 1.
 
-It does not implement the terminal. The transcript is the v1 history view;
-terminal access stays on the desktop for now.
+It does not yet render the terminal or conversation surface.
 
 ## Layout
 
@@ -33,12 +32,10 @@ Sources/LatchMobileKit/
   ControlPlane.swift              enrollment, permission refresh, revocation
   PairedDevice.swift              the paired-device record and its keychain home
   PairingModel.swift              the flow the pairing screen binds to
-  LatchGateway.swift              HTTP client, discovery, and sending
-  EventStream.swift               events WebSocket, cursor, resync, reconnect
-  Transcript.swift                harness events folded into chat rows
-  GatewayCompatibility.swift      the /v1 compatibility rules
+  LatchGateway.swift              protocol-v2 discovery and sessions client
+  GatewayCompatibility.swift      protocol-major-2 discovery rules
   LinkStore.swift                 keychain storage for the address and token
-  AppModel.swift, ChatModel.swift the two observable models the views bind to
+  AppModel.swift                  observable session-list model
 App/LatchMobile.xcodeproj         the iOS app target
 App/LatchMobile/*.swift           the SwiftUI screens
 App/LatchMobile/QRScannerView.swift the camera preview that reads QR codes
@@ -198,10 +195,9 @@ dead ends — and in all of them the code can still be typed in by hand.
 
 ## Staying compliant with the code contract
 
-Latch's wire contract is schema-first. `schemas/remote-access/v1/*.schema.json`
-and `fixtures/harness/*.v1.json` own it, and each client generates its types
-from those documents instead of hand-copying them. This app is the Swift target
-of that rule, and it keeps working across contract versions in three ways.
+Latch's wire contract is schema-first. `schemas/remote-access/v2/*.schema.json`
+owns the gateway, terminal, conversation item, state, and message protocol. This
+app vendors those documents and generates its Swift wire types from that set.
 
 ### 1. The Swift types are generated, not written
 
@@ -211,12 +207,10 @@ Tools/generate-contract.py --upstream ~/src/Latch  # or from somewhere else
 ```
 
 `Sources/LatchMobileKit/Generated/LatchContract.swift` is derived from the
-schemas: the protocol major, the endpoint and feature maps, the send operations,
-the idempotency key's own constraints, and every harness event variant with its
-fields all come from the documents rather than from a copy someone typed. The
-generator refuses to run when a schema's `$id` drifts, when an endpoint or
-feature stops being a boolean, or when the event schema grows a property that no
-variant claims — cases where quietly emitting Swift would be a lie.
+schemas: protocol major, endpoint and feature maps, conversation items and state,
+snapshots and mutations, operation results, history, and client actions. The
+generated source records a digest of the complete canonical schema set, so any
+schema edit makes the freshness check fail until the client is regenerated.
 
 ### 2. Drift fails a check rather than surfacing at runtime
 
@@ -240,19 +234,16 @@ hand edit to the generated file fails the suite even when nobody runs the script
 `docs/REMOTE_SDK.md` in the Latch repository fixes the client rules, and
 `GatewayCompatibility` implements them:
 
-- `GET /v1/capabilities` is the mandatory discovery step, and its answer is
+- `GET /v2/capabilities` is the mandatory discovery step, and its answer is
   cached rather than re-derived per screen.
 - An optional endpoint is used only when the map reports it as `true`. The app
-  never probes an endpoint and infers support from the error — `GatewayTests`
+  never probes an endpoint and infers support from the error — `GatewayV2Tests`
   asserts that no request is even sent to an undiscovered endpoint.
-- A 404 on discovery identifies the pre-discovery gateway: sessions and terminal
-  stay available, everything introduced alongside discovery stays off.
+- A 404 on discovery is an unsupported gateway; there is no v1 fallback.
 - A `protocolVersion` other than the supported major disables everything and
   reports which two versions disagree, rather than guessing at field meanings.
-- Additive changes are survivable. Unknown fields are ignored, an unknown
-  harness event type is kept and shown as unrecognized instead of being dropped,
-  and an unrecognized member of a closed value set degrades to `nil` rather than
-  discarding the event around it.
+- Additive changes are survivable. Unknown fields are ignored and an unknown
+  message status renders as `complete` rather than failing the conversation.
 
 Discovery's answer is also visible to the user, in Settings under *What this
 gateway offers*, so a missing control has a stated reason.
@@ -260,31 +251,17 @@ gateway offers*, so a missing control has a stated reason.
 ### When the contract changes
 
 1. Regenerate: `Tools/generate-contract.py`.
-2. Build. New required fields and new event variants surface as compile errors
-   in the reducer's `switch`, which is what makes them impossible to forget.
+2. Build. Required fields and message variants are explicit generated types.
 3. Run `swift test`. The freshness tests confirm the digests match.
-
-## Retries and idempotency
-
-Messages and prompt resolutions carry an `Idempotency-Key`, so a retry after an
-ambiguous network failure is deduplicated by the gateway for ten minutes rather
-than sent twice. A retry must reuse the same key, which is why `send` takes one
-instead of always minting a fresh value. Raw `keys` submissions deliberately
-have no retry contract and are sent without the header — the gateway rejects it
-there.
-
-The key is only sent when discovery reports `features.idempotencyKeys`. The
-gateway's `gatewayInstanceId` changing means the process restarted and its
-in-memory dedupe window went with it.
 
 ## Known gaps
 
 - No terminal view. Discovery reports the endpoint; the app does not use it yet.
-- A paired phone now uses the pinned Noise tunnel for its session list and
-  chat operations. Direct ICE is attempted before Cloudflare TURN credentials
+- A paired phone uses the pinned Noise tunnel for its session list. Direct ICE
+  is attempted before Cloudflare TURN credentials
   are requested; the manually entered `latch serve` link remains a coequal
   route. Physical NAT, cellular, captive-portal, sleep/wake, and relay-soak
   validation are release gates rather than completed device evidence.
-- Hook responses beyond the `awaiting_input` prompt are not modeled.
+- Conversation actions remain unavailable until the Hub implementation lands.
 - One linked computer at a time.
 - The session list does not refresh on its own; pull to refresh.

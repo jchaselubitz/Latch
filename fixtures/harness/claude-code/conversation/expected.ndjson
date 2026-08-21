@@ -1,6 +1,0 @@
-{"sessionId":"claude-session-1","at":"2026-08-13T10:00:00Z","harnessVersion":"2.1.119","connectorEpoch":1,"type":"user_message","text":"Check the build."}
-{"sessionId":"claude-session-1","at":"2026-08-13T10:00:01Z","harnessVersion":"2.1.119","connectorEpoch":1,"type":"assistant_message","text":"I will run the tests."}
-{"sessionId":"claude-session-1","at":"2026-08-13T10:00:01Z","harnessVersion":"2.1.119","connectorEpoch":1,"type":"tool_started","tool":"Bash","input":{"program":"cargo","description":null}}
-{"sessionId":"claude-session-1","at":"2026-08-13T10:00:02Z","harnessVersion":"2.1.119","connectorEpoch":1,"type":"tool_finished","tool":"Bash","output":{"available":true}}
-{"sessionId":"claude-session-1","at":"2026-08-13T10:00:03Z","harnessVersion":"2.1.119","connectorEpoch":1,"type":"assistant_message","text":"The build passes."}
-{"sessionId":"claude-session-1","at":"2026-08-13T10:00:04Z","harnessVersion":"2.1.119","connectorEpoch":1,"type":"status","status":"idle"}

@@ -1,11 +1,8 @@
 {
   "private": true,
   "workspaces": [
-    "packages/harness-schema",
     "packages/client",
-    "packages/terminal-react",
-    "packages/chat-react",
-    "examples/remote-sdk-react"
+    "packages/terminal-react"
   ],
   "devDependencies": {
     "@types/node": "^24.13.3",
@@ -15,7 +12,6 @@
   },
   "scripts": {
     "build": "npm run build --workspaces --if-present",
-    "example": "npm run dev --workspace @latch/remote-sdk-example",
     "typecheck": "npm run typecheck --workspaces",
     "test": "npm run test --workspaces --if-present"
   }

@@ -60,11 +60,11 @@ function attach() {
   });
 }
 
-test('the token travels as the latch.v1 subprotocol, not the query string', () => {
+test('the token travels as the latch.v2 subprotocol, not the query string', () => {
   const handle = attach();
   const socket = FakeSocket.instances[0]!;
-  assert.equal(socket.url, 'ws://127.0.0.1:4610/v1/sessions/ses_one/terminal');
-  assert.deepEqual(socket.protocols, ['latch.v1.secret']);
+  assert.equal(socket.url, 'ws://127.0.0.1:4610/v2/sessions/ses_one/terminal');
+  assert.deepEqual(socket.protocols, ['latch.v2.secret']);
   handle.close();
 });
 
@@ -125,7 +125,7 @@ test('read-only terminal mode is explicit in the WebSocket contract', () => {
   });
   assert.equal(
     FakeSocket.instances[0]?.url,
-    'ws://127.0.0.1:4610/v1/sessions/ses_one/terminal?mode=read-only'
+    'ws://127.0.0.1:4610/v2/sessions/ses_one/terminal?mode=read-only'
   );
   handle.close();
 });

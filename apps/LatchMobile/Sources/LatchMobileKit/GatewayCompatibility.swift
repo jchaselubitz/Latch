@@ -1,28 +1,7 @@
 import Foundation
 
-/// The client half of the `/v1` compatibility boundary.
-///
-/// `docs/REMOTE_SDK.md` fixes these rules and the TypeScript SDK implements the
-/// same ones. They exist so this app keeps working against a newer gateway and
-/// degrades honestly against an older one:
-///
-/// - `/v1` is a compatibility boundary, not one server release. Additions are
-///   optional and additive.
-/// - `GET /v1/capabilities` is the mandatory discovery step. An optional
-///   endpoint may be used only when the map reports it as `true`.
-/// - A client must never probe an optional endpoint and infer support from the
-///   error it gets back.
-/// - A gateway that 404s discovery is the pre-discovery, terminal-only build,
-///   unless the body is the control plane's unmatched-route contract.
-/// - A `protocolVersion` other than the supported major is unsupported rather
-///   than guessed at.
+/// Protocol-major-2 discovery rules. There is no legacy fallback or probing.
 public enum GatewayCompatibility {
-    /// The control plane's unmatched-route body.
-    ///
-    /// That service has pairing and signaling routes, not a session gateway.
-    /// A 404 on `/v1/capabilities` is therefore not the pre-discovery
-    /// `latch serve` surface: treating it as one makes the phone look linked
-    /// and then fail `/v1/sessions` with the same 404.
     public static func isControlPlaneUnmatchedRoute(
         status: Int,
         code: String?,
@@ -31,32 +10,6 @@ public enum GatewayCompatibility {
         status == 404 && code == "not_found" && reason == "no such resource"
     }
 
-    /// What a gateway with no `/v1/capabilities` endpoint can do.
-    ///
-    /// Sessions and terminal predate discovery, so they are safe to assume.
-    /// Everything introduced alongside discovery is off: without the document
-    /// there is no way to learn about it that is not a probe.
-    public static func legacyCapabilities() -> GatewayCapabilities {
-        GatewayCapabilities(
-            protocolVersion: LatchContract.protocolVersion,
-            productVersion: "",
-            endpoints: GatewayEndpoints(
-                sessions: true,
-                sessionCapabilities: false,
-                terminal: true,
-                events: false,
-                send: false
-            ),
-            features: GatewayFeatures(),
-            gatewayInstanceId: ""
-        )
-    }
-
-    /// Whether this build may call `endpoint` on the discovered gateway.
-    ///
-    /// An unsupported protocol major disables everything: field meanings are
-    /// only guaranteed within one major, so "the map said true" carries no
-    /// weight once the major disagrees.
     public static func supports(
         endpoint: GatewayEndpointsName,
         capabilities: GatewayCapabilities?
@@ -67,7 +20,6 @@ public enum GatewayCompatibility {
         return capabilities.endpoints.isEnabled(endpoint)
     }
 
-    /// Whether this build may rely on an optional feature.
     public static func supports(
         feature: GatewayFeaturesName,
         capabilities: GatewayCapabilities?
@@ -78,7 +30,6 @@ public enum GatewayCompatibility {
         return capabilities.features.isEnabled(feature)
     }
 
-    /// Rejects a gateway whose protocol major this build does not implement.
     public static func validate(_ capabilities: GatewayCapabilities) throws {
         guard capabilities.protocolVersion == LatchContract.protocolVersion else {
             throw LatchError.unsupportedProtocol(
@@ -88,112 +39,69 @@ public enum GatewayCompatibility {
         }
     }
 
-    /// How the session screen should behave, given discovery.
-    ///
-    /// A gateway without `events` cannot back a chat transcript, and one
-    /// without `send` cannot accept a message. The UI reads this instead of
-    /// finding out by failing a request.
     public static func sessionSurface(for capabilities: GatewayCapabilities?) -> SessionSurface {
-        let events = supports(endpoint: .events, capabilities: capabilities)
-        let send = supports(endpoint: .send, capabilities: capabilities)
-        let interaction = supports(endpoint: .sessionCapabilities, capabilities: capabilities)
-        if !events {
-            return SessionSurface(chat: false, composer: false, interactionControls: false)
-        }
-        return SessionSurface(chat: true, composer: send, interactionControls: interaction)
+        let conversation = supports(endpoint: .conversation, capabilities: capabilities)
+        return SessionSurface(
+            chat: conversation,
+            composer: conversation,
+            interactionControls: conversation
+        )
     }
 }
 
-/// Which side is behind when a gateway and this build disagree on the protocol
-/// major.
-///
-/// Both directions produce the same technical outcome — `supports` returns
-/// false for every endpoint, terminal included — but only one of them is
-/// something the person holding the phone can act on, and the two need
-/// different instructions. The gateway being *ahead* is the ordinary case
-/// rather than the exotic one: the Mac's `latch` CLI updates itself and this
-/// app updates through the App Store, so the Mac routinely crosses a major
-/// first.
 public enum ProtocolMismatch: Equatable, Sendable {
-    /// The gateway speaks a newer major. This phone is the side to update.
     case updatePhone(reported: Int, supported: Int)
-    /// The gateway speaks an older major. The Mac's `latch` CLI is the side to
-    /// update.
     case updateComputer(reported: Int, supported: Int)
 
-    /// Classifies a disagreement by which side is behind.
     public init(reported: Int, supported: Int) {
         self = reported > supported
             ? .updatePhone(reported: reported, supported: supported)
             : .updateComputer(reported: reported, supported: supported)
     }
 
-    /// The major the gateway reported.
     public var reported: Int {
         switch self {
-        case .updatePhone(let reported, _), .updateComputer(let reported, _): return reported
+        case .updatePhone(let reported, _), .updateComputer(let reported, _): reported
         }
     }
 
-    /// The major this build implements.
     public var supported: Int {
         switch self {
-        case .updatePhone(_, let supported), .updateComputer(_, let supported): return supported
+        case .updatePhone(_, let supported), .updateComputer(_, let supported): supported
         }
     }
 
-    /// SF Symbol for the screen that reports this.
     public var icon: String {
         switch self {
-        case .updatePhone: return "arrow.down.circle"
-        case .updateComputer: return "laptopcomputer.trianglebadge.exclamationmark"
+        case .updatePhone: "arrow.down.circle"
+        case .updateComputer: "laptopcomputer.trianglebadge.exclamationmark"
         }
     }
 
-    /// The headline. It names the action rather than the symptom: the computer
-    /// is reachable and healthy, so "cannot reach that computer" would send
-    /// someone to debug their network instead of opening the App Store.
     public var title: String {
         switch self {
-        case .updatePhone: return "Update Latch on this phone"
-        case .updateComputer: return "Update Latch on your computer"
+        case .updatePhone: "Update Latch on this phone"
+        case .updateComputer: "Update Latch on your computer"
         }
     }
 
-    /// What to do about it, and why the terminal went away with everything
-    /// else. The terminal is the fallback people reach for, so its absence is
-    /// explained here rather than discovered on the session screen.
     public var detail: String {
         switch self {
         case .updatePhone:
-            return """
-            Your computer is reachable and running a newer version of Latch. Update this app \
-            from the App Store to use it again. Sessions and the terminal stay unavailable \
-            until both sides match.
-            """
+            "Your computer is reachable and running a newer version of Latch. Update this app to use it again."
         case .updateComputer:
-            return """
-            This app is newer than the Latch on your computer. Run `latch update` there, then \
-            reopen this screen. Sessions and the terminal stay unavailable until both sides \
-            match.
-            """
+            "This app is newer than Latch on your computer. Run `latch update` there, then reopen this screen."
         }
     }
 
-    /// One line for a form row, where the full explanation does not fit.
     public var summary: String {
         "\(title). Gateway protocol \(reported); this app implements \(supported)."
     }
 }
 
-/// Which parts of the session screen discovery permits.
 public struct SessionSurface: Equatable, Sendable {
-    /// Show the transcript. Without it the session is terminal-only, which
-    /// this first app release does not implement.
     public let chat: Bool
-    /// Offer the message composer.
     public let composer: Bool
-    /// Offer request-bound controls, such as answering a permission prompt.
     public let interactionControls: Bool
 
     public init(chat: Bool, composer: Bool, interactionControls: Bool) {
@@ -202,10 +110,6 @@ public struct SessionSurface: Equatable, Sendable {
         self.interactionControls = interactionControls
     }
 
-    /// Applies the grant attached to a paired route after discovery has
-    /// determined which controls the gateway implements. The Mac remains the
-    /// authority for every operation, but an observe-only phone must not
-    /// present a composer it cannot use.
     public func restricted(to permission: DevicePermission?) -> SessionSurface {
         guard let permission, !permission.permits(.interact) else { return self }
         return SessionSurface(chat: chat, composer: false, interactionControls: false)

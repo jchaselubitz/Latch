@@ -16,8 +16,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: ./scripts/check-boundaries.sh
-      - name: Generated harness contracts
-        run: python3 scripts/generate-harness-types.py --check
+      - name: Generated v2 contracts
+        run: python3 scripts/generate-remote-access-types.py --check
       # The mobile app generates its Swift types from the same schemas and
       # vendors the copies it was generated from. This fails while the app
       # still speaks an older contract than the one in this commit, which is

@@ -14,6 +14,11 @@ resetting it; `ConversationState` has a stated refresh cadence rather than being
 assumed free; the connector trait gained the four things the Hub was otherwise
 forced to infer. Each change is marked **[R2]** where it appears.
 
+**Revision 3.** The release boundary is now an unconditional clean break. No v1
+route, discovery tombstone, command adapter, or staged compatibility build remains.
+This revision also makes crash-time operation ambiguity and incremental branch-index
+persistence explicit; neither can safely be hidden behind an exactly-once claim.
+
 ## Purpose
 
 Latch already keeps an interactive agent alive in a private tmux session and can
@@ -147,21 +152,24 @@ The Hub maintains a map from Latch session ID to a session actor. A session acto
 - connector source offsets and checkpoints;
 - a local normalized cache used for restart and history pagination.
 
-**[R2] A session actor runs two lanes, not one.** Applying a user action means
-several blocking `tmux` invocations — a session query, a pane capture, a paste
-buffer, a submit — and any of them can hang on a busy or wedged pane. If those
-run on the actor's mailbox, one stuck action stops source processing and
-broadcast for every subscriber of that session.
+**[R2] A session runtime separates state from blocking I/O.** Applying a user action
+means several blocking `tmux` invocations — a session query, a pane capture, a paste
+buffer, a submit — and polling can also block on file or screen I/O. If either runs on
+the actor's mailbox, one wedged process stops broadcast for every subscriber.
 
-| Lane | Runs on | Blocking | Owns |
+| Component | Runs on | Blocking | Owns |
 | --- | --- | --- | --- |
-| State | the actor mailbox | never | items, revision, generation, fanout |
-| Action | a blocking pool, one action at a time per session | yes, with a deadline | `connector.apply` |
+| State actor | the actor mailbox | never | items, revision, generation, fanout |
+| Observation worker | one scheduled task per session | bounded, with a deadline | source checkpoint and `connector.poll` |
+| Action worker | a blocking pool, one action at a time per session | bounded, with a deadline | `connector.apply` |
 
-An action is dispatched from the state lane, executes off it, and returns as an
-ordinary mailbox message. A wedged agent therefore costs one pending operation,
-not the session's broadcast. Exceeding the deadline is a refusal with its own
-reason, so a client can offer a retry rather than waiting indefinitely.
+Polls and actions execute off the state actor and return immutable results as mailbox
+messages; only the actor applies mutations and advances revisions. A wedged agent
+therefore costs one timed-out poll or pending operation, not the session's broadcast.
+Every child process has an enforced kill deadline. A timeout during read-only preflight
+is a refusal; a timeout after mutation begins is `ambiguous`, because killing the
+process cannot prove whether tmux applied the input. The client never retries that case
+automatically.
 
 Actors are lazy. Opening a conversation starts its actor; additional subscribers share
 it. An actor may remain warm for an idle period after the final subscriber leaves, then
@@ -296,6 +304,8 @@ Clients reconnect with the last generation and revision they applied:
 - if retained mutations cover that revision, the Hub sends only the missing mutations;
 - otherwise, the Hub sends a new snapshot immediately;
 - a generation mismatch always produces a snapshot;
+- an operation-epoch mismatch produces a snapshot and invalidates queued actions, but
+  does not by itself require a new conversation generation;
 - stale state is not communicated through a special close code or a forced reconnect.
 
 ## WebSocket protocol
@@ -304,7 +314,7 @@ The remote gateway becomes protocol major 2. The old v1 event and send surface i
 deleted rather than supported in parallel.
 
 ```text
-WS /v2/sessions/{sessionId}/conversation?generation=<id>&afterRevision=<n>
+WS /v2/sessions/{sessionId}/conversation?generation=<id>&afterRevision=<n>&operationEpoch=<id>
 ```
 
 **[R2] The server speaks first.** Resume position travels on the upgrade URL, as
@@ -313,7 +323,7 @@ mutation batch immediately after the handshake. Requiring the client to send a
 `resume` frame before anything arrives would add a full round trip — 100–300 ms
 over TURN — to every cold open and every foreground resume, on exactly the path
 this design exists to make feel fast. A client with no stored position simply
-omits both parameters.
+omits all three parameters.
 
 `resume` remains a client message for re-syncing mid-connection without
 reconnecting. It is no longer the mandatory first message.
@@ -333,11 +343,11 @@ follow it.
 ### Server-to-client messages
 
 ```text
-snapshot              generation, revision, items, state, hasMoreBefore, reason?
+snapshot              generation, revision, operationEpoch, items, state, hasMoreBefore, reason?
 items_upserted        generation, revision, items
 items_removed         generation, revision, itemIds
 state_changed         generation, revision, state
-operation_result      operationId, accepted, itemId?, reason?
+operation_result      operationId, status: accepted | refused | ambiguous, itemId?, reason?
 history_page          requestId, items, hasMoreBefore
 error                 code, message
 ```
@@ -346,15 +356,15 @@ error                 code, message
 resume rules already say that a generation mismatch produces a snapshot. Two
 message types with identical payloads and near-identical meaning is one more
 thing for a client to get wrong. `snapshot.reason` — `initial`, `generation`,
-`overflow` — says why it arrived, which is the only part that was not already
-expressible.
+`operation_epoch`, `overflow` — says why it arrived, which is the only part that was
+not already expressible.
 
 ### Client-to-server messages
 
 ```text
 resume                generation?, afterRevision?      (mid-connection re-sync only)
-send_message          operationId, text
-resolve_request       operationId, requestId, choice
+send_message          operationEpoch, operationId, text
+resolve_request       operationEpoch, operationId, requestId, choice
 history_request       requestId, beforeOrdinal, limit
 ```
 
@@ -367,14 +377,24 @@ the client and makes retries idempotent. The actor validates the operation again
 connector's current state immediately before it touches tmux; advertised availability
 is user-interface guidance, while the operation result is authoritative.
 
-**[R2] Idempotency must survive a gateway restart.** A retry whose record was
-lost is not a retry — it pastes the message into a live composer a second time,
-and that is not undoable. Accepted operation ids are small, so they are persisted
-alongside the connector checkpoint with the same TTL the v1 send path used.
-Gateway discovery continues to advertise a `gatewayInstanceId`; a client that
-sees it change with an operation still in flight must surface a manual retry
-rather than retrying on its own, because a rebuilt home has no ledger to
-deduplicate against.
+**[R2] Idempotency must survive a gateway restart.** A retry whose record was lost is
+not a retry — it pastes the message into a live composer a second time, and that is not
+undoable. Before dispatching an action, the Hub durably records the operation as
+`started`; after the connector returns it records `accepted` or `refused`, placing an
+accepted result and its canonical submitted item in the same journal batch. Replaying
+a finished operation returns the stored outcome. Recovering a `started` operation cannot
+prove whether tmux accepted it before the crash, so the Hub returns `ambiguous` and
+never executes it again automatically. The client preserves the text and offers an
+explicit retry with a new operation ID.
+
+This is at-most-once automatic execution, not impossible-to-guarantee exactly-once
+delivery across a non-transactional tmux boundary. Each conversation has a persisted
+`operationEpoch`, included in snapshots and every action. It survives an ordinary
+gateway restart and rotates before actions are accepted if the ledger is discarded or
+rebuilt. An epoch mismatch is refused without touching tmux. Discovery advertises
+`operationRetentionSeconds`; automatic same-ID retry is supported only within that
+window, and clients surface an expired operation for manual review instead of
+resending it.
 
 ## Message send and confirmation
 
@@ -413,6 +433,21 @@ are matched to observed user records in order, using exact normalized content an
 bounded time window. Direct messages typed on the computer simply arrive as new source
 records and receive connector-derived IDs.
 
+### Request lifecycle
+
+`ConversationState.pendingRequest` is always derived from request items; it is never
+updated independently. A connector closes a pending request using these rules:
+
+- `resolved` only when a Latch action successfully resolves that exact request;
+- `dismissed` when the authoritative main conversation advances beyond the request,
+  or when a later screen refresh shows that the prompt disappeared without a known
+  Latch resolution;
+- unrelated hook, tool-side-branch, or subagent records do not close it.
+
+This deliberately avoids inventing a successful resolution from screen absence. It
+also ensures a request answered directly at the computer disappears from the phone
+within the idle screen-refresh heartbeat.
+
 ## Connector boundary
 
 The connector interface is internal Rust code, not a network or third-party SDK in the
@@ -421,11 +456,11 @@ first release. Conceptually it provides:
 ```text
 detect(session metadata)   -> Unsupported | Pending { reason } | Supported { id, version }
 load(checkpoint)           -> projection + source position | CacheIncompatible
-poll(budget)               -> mutations                  // sources AND live state
+poll(budget)               -> { mutations, checkpointDelta } // sources + live state
 actions()                  -> [ActionDescriptor]         // { id, requiredGrant, enabled, reason }
 apply(actionId, payload)   -> Accepted { correlation } | Refused { reason }
 reconcile(outstanding, observed) -> mutations
-checkpoint()               -> bytes                      // bounded by active items
+checkpointSnapshot()       -> bytes                     // periodic compaction only
 
 Mutation =
   | Upsert(item)             // the Hub assigns the ordinal
@@ -451,9 +486,10 @@ exists because without it the Hub would have to infer something agent-specific:
 4. **Connectors never emit `ordinal`, `revision`, or `generation`.** They emit
    in observation order and the Hub stamps. See *Conversation model*.
 
-Two rules make the Hub's scheduling enforceable rather than aspirational:
-**`poll` is the only place a connector may perform I/O or spawn a process**, and
-**`apply` is the only place a connector may mutate the agent.**
+Two rules make the Hub's scheduling enforceable rather than aspirational: **`poll` is
+the only place a connector may perform observation I/O**, and **`apply` is the only
+place it may perform action I/O or mutate the agent**. Both run outside the state
+actor, with budgets and deadlines.
 
 The initial connector is Claude. It reuses proven knowledge from the current parser,
 hook capture, transcript discovery, and last-moment tmux screen validation, but emits
@@ -507,24 +543,27 @@ Latch-owned derived state lives under the existing private session directory:
 
 ```text
 ~/.latch/sessions/<session-id>/conversation/
-  snapshot.json             compact projection at a known revision
-  journal.jsonl             append-only item and state mutations after the snapshot
-  connector-checkpoint.json binding, byte offsets, active-chain ids, connector version
-  operations.json           bounded ring of accepted operation ids and outcomes
+  snapshot.json             projection + connector state + operation ledger
+  journal.jsonl             append-only durable state-transition batches
 ```
 
-**[R2] The checkpoint is bounded by the active conversation, never by history.**
-It holds the observed source binding, one byte offset per source, the id list of
-the active branch, and the connector version. It must not hold a structure whose
-size grows with the whole transcript: the checkpoint is written after every batch
-of mutations, so an `O(transcript)` checkpoint would reintroduce, as a write, the
-`O(transcript)` cost this design removes as a read. The active-chain id list is
-already `O(items in the snapshot)` and compacts alongside it.
+The connector state contains the observed source binding, one byte offset per source,
+the connector version, and an index of the active source branch. That branch index may
+grow with the active source chain and is not falsely assumed to be bounded by the
+newest visible snapshot page. The important performance rule is how it is persisted:
+each source batch appends only offset and branch deltas to `journal.jsonl`; it never
+rewrites the full index. Operation intents/outcomes and their associated item
+mutations use the same journal batch, avoiding an impossible atomic update across two
+files. Each batch is one bounded record; an incomplete final record after a crash is
+ignored. Periodic snapshot compaction may write `O(active branch)` bytes, amortized
+behind a measured threshold.
 
-All three files are disposable caches. The agent transcript and running session remain
-authoritative. On startup the actor loads the snapshot and journal once, resumes the
-connector from its checkpoint, and processes only appended source bytes. A malformed
-or incompatible cache is deleted and rebuilt; there is no cache migration framework.
+Both files are disposable derived state. The agent transcript and running session
+remain authoritative. On startup the actor loads the snapshot and journal once,
+resumes the connector from its checkpoint, and processes only appended source bytes.
+A malformed or incompatible cache is deleted and rebuilt; there is no cache migration
+framework. Rebuilding also rotates `operationEpoch` before the actor accepts actions,
+so losing the deduplication ledger cannot silently turn an old retry into new input.
 
 Journal compaction atomically writes a new snapshot and replaces the journal after a
 measured size or mutation threshold. History pages are served from the in-memory index
@@ -539,7 +578,7 @@ WAL mode replaces these files; Redis does not.
 
 Each connector owns a source checkpoint. For an append-only JSONL transcript, the
 checkpoint includes the observed binding, file identity, complete byte offset, and the
-id list of the active branch.
+incrementally maintained active-branch index.
 
 On change:
 
@@ -548,7 +587,8 @@ On change:
 3. parse complete new records;
 4. classify each new record against the active branch (below);
 5. emit only the affected mutations;
-6. atomically persist the new checkpoint after journal mutations are durable.
+6. append offset and branch-index deltas in the same durable journal batch as the
+   resulting conversation mutations.
 
 **[R2] Step 4 is where an append-only read becomes a correct projection.** A
 transcript's active branch is defined from its tail backwards, so "read the new
@@ -559,7 +599,8 @@ rebuild:
 | --- | --- | --- |
 | the current tail of the active chain | `Upsert` | `O(1)` — the overwhelming majority |
 | an earlier id on the active chain | `TruncateAfter`, then `Upsert` | `O(truncated items)` |
-| not on the active chain, or unknown | `Rebuild` | `O(transcript)`, and rare |
+| recognized side branch or subagent | ignore for main-chain position | `O(1)` |
+| unknown and not classifiable | `Rebuild` | `O(transcript)`, and rare |
 
 Records that belong to a subagent or side branch never move the chain tail and
 must not trigger reclassification; they append continuously while a subagent runs.
@@ -590,9 +631,9 @@ second per warm session, multiplied by every warm session.
 - at most once per poll, whatever the poll cadence;
 - hashed, so an unchanged screen emits no mutation and burns no revision.
 
-One useful consequence: the same refresh is what notices a change Latch did not
-make — a prompt answered at the computer, or a `latch send` from another process
-— so third-party interaction does not need a separate mechanism.
+One useful consequence: the same refresh notices a change this Hub subscriber did not
+make — for example, a prompt answered directly at the computer — so local interaction
+does not need a second observation mechanism.
 
 ## Backpressure and bounds
 
@@ -636,32 +677,19 @@ fallback calls to these surfaces. The coordinated release deletes `/v1` remote g
 routes and ships `/v2`. Existing Latch-owned derived harness-event caches may be
 discarded. Agent-owned transcripts are never modified or deleted.
 
-### [R2] Two things that look like exceptions and are not
+Mixed-major desktop/mobile installations are unsupported and may be temporarily
+unusable during the update. That is an explicit single-user launch tradeoff, not a
+missing compatibility task.
 
-**`GET /v1/capabilities` survives as a version tombstone.** It returns
-`protocolVersion: 2` and nothing else. This is not a dual protocol — no v1
-behavior remains behind it, and no client can do anything with the response
-except learn that it is too old.
+The legacy CLI conversation commands (`latch events`, `latch send`, and
+session-level `latch capabilities`) are removed with their backing routes. No CLI
+conversation successor is required for this milestone. The documented Overlord
+integration is explicitly retired until it is rebuilt as a v2 Hub client; it must not
+silently retain an independent transcript observer.
 
-It exists because the two sides cannot be updated together. The CLI ships as one
-signed archive and updates itself; the phone updates through the App Store. A Mac
-that has crossed to v2 in front of a phone that has not is the ordinary case, not
-the exotic one. Without the tombstone the phone gets a bare 404 on discovery,
-concludes it is talking to a pre-discovery gateway, reports itself linked, and
-then fails on every request — the worst available outcome. With it, the phone
-says "update Latch on this phone" and stops.
+### Shared routing is part of the clean replacement
 
-Note what is being protected: on a protocol-major disagreement a client must
-disable **every** endpoint, terminal included, because field meanings are only
-guaranteed within a major. The universal fallback is not available during the
-skew window. That makes the diagnostic the whole of the user experience, so it
-has to be a real one.
-
-The phone-side half of this — rendering that state as an instruction naming the
-side that can act, rather than as a connection failure — must be in the field
-*before* the v2 gateway ships, or it does not help anyone.
-
-**The remote-access route allowlist changes with the router.** Grant enforcement
+The remote-access route allowlist changes with the router. Grant enforcement
 lives in `latch-remote`, which inspects the initial HTTP request and rejects any
 target that does not begin with `/v1/`. It is a second, hand-maintained copy of
 the gateway's route table, which is why it is easy to forget. Shipping a `/v2`
@@ -722,6 +750,8 @@ The architecture is working when:
     keeps the generation; clients do not rebuild.
 12. **[R2]** Two Latch sessions in the same working directory observe their own
     conversations, with no generation churn between them.
-13. **[R2]** Restarting `latch serve` mid-send and retrying the same `operationId`
-    delivers exactly one message.
-
+13. Restarting `latch serve` mid-send never executes the same `operationId` twice.
+    If the durable record is only `started`, the client receives `ambiguous` and must
+    choose whether to retry with a new operation ID.
+14. Rebuilding a corrupt conversation cache rotates `operationEpoch`; an action queued
+    under the previous epoch is refused without touching tmux.

@@ -39,7 +39,7 @@ public actor RemoteTransportPolicy {
 
 /// The mechanism that makes the gateway URL usable.
 ///
-/// `LatchGateway` and `EventStream` deliberately stay HTTP/WebSocket clients.
+/// Gateway clients deliberately stay HTTP/WebSocket clients.
 /// A manual link supplies an HTTPS (or local HTTP) URL directly; the paired
 /// route supplies a private loopback URL whose listener carries bytes through
 /// a pinned Noise session. Keeping this seam here prevents two implementations

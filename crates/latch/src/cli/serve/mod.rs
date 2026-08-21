@@ -1,7 +1,7 @@
 //! Loopback HTTP/WebSocket gateway for remote Latch clients.
 //!
 //! `latch serve` is a subcommand of the existing binary, not a second product.
-//! It speaks the public CLI JSON contracts over `/v1` and wraps `latch attach`
+//! It speaks the protocol-major-2 contracts over `/v2` and wraps `latch attach`
 //! under a per-client PTY for the terminal channel.
 //!
 //! The supported remote path is an SSH tunnel to the loopback bind. The gateway
@@ -9,11 +9,17 @@
 //! tunnel to it). Binding a non-loopback address requires `--allow-remote`.
 
 mod auth;
+#[allow(dead_code)] // Phase 0 generates the full v2 wire surface before the Hub consumes it.
 mod contract;
-mod events;
+mod conversation;
 mod http;
 mod pty;
+pub(crate) mod routes;
 mod terminal;
+
+/// The paired-proxy suite drives the real router through the Noise tunnel.
+#[cfg(test)]
+pub(crate) use http::test_router;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;

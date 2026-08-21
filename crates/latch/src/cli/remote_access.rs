@@ -23,8 +23,11 @@ use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, Semaphore};
 
+use crate::cli::serve::routes::{route_for, DEVICE_GRANT_HEADER};
 use crate::cli::serve::{load_token, mint_token};
 use crate::session::paths::{LatchHome, DIR_MODE, FILE_MODE};
+
+pub use crate::cli::serve::routes::Grant as DevicePermission;
 
 const PAIRING_LIFETIME: Duration = Duration::from_secs(5 * 60);
 const MAX_RECORD: usize = 65_535;
@@ -687,29 +690,6 @@ pub fn establish_relay_ciphers(
             state: responder.into_transport_mode()?,
         },
     ))
-}
-
-/// Access granted to a paired device.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum DevicePermission {
-    /// Read sessions, events, and an output-only terminal.
-    Observe,
-    /// Also submit structured messages and prompt resolutions.
-    Interact,
-    /// Also send terminal bytes and resize controls.
-    Control,
-}
-
-impl DevicePermission {
-    fn permits(self, required: Self) -> bool {
-        matches!(
-            (self, required),
-            (Self::Control, _)
-                | (Self::Interact, Self::Interact | Self::Observe)
-                | (Self::Observe, Self::Observe)
-        )
-    }
 }
 
 /// A safe default for newly paired phones.
@@ -1676,7 +1656,7 @@ fn authorize_and_inject(
         .ok_or_else(|| anyhow!("missing HTTP version"))?;
     if words.next().is_some()
         || version != "HTTP/1.1"
-        || !target.starts_with("/v1/")
+        || !target.starts_with("/v2/")
         || target.contains("..")
         || target.to_ascii_lowercase().contains("%2e")
     {
@@ -1691,6 +1671,7 @@ fn authorize_and_inject(
         if name.eq_ignore_ascii_case("authorization")
             || name.eq_ignore_ascii_case("proxy-authorization")
             || name.eq_ignore_ascii_case("transfer-encoding")
+            || name.eq_ignore_ascii_case(DEVICE_GRANT_HEADER)
         {
             bail!("remote request contains a forbidden HTTP header");
         }
@@ -1701,18 +1682,25 @@ fn authorize_and_inject(
     if required_len != request.len() {
         bail!("HTTP pipelining is not permitted through remote access");
     }
-    let required = permission_for_request(method, target, &request[end + 4..required_len])?;
+    let (_, required) = route_for(method, target)
+        .ok_or_else(|| anyhow!("HTTP operation is not permitted through remote access"))?;
     if !permission.permits(required) {
         bail!("device permission does not allow this operation");
     }
-    let mut injected = Vec::with_capacity(request.len() + token.len() + 32);
+    // `end` indexes the blank line, so `request[end..]` still carries the
+    // header terminator. Emitting another CRLF here would leave a stray one in
+    // the stream, which an upgraded gateway reads as a corrupt first frame.
+    let mut injected = Vec::with_capacity(request.len() + token.len() + 64);
     injected.extend_from_slice(&request[..end]);
     injected.extend_from_slice(b"\r\nAuthorization: Bearer ");
     injected.extend_from_slice(token.as_bytes());
+    injected.extend_from_slice(b"\r\n");
+    injected.extend_from_slice(DEVICE_GRANT_HEADER.as_bytes());
+    injected.extend_from_slice(b": ");
+    injected.extend_from_slice(permission.as_header_value().as_bytes());
     if !websocket_upgrade {
         injected.extend_from_slice(b"\r\nConnection: close");
     }
-    injected.extend_from_slice(b"\r\n");
     injected.extend_from_slice(&request[end..]);
     Ok(injected)
 }
@@ -1744,62 +1732,6 @@ fn complete_initial_request_len(request: &[u8]) -> anyhow::Result<usize> {
         bail!("initial request exceeds limit");
     }
     Ok(total)
-}
-
-fn permission_for_request(
-    method: &str,
-    target: &str,
-    body: &[u8],
-) -> anyhow::Result<DevicePermission> {
-    let path = target.split('?').next().unwrap_or(target);
-    if method == "GET" {
-        if path == "/v1/capabilities" || path == "/v1/sessions" {
-            return Ok(DevicePermission::Observe);
-        }
-        let parts: Vec<_> = path.split('/').collect();
-        if parts.len() == 4 && parts[1] == "v1" && parts[2] == "sessions" && !parts[3].is_empty() {
-            return Ok(DevicePermission::Observe);
-        }
-        if parts.len() == 5
-            && parts[1] == "v1"
-            && parts[2] == "sessions"
-            && !parts[3].is_empty()
-            && matches!(parts[4], "capabilities" | "events")
-        {
-            return Ok(DevicePermission::Observe);
-        }
-        if parts.len() == 5
-            && parts[1] == "v1"
-            && parts[2] == "sessions"
-            && !parts[3].is_empty()
-            && parts[4] == "terminal"
-        {
-            return if target.contains("mode=read-only") {
-                Ok(DevicePermission::Observe)
-            } else {
-                Ok(DevicePermission::Control)
-            };
-        }
-        {
-            bail!("HTTP operation is not permitted through remote access");
-        }
-    }
-    if method == "POST" && path.ends_with("/send") {
-        let parts: Vec<_> = path.split('/').collect();
-        if parts.len() != 5 || parts[1] != "v1" || parts[2] != "sessions" || parts[3].is_empty() {
-            bail!("HTTP operation is not permitted through remote access");
-        }
-        let body: serde_json::Value =
-            serde_json::from_slice(body).context("invalid send request")?;
-        if body.get("keys").is_some() {
-            return Ok(DevicePermission::Control);
-        }
-        if body.get("message").is_none() && body.get("resolve").is_none() {
-            bail!("HTTP operation is not permitted through remote access");
-        }
-        return Ok(DevicePermission::Interact);
-    }
-    bail!("HTTP operation is not permitted through remote access")
 }
 
 async fn responder_handshake(
@@ -2406,7 +2338,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lan_proxy_round_trips_past_the_handshake_deadline_and_closes_on_revocation() {
+    async fn noise_proxy_carries_the_v2_read_only_terminal_and_closes_on_revocation() {
         let (_dir, home) = home();
         set_enabled(&home, true).unwrap();
         let paths = Paths::new(&home);
@@ -2434,6 +2366,9 @@ mod tests {
             assert!(request
                 .windows(b"Authorization: Bearer test-gateway-token".len())
                 .any(|part| part == b"Authorization: Bearer test-gateway-token"));
+            assert!(request
+                .windows(b"x-latch-device-grant: observe".len())
+                .any(|part| part == b"x-latch-device-grant: observe"));
             stream
                 .write_all(
                     b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n",
@@ -2471,7 +2406,7 @@ mod tests {
         encrypt_record(
             &mut writer,
             &mut transport,
-            b"GET /v1/capabilities HTTP/1.1\r\nHost: latch\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
+            b"GET /v2/sessions/ses_1/terminal?mode=read-only HTTP/1.1\r\nHost: latch\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
         )
         .await
         .unwrap();
@@ -2490,7 +2425,6 @@ mod tests {
             b"pong"
         );
 
-        let revoked_at = tokio::time::Instant::now();
         revoke(&home, &device.device_id).unwrap();
         let closed =
             tokio::time::timeout(Duration::from_millis(500), read_frame(&mut reader)).await;
@@ -2498,13 +2432,238 @@ mod tests {
             matches!(closed, Ok(Err(_))),
             "revocation must close the peer stream"
         );
-        assert!(
-            revoked_at.elapsed() <= Duration::from_millis(500),
-            "revocation exceeded the polling budget"
-        );
         drop(writer);
         assert!(proxy.await.unwrap().is_ok());
         gateway.await.unwrap();
+    }
+
+    /// The whole paired path, end to end: a Noise-authenticated observe-only
+    /// device opens the real v2 conversation WebSocket through the proxy,
+    /// reads the conversation, and is refused `send_message` by the Hub.
+    ///
+    /// The proxy authorizes only the upgrade, so this is the test that proves
+    /// the per-message check actually happens behind it.
+    #[tokio::test]
+    async fn noise_tunnel_carries_the_v2_conversation_and_the_hub_refuses_an_observe_only_send() {
+        let (dir, home) = home();
+        set_enabled(&home, true).unwrap();
+        let paths = Paths::new(&home);
+        let mac_identity = identity(&paths).unwrap();
+        let (phone_private, phone_public) = keypair();
+        let pairing = create_pairing(&home).unwrap();
+        confirm_pairing(
+            &home,
+            &pairing.pairing_id,
+            &pairing.secret,
+            &phone_public,
+            "observe-only phone",
+            DevicePermission::Observe,
+        )
+        .unwrap();
+
+        let session = conversation_session(&home);
+        ensure_private_directory(&paths.runtime()).unwrap();
+        let token_path = paths.runtime().join("gateway.token");
+        write_bytes_atomic(&token_path, b"tunnel-gateway-token").unwrap();
+        let hub = crate::conversation::ConversationHub::new(dir.path().join("hub")).unwrap();
+        let app = crate::cli::serve::test_router(home.clone(), token_path.clone(), hub);
+        let gateway_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let gateway_addr = gateway_listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(
+                gateway_listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await;
+        });
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener_addr = listener.local_addr().unwrap();
+        let proxy_paths = paths.clone();
+        let proxy_identity = mac_identity.clone();
+        let proxy_token = token_path.clone();
+        let proxy = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            proxy_connection(
+                stream,
+                &proxy_paths,
+                &proxy_identity,
+                &proxy_token,
+                gateway_addr,
+            )
+            .await
+        });
+
+        let stream = TcpStream::connect(listener_addr).await.unwrap();
+        let (mut reader, mut writer) = stream.into_split();
+        let mut transport = initiator_handshake(&mut reader, &mut writer, &phone_private).await;
+        let upgrade = format!(
+            "GET /v2/sessions/{session}/conversation HTTP/1.1\r\nHost: latch\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+        );
+        encrypt_record(&mut writer, &mut transport, upgrade.as_bytes())
+            .await
+            .unwrap();
+
+        let mut buffered = Vec::new();
+        let response = loop {
+            buffered.extend(decrypt_record(&mut reader, &mut transport).await.unwrap());
+            if let Some(end) = buffered.windows(4).position(|window| window == b"\r\n\r\n") {
+                break buffered.drain(..end + 4).collect::<Vec<_>>();
+            }
+        };
+        assert!(
+            response.starts_with(b"HTTP/1.1 101"),
+            "expected a websocket upgrade, got {}",
+            String::from_utf8_lossy(&response)
+        );
+
+        // The server speaks first: no client frame has been sent yet.
+        let snapshot = next_ws_message(&mut reader, &mut transport, &mut buffered).await;
+        assert_eq!(snapshot["type"], "snapshot");
+        assert_eq!(snapshot["reason"], "initial");
+
+        encrypt_record(
+            &mut writer,
+            &mut transport,
+            &ws_text_frame(
+                &serde_json::json!({
+                    "type": "send_message",
+                    "operationEpoch": snapshot["operationEpoch"],
+                    "operationId": "tunnel-op",
+                    "text": "hello",
+                })
+                .to_string(),
+            ),
+        )
+        .await
+        .unwrap();
+
+        let mut result = next_ws_message(&mut reader, &mut transport, &mut buffered).await;
+        for _ in 0..16 {
+            if result["type"] == "operation_result" {
+                break;
+            }
+            result = next_ws_message(&mut reader, &mut transport, &mut buffered).await;
+        }
+        assert_eq!(result["type"], "operation_result");
+        assert_eq!(result["operationId"], "tunnel-op");
+        assert_eq!(result["status"], "refused");
+        assert!(result["reason"].as_str().unwrap().contains("device grant"));
+
+        drop(writer);
+        let _ = proxy.await.unwrap();
+    }
+
+    /// Creates the metadata one session needs to be routable.
+    fn conversation_session(home: &LatchHome) -> String {
+        use crate::session::manifest::{SourceInfo, TerminalSize};
+        use crate::session::meta::{self, SessionMeta};
+        use crate::session::paths::SessionId;
+
+        home.ensure().unwrap();
+        let id = SessionId::parse("ses_tunnelconversation").unwrap();
+        let paths = home.session(&id);
+        paths.ensure().unwrap();
+        meta::write_once(
+            &paths,
+            &SessionMeta {
+                format_version: 1,
+                id: id.as_str().to_owned(),
+                name: "tunnel".into(),
+                title: None,
+                cwd: std::path::PathBuf::from("/tmp"),
+                command_label: "claude".into(),
+                harness: Some("claude-code".into()),
+                created_at: "2026-08-20T00:00:00Z".into(),
+                initial_size: TerminalSize::new(80, 24),
+                source: SourceInfo {
+                    kind: "test".into(),
+                    external_run_id: None,
+                },
+            },
+        )
+        .unwrap();
+        id.as_str().to_owned()
+    }
+
+    /// Minimal client-to-server text frame. A zero mask key is a legal mask.
+    fn ws_text_frame(text: &str) -> Vec<u8> {
+        let payload = text.as_bytes();
+        let mut frame = vec![0x81];
+        if payload.len() < 126 {
+            frame.push(0x80 | payload.len() as u8);
+        } else {
+            frame.push(0x80 | 126);
+            frame.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+        }
+        frame.extend_from_slice(&[0, 0, 0, 0]);
+        frame.extend_from_slice(payload);
+        frame
+    }
+
+    /// Reads one server text frame out of the tunnel, refilling from Noise
+    /// records because record and frame boundaries do not align.
+    async fn next_ws_message(
+        reader: &mut tokio::net::tcp::OwnedReadHalf,
+        transport: &mut TransportState,
+        buffered: &mut Vec<u8>,
+    ) -> serde_json::Value {
+        loop {
+            if let Some((opcode, payload, consumed)) = parse_ws_frame(buffered) {
+                buffered.drain(..consumed);
+                match opcode {
+                    0x1 => {
+                        return serde_json::from_slice(&payload).expect("server frame is not JSON")
+                    }
+                    0x8 => panic!("tunnel closed before a text frame"),
+                    _ => continue,
+                }
+            }
+            let record =
+                tokio::time::timeout(Duration::from_secs(10), decrypt_record(reader, transport))
+                    .await
+                    .expect("timed out waiting for a conversation frame")
+                    .expect("tunnel record");
+            buffered.extend(record);
+        }
+    }
+
+    /// Returns (opcode, payload, bytes consumed) for one complete server frame.
+    fn parse_ws_frame(buffer: &[u8]) -> Option<(u8, Vec<u8>, usize)> {
+        if buffer.len() < 2 {
+            return None;
+        }
+        let opcode = buffer[0] & 0x0f;
+        let masked = buffer[1] & 0x80 != 0;
+        let short = (buffer[1] & 0x7f) as usize;
+        let (length, mut offset) = match short {
+            126 => {
+                if buffer.len() < 4 {
+                    return None;
+                }
+                (u16::from_be_bytes([buffer[2], buffer[3]]) as usize, 4)
+            }
+            127 => {
+                if buffer.len() < 10 {
+                    return None;
+                }
+                let mut bytes = [0_u8; 8];
+                bytes.copy_from_slice(&buffer[2..10]);
+                (u64::from_be_bytes(bytes) as usize, 10)
+            }
+            other => (other, 2),
+        };
+        if masked {
+            offset += 4;
+        }
+        if buffer.len() < offset + length {
+            return None;
+        }
+        Some((
+            opcode,
+            buffer[offset..offset + length].to_vec(),
+            offset + length,
+        ))
     }
 
     #[test]
@@ -2709,7 +2868,7 @@ mod tests {
     #[test]
     fn proxy_authorization_never_accepts_control_for_observers() {
         let request =
-            b"GET /v1/sessions/ses_1/terminal?mode=control HTTP/1.1\r\nHost: example\r\n\r\n"
+            b"GET /v2/sessions/ses_1/terminal?mode=control HTTP/1.1\r\nHost: example\r\n\r\n"
                 .to_vec();
         assert!(authorize_and_inject(request, DevicePermission::Observe, "secret").is_err());
     }
@@ -2717,25 +2876,32 @@ mod tests {
     #[test]
     fn proxy_only_injects_its_own_gateway_credential() {
         let request =
-            b"GET /v1/sessions HTTP/1.1\r\nHost: example\r\nAuthorization: Bearer stolen\r\n\r\n"
+            b"GET /v2/sessions HTTP/1.1\r\nHost: example\r\nAuthorization: Bearer stolen\r\n\r\n"
                 .to_vec();
         assert!(authorize_and_inject(request, DevicePermission::Control, "secret").is_err());
+        let forged_grant =
+            b"GET /v2/sessions HTTP/1.1\r\nHost: example\r\nX-Latch-Device-Grant: control\r\n\r\n"
+                .to_vec();
+        assert!(authorize_and_inject(forged_grant, DevicePermission::Observe, "secret").is_err());
     }
 
     #[test]
     fn proxy_rejects_request_smuggling_and_closes_plain_http() {
-        let pipelined = b"GET /v1/sessions HTTP/1.1\r\nHost: example\r\n\r\nGET /v1/sessions/ses_1/terminal?mode=control HTTP/1.1\r\nHost: example\r\n\r\n".to_vec();
+        let pipelined = b"GET /v2/sessions HTTP/1.1\r\nHost: example\r\n\r\nGET /v2/sessions/ses_1/terminal?mode=control HTTP/1.1\r\nHost: example\r\n\r\n".to_vec();
         assert!(authorize_and_inject(pipelined, DevicePermission::Observe, "secret").is_err());
-        let smuggled = b"POST /v1/sessions/ses_1/send HTTP/1.1\r\nHost: example\r\nContent-Length: 2\r\nContent-Length: 80\r\n\r\n{}".to_vec();
+        let smuggled = b"GET /v2/sessions/ses_1/conversation HTTP/1.1\r\nHost: example\r\nContent-Length: 2\r\nContent-Length: 80\r\n\r\n{}".to_vec();
         assert!(authorize_and_inject(smuggled, DevicePermission::Interact, "secret").is_err());
-        let transfer = b"POST /v1/sessions/ses_1/send HTTP/1.1\r\nHost: example\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n".to_vec();
+        let transfer = b"GET /v2/sessions/ses_1/conversation HTTP/1.1\r\nHost: example\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n".to_vec();
         assert!(authorize_and_inject(transfer, DevicePermission::Interact, "secret").is_err());
-        let ordinary = b"GET /v1/sessions HTTP/1.1\r\nHost: example\r\n\r\n".to_vec();
+        let ordinary = b"GET /v2/sessions HTTP/1.1\r\nHost: example\r\n\r\n".to_vec();
         let authorized =
             authorize_and_inject(ordinary, DevicePermission::Observe, "secret").unwrap();
         assert!(authorized
             .windows(b"Connection: close".len())
             .any(|part| part == b"Connection: close"));
+        assert!(authorized
+            .windows(b"x-latch-device-grant: observe".len())
+            .any(|part| part == b"x-latch-device-grant: observe"));
     }
 
     fn candidate(port: u16) -> DirectCandidate {

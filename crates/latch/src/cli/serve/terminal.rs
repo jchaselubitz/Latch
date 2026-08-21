@@ -33,7 +33,7 @@ pub struct TerminalConnect {
     pub mode: TerminalAccessMode,
 }
 
-/// `cols` / `rows` query parameters on `/v1/sessions/{id}/terminal`.
+/// `cols` / `rows` query parameters on `/v2/sessions/{id}/terminal`.
 #[derive(Debug, Default, Deserialize)]
 pub struct TerminalQuery {
     /// Initial columns. Must be paired with [`Self::rows`].

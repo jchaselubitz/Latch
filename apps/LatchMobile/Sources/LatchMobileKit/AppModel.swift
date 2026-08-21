@@ -33,6 +33,10 @@ public final class AppModel {
     public private(set) var sessions: [SessionSummary] = []
     public private(set) var sessionsError: String?
     public private(set) var isLoadingSessions = false
+    /// Session stores are retained here rather than by a navigation view, so a
+    /// pushed chat can reconnect from its cached revision instead of replaying
+    /// the conversation after every back-navigation.
+    private var conversationStores: [String: ConversationStore] = [:]
 
     private let storage: LinkStorage
     private let sessionFactory: @Sendable (GatewayLink) -> LatchGateway
@@ -111,7 +115,27 @@ public final class AppModel {
         pairedConnectionGeneration &+= 1
         sessions = []
         sessionsError = nil
+        conversationStores.values.forEach { $0.stop() }
+        conversationStores = [:]
         linkState = .unlinked
+    }
+
+    /// Returns the one persistent conversation store for this session. This
+    /// consumes discovery already performed during link setup; it never makes
+    /// a separate interaction-capabilities preflight.
+    public func conversationStore(for session: SessionSummary) -> ConversationStore? {
+        guard let gateway,
+              case .linked(let capabilities) = linkState,
+              GatewayCompatibility.supports(endpoint: .conversation, capabilities: capabilities)
+        else { return nil }
+        if let existing = conversationStores[session.id] { return existing }
+        let store = ConversationStore(
+            sessionID: session.id,
+            gateway: gateway,
+            operationRetentionSeconds: capabilities.operationRetentionSeconds
+        )
+        conversationStores[session.id] = store
+        return store
     }
 
     private func connect(to link: GatewayLink, persist: Bool) async {
@@ -191,6 +215,9 @@ public final class AppModel {
             linkSource = source
             self.pairedDevice = pairedDevice
             linkState = .linked(capabilities)
+            conversationStores.values.forEach {
+                $0.reconnect(using: gateway, operationRetentionSeconds: capabilities.operationRetentionSeconds)
+            }
             if persist {
                 try? storage.save(link)
             }
@@ -276,5 +303,28 @@ public final class AppModel {
         // This entry point is only for a route suspension/path teardown.
         guard linkSource == nil, let pairedDevice else { return }
         await connectPairedDevice(pairedDevice)
+    }
+
+    /// The socket is intentionally stopped before suspension: iOS can reclaim
+    /// the underlying connection without delivering a close callback. Stores
+    /// keep their cache and resume tuple, so foreground does not need a replay.
+    public func suspendConversations() {
+        conversationStores.values.forEach { $0.stop() }
+    }
+
+    public func resumeConversations() {
+        conversationStores.values.forEach { $0.start() }
+    }
+
+    /// Restores a usable route and repeats discovery before any conversation
+    /// socket is allowed to resume application traffic.
+    public func resumeAfterSuspension() async {
+        if linkSource == nil, pairedDevice != nil {
+            await reconnectPairedTransport()
+        } else {
+            await rediscover()
+        }
+        guard case .linked = linkState else { return }
+        resumeConversations()
     }
 }

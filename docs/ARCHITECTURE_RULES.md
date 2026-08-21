@@ -12,7 +12,7 @@ crates/
 apps/LatchDesktop/         # native macOS client
 packages/                  # TypeScript presentation clients
 services/control-plane/    # cloud control plane (independent deployable)
-fixtures/harness/          # public schemas plus raw/normalized connector corpus
+fixtures/conversation/     # raw Claude/Codex connector corpus
 fixtures/vt/               # irreplaceable recorded harness streams
 ```
 
@@ -58,21 +58,19 @@ No Node.js process sits on the every-window path. A terminal profile invokes
 `latch`, so startup latency remains a product requirement. TypeScript belongs
 in `packages/` and presentation clients.
 
-## Harness events are schema-first
+## Conversation Hub is schema-first
 
-`fixtures/harness/harness-event.v1.json` and
-`interaction-capabilities.v1.json` own the public observation and interaction
-contracts. Rust connector types and TypeScript consumer types are generated
-from those schemas. Connector fixtures retain raw records alongside normalized
-events; parser changes must preserve deterministic event indexes within a
-connector epoch.
+`schemas/remote-access/v2/` owns the public conversation and gateway contract.
+The Hub owns projection ordering, revisions, generations, operation epochs,
+pending-request derivation, and durable operation outcomes. Clients consume one
+server-first conversation socket; they do not fold harness events or maintain
+event cursors.
 
-Claude transcripts do not reliably contain pending input. A generated,
-owner-only plugin is therefore injected into directly launched Claude
-processes and captures only `PermissionRequest` records. It must not modify
-global Claude settings. Transcript and hook records feed an append-only
-per-session event ledger; emitted cursor positions are ledger indexes and are
-never renumbered when one source writes late.
+Connector fixtures retain bounded raw Claude and Codex records alongside their
+expected normalized projections in `fixtures/conversation/`. Agent-specific
+source binding, transcript parsing, hooks, and action execution stay behind the
+connector boundary. The owner-only Claude hook must not modify global Claude
+settings.
 
 ## Session state is queried, never stored
 

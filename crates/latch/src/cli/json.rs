@@ -256,8 +256,9 @@ pub struct ConfigReport {
 
 /// `latch capabilities --json`.
 ///
-/// Overlord's execution provider calls this before offering Latch as a launch
-/// target. Field names match `planning/OVERLORD_INTEGRATION.md`.
+/// Engine discovery for launch providers and the `/v2` gateway capabilities
+/// document. It reports no conversation or interaction capability: those are
+/// pushed as conversation state over the v2 WebSocket instead.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilitiesReport {
     /// Wire protocol version this build speaks.

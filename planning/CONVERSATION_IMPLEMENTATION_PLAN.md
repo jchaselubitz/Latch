@@ -10,9 +10,14 @@ the current repository.
 
 **Revision 2.** Amended after
 [`CONVERSATION_ARCHITECTURE_REVIEW.md`](./CONVERSATION_ARCHITECTURE_REVIEW.md).
-The delivery graph is unchanged in shape; three things moved earlier because
-they are preconditions rather than details, and one shipped ahead of the graph
-entirely. Changes are marked **[R2]**.
+It introduced the grant boundary, Hub-owned ordering, incremental rewind handling,
+bounded backpressure, and explicit live-state cost. Changes from that review remain
+marked **[R2]** where useful.
+
+**Revision 3.** The release is now an unconditional clean break: there is no v1
+discovery tombstone, staged compatibility build, or legacy CLI adapter. Operation
+durability and connector branch-index persistence are specified without relying on
+false exactly-once or fixed-size-checkpoint assumptions.
 
 ## Objective
 
@@ -36,15 +41,9 @@ The implementation follows four rules:
 
 1. **Delete instead of deprecate.** Old event types, endpoints, reducers, reconnect
    paths, schemas, generated types, and tests are removed when their replacement lands.
-2. **No dual protocol.** The gateway exposes protocol major 2 only. `/v1` routes do not
-   coexist with `/v2` routes. **[R2] One exception, and it is not a protocol:**
-   `GET /v1/capabilities` remains as a tombstone returning `protocolVersion: 2` and
-   nothing else. No v1 behavior lives behind it and no client can act on it except to
-   learn it is too old. It exists because the CLI self-updates and the phone does not,
-   so a version-skew window is guaranteed — and during that window a client must
-   disable every endpoint, terminal included, which makes the diagnostic the entire
-   user experience. A bare 404 would instead be read as the pre-discovery gateway and
-   produce a phone that looks linked and fails every request.
+2. **No dual protocol.** The gateway exposes protocol major 2 only. No `/v1` route,
+   including a discovery tombstone, coexists with `/v2`. Temporary mixed-major
+   failure during the single-user update is accepted.
 3. **No cache migration.** Old Latch-owned harness event ledgers and client cursors are
    discarded. The new projection rebuilds from the authoritative agent source.
 4. **Do not delete agent data.** Claude, Codex, or other agent-owned transcripts are
@@ -105,7 +104,6 @@ protocol, or mobile client.
 
 ```mermaid
 flowchart LR
-    PS["S. Ship-ahead phone build"]
     P0["0. Contract + demolition"]
     P1["1. Domain + connector boundary"]
     P2["2. Incremental Claude connector"]
@@ -116,70 +114,11 @@ flowchart LR
     P7["7. Codex connector"]
     P8["8. Performance + release proof"]
 
-    PS --> P0 --> P1 --> P2 --> P3 --> P4 --> P5 --> P6 --> P7 --> P8
-    PS -. "must be in the field before P0 reaches a Mac" .-> P4
+    P0 --> P1 --> P2 --> P3 --> P4 --> P5 --> P6 --> P7 --> P8
 ```
 
 The sequence is intentionally vertical. Until the Hub and v2 protocol are stable,
 parallel client work would encode unsettled semantics and create throwaway adapters.
-
-**[R2] Phase S is outside that argument.** It ships no v2 semantics at all — it
-teaches the *current* phone build how to report a gateway it cannot speak to. It
-has to reach the App Store before a v2 gateway reaches anyone's Mac, and App
-Store review is not a step this plan controls, so it starts first and waits.
-
-## Phase S — Ship-ahead phone build
-
-**[R2] Status: implemented.** This is the only phase that ships before the
-contract exists, and the only one whose delivery date this plan does not
-control.
-
-### Goal
-
-Make the phone build that is in the field today report a gateway it cannot speak
-to as an instruction, not as a connection failure — so that the skew window
-between a self-updating CLI and an App Store app is survivable.
-
-### Why it cannot wait for Phase 5
-
-`GatewayCompatibility.supports` returns false for every endpoint on a
-protocol-major disagreement, terminal included, because field meanings are only
-guaranteed within a major. So during the skew window the phone has no fallback
-surface at all — the diagnostic *is* the experience. And the phone cannot be
-updated on the same schedule as the Mac: the CLI ships as one signed archive and
-updates itself, the app goes through review.
-
-A fix landing with Phase 5 arrives after the breakage it was meant to prevent.
-
-### Work
-
-1. Classify a protocol disagreement by which side is behind (`ProtocolMismatch`),
-   because only one of the two is something the person holding the phone can act
-   on, and the gateway being ahead is the ordinary direction.
-2. Give `AppModel.LinkState` a distinct `incompatible` case. `failed(String)` is
-   rendered as "cannot reach that computer", which sends someone to debug a
-   network that is working.
-3. Render it in both places a link state surfaces, naming the remedy and
-   accounting for the terminal being unavailable too — that is the fallback
-   people reach for, and its absence should be explained where the mismatch is
-   reported rather than discovered a screen later.
-4. Keep the saved link and the pairing record. The computer is not the problem
-   and must be reconnectable the moment the versions agree.
-
-### Exit criteria
-
-- A discovery document reporting a newer major produces "Update Latch on this
-  phone" on both the manual and paired routes.
-- The saved link and paired record survive it.
-- The pairing reconnects once the versions agree, with no re-pairing.
-- No endpoint is offered across the disagreement.
-
-### What this phase depends on from Phase 0
-
-The tombstone. This phone-side work only runs if discovery still *answers*; a
-bare 404 is indistinguishable from the pre-discovery gateway and is classified as
-legacy. `GET /v1/capabilities` returning `protocolVersion: 2` is what turns that
-404 into this screen, and it is a Phase 0 deliverable.
 
 ## Phase 0 — Contract and demolition boundary
 
@@ -198,10 +137,13 @@ misunderstand.
      `pendingRequest` is documented as derived from item status;
    - snapshots, upsert/remove mutations, history pages, operations, results,
      and errors. **[R2]** No `conversation_reset`: `snapshot` gains an optional
-     `reason` (`initial` | `generation` | `overflow`) instead;
+     `reason` (`initial` | `generation` | `operation_epoch` | `overflow`) instead;
+     `operation_result.status` is `accepted | refused | ambiguous`;
+     snapshots and action messages carry a per-conversation `operationEpoch`;
    - **[R2]** `partial` reserved in `message.status`, emitted by nothing, with a
      documented client rule to render an unknown status as `complete`;
-   - protocol-major-2 gateway discovery, **[R2]** retaining `gatewayInstanceId`.
+   - protocol-major-2 gateway discovery, **[R2]** retaining `gatewayInstanceId` and
+     advertising `operationRetentionSeconds`.
 2. Set the gateway protocol major to 2.
 3. **[R2]** Define the route table once, in `cli/serve/routes.rs`, as route plus
    required grant. The router and the remote-access allowlist both consume it.
@@ -220,17 +162,14 @@ misunderstand.
    defaults to control. Without this the conversation socket is a hole in the
    grant model: the proxy authorizes one upgrade and never sees the operations
    that follow.
-5. **[R2]** Keep `GET /v1/capabilities` as a version tombstone returning
-   `protocolVersion: 2` and nothing else. This is not a dual protocol and must not
-   be removed by the Phase 6 cleanup — add a test that pins it. See Phase S.
-6. Delete the old chat-facing schemas and generated contract types:
+5. Delete the old chat-facing schemas and generated contract types:
    - `harness-event.v1`;
    - `interaction-capabilities.v1`;
    - old send request/response types;
    - event-stream close-code constants.
-7. Delete tests whose only purpose is compatibility with `/v1`, numeric event cursors,
+6. Delete tests whose only purpose is compatibility with `/v1`, numeric event cursors,
    or harness-event reducers.
-8. Update contract generators so Rust and Swift are generated from the new canonical
+7. Update contract generators so Rust and Swift are generated from the new canonical
    schemas. TypeScript generation is retained only if the package replacement in Phase
    6 will use it.
 
@@ -239,7 +178,7 @@ new empty/skeletal v2 surface builds and no legacy chat symbol remains.
 
 ### Exit criteria
 
-- Searching for `HarnessEvent`, `assistant_delta`, `/v1/sessions`, `EventStreamClose`,
+- Searching for `HarnessEvent`, `assistant_delta`, `/v1`, `EventStreamClose`,
   and the old interaction-capability schema returns no production references.
 - Gateway discovery reports protocol major 2 and only v2 endpoints.
 - **[R2]** The terminal endpoint still works through its v2 path **through the
@@ -248,7 +187,6 @@ new empty/skeletal v2 surface builds and no legacy chat symbol remains.
   `RemoteAccessEndToEndTests` already has the harness for it.
 - **[R2]** Every route the router serves appears in the shared table, enforced by
   a test, so a later endpoint cannot be silently unroutable when paired.
-- **[R2]** `GET /v1/capabilities` returns protocol major 2 and nothing else.
 - No compatibility aliases or conditional old-client branches exist.
 
 ## Phase 1 — Conversation domain and connector boundary
@@ -282,11 +220,14 @@ Create a stable agent-neutral model before porting Claude behavior.
      connector that has not yet observed its binding is distinguishable from one
      that will never work;
    - `poll(budget)` covers source reads *and* live state on one cadence, and is
-     the only place a connector may perform I/O or spawn a process;
+     the only place a connector may perform observation I/O;
    - `actions()` returns descriptors carrying `requiredGrant`, so the Hub gates
      operations without knowing what they mean;
-   - `apply` is the only place a connector may mutate the agent;
-   - `checkpoint()` is bounded by active items, never by history.
+   - `apply` is the only place a connector may perform action I/O or mutate the
+     agent;
+   - `poll` returns its offset and active-branch deltas with its domain mutations;
+     `checkpointSnapshot()` serializes full connector state only for periodic
+     compaction, never after every source append.
 4. Define connector outputs only in conversation-domain terms. No connector may emit
    wire messages directly. **[R2]** No connector may emit an ordinal, a revision,
    or a generation either — the Hub stamps all three.
@@ -304,6 +245,9 @@ Create a stable agent-neutral model before porting Claude behavior.
    - **[R2]** `TruncateAfter` dropping the tail without a generation change;
    - generation reset;
    - duplicate mutation handling.
+8. Collect Claude and Codex source fixtures now, before the connector trait hardens:
+   turns, tools, permissions/questions, lifecycle state, branching, rewrites, and
+   directly typed terminal input.
 
 ### Exit criteria
 
@@ -342,22 +286,20 @@ connector that processes only new source data during steady state.
    - Return `Pending` until observed, which the Hub reports as `phase: starting`.
    - Delete `newest_jsonl`.
 3. Remove the standalone `latch events` command and the child-process relay in the
-   gateway. **[R2]** See Phase 4 for its successor; `planning/OVERLORD_INTEGRATION.md`
-   names it as a contract and cannot simply be left stale.
+   gateway. There is no compatibility successor in this milestone.
 4. Implement a source checkpoint containing:
    - the observed binding (agent session id and source path) and file identity;
    - complete byte offset per source, transcript and hook sidecar;
-   - **[R2]** the id list of the active branch — bounded by active items, *not*
-     the full record graph. The checkpoint is written after every batch, so an
-     `O(transcript)` checkpoint would reintroduce as a write the cost this phase
-     removes as a read;
+   - **[R2]** an active-branch index. It may grow with the active source chain, so
+     persist it as append-only branch deltas and compact it into the periodic
+     snapshot; never rewrite the full index after every source append;
    - connector implementation version.
 5. On normal append, read and parse only records after the offsets.
 6. **[R2]** Classify each appended record against the active chain rather than
-   rebuilding: parent is the chain tail → `Upsert`; parent is an earlier id on the
-   chain → `TruncateAfter` then `Upsert`; parent unknown or off-chain → `Rebuild`.
-   Side-branch and subagent records never move the chain tail. Interrupts and
-   rewinds are routine, and today they hard-fail the stream; making them full
+   rebuilding: parent is the chain tail → `Upsert`; parent is an earlier active id →
+   `TruncateAfter` then `Upsert`; a recognized side-branch or subagent record does not
+   move the main-chain tail; an unknown, unclassifiable parent → `Rebuild`. Interrupts
+   and rewinds are routine, and today they hard-fail the stream; making them full
    rebuilds would make full snapshots part of ordinary use.
 7. Detect file replacement, truncation, and an incompatible checkpoint. Rebuild
    once and return a new conversation generation.
@@ -375,17 +317,16 @@ connector that processes only new source data during steady state.
     second collide. Under upsert-by-id a collision merges two requests into one
     item and leaves one of them unanswerable. Give the fallback a per-source
     sequence rather than a timestamp.
-11. **[R2]** Define the request lifecycle rule, and make it a conformance rule
-    rather than a Claude detail. No Claude source emits "resolved": the transcript
-    has no resolution record and there is no `PermissionResolved` hook. The rule
-    the current phone already applies, moved into the connector where it belongs:
-    - a `pending` request becomes `dismissed` when any later source record other
-      than that request is observed — the agent moved on, so it was answered
-      somewhere;
-    - it becomes `resolved` when Latch applied the resolution, or when a screen
-      capture confirms the prompt is gone.
-    Conformance rule for every connector, Codex included: **no connector may
-    leave a request `pending` once a later item has been observed.**
+11. **[R2]** Define the request lifecycle rule, and make it a connector conformance
+    rule rather than a Claude UI detail. No Claude source emits "resolved": the
+    transcript has no resolution record and there is no `PermissionResolved` hook.
+    - `resolved` means Latch successfully applied a resolution to that exact request;
+    - `dismissed` means the authoritative main conversation advanced beyond the
+      request, or a screen refresh showed the prompt gone without a known Latch
+      resolution;
+    - unrelated hook, side-branch, and subagent records do not close the request.
+    Conformance rule for every connector, Codex included: a request cannot remain
+    `pending` after authoritative main-chain progress or confirmed prompt absence.
 12. Implement action handling:
     - `actions()` returns descriptors with `requiredGrant`;
     - capture and validate the screen immediately before action;
@@ -406,9 +347,9 @@ connector that processes only new source data during steady state.
 - Build a transcript with at least 100,000 source records.
 - Load once, append one record, and assert the connector reads only the appended range.
 - Assert steady-state append time does not scale with the preexisting transcript size.
-- **[R2]** Assert the checkpoint written after that append is bounded by active
-  items, not by transcript length. This is the failure mode where the read cost
-  is removed and reappears as a write.
+- Assert checkpoint/journal bytes written for a normal append are `O(new branch
+  mutations)`, independent of active-chain and transcript length. Separately measure
+  periodic compaction as `O(active branch)`.
 - **[R2]** Append a record parented to an earlier on-chain id; assert one
   `TruncateAfter` and no generation change.
 - **[R2]** Run two sessions in one working directory; assert each observes its own
@@ -448,13 +389,14 @@ Create one shared, bounded, restartable session actor per watched conversation.
    - configurable warm idle period;
    - connector stop and checkpoint on eviction;
    - catch-up on reactivation.
-4. **[R2]** Run the actor in two lanes. Source mutations and state transitions go
-   through the mailbox and never block. Connector actions are dispatched from the
-   mailbox to a blocking pool — one action at a time per session, with a deadline —
-   and return as ordinary mailbox messages. One `send` is several blocking `tmux`
-   invocations; on the mailbox, a wedged pane stops broadcast for every subscriber
-   of that session. Deadline expiry is a refusal with its own reason, so a client
-   can offer a retry.
+4. **[R2]** Separate the state actor from both kinds of blocking I/O. The actor
+   schedules at most one observation poll per session and one serialized action per
+   session on bounded workers, each with a deadline; immutable results return as
+   mailbox messages. Only the actor mutates the projection or advances revisions.
+   One `send` is several blocking `tmux` invocations, and screen polling also spawns a
+   process; neither may stop fanout. Enforce child-process kill deadlines. A timeout
+   during read-only preflight is `refused`; after the first mutating step it is
+   `ambiguous`, because process termination cannot prove whether tmux applied input.
 5. Maintain:
    - indexed current items;
    - current state;
@@ -462,9 +404,12 @@ Create one shared, bounded, restartable session actor per watched conversation.
    - the device grant per subscriber, checked against `ActionDescriptor.requiredGrant`
      before any action is dispatched **[R2]**;
    - bounded recent-mutation ring;
-   - **[R2]** idempotent operation results, persisted alongside the checkpoint with
-     the TTL the v1 send path used. An in-memory-only ledger makes a retry across a
-     gateway restart a second paste into a live composer, which is not undoable.
+   - durable operation intents and results. Persist `started` before dispatch, then
+     persist `accepted` or `refused` after the connector returns. A recovered
+     `started` operation returns `ambiguous` and is never executed automatically;
+     finished operation IDs replay their stored result. Persist an accepted result and
+     its canonical submitted item in one journal batch. Bound the ledger by an explicit
+     count and age policy.
    - subscriber queues bounded in bytes as well as count **[R2]**.
 6. **[R2]** Implement tiered overflow. Replace the subscriber's queued mutations
    with a pending-snapshot marker rather than appending a snapshot behind them;
@@ -475,13 +420,16 @@ Create one shared, bounded, restartable session actor per watched conversation.
    subscriber that could not keep up with fewer. Never block the connector actor on a
    client.
 7. Implement the per-session cache described in the architecture:
-   - atomically written compact snapshot;
-   - append-only JSONL mutations;
-   - atomically written connector checkpoint;
+   - atomically written compact projection, connector state, and bounded operation
+     ledger;
+   - append-only JSONL batches containing conversation, offset, branch-index, and
+     operation transitions together; an incomplete final batch is ignored;
    - threshold-based compaction;
    - strict record and file bounds.
 8. On malformed or incompatible cache, delete only the Latch-owned conversation cache
-   and rebuild from the connector source.
+   and rebuild from the connector source. Rotate `operationEpoch` before accepting an
+   action, so an old queued operation is refused rather than executed against an empty
+   ledger.
 9. Treat sessions without a connector as `unavailable` for conversation while leaving
    terminal operations unaffected.
 
@@ -495,7 +443,13 @@ Create one shared, bounded, restartable session actor per watched conversation.
   is what happens on TURN.
 - **[R2]** A connector action that never returns does not stall source mutations or
   fanout for that session.
+- An observation poll that reaches its deadline reports degraded state without
+  blocking action results or fanout.
 - Concurrent send operations are serialized and operation IDs deduplicate retries.
+- Restart with an operation durably `started` but lacking an outcome; assert the same
+  ID returns `ambiguous` and is not dispatched again.
+- Rebuild a corrupt cache, then submit an action carrying the previous
+  `operationEpoch`; assert refusal before connector dispatch.
 - **[R2]** An observe-grant subscriber's `send_message` is refused by the Hub.
 - Actor eviction and immediate reactivation resume from the durable checkpoint.
 - Gateway restart loads the cache once and catches up only missing source records.
@@ -526,29 +480,29 @@ Expose the Hub through one authenticated, resumable, bidirectional WebSocket.
      Hub, because the proxy authorizes one upgrade and cannot see the frames after
      it;
    - control: terminal input through the terminal endpoint.
-3. **[R2]** Accept resume position on the upgrade URL (`?generation=&afterRevision=`)
-   and send first. Requiring a `resume` frame before the server says anything adds a
-   round trip — 100–300 ms over TURN — to every cold open and foreground resume.
-   `resume` stays as a mid-connection re-sync message.
+3. **[R2]** Accept resume position and cached operation epoch on the upgrade URL
+   (`?generation=&afterRevision=&operationEpoch=`) and send first. Requiring a
+   `resume` frame before the server says anything adds a round trip — 100–300 ms over
+   TURN — to every cold open and foreground resume. `resume` stays as a
+   mid-connection re-sync message.
 4. Send either:
    - missing mutations when generation/revision can resume; or
-   - a recent snapshot when they cannot, carrying `reason`.
+   - a recent snapshot when they cannot, carrying `reason`. An operation-epoch
+     mismatch invalidates queued actions but does not itself change conversation
+     generation.
 5. Implement bidirectional operations and correlated results on the same socket.
 6. Implement bounded `history_request` and `history_page` messages.
 7. Validate all payload sizes before sending them to the Hub.
-8. Translate subscriber overflow into a snapshot on the same socket.
+8. Apply the tiered overflow policy from Phase 3 on the same socket.
 9. Use normal protocol errors for malformed messages and permission refusals. Do not
    recreate custom close-code cursor recovery.
-10. **[R2]** Add `latch conversation <session> --json --follow` as a thin in-process
-    Hub subscriber. It is the successor to `latch events`, which
-    `planning/OVERLORD_INTEGRATION.md` names as a contract in five places, and it
-    keeps one observation implementation rather than two. Update that document in
-    the same release, or state there that the integration is retired.
-11. **[R2]** State the CLI/Hub coexistence rule. `latch send` and `latch capabilities`
-    remain separate processes; they already serialize against the Hub through the
-    interaction flock, and the event-driven state refresh from Phase 2 is what
-    notices their effect. Write it down rather than leaving it to be discovered.
-12. Add end-to-end tests over a real local WebSocket plus focused tests through the
+10. Remove the remaining `latch send` and session-level `latch capabilities` commands;
+    `latch events` was removed in Phase 2. Do not add a compatibility CLI observer
+    that creates a second conversation path.
+    Terminal attach remains the local fallback. Retire the current Overlord contract
+    explicitly in `planning/OVERLORD_INTEGRATION.md` until it is rebuilt as a v2 Hub
+    client.
+11. Add end-to-end tests over a real local WebSocket plus focused tests through the
     Noise tunnel.
 
 ### Protocol sequence
@@ -560,9 +514,8 @@ sequenceDiagram
     participant H as Session Actor
     participant C as Connector
 
-    M->>G: Open conversation WebSocket
-    M->>G: resume(generation?, afterRevision?)
-    G->>H: Subscribe/resume
+    M->>G: Open WebSocket ?generation=&afterRevision=&operationEpoch=
+    G->>H: Subscribe at supplied position
     alt resumable
         H-->>G: Missing mutations
         G-->>M: items_upserted/state_changed
@@ -590,8 +543,7 @@ sequenceDiagram
 - History and actions require no extra HTTP or WebRTC connection.
 - **[R2]** An observe-only device can read the conversation and is refused
   `send_message` and `resolve_request` by the Hub, over the Noise tunnel.
-- The v1 gateway surface no longer exists, **[R2]** apart from the discovery
-  tombstone.
+- The v1 gateway and legacy conversation CLI surfaces no longer exist.
 
 ## Phase 5 — Native mobile replacement
 
@@ -603,9 +555,6 @@ that renders Hub-owned items and state.
 ### Work
 
 1. Delete native `EventStream`, `Transcript`, the old `ChatModel`, and their tests.
-   **[R2]** Keep `ProtocolMismatch` and the `incompatible` link state from Phase S:
-   they are not part of the events pipeline and the skew window does not close when
-   v2 ships — it opens.
    **[R2]** Move `Transcript`'s implicit request-resolution rule into the Claude
    connector before deleting it (Phase 2, item 11). It is the only implementation of
    that rule that exists, and no source replaces it.
@@ -617,7 +566,7 @@ that renders Hub-owned items and state.
    - apply snapshots and revisioned mutations;
    - issue correlated history and action requests.
 3. Implement `ConversationStore` keyed by session ID:
-   - persist recent items, generation, revision, and state locally;
+   - persist recent items, generation, revision, operation epoch, and state locally;
    - keep stores alive across navigation;
    - restore immediately before network connection;
    - replace local state atomically on server snapshot;
@@ -626,9 +575,12 @@ that renders Hub-owned items and state.
    - create an operation ID and local sending row immediately;
    - merge the canonical Hub item by operation/item ID;
    - display authoritative refusal and retain text for retry;
-   - **[R2]** on a changed `gatewayInstanceId` with an operation still in flight,
-     surface a manual retry rather than retrying automatically: a rebuilt home has
-     no ledger to deduplicate against;
+   - display `ambiguous` distinctly and require an explicit retry with a new
+     operation ID; never turn ambiguity into automatic duplicate input;
+   - automatically resend the same operation ID only inside the gateway-advertised
+     retention window; after it expires, require manual review and a new operation ID;
+   - include the snapshot's `operationEpoch` in every action; on an epoch mismatch,
+     surface manual review and do not rewrite the queued operation to the new epoch;
    - never duplicate the later observed user record.
 5. Drive composer and request controls exclusively from pushed conversation state.
    There is no separate capabilities fetch for chat interaction.
@@ -670,18 +622,15 @@ new public SDK is distributed.
 
 1. Delete the event subscription, numeric cursor, and harness-event exports from
    `@latch/client`.
-2. **[R2]** `@latch/chat-react` has a consumer: `examples/remote-sdk-react` imports
-   `useTranscript`, `Composer`, `AwaitingInputPrompt`, and `TranscriptItem`. Decide
-   between rebuilding the example on v2 and deleting example and package together —
-   but decide it, rather than discovering the dependency during the delete.
+2. Delete `@latch/chat-react` and its `examples/remote-sdk-react` consumer. A new web
+   SDK is outside this milestone and should be designed against the proven v2 model,
+   not carried through the replacement speculatively.
 3. **[R2]** Verify `packages/terminal-react` still builds after the events exports
    leave `@latch/client`; it depends on that package and not on the chat surface.
-4. If the React example remains valuable, rebuild it directly on the v2 conversation
-   protocol after the native mobile implementation proves the model.
-5. Remove `@latch/harness-schema`; replace it with generated v2 conversation types only
+4. Remove `@latch/harness-schema`; replace it with generated v2 conversation types only
    if a TypeScript consumer exists now.
-6. Delete old package fixtures, persistence envelopes, reconnect tests, and docs.
-7. Update repository planning and README references so they do not claim the events SDK
+5. Delete old package fixtures, persistence envelopes, reconnect tests, and docs.
+6. Update repository planning and README references so they do not claim the events SDK
    remains supported. **[R2]** Specifically: `docs/REMOTE_SDK.md`, which documents the
    `/v1` compatibility rules as a published contract; `planning/OVERLORD_INTEGRATION.md`,
    per Phase 4; and the "Harness events are schema-first" section of
@@ -689,8 +638,6 @@ new public SDK is distributed.
    rule that late-writing sources never renumber emitted positions survives verbatim —
    it is the same rule the Hub's ordinal ownership implements — but it now names
    conversation items rather than a harness-event ledger.
-8. **[R2]** Do not remove the `GET /v1/capabilities` tombstone during this cleanup.
-   It is the skew diagnostic, not a legacy route; its pinning test says so.
 
 ### Exit criteria
 
@@ -707,22 +654,13 @@ stable.
 
 ### Work
 
-0. **[R2]** Collect the Codex fixture corpus during Phase 1, not here. Fixtures
-   cost little to gather and are what catch a connector-trait assumption before
-   three phases are built on it. Only the implementation belongs in this phase.
-1. Collect Codex fixtures for:
-   - user and assistant turns;
-   - tool start/completion and failure;
-   - permission and question requests;
-   - session start, idle, working, and exit;
-   - branching or transcript rewrite behavior;
-   - directly typed terminal messages.
-2. Implement Codex detection, transcript/hook discovery, checkpointing, normalization,
+1. Use the Codex fixture corpus collected in Phase 1 to implement detection,
+   transcript/hook discovery, checkpointing, normalization,
    and action application entirely behind the connector trait.
-3. Use native source IDs where present and document deterministic fallbacks where they
+2. Use native source IDs where present and document deterministic fallbacks where they
    are not.
-4. Run the same connector conformance suite used for Claude.
-5. Verify that no protocol, Hub, or mobile source file changes are necessary beyond
+3. Run the same connector conformance suite used for Claude.
+4. Verify that no protocol, Hub, or mobile source file changes are necessary beyond
    displaying the connector name or additive item details.
 
 ### Exit criteria
@@ -750,8 +688,8 @@ Instrument and record:
 - **[R2]** `tmux` invocations per warm session per second, idle and active. This is
   likely the dominant steady-state cost of the whole system and the one the first
   draft never counted;
-- **[R2]** checkpoint bytes written per append, which must not track transcript
-  length;
+- checkpoint/journal bytes written per append, which must track only new mutations;
+- periodic connector-state compaction bytes and duration by active-branch size;
 - message acceptance latency from phone to tmux;
 - transcript-observation latency from source append to mobile item;
 - memory per warm actor and per subscriber;
@@ -763,8 +701,9 @@ Instrument and record:
 ### Failure tests
 
 - Kill and restart `latch serve` during an active conversation.
-- **[R2]** Restart `latch serve` mid-send, then retry the same `operationId`; assert
-  exactly one message reaches the composer.
+- Restart `latch serve` after persisting `started` but before persisting an outcome;
+  retry the same `operationId`, assert it is not dispatched again, and assert the
+  client receives `ambiguous`.
 - Truncate or replace a connector source.
 - **[R2]** Rewind onto the existing branch; assert a truncation, not a generation.
 - **[R2]** Run two sessions in one working directory for several minutes; assert no
@@ -772,6 +711,8 @@ Instrument and record:
 - **[R2]** Corrupt one record in the middle of a transcript; assert the session keeps
   running and reports the skipped count.
 - Corrupt each Latch-owned cache file independently.
+- After cache rebuild, replay an operation with the prior `operationEpoch`; assert tmux
+  is untouched.
 - Background the phone during send and retry the same operation ID.
 - Disconnect after tmux accepts input but before mobile receives the result.
 - Overflow one subscriber while another remains healthy.
@@ -788,25 +729,25 @@ These are asymptotic requirements rather than hardware-specific promises:
 - history request is `O(page size)` after the actor's index is loaded;
 - a slow subscriber has bounded memory and zero effect on connector progress;
 - **[R2]** a blocked connector action has zero effect on subscriber fanout;
-- **[R2]** checkpoint write cost is `O(active items)`, independent of history;
+- normal checkpoint/journal write cost is `O(new mutations)`; periodic compaction is
+  `O(active branch)` and does not run on every append;
 - **[R2]** steady-state `tmux` invocations are `O(1)` per poll, not per subscriber;
 - no normal operation launches a child transcript-streaming process.
 
 ### Coordinated release checklist
 
-1. **[R2]** Confirm the Phase S phone build is in the field *first*. The CLI ships as
-   one signed archive and self-updates; the app goes through review. These cannot be
-   made simultaneous, so the order is the mitigation.
-2. Ship matching CLI, desktop, remote helper, and mobile builds.
-3. Bump gateway protocol discovery to major 2.
-4. Remove `/v1`, old schemas, old generated types, and old SDK packages in the same
-   release — **[R2]** except the `GET /v1/capabilities` tombstone.
-5. Discard old Latch-owned chat caches on first v2 startup.
-6. Preserve all agent-owned transcripts and session metadata.
-7. Verify terminal attach and remote pairing independently of conversation support,
+1. Ship matching CLI, desktop, remote helper, and mobile builds as one coordinated
+   breaking release. No mixed-major behavior is supported; temporary downtime while
+   the sole installation is updated is acceptable.
+2. Bump gateway protocol discovery to major 2.
+3. Remove all `/v1` routes, old schemas, old generated types, old CLI conversation
+   commands, and old SDK packages in the same release.
+4. Discard old Latch-owned chat caches on first v2 startup.
+5. Preserve all agent-owned transcripts and session metadata.
+6. Verify terminal attach and remote pairing independently of conversation support,
    **[R2]** over the Noise tunnel as well as loopback.
-8. Verify Claude and Codex connector conformance fixtures.
-9. Run Rust, Swift, contract-generation, boundary, and remote end-to-end suites.
+7. Verify Claude and Codex connector conformance fixtures.
+8. Run Rust, Swift, contract-generation, boundary, and remote end-to-end suites.
 
 ## Definition of done
 
@@ -819,9 +760,7 @@ The replacement is complete when:
 - Claude and Codex both conform to the same connector contract;
 - the device grant reaches the Hub and is enforced per operation **[R2]**;
 - no legacy event endpoint, cursor, schema, reducer, package API, compatibility shim,
-  cache migration, or dual write remains — the discovery tombstone is none of these
-  **[R2]**;
+  cache migration, discovery tombstone, or dual write remains;
 - terminal, pairing, and remote transport still function as independent fallback
   infrastructure;
 - performance tests demonstrate bounded work and stalled-client isolation.
-

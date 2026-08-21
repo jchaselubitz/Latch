@@ -1,98 +1,53 @@
-# Latch Remote SDK
+# Latch TypeScript integration
 
-`latch serve` exposes a Latch session to a browser or native client through a
-token-protected HTTP/WebSocket gateway. The Remote SDK packages are the public
-client surface:
+Latch protocol major 2 deliberately has a small TypeScript surface:
 
-- `@latch/client` — session discovery, terminal, events, and interaction.
-- `@latch/terminal-react` — the terminal component, with xterm private.
-- `@latch/chat-react` — transcript state, composer, and request-bound prompt.
-- `@latch/harness-schema` — generated event and interaction contract types.
+- `@latch/client` discovers sessions and opens a terminal WebSocket.
+- `@latch/terminal-react` renders a terminal handle through an embedder-supplied
+  xterm renderer.
 
-## Gateway compatibility
+Both packages are private workspaces. They are terminal integrations, not a
+conversation SDK. The only supported conversation client is the native mobile
+client, which speaks the canonical v2 conversation socket directly.
 
-`/v1` is a compatibility boundary, not a snapshot of one server release. A
-gateway keeps the documented paths and fields stable for protocol major 1;
-later additions are optional and additive. It never repurposes a field,
-changes a WebSocket frame type, or removes an endpoint while it still reports
-`protocolVersion: 1`.
+## Protocol boundary
 
-`GET /v1/capabilities` is the mandatory discovery step for optional features.
-It returns `protocolVersion`, `productVersion`, an `endpoints` map, `features`,
-and an opaque `gatewayInstanceId`. A
-client may use an endpoint only when the map reports it as `true`. A missing or
-`false` `events` endpoint means show the terminal instead of chat; a missing or
-`false` `send` endpoint means render transcript-only UI; a missing session
-capabilities endpoint means do not render interaction controls. A client must
-not probe an optional endpoint and infer support from an error.
+Use `GET /v2/capabilities` before opening a gateway connection. It reports
+protocol major 2, the gateway instance ID, operation retention, and the
+available `sessions`, `terminal`, and `conversation` endpoints. A consumer must
+require `protocolVersion: 2`; v1 has been removed and is not negotiated,
+probed, or adapted.
 
-The client treats a gateway that returns 404 for `/v1/capabilities` as the
-pre-discovery, terminal-only gateway: sessions and terminal remain available;
-events, send, and session capabilities are disabled. A `protocolVersion` other
-than 1 is unsupported rather than guessed at. The exported
-`supportsGatewayEndpoint()` encodes this rule.
+`@latch/client` supports session listing, inspection, discovery, and terminal
+attachment. The terminal socket is
+`WS /v2/sessions/{id}/terminal`; the token is carried by the `latch.v2.*`
+subprotocol. `mode=read-only` is explicit and only valid when discovery
+advertises the feature.
 
-The canonical versioned schemas for these additions live in
-[`schemas/remote-access/v1/`](../schemas/remote-access/v1/). `features` is
-where v1 advertises `idempotencyKeys` and `readOnlyTerminal`; a client uses
-neither capability unless discovery says it is available.
+Conversation transport is
+`WS /v2/sessions/{id}/conversation`. It is server-first: the client provides
+generation, revision, and operation epoch as upgrade parameters, then receives
+a snapshot or retained mutations. It supports history pages and correlated
+`send_message` and `resolve_request` operations, with the Hub enforcing the
+device grant for every action. Its canonical schema is
+[`schemas/remote-access/v2/`](../schemas/remote-access/v2/), not a published
+TypeScript package API.
 
-## Publishing decision
+There is no `@latch/chat-react`, `@latch/harness-schema`, remote React SDK
+example, event cursor, transcript reducer, HTTP send endpoint, compatibility
+mode, or v1 fallback. Consumers needing a conversation UI should implement the
+v2 socket from the canonical schema; they must not recreate or import a legacy
+surface.
 
-The packages now build standard ESM JavaScript and `.d.ts` declarations into
-`dist/`; published exports never point at TypeScript source. All four packages
-use the `@latch/*` npm scope, version together starting at `0.1.0`, and declare
-the repository's current `UNLICENSED` license. They are deliberately still
-private workspaces: the Latch project is not licensed for third-party
-redistribution, and publishing a public SDK with that metadata would mislead
-consumers. When Latch chooses a redistribution license and claims the npm
-scope, remove `private`, set `publishConfig.access` deliberately, run
-`npm run build`, and publish the four matching versions to npm.
-
-The build and the example intentionally use only each package's exports map,
-so that future publication is checked without exposing source files as API.
-
-## Running the example
-
-Start the gateway on the session host, then copy its token into the example.
+## Development
 
 ```bash
-latch serve
-latch serve token
 npm install
+npm run typecheck
 npm run build
-npm run example
+npm test
 ```
 
-Open the example, enter the gateway URL and token, and choose a session. It
-uses the public packages for the terminal, transcript, composer, and
-permission/question prompt. For remote access, point the URL at an SSH tunnel,
-Tailscale, or a reverse proxy that terminates TLS; `latch serve` itself is
-plaintext and loopback-only by default.
-
-## Operational decisions
-
-Rotating the token with `latch serve token` affects new HTTP and WebSocket
-handshakes immediately. Existing authenticated WebSocket connections stay
-open; reconnecting clients must use the newly minted token. This avoids a
-surprise terminal disconnect while still making a leaked token unusable for
-new connections.
-
-Terminal mode defaults to `control` for compatibility. A client that has
-discovered `features.readOnlyTerminal` may attach with `mode: 'read-only'`.
-That mode ignores WebSocket input and resize frames and starts the tmux attach
-client in read-only mode, so an observer cannot reflow or control the session.
-Controlling clients retain the existing resize behavior; use `latch resize
---pinned` where size stability matters.
-
-For `message` and `resolve`, the SDK sends a random `Idempotency-Key` unless a
-caller supplies one. A retry after an ambiguous network failure must reuse the
-same key. The gateway returns the initial completed response for ten minutes;
-the key cannot be reused for a different payload. This cache is intentionally
-in-memory, so a changed `gatewayInstanceId` means the caller must refresh
-state rather than replay a potentially applied operation. Arbitrary `keys`
-input remains intentionally non-idempotent.
-
-A terminal connection receives tmux's current visible screen only; it does
-not backfill scrollback. The events/chat surface is the v1 history view.
-Scrollback backfill via `capture-pane -S` remains deferred.
+The packages are private while Latch is unlicensed. A future public SDK needs a
+separate versioned design; it must start from the v2 conversation protocol, not
+from removed v1 APIs.

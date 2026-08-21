@@ -1,1 +1,0 @@
-{"sessionId":"851b055e-9cf0-45b7-85ca-5e61885e65c4","at":"2026-08-13T15:57:51Z","harnessVersion":"unknown","connectorEpoch":1,"type":"awaiting_input","requestId":"permission:Bash:2026-08-13T15:57:51Z","kind":"permission","prompt":"Write permission-test proof string to temp file","choices":["Allow once","Deny"]}

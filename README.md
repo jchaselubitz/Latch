@@ -11,9 +11,6 @@ latch                       # a persistent shell, attached
 latch run -- claude         # a persistent agent session
 latch list                  # what is running
 latch attach auth-refactor  # from anywhere, including a phone over SSH
-latch events auth-refactor --json  # normalized live agent events
-printf '%s' 'continue' | latch send auth-refactor --message -
-latch send auth-refactor --resolve permission-1='Allow once'
 latch remove old-session    # remove one exited/lost session
 latch update                # replace the CLI, remote helper, and tmux payload
 ```
@@ -28,7 +25,7 @@ than code.
 Download the standalone CLI payload and the universal macOS desktop app from the same
 [GitHub Release](https://github.com/jchaselubitz/Latch/releases/latest). The
 current desktop archive is
-[Latch-0.2608201210.0-macos.zip](https://github.com/jchaselubitz/Latch/releases/download/v0.2608201210.0/Latch-0.2608201210.0-macos.zip);
+[Latch-0.2608210522.0-macos.zip](https://github.com/jchaselubitz/Latch/releases/download/v0.2608210522.0/Latch-0.2608210522.0-macos.zip);
 it contains only `Latch.app`. Drag the app to Applications, then install the CLI
 independently with:
 
@@ -64,24 +61,10 @@ Multiple terminals can attach, closing a terminal does not stop the process,
 and session state is queried directly from tmux.
 
 When Latch launches Claude Code directly, it adds an owner-only observation
-plugin for that process only. The plugin records pending permission and
-question hooks beside the session transcript; it never changes the user's
-global Claude settings. `latch events` combines those hooks with transcript
-messages in a persistent event ledger, so numeric cursors remain stable even
-when Claude writes transcript records late.
-
-`latch capabilities <session> --json` reports the schema-defined interaction
-capabilities for the current screen. `latch send` reads messages from stdin,
-sends explicit key names with `--keys`, and binds `--resolve` to the exact
-pending request id. `--message` and `--resolve` are offered only when Latch
-knows the session is hosting Claude Code (a harness marker written at launch
-from `claude` argv, or the session's hook sidecar). Plain shells — including
-ones whose prompt uses the same `❯` glyph as Claude's composer — report
-`sendMessage=false` and keep `--keys` as the explicit caller-owns-the-risk
-path. Latch captures the live tmux pane before every operation: an empty
-Claude composer and a visible numbered prompt are accepted, while typed text,
-stale requests, exited sessions, and unrecognized screens are refused rather
-than receiving input.
+plugin for that process only. The plugin captures bounded raw source bindings
+and permission observations beside the session; it never changes the user's
+global Claude settings or exposes agent-specific records to clients. The v2
+Conversation Hub consumes those sources behind an agent-neutral boundary.
 
 ## Layout
 
@@ -89,8 +72,9 @@ than receiving input.
 crates/
   latch/                   # CLI, metadata, and private tmux engine
 apps/LatchDesktop/         # native macOS session manager + menu-bar extra
-packages/                  # generated harness contract and TypeScript clients
-fixtures/                  # harness schemas, raw transcripts, retained VT recordings
+packages/                  # protocol-major-2 TypeScript contracts and terminal client
+schemas/remote-access/v2/  # canonical gateway and conversation schemas
+fixtures/                  # raw agent transcripts and retained VT recordings
 docs/
 planning/
 ```
@@ -101,7 +85,7 @@ planning/
 cargo test --workspace          # unit, integration, and fixture suites
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
-python3 scripts/generate-harness-types.py  # regenerate Rust + TypeScript contracts
+python3 scripts/generate-remote-access-types.py  # regenerate v2 Rust + TypeScript contracts
 ./scripts/check-boundaries.sh   # dependency and layering rules
 swift test --package-path apps/LatchDesktop  # desktop contract tests (macOS)
 ```

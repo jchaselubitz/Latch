@@ -1,34 +1,30 @@
 {
-  "protocolVersion": 1,
+  "protocolVersion": 2,
   "generator": "Tools/generate-contract.py",
   "generated": {
     "path": "Sources/LatchMobileKit/Generated/LatchContract.swift",
-    "sha256": "647d0af613c988438ef04e20f24af1ac65f8f9423a2c3242c226a11ff5783c33"
+    "sha256": "2aa74e39ac5f8eb1ab2dafc7f6d86844b87f7becd9bddee61b82fa1db39daa00"
   },
   "schemas": [
     {
-      "source": "schemas/remote-access/v1/gateway-capabilities.schema.json",
-      "sha256": "37c6d47973e968d0761642f7b6d08598984494ec9bf7f98a5b96ab4b65f9a59e"
+      "source": "schemas/remote-access/v2/conversation-item.schema.json",
+      "sha256": "7d7a861469a47ba340e66d609c260f1879a8f5e6f52a5cf2c9d5e857e2ffd46a"
     },
     {
-      "source": "schemas/remote-access/v1/terminal-connection.schema.json",
-      "sha256": "2e292772a42afdb9a2009c2390fb6d0a8ef263a781bcf9428d8ee7d4e05db902"
+      "source": "schemas/remote-access/v2/conversation-state.schema.json",
+      "sha256": "9808c7ed56fad47e1692fec678d23a53bd1b44b909948e373073464998573171"
     },
     {
-      "source": "schemas/remote-access/v1/idempotency-key.schema.json",
-      "sha256": "85c11112d8b61a915d6d20fc2805c965ee17551e524439ce9d1019f571572675"
+      "source": "schemas/remote-access/v2/conversation-protocol.schema.json",
+      "sha256": "e80c1f809a4b51d1c9407a51cf3ef652cc7834226e458da5b7db0851225f2ee5"
     },
     {
-      "source": "schemas/remote-access/v1/send-request.schema.json",
-      "sha256": "d6eeab709d0793d633dd8bfbb4f129ab88434567d27e999ad330d6f91153262a"
+      "source": "schemas/remote-access/v2/gateway-capabilities.schema.json",
+      "sha256": "25d6559544488e3cc8e35472cf8e1d3e05fe06ada2e6cf43907e1a74ca375830"
     },
     {
-      "source": "fixtures/harness/harness-event.v1.json",
-      "sha256": "73aa35cbdabe5c3bfeef37fdf9ccd6b104ddfbb802507e212b56e2d558c88433"
-    },
-    {
-      "source": "fixtures/harness/interaction-capabilities.v1.json",
-      "sha256": "cd9d71cb5244b628cc2f23c39921fa89f3276aa161c142ce6db073679b846d29"
+      "source": "schemas/remote-access/v2/terminal-connection.schema.json",
+      "sha256": "6df98b8a5dd4b0c35f52d5827662d6713f7a4fd5d1ec9c3eab627cca06d26604"
     }
   ]
 }

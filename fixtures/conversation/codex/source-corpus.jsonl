@@ -1,0 +1,6 @@
+{"event":"user_message","id":"codex-user-1","created_at":"2026-01-01T00:00:00Z","text":"inspect the repository"}
+{"event":"tool_call","call_id":"codex-tool-1","parent_id":"codex-user-1","tool":"exec_command","state":"running"}
+{"event":"tool_result","call_id":"codex-tool-1","state":"completed","summary":"listed files"}
+{"event":"approval_request","request_id":"codex-approval-1","prompt":"Allow command?","choices":["Allow","Deny"]}
+{"event":"branch_rewrite","parent_id":"codex-user-1","replacement_id":"codex-user-2"}
+{"event":"terminal_input","source_id":"typed-1","text":"continue"}

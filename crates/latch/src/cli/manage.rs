@@ -476,11 +476,7 @@ pub fn capabilities() -> CapabilitiesReport {
             local_attach: true,
             cloud_attach: false,
             self_update: crate::cli::update::can_self_update(),
-            extensions: vec![
-                "harness-events-v1".to_owned(),
-                "claude-code-events".to_owned(),
-                "harness-interaction-v1".to_owned(),
-            ],
+            extensions: Vec::new(),
         },
     }
 }

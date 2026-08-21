@@ -1,0 +1,5 @@
+{"type":"user","uuid":"claude-user-1","parentUuid":null,"timestamp":"2026-01-01T00:00:00Z","message":{"content":"inspect the repository"}}
+{"type":"assistant","uuid":"claude-assistant-1","parentUuid":"claude-user-1","timestamp":"2026-01-01T00:00:01Z","message":{"content":[{"type":"text","text":"I will inspect it."},{"type":"tool_use","id":"claude-tool-1","name":"Bash","input":{"description":"List files"}}]}}
+{"type":"user","uuid":"claude-tool-result-1","parentUuid":"claude-assistant-1","timestamp":"2026-01-01T00:00:02Z","message":{"content":[{"type":"tool_result","tool_use_id":"claude-tool-1","content":"listed files"}]}}
+{"hook_event_name":"PermissionRequest","prompt_id":"claude-permission-1","tool_name":"Bash","timestamp":"2026-01-01T00:00:03Z","tool_input":{"description":"Allow command?"}}
+{"type":"assistant","uuid":"claude-assistant-rewrite","parentUuid":"claude-user-1","timestamp":"2026-01-01T00:00:04Z","message":{"content":[{"type":"text","text":"Rewritten response."}]}}

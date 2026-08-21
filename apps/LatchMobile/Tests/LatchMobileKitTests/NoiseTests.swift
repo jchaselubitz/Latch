@@ -45,9 +45,9 @@ final class NoiseTests: XCTestCase {
     private static let handshakeHashHex =
         "3a13d911a4b5693961c8c2071e28b2353dab55c91eb00315c5b32fc4af4d4d17"
     /// First transport record initiator to responder, plaintext
-    /// `GET /v1/capabilities`.
+    /// `GET /v2/capabilities`.
     private static let initiatorRecordHex =
-        "1ca64c904a22bdf89959dcaa9bcfc54d6b0485404f0086455043f7ed3dc634f797905d63"
+        "1ca64c904a22bef89959dcaa9bcfc54d6b048540002162ef066751076e32ca18ce8655c0"
     /// First transport record responder to initiator, plaintext
     /// `HTTP/1.1 200 OK`.
     private static let responderRecordHex =
@@ -145,7 +145,7 @@ final class NoiseTests: XCTestCase {
         let session = try initiator.split()
 
         XCTAssertEqual(
-            HexCoding.encode(try session.encrypt(Data("GET /v1/capabilities".utf8))),
+            HexCoding.encode(try session.encrypt(Data("GET /v2/capabilities".utf8))),
             Self.initiatorRecordHex
         )
         XCTAssertEqual(

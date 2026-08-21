@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://latch.cooperativ.dev/schemas/remote-access/v2/conversation-item.schema.json",
+  "title": "LatchConversationItemV2",
+  "description": "One stable item in a Conversation Hub projection. Clients order items only by ordinal; createdAt is display metadata. Ordinals are assigned by the Hub in observation order and are never renumbered.",
+  "type": "object",
+  "required": ["id", "ordinal", "createdAt", "kind"],
+  "properties": {
+    "id": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "ordinal": { "type": "integer", "minimum": 1 },
+    "createdAt": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "kind": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["type", "role", "text", "status"],
+          "properties": {
+            "type": { "const": "message" },
+            "role": { "enum": ["user", "assistant"] },
+            "text": { "type": "string" },
+            "status": {
+              "enum": ["submitted", "observed", "partial", "complete", "failed"],
+              "description": "partial is reserved in v2 and is not emitted initially. Clients render an unknown future status as complete."
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["type", "name", "summary", "status"],
+          "properties": {
+            "type": { "const": "tool" },
+            "name": { "type": "string", "minLength": 1, "maxLength": 256 },
+            "summary": { "type": "string", "maxLength": 16384 },
+            "status": { "enum": ["running", "succeeded", "failed"] },
+            "parentMessageId": { "type": ["string", "null"], "maxLength": 256 }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["type", "requestId", "requestType", "prompt", "choices", "status"],
+          "properties": {
+            "type": { "const": "request" },
+            "requestId": { "type": "string", "minLength": 1, "maxLength": 256 },
+            "requestType": { "enum": ["permission", "question"] },
+            "prompt": { "type": "string", "maxLength": 16384 },
+            "choices": {
+              "type": "array",
+              "maxItems": 128,
+              "items": { "type": "string", "maxLength": 4096 }
+            },
+            "status": { "enum": ["pending", "resolved", "dismissed"] }
+          },
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  "additionalProperties": false
+}

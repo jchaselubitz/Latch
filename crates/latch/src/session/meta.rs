@@ -211,7 +211,11 @@ pub fn sanitize_display(raw: &str) -> String {
 
 /// Hosted harness Latch recognizes from launch argv.
 pub fn harness_kind(argv: &[String]) -> Option<&'static str> {
-    (redact_command(argv) == "claude").then_some("claude")
+    match redact_command(argv).as_str() {
+        "claude" => Some("claude"),
+        "codex" => Some("codex"),
+        _ => None,
+    }
 }
 
 /// Reduces argv to the executable basename.
@@ -322,6 +326,13 @@ mod tests {
         let meta = derive_argv(vec!["/usr/local/bin/claude".to_owned(), "-p".to_owned()]);
         assert_eq!(meta.harness.as_deref(), Some("claude"));
         assert_eq!(meta.command_label, "claude");
+    }
+
+    #[test]
+    fn codex_argv_persists_a_harness_marker() {
+        let meta = derive_argv(vec!["/usr/local/bin/codex".to_owned(), "exec".to_owned()]);
+        assert_eq!(meta.harness.as_deref(), Some("codex"));
+        assert_eq!(meta.command_label, "codex");
     }
 
     #[test]

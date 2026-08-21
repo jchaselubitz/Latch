@@ -52,10 +52,6 @@ impl Harness {
         )
     }
 
-    fn create_session(&self, request: CreateSession<'_>) -> Value {
-        self.create_session_from_source(request, "test")
-    }
-
     fn create_session_from_source(&self, request: CreateSession<'_>, source_kind: &str) -> Value {
         let manifest = json!({
             "format_version": 1,
@@ -103,6 +99,16 @@ impl Harness {
             .map(str::to_owned)
     }
 
+    fn attach_attempts(&self) -> u64 {
+        let path = self.home.join("server.fake.json");
+        let state: Value = serde_json::from_slice(&fs::read(path).expect("read fake tmux state"))
+            .expect("parse fake tmux state");
+        state
+            .get("_attach_attempts")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+    }
+
     fn survive_stop(&self, id: &str) {
         self.patch_state(id, |entry| {
             entry["survive_stop"] = Value::Bool(true);
@@ -113,26 +119,6 @@ impl Harness {
         self.patch_state(id, |entry| {
             entry["fail_attach_remove"] = Value::Bool(true);
         });
-    }
-
-    fn set_screen(&self, id: &str, screen: &str) {
-        self.patch_state(id, |entry| {
-            entry["screen"] = Value::String(screen.to_owned());
-        });
-    }
-
-    fn fail_next_send_keys(&self, id: &str) {
-        self.patch_state(id, |entry| {
-            entry["fail_send_keys"] = Value::Bool(true);
-        });
-    }
-
-    fn mark_claude_harness(&self, id: &str) {
-        let path = self.home.join("sessions").join(id).join("meta.json");
-        let mut metadata: Value = serde_json::from_slice(&fs::read(&path).expect("read metadata"))
-            .expect("parse metadata");
-        metadata["harness"] = json!("claude");
-        fs::write(path, serde_json::to_vec(&metadata).unwrap()).expect("write metadata");
     }
 
     /// Stands in for `latch open`, which cannot run its macOS viewer here.
@@ -160,13 +146,6 @@ impl Harness {
                 .expect("parse fake tmux state");
         patch(&mut state[id]);
         fs::write(path, serde_json::to_vec(&state).unwrap()).expect("write fake tmux state");
-    }
-
-    fn state(&self, id: &str) -> Value {
-        let path = self.home.join("server.fake.json");
-        let state: Value = serde_json::from_slice(&fs::read(path).expect("read fake tmux state"))
-            .expect("parse fake tmux state");
-        state[id].clone()
     }
 }
 
@@ -384,132 +363,6 @@ fn multiple_and_nested_attaches_are_always_accepted_and_resize_can_pin() {
 }
 
 #[test]
-fn interaction_is_screen_gated_and_resolution_is_request_bound() {
-    let harness = Harness::new();
-    let created = harness.create("sleep 30");
-    let id = created["session"]["id"].as_str().unwrap();
-
-    harness.set_screen(id, "conversation\n\n  ❯   \n  ? for shortcuts\n");
-    let unknown = harness.json(&["capabilities", id, "--json"]);
-    assert_eq!(unknown["sendMessage"], false);
-    assert_eq!(unknown["sendKeys"], true);
-    assert_eq!(unknown["resolve"], false);
-    assert_eq!(unknown["canSend"]["ok"], false);
-    assert!(unknown["canSend"]["reason"]
-        .as_str()
-        .unwrap()
-        .contains("not a known Claude Code harness"));
-
-    let refused = harness
-        .command()
-        .args(["send", id, "--message", "-", "--json"])
-        .stdin(Stdio::null())
-        .output()
-        .expect("refuse message send");
-    assert!(!refused.status.success());
-    assert!(String::from_utf8_lossy(&refused.stderr).contains("not a known Claude Code harness"));
-
-    let keys = harness.json(&["send", id, "--keys", "C-c", "--json"]);
-    assert_eq!(keys["sent"], true);
-
-    harness.mark_claude_harness(id);
-    let idle = harness.json(&["capabilities", id, "--json"]);
-    assert_eq!(
-        idle,
-        json!({
-            "sendMessage": true,
-            "sendKeys": true,
-            "resolve": false,
-            "canSend": {"ok": true}
-        })
-    );
-
-    let mut message = harness
-        .command()
-        .args(["send", id, "--message", "-", "--json"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .expect("spawn message send");
-    std::io::Write::write_all(
-        message.stdin.as_mut().expect("message stdin"),
-        b"continue the task",
-    )
-    .unwrap();
-    let output = message.wait_with_output().expect("wait for message send");
-    assert_success(&output);
-    let state = harness.state(id);
-    assert_eq!(state["pasted"], json!(["continue the task"]));
-    assert_eq!(state["sent_keys"], json!(["C-c", "Enter"]));
-
-    let session_dir = harness.home.join("sessions").join(id);
-    fs::write(
-        session_dir.join("harness-hooks.jsonl"),
-        concat!(
-            "{\"session_id\":\"claude-session-3\",\"hook_event_name\":\"PermissionRequest\",",
-            "\"request_id\":\"permission-1\",\"tool_name\":\"Bash\",",
-            "\"tool_input\":{\"description\":\"Install the test runner\"},",
-            "\"permission_suggestions\":[{\"description\":\"Allow once\"},{\"description\":\"Deny\"}]}\n"
-        ),
-    )
-    .unwrap();
-    harness.set_screen(
-        id,
-        "Install the test runner\n  1. Allow once\n  2. Deny\nEnter to confirm\n",
-    );
-    let pending = harness.json(&["capabilities", id, "--json"]);
-    assert_eq!(pending["sendMessage"], false);
-    assert_eq!(pending["sendKeys"], true);
-    assert_eq!(pending["resolve"], true);
-    assert_eq!(pending["canSend"]["ok"], true);
-
-    let resolved = harness.json(&["send", id, "--resolve", "permission-1=Allow once", "--json"]);
-    assert_eq!(resolved["resolved"], true);
-    let state = harness.state(id);
-    assert_eq!(state["sent_keys"], json!(["C-c", "Enter", "1"]));
-
-    let repeated = harness
-        .command()
-        .args(["send", id, "--resolve", "permission-1=Allow once", "--json"])
-        .output()
-        .unwrap();
-    assert!(!repeated.status.success());
-    assert!(String::from_utf8_lossy(&repeated.stderr).contains("already resolved"));
-}
-
-#[test]
-fn paste_enter_failure_reports_unsubmitted_text_and_recovery() {
-    let harness = Harness::new();
-    let created = harness.create("sleep 30");
-    let id = created["session"]["id"].as_str().unwrap();
-    harness.mark_claude_harness(id);
-    harness.set_screen(id, "conversation\n\n  ❯   \n  ? for shortcuts\n");
-    harness.fail_next_send_keys(id);
-
-    let mut message = harness
-        .command()
-        .args(["send", id, "--message", "-"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn message send");
-    std::io::Write::write_all(
-        message.stdin.as_mut().expect("message stdin"),
-        b"do not submit this",
-    )
-    .unwrap();
-    let output = message.wait_with_output().expect("wait for message send");
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("pasted into the composer but not submitted"));
-    assert!(stderr.contains("latch send --keys C-u"));
-    let state = harness.state(id);
-    assert_eq!(state["pasted"], json!(["do not submit this"]));
-    assert_eq!(state["sent_keys"], json!([]));
-}
-
-#[test]
 fn stop_reports_failure_when_the_process_survives_sigkill() {
     let harness = Harness::new();
     let created = harness.create("sleep 30");
@@ -617,17 +470,16 @@ fn attach_retry_does_not_retry_a_session_that_is_gone() {
     let id = created["session"]["id"].as_str().unwrap();
     harness.fail_next_attach_and_remove(id);
 
-    let started = Instant::now();
     let output = harness
         .command()
         .args(["attach", "--retry", id])
         .output()
         .expect("attach retry");
     assert!(!output.status.success());
-    assert!(
-        started.elapsed() < Duration::from_millis(500),
-        "attach --retry retried a permanent failure: {:?}",
-        started.elapsed()
+    assert_eq!(
+        harness.attach_attempts(),
+        1,
+        "attach --retry retried a permanent failure"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -712,21 +564,21 @@ fn serve_exposes_sessions_and_a_pty_terminal_behind_a_bearer_token() {
 
     let unauth = http_get(HttpGet {
         addr: &gateway.addr,
-        path: "/v1/sessions",
+        path: "/v2/sessions",
         token: None,
         origin: None,
     });
     assert_eq!(unauth.status, 401);
     let wrong = http_get(HttpGet {
         addr: &gateway.addr,
-        path: "/v1/sessions",
+        path: "/v2/sessions",
         token: Some("nope"),
         origin: None,
     });
     assert_eq!(wrong.status, 401);
     let blocked = http_get(HttpGet {
         addr: &gateway.addr,
-        path: "/v1/sessions",
+        path: "/v2/sessions",
         token: Some(&gateway.token),
         origin: Some("https://evil.example"),
     });
@@ -734,7 +586,7 @@ fn serve_exposes_sessions_and_a_pty_terminal_behind_a_bearer_token() {
 
     let listed = http_get(HttpGet {
         addr: &gateway.addr,
-        path: "/v1/sessions",
+        path: "/v2/sessions",
         token: Some(&gateway.token),
         origin: None,
     });
@@ -744,7 +596,7 @@ fn serve_exposes_sessions_and_a_pty_terminal_behind_a_bearer_token() {
 
     let inspect = http_get(HttpGet {
         addr: &gateway.addr,
-        path: &format!("/v1/sessions/{id}"),
+        path: &format!("/v2/sessions/{id}"),
         token: Some(&gateway.token),
         origin: None,
     });
@@ -756,7 +608,7 @@ fn serve_exposes_sessions_and_a_pty_terminal_behind_a_bearer_token() {
 
     let missing = http_get(HttpGet {
         addr: &gateway.addr,
-        path: "/v1/sessions/missing-session",
+        path: "/v2/sessions/missing-session",
         token: Some(&gateway.token),
         origin: None,
     });
@@ -765,32 +617,39 @@ fn serve_exposes_sessions_and_a_pty_terminal_behind_a_bearer_token() {
     assert_eq!(missing_body["error"], "session not found");
     assert!(!missing.body.contains("no session named"));
 
-    let capabilities = http_get(HttpGet {
-        addr: &gateway.addr,
-        path: &format!("/v1/sessions/{id}/capabilities"),
-        token: Some(&gateway.token),
-        origin: None,
-    });
-    assert_eq!(capabilities.status, 200);
-    let capabilities_body: Value = serde_json::from_str(&capabilities.body).unwrap();
-    assert!(capabilities_body.get("canSend").is_some());
-    assert_eq!(capabilities_body["events"]["ok"], false);
-    assert_eq!(
-        capabilities_body["events"]["reason"],
-        "no harness connector"
-    );
-
     let gateway_caps = http_get(HttpGet {
         addr: &gateway.addr,
-        path: "/v1/capabilities",
+        path: "/v2/capabilities",
         token: Some(&gateway.token),
         origin: None,
     });
     assert_eq!(gateway_caps.status, 200);
     let gateway_body: Value = serde_json::from_str(&gateway_caps.body).unwrap();
-    assert_eq!(gateway_body["endpoints"]["events"], true);
-    assert_eq!(gateway_body["endpoints"]["send"], true);
+    assert_eq!(gateway_body["protocolVersion"], 2);
+    assert_eq!(gateway_body["endpoints"]["conversation"], true);
+    assert_eq!(gateway_body["operationRetentionSeconds"], 600);
     assert_eq!(gateway_body["endpoints"]["terminal"], true);
+
+    // The whole binary, not just the router: one authenticated conversation
+    // socket that speaks first and answers history without a second connection.
+    let (mut conversation, response) = connect_conversation(&gateway.addr, id, &gateway.token);
+    assert_eq!(
+        response.status(),
+        tungstenite::http::StatusCode::SWITCHING_PROTOCOLS
+    );
+    let first = read_conversation_message(&mut conversation);
+    assert_eq!(first["type"], "snapshot");
+    assert_eq!(first["reason"], "initial");
+    assert_eq!(first["revision"], 0);
+    conversation
+        .send(tungstenite::Message::Text(
+            r#"{"type":"history_request","requestId":"h","beforeOrdinal":1,"limit":10}"#.into(),
+        ))
+        .unwrap();
+    let page = read_conversation_message(&mut conversation);
+    assert_eq!(page["type"], "history_page");
+    assert_eq!(page["requestId"], "h");
+    conversation.close(None).ok();
 
     let (mut socket, response) = connect_terminal(TerminalWsRequest {
         addr: &gateway.addr,
@@ -819,7 +678,6 @@ fn serve_terminal_relays_bytes_in_both_directions() {
     let gateway = start_gateway_with(GatewayOptions {
         harness: &harness,
         echo_attach: true,
-        claude_config: None,
     });
 
     let (mut socket, _) = connect_terminal(TerminalWsRequest {
@@ -941,203 +799,6 @@ fn serve_refuses_non_loopback_bind_without_allow_remote() {
     assert!(!harness.home.join("serve.token").is_file());
 }
 
-#[test]
-fn serve_events_close_reports_missing_session_and_missing_connector() {
-    let harness = Harness::new();
-    let created = harness.create("sleep 30");
-    let id = created["session"]["id"].as_str().unwrap();
-    let gateway = start_gateway(&harness);
-
-    let (mut missing, _) = connect_events(EventsWsRequest {
-        addr: &gateway.addr,
-        session: "missing-session",
-        token: &gateway.token,
-        cursor: None,
-    });
-    assert_ws_close(&mut missing, 4404, "session not found");
-
-    let (mut no_connector, _) = connect_events(EventsWsRequest {
-        addr: &gateway.addr,
-        session: id,
-        token: &gateway.token,
-        cursor: None,
-    });
-    assert_ws_close(&mut no_connector, 4408, "no harness connector");
-}
-
-#[test]
-fn serve_events_streams_harness_events_from_a_cursor() {
-    let harness = Harness::new();
-    let created = harness.create_session(CreateSession {
-        shell: "sleep 30",
-        command_label: "claude",
-    });
-    let id = created["session"]["id"].as_str().unwrap();
-    let inspect = harness.json(&["inspect", id, "--json"]);
-    let cwd = inspect["cwd"].as_str().unwrap();
-    let claude_config = plant_claude_transcript(PlantTranscript {
-        harness: &harness,
-        cwd,
-    });
-    let gateway = start_gateway_with(GatewayOptions {
-        harness: &harness,
-        echo_attach: false,
-        claude_config: Some(claude_config),
-    });
-
-    let capabilities = http_get(HttpGet {
-        addr: &gateway.addr,
-        path: &format!("/v1/sessions/{id}/capabilities"),
-        token: Some(&gateway.token),
-        origin: None,
-    });
-    assert_eq!(capabilities.status, 200);
-    let capabilities_body: Value = serde_json::from_str(&capabilities.body).unwrap();
-    assert_eq!(capabilities_body["events"]["ok"], true);
-    assert_eq!(capabilities_body["events"]["connectorEpoch"], 1);
-
-    let (mut socket, _) = connect_events(EventsWsRequest {
-        addr: &gateway.addr,
-        session: id,
-        token: &gateway.token,
-        cursor: Some(4),
-    });
-    let first = read_json_event(&mut socket);
-    assert_eq!(first["type"], "assistant_message");
-    assert_eq!(first["text"], "The build passes.");
-    let second = read_json_event(&mut socket);
-    assert_eq!(second["type"], "status");
-    assert_eq!(second["status"], "idle");
-    socket.close(None).ok();
-
-    let (mut stale, _) = connect_events(EventsWsRequest {
-        addr: &gateway.addr,
-        session: id,
-        token: &gateway.token,
-        cursor: Some(99),
-    });
-    assert_ws_close(&mut stale, 4422, "stale cursor");
-}
-
-#[test]
-fn serve_send_is_capability_gated_and_refusals_are_409() {
-    let harness = Harness::new();
-    let created = harness.create("sleep 30");
-    let id = created["session"]["id"].as_str().unwrap();
-    harness.set_screen(id, "conversation\n\n  ❯   \n  ? for shortcuts\n");
-    let gateway = start_gateway(&harness);
-
-    let unauth = http_post(HttpPost {
-        addr: &gateway.addr,
-        path: &format!("/v1/sessions/{id}/send"),
-        token: None,
-        body: r#"{"message":"hello"}"#,
-    });
-    assert_eq!(unauth.status, 401);
-
-    let missing = http_post(HttpPost {
-        addr: &gateway.addr,
-        path: "/v1/sessions/missing-session/send",
-        token: Some(&gateway.token),
-        body: r#"{"message":"hello"}"#,
-    });
-    assert_eq!(missing.status, 404);
-    let missing_body: Value = serde_json::from_str(&missing.body).unwrap();
-    assert_eq!(missing_body["error"], "session not found");
-
-    let invalid = http_post(HttpPost {
-        addr: &gateway.addr,
-        path: &format!("/v1/sessions/{id}/send"),
-        token: Some(&gateway.token),
-        body: "{}",
-    });
-    assert_eq!(invalid.status, 400);
-    let invalid_body: Value = serde_json::from_str(&invalid.body).unwrap();
-    assert!(invalid_body["error"]
-        .as_str()
-        .unwrap()
-        .contains("exactly one"));
-
-    let refused = http_post(HttpPost {
-        addr: &gateway.addr,
-        path: &format!("/v1/sessions/{id}/send"),
-        token: Some(&gateway.token),
-        body: r#"{"message":"hello"}"#,
-    });
-    assert_eq!(refused.status, 409);
-    let refused_body: Value = serde_json::from_str(&refused.body).unwrap();
-    assert_eq!(refused_body["error"], "refused");
-    assert!(refused_body["reason"]
-        .as_str()
-        .unwrap()
-        .contains("not a known Claude Code harness"));
-
-    let keys = http_post(HttpPost {
-        addr: &gateway.addr,
-        path: &format!("/v1/sessions/{id}/send"),
-        token: Some(&gateway.token),
-        body: r#"{"keys":"C-c"}"#,
-    });
-    assert_eq!(keys.status, 200);
-    let keys_body: Value = serde_json::from_str(&keys.body).unwrap();
-    assert_eq!(keys_body["sent"], true);
-    assert_eq!(keys_body["operation"], "keys");
-
-    harness.mark_claude_harness(id);
-    let message = http_post(HttpPost {
-        addr: &gateway.addr,
-        path: &format!("/v1/sessions/{id}/send"),
-        token: Some(&gateway.token),
-        body: r#"{"message":"continue the task"}"#,
-    });
-    assert_eq!(message.status, 200, "{}", message.body);
-    let message_body: Value = serde_json::from_str(&message.body).unwrap();
-    assert_eq!(message_body["sent"], true);
-    assert_eq!(message_body["operation"], "message");
-    let state = harness.state(id);
-    assert_eq!(state["pasted"], json!(["continue the task"]));
-
-    let session_dir = harness.home.join("sessions").join(id);
-    fs::write(
-        session_dir.join("harness-hooks.jsonl"),
-        concat!(
-            "{\"session_id\":\"claude-session-3\",\"hook_event_name\":\"PermissionRequest\",",
-            "\"request_id\":\"permission-1\",\"tool_name\":\"Bash\",",
-            "\"tool_input\":{\"description\":\"Install the test runner\"},",
-            "\"permission_suggestions\":[{\"description\":\"Allow once\"},{\"description\":\"Deny\"}]}\n"
-        ),
-    )
-    .unwrap();
-    harness.set_screen(
-        id,
-        "Install the test runner\n  1. Allow once\n  2. Deny\nEnter to confirm\n",
-    );
-    let resolved = http_post(HttpPost {
-        addr: &gateway.addr,
-        path: &format!("/v1/sessions/{id}/send"),
-        token: Some(&gateway.token),
-        body: r#"{"resolve":{"requestId":"permission-1","choice":"Allow once"}}"#,
-    });
-    assert_eq!(resolved.status, 200, "{}", resolved.body);
-    let resolved_body: Value = serde_json::from_str(&resolved.body).unwrap();
-    assert_eq!(resolved_body["resolved"], true);
-    assert_eq!(resolved_body["requestId"], "permission-1");
-
-    let stale = http_post(HttpPost {
-        addr: &gateway.addr,
-        path: &format!("/v1/sessions/{id}/send"),
-        token: Some(&gateway.token),
-        body: r#"{"resolve":{"requestId":"permission-1","choice":"Allow once"}}"#,
-    });
-    assert_eq!(stale.status, 409);
-    let stale_body: Value = serde_json::from_str(&stale.body).unwrap();
-    assert_eq!(stale_body["error"], "refused");
-    assert!(stale_body["reason"]
-        .as_str()
-        .unwrap()
-        .contains("already resolved"));
-}
-
 struct CreateSession<'a> {
     shell: &'a str,
     command_label: &'a str,
@@ -1161,15 +822,12 @@ struct GatewayOptions<'a> {
     /// Make the fake tmux echo PTY input back, so a relay test can prove both
     /// directions rather than only that a socket opened.
     echo_attach: bool,
-    /// `CLAUDE_CONFIG_DIR` for `latch events` transcript discovery.
-    claude_config: Option<PathBuf>,
 }
 
 fn start_gateway(harness: &Harness) -> Gateway {
     start_gateway_with(GatewayOptions {
         harness,
         echo_attach: false,
-        claude_config: None,
     })
 }
 
@@ -1194,9 +852,6 @@ fn start_gateway_with(options: GatewayOptions<'_>) -> Gateway {
     serve.args(["serve", "--bind", "127.0.0.1:0"]);
     if options.echo_attach {
         serve.env("LATCH_FAKE_TMUX_ECHO", "1");
-    }
-    if let Some(claude_config) = &options.claude_config {
-        serve.env("CLAUDE_CONFIG_DIR", claude_config);
     }
     let mut child = serve
         .stderr(Stdio::piped())
@@ -1227,6 +882,48 @@ struct TerminalWsRequest<'a> {
     rows: Option<u16>,
 }
 
+/// Opens the v2 conversation socket against a live `latch serve`.
+fn connect_conversation(
+    addr: &str,
+    session: &str,
+    token: &str,
+) -> (
+    tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>,
+    tungstenite::http::Response<Option<Vec<u8>>>,
+) {
+    let http_request = tungstenite::http::Request::builder()
+        .uri(format!("ws://{addr}/v2/sessions/{session}/conversation"))
+        .header("Host", addr)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Connection", "Upgrade")
+        .header("Upgrade", "websocket")
+        .header("Sec-WebSocket-Version", "13")
+        .header(
+            "Sec-WebSocket-Key",
+            tungstenite::handshake::client::generate_key(),
+        )
+        .body(())
+        .unwrap();
+    tungstenite::connect(http_request).expect("conversation websocket")
+}
+
+/// Reads one conversation frame, ignoring control frames.
+fn read_conversation_message(
+    socket: &mut tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>,
+) -> Value {
+    if let tungstenite::stream::MaybeTlsStream::Plain(stream) = socket.get_ref() {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .expect("read timeout");
+    }
+    for _ in 0..32 {
+        if let tungstenite::Message::Text(text) = socket.read().expect("conversation frame") {
+            return serde_json::from_str(&text).expect("conversation json");
+        }
+    }
+    panic!("no conversation text frame arrived");
+}
+
 fn connect_terminal(
     request: TerminalWsRequest<'_>,
 ) -> (
@@ -1234,7 +931,7 @@ fn connect_terminal(
     tungstenite::http::Response<Option<Vec<u8>>>,
 ) {
     let mut uri = format!(
-        "ws://{}/v1/sessions/{}/terminal",
+        "ws://{}/v2/sessions/{}/terminal",
         request.addr, request.session
     );
     if let (Some(cols), Some(rows)) = (request.cols, request.rows) {
@@ -1254,126 +951,6 @@ fn connect_terminal(
         .body(())
         .unwrap();
     tungstenite::connect(http_request).expect("terminal websocket")
-}
-
-struct EventsWsRequest<'a> {
-    addr: &'a str,
-    session: &'a str,
-    token: &'a str,
-    cursor: Option<usize>,
-}
-
-fn connect_events(
-    request: EventsWsRequest<'_>,
-) -> (
-    tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>,
-    tungstenite::http::Response<Option<Vec<u8>>>,
-) {
-    let mut uri = format!(
-        "ws://{}/v1/sessions/{}/events",
-        request.addr, request.session
-    );
-    if let Some(cursor) = request.cursor {
-        uri.push_str(&format!("?cursor={cursor}"));
-    }
-    let http_request = tungstenite::http::Request::builder()
-        .uri(&uri)
-        .header("Host", request.addr)
-        .header("Authorization", format!("Bearer {}", request.token))
-        .header("Connection", "Upgrade")
-        .header("Upgrade", "websocket")
-        .header("Sec-WebSocket-Version", "13")
-        .header(
-            "Sec-WebSocket-Key",
-            tungstenite::handshake::client::generate_key(),
-        )
-        .body(())
-        .unwrap();
-    tungstenite::connect(http_request).expect("events websocket")
-}
-
-fn read_json_event(
-    socket: &mut tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>,
-) -> Value {
-    if let tungstenite::stream::MaybeTlsStream::Plain(stream) = socket.get_ref() {
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .expect("read timeout");
-    }
-    let deadline = Instant::now() + Duration::from_secs(8);
-    loop {
-        let message = socket.read().expect("events websocket message");
-        match message {
-            tungstenite::Message::Text(text) => {
-                return serde_json::from_str(text.as_str()).expect("HarnessEvent JSON");
-            }
-            tungstenite::Message::Ping(_) | tungstenite::Message::Pong(_) => {}
-            other => {
-                assert!(
-                    Instant::now() < deadline,
-                    "timed out waiting for an event, last={other:?}"
-                );
-            }
-        }
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for an event frame"
-        );
-    }
-}
-
-fn assert_ws_close(
-    socket: &mut tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>,
-    code: u16,
-    reason: &str,
-) {
-    if let tungstenite::stream::MaybeTlsStream::Plain(stream) = socket.get_ref() {
-        stream
-            .set_read_timeout(Some(Duration::from_secs(3)))
-            .expect("read timeout");
-    }
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let message = socket.read().expect("websocket message");
-        match message {
-            tungstenite::Message::Close(Some(frame)) => {
-                assert_eq!(u16::from(frame.code), code);
-                assert!(
-                    frame.reason.as_str().contains(reason),
-                    "close reason {}",
-                    frame.reason
-                );
-                return;
-            }
-            tungstenite::Message::Close(None) => panic!("silent close without code"),
-            other => {
-                assert!(
-                    Instant::now() < deadline,
-                    "timed out waiting for close {code}, last={other:?}"
-                );
-            }
-        }
-    }
-}
-
-struct PlantTranscript<'a> {
-    harness: &'a Harness,
-    cwd: &'a str,
-}
-
-fn plant_claude_transcript(request: PlantTranscript<'_>) -> PathBuf {
-    let claude_config = request.harness.home.join("claude");
-    let encoded: String = request
-        .cwd
-        .chars()
-        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
-        .collect();
-    let project = claude_config.join("projects").join(encoded);
-    fs::create_dir_all(&project).expect("claude project dir");
-    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../fixtures/harness/claude-code/conversation/raw.jsonl");
-    fs::copy(&fixture, project.join("run-1.jsonl")).expect("plant transcript");
-    claude_config
 }
 
 /// Reads terminal frames until `needle` shows up or the deadline passes.
@@ -1444,41 +1021,19 @@ struct HttpGet<'a> {
     origin: Option<&'a str>,
 }
 
-struct HttpPost<'a> {
-    addr: &'a str,
-    path: &'a str,
-    token: Option<&'a str>,
-    body: &'a str,
-}
-
 struct HttpRequest<'a> {
     addr: &'a str,
-    method: &'a str,
     path: &'a str,
     token: Option<&'a str>,
     origin: Option<&'a str>,
-    body: Option<&'a str>,
 }
 
 fn http_get(request: HttpGet<'_>) -> HttpResponse {
     http_request(HttpRequest {
         addr: request.addr,
-        method: "GET",
         path: request.path,
         token: request.token,
         origin: request.origin,
-        body: None,
-    })
-}
-
-fn http_post(request: HttpPost<'_>) -> HttpResponse {
-    http_request(HttpRequest {
-        addr: request.addr,
-        method: "POST",
-        path: request.path,
-        token: request.token,
-        origin: None,
-        body: Some(request.body),
     })
 }
 
@@ -1488,8 +1043,7 @@ fn http_request(request: HttpRequest<'_>) -> HttpResponse {
         .set_read_timeout(Some(Duration::from_secs(3)))
         .unwrap();
     let mut message = format!(
-        "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n",
-        method = request.method,
+        "GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n",
         path = request.path,
         addr = request.addr
     );
@@ -1499,14 +1053,7 @@ fn http_request(request: HttpRequest<'_>) -> HttpResponse {
     if let Some(origin) = request.origin {
         message.push_str(&format!("Origin: {origin}\r\n"));
     }
-    if let Some(body) = request.body {
-        message.push_str("Content-Type: application/json\r\n");
-        message.push_str(&format!("Content-Length: {}\r\n", body.len()));
-    }
     message.push_str("\r\n");
-    if let Some(body) = request.body {
-        message.push_str(body);
-    }
     stream.write_all(message.as_bytes()).unwrap();
     let mut raw = String::new();
     stream.read_to_string(&mut raw).unwrap();

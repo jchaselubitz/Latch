@@ -67,21 +67,11 @@ final class ContractFreshnessTests: XCTestCase {
         }
     }
 
-    func testTheGeneratedEventListCoversTheVendoredSchema() throws {
+    func testTheConversationSchemaReservesPartialStatus() throws {
         let data = try Data(
-            contentsOf: app.appendingPathComponent("Contract/schemas/harness-event.v1.json")
+            contentsOf: app.appendingPathComponent("Contract/schemas/conversation-item.schema.json")
         )
-        let schema = try XCTUnwrap(
-            try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        )
-        let properties = try XCTUnwrap(schema["properties"] as? [String: Any])
-        let type = try XCTUnwrap(properties["type"] as? [String: Any])
-        let declared = try XCTUnwrap(type["enum"] as? [String])
-        XCTAssertEqual(
-            LatchContract.harnessEventTypes,
-            declared,
-            "a harness event type was added upstream; run Tools/generate-contract.py"
-        )
+        XCTAssertTrue(String(decoding: data, as: UTF8.self).contains("\"partial\""))
     }
 
     /// A local SHA-256, so the check does not need CryptoKit on every platform

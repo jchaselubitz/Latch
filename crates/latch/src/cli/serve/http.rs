@@ -1,47 +1,38 @@
-//! `/v1` HTTP and WebSocket surface.
+//! Protocol-major-2 HTTP and WebSocket gateway.
 
-use std::collections::hash_map::DefaultHasher;
-use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
-use std::hash::{Hash, Hasher};
 use std::io::Write;
+use std::net::SocketAddr;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path as FsPath;
-use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
-use axum::extract::rejection::JsonRejection;
 use axum::extract::ws::WebSocketUpgrade;
-use axum::extract::{Path, Query, State};
+use axum::extract::{ConnectInfo, Extension, Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, Method, Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::get;
 use axum::{Json, Router};
-use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde::Serialize;
 use tokio::net::TcpListener;
-use tokio::sync::{oneshot, Mutex};
 
 use super::auth::{
     load_token, origin_allowed, presented_token, selected_subprotocol, token_matches,
 };
-use super::contract::{GatewayFeatures, GatewayReadiness, REMOTE_ACCESS_SCHEMA_VERSION};
-use super::events::{self, EventsConnect, EventsQuery};
+use super::contract::{
+    GatewayFeatures, GatewayReadiness, OPERATION_RETENTION_SECONDS, REMOTE_ACCESS_SCHEMA_VERSION,
+};
+use super::conversation::{self, ConversationConnect, ConversationQuery};
+use super::routes::{route_for, Grant, RouteId, RouteSpec, DEVICE_GRANT_HEADER, ROUTES};
 use super::terminal::{self, TerminalConnect, TerminalQuery};
 use super::ServeOptions;
 use crate::cli::attach::SessionLookupError;
 use crate::cli::json::CapabilitiesReport;
 use crate::cli::manage::{self, InspectOptions, ListOptions};
-use crate::harness::{
-    self, EventsAvailability, InteractionCapabilities, InteractionOptions, SendAction, SendInvalid,
-    SendOptions, SendRefused,
-};
+use crate::conversation::ConversationHub;
 use crate::session::paths::{LatchHome, DIR_MODE, FILE_MODE};
-
-const IDEMPOTENCY_TTL: Duration = Duration::from_secs(10 * 60);
-const IDEMPOTENCY_LIMIT: usize = 1024;
 
 #[derive(Clone)]
 struct AppState {
@@ -50,37 +41,14 @@ struct AppState {
     latch_bin: std::path::PathBuf,
     bind_is_loopback: bool,
     gateway_instance_id: String,
-    idempotency: Arc<Mutex<IdempotencyStore>>,
-}
-
-#[derive(Default)]
-struct IdempotencyStore {
-    entries: HashMap<IdempotencyCacheKey, IdempotencyEntry>,
-}
-
-#[derive(Hash, PartialEq, Eq)]
-struct IdempotencyCacheKey {
-    session_id: String,
-    key: String,
-}
-
-enum IdempotencyEntry {
-    InFlight {
-        fingerprint: u64,
-        waiters: Vec<oneshot::Sender<()>>,
-    },
-    Complete {
-        fingerprint: u64,
-        report: harness::SendReport,
-        completed_at: Instant,
-    },
+    /// Also keeps the exclusive Hub writer lock alive for the gateway lifetime.
+    conversation_hub: ConversationHub,
 }
 
 #[derive(Debug)]
 struct ApiError {
     status: StatusCode,
     message: String,
-    reason: Option<String>,
 }
 
 impl ApiError {
@@ -88,51 +56,39 @@ impl ApiError {
         Self {
             status,
             message: message.into(),
-            reason: None,
-        }
-    }
-
-    fn refused(reason: impl Into<String>) -> Self {
-        Self {
-            status: StatusCode::CONFLICT,
-            message: "refused".to_owned(),
-            reason: Some(reason.into()),
         }
     }
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let body = match &self.reason {
-            Some(reason) => json!({ "error": self.message, "reason": reason }),
-            None => json!({ "error": self.message }),
-        };
-        (self.status, Json(body)).into_response()
+        (
+            self.status,
+            Json(serde_json::json!({ "error": self.message })),
+        )
+            .into_response()
     }
 }
 
 /// Binds and serves until SIGINT/SIGTERM.
 pub async fn run(options: ServeOptions) -> anyhow::Result<()> {
     let gateway_instance_id = gateway_instance_id();
+    let connector_home = options.home.clone();
+    let conversation_hub = ConversationHub::with_connector_factory(
+        options.home.root().to_owned(),
+        std::sync::Arc::new(move |id| {
+            crate::conversation::connector_for_session(connector_home.clone(), id)
+        }),
+    )?;
     let state = AppState {
         home: options.home,
         token_file: options.token_file,
         latch_bin: options.latch_bin,
         bind_is_loopback: options.bind.ip().is_loopback(),
         gateway_instance_id: gateway_instance_id.clone(),
-        idempotency: Arc::new(Mutex::new(IdempotencyStore::default())),
+        conversation_hub,
     };
-    let app = Router::new()
-        .route("/v1/capabilities", get(gateway_capabilities))
-        .route("/v1/sessions", get(list_sessions))
-        .route("/v1/sessions/{id}", get(inspect_session))
-        .route("/v1/sessions/{id}/capabilities", get(session_capabilities))
-        .route("/v1/sessions/{id}/send", post(send_to_session))
-        .route("/v1/sessions/{id}/terminal", get(terminal_ws))
-        .route("/v1/sessions/{id}/events", get(events_ws))
-        .layer(middleware::from_fn_with_state(state.clone(), require_token))
-        .layer(middleware::from_fn(add_cors))
-        .with_state(state);
+    let app = router(state);
 
     let listener = TcpListener::bind(options.bind)
         .await
@@ -151,10 +107,52 @@ pub async fn run(options: ServeOptions) -> anyhow::Result<()> {
         )?;
     }
     eprintln!("latch serve listening on {addr}");
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .context("serve failed")
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .context("serve failed")
+}
+
+fn router(state: AppState) -> Router {
+    let mut router = Router::<AppState>::new();
+    for spec in ROUTES {
+        router = register(router, *spec);
+    }
+    router
+        .layer(middleware::from_fn_with_state(state.clone(), require_token))
+        .layer(middleware::from_fn(add_cors))
+        .with_state(state)
+}
+
+/// Builds the production router, including the token and grant middleware, for
+/// tests that need a real socket rather than a hand-rolled handler.
+#[cfg(test)]
+pub(crate) fn test_router(
+    home: LatchHome,
+    token_file: std::path::PathBuf,
+    conversation_hub: ConversationHub,
+) -> Router {
+    router(AppState {
+        home,
+        token_file,
+        latch_bin: std::path::PathBuf::from("latch"),
+        bind_is_loopback: true,
+        gateway_instance_id: "gw-test".to_owned(),
+        conversation_hub,
+    })
+}
+
+fn register(router: Router<AppState>, spec: RouteSpec) -> Router<AppState> {
+    match spec.id {
+        RouteId::Capabilities => router.route(spec.pattern, get(gateway_capabilities)),
+        RouteId::Sessions => router.route(spec.pattern, get(list_sessions)),
+        RouteId::Session => router.route(spec.pattern, get(inspect_session)),
+        RouteId::Terminal => router.route(spec.pattern, get(terminal_ws)),
+        RouteId::Conversation => router.route(spec.pattern, get(conversation_ws)),
+    }
 }
 
 async fn shutdown_signal() {
@@ -197,19 +195,17 @@ fn apply_cors(headers: &mut HeaderMap, origin: Option<&HeaderValue>) {
     }
     headers.insert(
         header::ACCESS_CONTROL_ALLOW_HEADERS,
-        HeaderValue::from_static(
-            "Authorization, Content-Type, Idempotency-Key, Sec-WebSocket-Protocol",
-        ),
+        HeaderValue::from_static("Authorization, Content-Type, Sec-WebSocket-Protocol"),
     );
     headers.insert(
         header::ACCESS_CONTROL_ALLOW_METHODS,
-        HeaderValue::from_static("GET, POST, OPTIONS"),
+        HeaderValue::from_static("GET, OPTIONS"),
     );
 }
 
 async fn require_token(
     State(state): State<AppState>,
-    request: Request<axum::body::Body>,
+    mut request: Request<axum::body::Body>,
     next: Next,
 ) -> Result<Response, ApiError> {
     if request.method() == Method::OPTIONS {
@@ -226,6 +222,49 @@ async fn require_token(
     if !token_matches(&expected, &presented) {
         return Err(ApiError::new(StatusCode::UNAUTHORIZED, "invalid token"));
     }
+
+    let peer_is_loopback = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(address)| address.ip().is_loopback())
+        .unwrap_or(state.bind_is_loopback);
+    let grant =
+        match request.headers().get(DEVICE_GRANT_HEADER) {
+            Some(value) if peer_is_loopback => value
+                .to_str()
+                .ok()
+                .and_then(Grant::from_header_value)
+                .ok_or_else(|| ApiError::new(StatusCode::BAD_REQUEST, "invalid device grant"))?,
+            Some(_) => {
+                return Err(ApiError::new(
+                    StatusCode::FORBIDDEN,
+                    "device grant header is trusted only from the loopback proxy",
+                ))
+            }
+            None if peer_is_loopback => Grant::Control,
+            None => {
+                return Err(ApiError::new(
+                    StatusCode::FORBIDDEN,
+                    "non-loopback requests require the paired proxy",
+                ))
+            }
+        };
+    request.headers_mut().remove(DEVICE_GRANT_HEADER);
+    let method = request.method().as_str();
+    let target = request
+        .uri()
+        .path_and_query()
+        .map(|value| value.as_str())
+        .unwrap_or_else(|| request.uri().path());
+    let (_, required) = route_for(method, target)
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "route not found"))?;
+    if !grant.permits(required) {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "device grant does not permit this route",
+        ));
+    }
+    request.extensions_mut().insert(grant);
     Ok(next.run(request).await)
 }
 
@@ -237,24 +276,14 @@ struct GatewayCapabilities {
     endpoints: GatewayEndpoints,
     features: GatewayFeatures,
     gateway_instance_id: String,
+    operation_retention_seconds: u64,
 }
 
 #[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
 struct GatewayEndpoints {
     sessions: bool,
-    session_capabilities: bool,
     terminal: bool,
-    events: bool,
-    send: bool,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SessionCapabilitiesDocument {
-    #[serde(flatten)]
-    interaction: InteractionCapabilities,
-    events: EventsAvailability,
+    conversation: bool,
 }
 
 async fn gateway_capabilities(State(state): State<AppState>) -> Response {
@@ -262,16 +291,14 @@ async fn gateway_capabilities(State(state): State<AppState>) -> Response {
         engine: manage::capabilities(),
         endpoints: GatewayEndpoints {
             sessions: true,
-            session_capabilities: true,
             terminal: true,
-            events: true,
-            send: true,
+            conversation: true,
         },
         features: GatewayFeatures {
-            idempotency_keys: true,
             read_only_terminal: true,
         },
         gateway_instance_id: state.gateway_instance_id,
+        operation_retention_seconds: OPERATION_RETENTION_SECONDS,
     })
     .into_response()
 }
@@ -298,133 +325,13 @@ async fn inspect_session(
     Ok(Json(report).into_response())
 }
 
-async fn session_capabilities(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<Response, ApiError> {
-    let home = state.home.clone();
-    let report =
-        tokio::task::spawn_blocking(move || -> anyhow::Result<SessionCapabilitiesDocument> {
-            let interaction = harness::interaction_capabilities(InteractionOptions {
-                home: home.clone(),
-                session: id.clone(),
-            })?;
-            let events = harness::events_availability(InteractionOptions { home, session: id })?;
-            Ok(SessionCapabilitiesDocument {
-                interaction,
-                events,
-            })
-        })
-        .await
-        .map_err(|_| internal("session capabilities"))?
-        .map_err(map_engine_error)?;
-    Ok(Json(report).into_response())
-}
-
-#[derive(Debug, Deserialize)]
-struct SendRequestBody {
-    message: Option<String>,
-    keys: Option<String>,
-    resolve: Option<ResolveBody>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ResolveBody {
-    request_id: String,
-    choice: String,
-}
-
-fn send_action(body: SendRequestBody) -> Result<SendAction, ApiError> {
-    let supplied = usize::from(body.message.is_some())
-        + usize::from(body.keys.is_some())
-        + usize::from(body.resolve.is_some());
-    if supplied != 1 {
-        return Err(ApiError::new(
-            StatusCode::BAD_REQUEST,
-            "choose exactly one of message, keys, or resolve",
-        ));
-    }
-    if let Some(message) = body.message {
-        return Ok(SendAction::Message(message));
-    }
-    if let Some(keys) = body.keys {
-        return Ok(SendAction::Keys(keys));
-    }
-    let resolve = body.resolve.expect("one send operation was supplied");
-    Ok(SendAction::Resolve {
-        request_id: resolve.request_id,
-        choice: resolve.choice,
-    })
-}
-
-async fn send_to_session(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    headers: HeaderMap,
-    body: Result<Json<SendRequestBody>, JsonRejection>,
-) -> Result<Response, ApiError> {
-    let Json(body) =
-        body.map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid send body"))?;
-    let action = send_action(body)?;
-    let key = idempotency_key(&headers)?;
-    let fingerprint = action_fingerprint(&action);
-    if key.is_some() && fingerprint.is_none() {
-        return Err(ApiError::new(
-            StatusCode::BAD_REQUEST,
-            "Idempotency-Key is supported only for message and resolve operations",
-        ));
-    }
-
-    let home = state.home.clone();
-    let session_id = tokio::task::spawn_blocking(move || manage::resolve_existing(&home, &id))
-        .await
-        .map_err(|_| internal("resolve session"))?
-        .map_err(map_engine_error)?
-        .to_string();
-
-    let cache_key = key.map(|key| IdempotencyCacheKey {
-        key,
-        session_id: session_id.clone(),
-    });
-    if let (Some(cache_key), Some(fingerprint)) = (&cache_key, fingerprint) {
-        if let Some(report) =
-            begin_idempotent_request(&state.idempotency, cache_key, fingerprint).await?
-        {
-            return Ok(Json(report).into_response());
-        }
-    }
-
-    let home = state.home.clone();
-    let report = tokio::task::spawn_blocking(move || {
-        harness::send(SendOptions {
-            home,
-            session: session_id,
-            action,
-        })
-    })
-    .await
-    .map_err(|_| internal("send"))?
-    .map_err(map_engine_error);
-    if let (Some(cache_key), Some(fingerprint)) = (&cache_key, fingerprint) {
-        finish_idempotent_request(
-            &state.idempotency,
-            cache_key,
-            fingerprint,
-            report.as_ref().ok(),
-        )
-        .await;
-    }
-    let report = report?;
-    Ok(Json(report).into_response())
-}
-
 async fn terminal_ws(
     ws: WebSocketUpgrade,
     Path(id): Path<String>,
     Query(query): Query<TerminalQuery>,
     State(state): State<AppState>,
     headers: HeaderMap,
+    Extension(_grant): Extension<Grant>,
 ) -> Response {
     let mut upgrade = ws;
     if let Some(protocol) = selected_subprotocol(&headers) {
@@ -441,147 +348,28 @@ async fn terminal_ws(
     upgrade.on_upgrade(move |socket| terminal::run(socket, connect))
 }
 
-fn idempotency_key(headers: &HeaderMap) -> Result<Option<String>, ApiError> {
-    let Some(value) = headers.get("idempotency-key") else {
-        return Ok(None);
+async fn conversation_ws(
+    ws: WebSocketUpgrade,
+    Path(id): Path<String>,
+    Query(query): Query<ConversationQuery>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Extension(grant): Extension<Grant>,
+) -> Response {
+    let mut upgrade = ws;
+    if let Some(protocol) = selected_subprotocol(&headers) {
+        upgrade = upgrade.protocols([protocol]);
+    }
+    // The proxy authorized this one upgrade; the Hub re-checks the grant on
+    // every operation frame that follows.
+    let connect = ConversationConnect {
+        home: state.home.clone(),
+        hub: state.conversation_hub.clone(),
+        session: id,
+        grant,
+        query,
     };
-    let key = value
-        .to_str()
-        .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid Idempotency-Key"))?;
-    if key.is_empty()
-        || key.len() > 128
-        || !key
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
-    {
-        return Err(ApiError::new(
-            StatusCode::BAD_REQUEST,
-            "invalid Idempotency-Key",
-        ));
-    }
-    Ok(Some(key.to_owned()))
-}
-
-fn action_fingerprint(action: &SendAction) -> Option<u64> {
-    let mut hasher = DefaultHasher::new();
-    match action {
-        SendAction::Message(message) => {
-            "message".hash(&mut hasher);
-            message.hash(&mut hasher);
-        }
-        SendAction::Resolve { request_id, choice } => {
-            "resolve".hash(&mut hasher);
-            request_id.hash(&mut hasher);
-            choice.hash(&mut hasher);
-        }
-        SendAction::Keys(_) => return None,
-    }
-    Some(hasher.finish())
-}
-
-async fn begin_idempotent_request(
-    store: &Arc<Mutex<IdempotencyStore>>,
-    key: &IdempotencyCacheKey,
-    fingerprint: u64,
-) -> Result<Option<harness::SendReport>, ApiError> {
-    loop {
-        let waiting = {
-            let mut store = store.lock().await;
-            prune_idempotency(&mut store);
-            match store.entries.get_mut(key) {
-                Some(IdempotencyEntry::Complete {
-                    fingerprint: stored,
-                    report,
-                    ..
-                }) => {
-                    if *stored != fingerprint {
-                        return Err(ApiError::new(
-                            StatusCode::CONFLICT,
-                            "Idempotency-Key was already used for a different operation",
-                        ));
-                    }
-                    return Ok(Some(report.clone()));
-                }
-                Some(IdempotencyEntry::InFlight {
-                    fingerprint: stored,
-                    waiters,
-                }) => {
-                    if *stored != fingerprint {
-                        return Err(ApiError::new(
-                            StatusCode::CONFLICT,
-                            "Idempotency-Key was already used for a different operation",
-                        ));
-                    }
-                    let (sender, receiver) = oneshot::channel();
-                    waiters.push(sender);
-                    Some(receiver)
-                }
-                None => {
-                    if store.entries.len() >= IDEMPOTENCY_LIMIT {
-                        return Err(ApiError::new(
-                            StatusCode::SERVICE_UNAVAILABLE,
-                            "idempotency cache is full; retry with the same key",
-                        ));
-                    }
-                    store.entries.insert(
-                        IdempotencyCacheKey {
-                            session_id: key.session_id.clone(),
-                            key: key.key.clone(),
-                        },
-                        IdempotencyEntry::InFlight {
-                            fingerprint,
-                            waiters: Vec::new(),
-                        },
-                    );
-                    return Ok(None);
-                }
-            }
-        };
-        if let Some(receiver) = waiting {
-            let _ = receiver.await;
-        }
-    }
-}
-
-async fn finish_idempotent_request(
-    store: &Arc<Mutex<IdempotencyStore>>,
-    key: &IdempotencyCacheKey,
-    fingerprint: u64,
-    report: Option<&harness::SendReport>,
-) {
-    let mut store = store.lock().await;
-    let Some(IdempotencyEntry::InFlight {
-        fingerprint: stored,
-        waiters,
-    }) = store.entries.remove(key)
-    else {
-        return;
-    };
-    if stored == fingerprint {
-        if let Some(report) = report {
-            store.entries.insert(
-                IdempotencyCacheKey {
-                    session_id: key.session_id.clone(),
-                    key: key.key.clone(),
-                },
-                IdempotencyEntry::Complete {
-                    fingerprint,
-                    report: report.clone(),
-                    completed_at: Instant::now(),
-                },
-            );
-        }
-        for waiter in waiters {
-            let _ = waiter.send(());
-        }
-    }
-}
-
-fn prune_idempotency(store: &mut IdempotencyStore) {
-    let now = Instant::now();
-    store.entries.retain(|_, entry| {
-        !matches!(entry, IdempotencyEntry::Complete { completed_at, .. } if now.duration_since(*completed_at) > IDEMPOTENCY_TTL)
-    });
+    upgrade.on_upgrade(move |socket| conversation::run(socket, connect))
 }
 
 fn gateway_instance_id() -> String {
@@ -630,39 +418,7 @@ fn write_readiness(path: &FsPath, readiness: &GatewayReadiness) -> anyhow::Resul
     Ok(())
 }
 
-async fn events_ws(
-    ws: WebSocketUpgrade,
-    Path(id): Path<String>,
-    Query(query): Query<EventsQuery>,
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Response {
-    let mut upgrade = ws;
-    if let Some(protocol) = selected_subprotocol(&headers) {
-        upgrade = upgrade.protocols([protocol]);
-    }
-    let connect = EventsConnect {
-        home: state.home.clone(),
-        latch_bin: state.latch_bin.clone(),
-        session: id,
-        cursor: query.cursor.unwrap_or(0),
-    };
-    upgrade.on_upgrade(move |socket| events::run(socket, connect))
-}
-
 fn map_engine_error(error: anyhow::Error) -> ApiError {
-    if let Some(refused) = error
-        .chain()
-        .find_map(|cause| cause.downcast_ref::<SendRefused>())
-    {
-        return ApiError::refused(refused.reason.clone());
-    }
-    if let Some(invalid) = error
-        .chain()
-        .find_map(|cause| cause.downcast_ref::<SendInvalid>())
-    {
-        return ApiError::new(StatusCode::BAD_REQUEST, invalid.reason.clone());
-    }
     if let Some(lookup) = error
         .chain()
         .find_map(|cause| cause.downcast_ref::<SessionLookupError>())
@@ -682,7 +438,15 @@ fn internal(what: &str) -> ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::attach::SessionLookupError;
+
+    #[test]
+    fn every_registered_handler_comes_from_the_shared_route_table() {
+        assert_eq!(ROUTES.len(), 5);
+        let mut ids = ROUTES.iter().map(|route| route.id).collect::<Vec<_>>();
+        ids.sort_by_key(|id| *id as u8);
+        ids.dedup();
+        assert_eq!(ids.len(), ROUTES.len());
+    }
 
     #[test]
     fn missing_session_is_404_without_internal_detail() {
@@ -695,181 +459,5 @@ mod tests {
         assert_eq!(mapped.status, StatusCode::NOT_FOUND);
         assert_eq!(mapped.message, "session not found");
         assert!(!mapped.message.contains("secret-name"));
-    }
-
-    #[test]
-    fn absent_tmux_session_is_404() {
-        let mapped = map_engine_error(
-            SessionLookupError::NotInServer {
-                session: "ses_dead".to_owned(),
-            }
-            .into(),
-        );
-        assert_eq!(mapped.status, StatusCode::NOT_FOUND);
-        assert_eq!(mapped.message, "session not found");
-    }
-
-    #[test]
-    fn ambiguous_name_is_conflict_without_the_name() {
-        let mapped = map_engine_error(
-            SessionLookupError::Ambiguous {
-                session: "agent".to_owned(),
-            }
-            .into(),
-        );
-        assert_eq!(mapped.status, StatusCode::CONFLICT);
-        assert_eq!(mapped.message, "session name is ambiguous");
-        assert!(!mapped.message.contains("agent"));
-    }
-
-    #[test]
-    fn other_errors_are_generic_500() {
-        let mapped = map_engine_error(anyhow::anyhow!("cannot read /private/path/meta.json"));
-        assert_eq!(mapped.status, StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(mapped.message, "internal error");
-        assert!(mapped.reason.is_none());
-        assert!(!mapped.message.contains("/private"));
-    }
-
-    #[test]
-    fn send_refusal_is_409_with_a_reason() {
-        let mapped = map_engine_error(
-            SendRefused {
-                reason: "the Claude Code composer already contains text".to_owned(),
-            }
-            .into(),
-        );
-        assert_eq!(mapped.status, StatusCode::CONFLICT);
-        assert_eq!(mapped.message, "refused");
-        assert_eq!(
-            mapped.reason.as_deref(),
-            Some("the Claude Code composer already contains text")
-        );
-    }
-
-    #[test]
-    fn send_invalid_input_is_400() {
-        let mapped = map_engine_error(
-            SendInvalid {
-                reason: "message must not be empty".to_owned(),
-            }
-            .into(),
-        );
-        assert_eq!(mapped.status, StatusCode::BAD_REQUEST);
-        assert_eq!(mapped.message, "message must not be empty");
-        assert!(mapped.reason.is_none());
-    }
-
-    #[test]
-    fn send_body_requires_exactly_one_operation() {
-        let error = send_action(SendRequestBody {
-            message: Some("hello".to_owned()),
-            keys: Some("Enter".to_owned()),
-            resolve: None,
-        })
-        .unwrap_err();
-        assert_eq!(error.status, StatusCode::BAD_REQUEST);
-        assert!(error.message.contains("exactly one"));
-    }
-
-    #[test]
-    fn idempotency_keys_are_bounded_ascii_tokens() {
-        let mut headers = HeaderMap::new();
-        headers.insert("idempotency-key", HeaderValue::from_static("mobile-1_2.3"));
-        assert_eq!(
-            idempotency_key(&headers).unwrap().as_deref(),
-            Some("mobile-1_2.3")
-        );
-
-        headers.insert("idempotency-key", HeaderValue::from_static("has space"));
-        let error = idempotency_key(&headers).unwrap_err();
-        assert_eq!(error.status, StatusCode::BAD_REQUEST);
-    }
-
-    #[tokio::test]
-    async fn completed_idempotent_request_returns_its_first_report() {
-        let store = Arc::new(Mutex::new(IdempotencyStore::default()));
-        let key = IdempotencyCacheKey {
-            session_id: "ses_one".to_owned(),
-            key: "retry-1".to_owned(),
-        };
-        let fingerprint = action_fingerprint(&SendAction::Message("hello".to_owned())).unwrap();
-        assert!(begin_idempotent_request(&store, &key, fingerprint)
-            .await
-            .unwrap()
-            .is_none());
-        let report = harness::SendReport {
-            session_id: "ses_one".to_owned(),
-            operation: "message",
-            request_id: None,
-            choice: None,
-            sent: true,
-            resolved: false,
-        };
-        finish_idempotent_request(&store, &key, fingerprint, Some(&report)).await;
-        assert_eq!(
-            begin_idempotent_request(&store, &key, fingerprint)
-                .await
-                .unwrap(),
-            Some(report)
-        );
-    }
-
-    #[tokio::test]
-    async fn idempotency_key_cannot_be_reused_for_new_content() {
-        let store = Arc::new(Mutex::new(IdempotencyStore::default()));
-        let key = IdempotencyCacheKey {
-            session_id: "ses_one".to_owned(),
-            key: "retry-1".to_owned(),
-        };
-        let first = action_fingerprint(&SendAction::Message("first".to_owned())).unwrap();
-        let second = action_fingerprint(&SendAction::Message("second".to_owned())).unwrap();
-        assert!(begin_idempotent_request(&store, &key, first)
-            .await
-            .unwrap()
-            .is_none());
-        let error = begin_idempotent_request(&store, &key, second)
-            .await
-            .unwrap_err();
-        assert_eq!(error.status, StatusCode::CONFLICT);
-    }
-
-    #[test]
-    fn readiness_handoff_is_private_and_token_free() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("supervision").join("ready.json");
-        let readiness = GatewayReadiness {
-            format_version: REMOTE_ACCESS_SCHEMA_VERSION,
-            address: "127.0.0.1:46123".to_owned(),
-            url: "http://127.0.0.1:46123".to_owned(),
-            protocol_version: 1,
-            gateway_instance_id: "gw-7fa-1234abcd".to_owned(),
-        };
-        write_readiness(&path, &readiness).unwrap();
-        assert_eq!(
-            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-            FILE_MODE
-        );
-        let text = std::fs::read_to_string(path).unwrap();
-        assert!(!text.contains("token"));
-        let decoded: GatewayReadiness = serde_json::from_str(&text).unwrap();
-        assert_eq!(decoded, readiness);
-    }
-
-    #[test]
-    fn readiness_refuses_a_shared_parent_directory() {
-        let temp = tempfile::tempdir().unwrap();
-        let parent = temp.path().join("shared");
-        std::fs::create_dir(&parent).unwrap();
-        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let readiness = GatewayReadiness {
-            format_version: REMOTE_ACCESS_SCHEMA_VERSION,
-            address: "127.0.0.1:46123".to_owned(),
-            url: "http://127.0.0.1:46123".to_owned(),
-            protocol_version: 1,
-            gateway_instance_id: "gw-7fa-1234abcd".to_owned(),
-        };
-        let error = write_readiness(&parent.join("ready.json"), &readiness).unwrap_err();
-        assert!(error.to_string().contains("owner-only"));
     }
 }

@@ -224,16 +224,13 @@ struct SettingsView: View {
     static func label(_ endpoint: GatewayEndpointsName) -> String {
         switch endpoint {
         case .sessions: return "Session list"
-        case .sessionCapabilities: return "Per-session capabilities"
         case .terminal: return "Terminal"
-        case .events: return "Chat transcript"
-        case .send: return "Sending messages"
+        case .conversation: return "Conversation"
         }
     }
 
     static func label(_ feature: GatewayFeaturesName) -> String {
         switch feature {
-        case .idempotencyKeys: return "Safe retries"
         case .readOnlyTerminal: return "Read-only terminal"
         }
     }
