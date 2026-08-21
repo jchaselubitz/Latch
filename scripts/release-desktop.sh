@@ -65,6 +65,15 @@ if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
 fi
 
 archive_path="$repo_dir/dist/Latch-$version-macos.zip"
+
+# A release build must start with a fresh app bundle.  This keeps a bundle from
+# an earlier local build from being mistaken for the application being released
+# if packaging is interrupted or retried.
+app_dir="$repo_dir/apps/LatchDesktop/.build/release/Latch.app"
+if [[ -e "$app_dir" ]]; then
+    rm -rf -- "$app_dir"
+fi
+
 LATCH_APP_ARCHIVE="$archive_path" \
     apps/LatchDesktop/build-app.sh
 

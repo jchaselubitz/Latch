@@ -103,7 +103,8 @@ The script reads `LATCH_CODESIGN_IDENTITY` and `LATCH_NOTARY_PROFILE` from the
 ignored repository-root `.env`; environment variables supplied at invocation
 time take precedence. Do not commit the `.env` file.
 
-The release script refuses a dirty worktree, notarizes and staples
+The release script refuses a dirty worktree, removes any previous local
+`apps/LatchDesktop/.build/release/Latch.app` bundle, notarizes and staples
 `dist/Latch-<version>-macos.zip`, creates an annotated `v<version>` tag on the
 current commit, then pushes both the current branch and that tag to `origin`.
 
