@@ -266,7 +266,34 @@ fn payload_is_complete(executable: Option<&Path>) -> bool {
         PAYLOAD_SIBLINGS
             .iter()
             .all(|name| parent.join(name).is_file())
+            && kernel_is_patched(&parent.join(BUNDLED_TMUX_NAME))
     })
+}
+
+/// Whether the installed `latch-tmux` is the Latch-patched kernel.
+///
+/// A present file with the right name and upstream version is not enough:
+/// stock tmux 3.7b satisfies both and then fails every attach at the moment a
+/// user wants one. `-R` is the raw-attach flag the patched kernel accepts
+/// during client identification and upstream tmux rejects as an unknown
+/// option, so probing it here turns "your kernel is not the Latch one" into a
+/// payload repair rather than a runtime error.
+///
+/// A staged file that is not yet executable — mid-install, or a test fixture
+/// written with `fs::write` — cannot be probed, so treat only a definite
+/// rejection as incomplete and let the ordinary version comparison decide the
+/// rest.
+fn kernel_is_patched(tmux: &Path) -> bool {
+    match Command::new(tmux)
+        .args(["-R", "-V"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+    {
+        Ok(status) => status.success(),
+        Err(_) => true,
+    }
 }
 
 /// Refuses to replace a binary that something else is responsible for.
@@ -662,13 +689,26 @@ mod tests {
         }
     }
 
+    /// Writes a stand-in `latch-tmux`.
+    ///
+    /// Payload completeness probes the kernel's raw-attach capability, so the
+    /// fixture has to answer `-R -V` the way a real kernel does: patched ones
+    /// succeed, an upstream build rejects the unknown option.
+    fn write_kernel(path: &Path, patched: bool) {
+        let body = if patched {
+            "#!/bin/sh\ncase \"$1\" in -R) exit 0 ;; esac\nexit 1\n"
+        } else {
+            "#!/bin/sh\nexit 1\n"
+        };
+        fs::write(path, body).expect("write kernel");
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("chmod kernel");
+    }
+
     fn installed_binary(directory: &Path) -> PathBuf {
         let path = directory.join("latch");
         fs::write(&path, b"the old binary").expect("write old binary");
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod");
-        let tmux = directory.join(BUNDLED_TMUX_NAME);
-        fs::write(&tmux, b"the old tmux").expect("write old tmux");
-        fs::set_permissions(&tmux, fs::Permissions::from_mode(0o755)).expect("chmod tmux");
+        write_kernel(&directory.join(BUNDLED_TMUX_NAME), true);
         let remote = directory.join(BUNDLED_REMOTE_NAME);
         fs::write(&remote, b"the old remote").expect("write old remote");
         fs::set_permissions(&remote, fs::Permissions::from_mode(0o755)).expect("chmod remote");
@@ -756,6 +796,26 @@ mod tests {
         assert_eq!(
             fs::read(dir.path().join(BUNDLED_REMOTE_NAME)).unwrap(),
             b"the remote helper"
+        );
+    }
+
+    #[test]
+    fn a_current_cli_beside_an_unpatched_kernel_repairs_the_complete_payload() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let target = installed_binary(dir.path());
+        write_kernel(&dir.path().join(BUNDLED_TMUX_NAME), false);
+        let source = release_with("0.2608101202.0", b"the repaired binary", false);
+
+        let report = update_from(options_for(&target, "0.2608101202.0"), &source).expect("repair");
+
+        assert_eq!(
+            report.status, "installed",
+            "an upstream tmux beside `latch` is an incomplete payload, not a current one: \
+             every attach would fail at the moment a user wanted one"
+        );
+        assert_eq!(
+            fs::read(dir.path().join(BUNDLED_TMUX_NAME)).unwrap(),
+            b"tmux 3.7b"
         );
     }
 

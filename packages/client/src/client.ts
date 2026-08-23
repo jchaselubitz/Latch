@@ -54,16 +54,31 @@ export function createLatchClient(options: LatchClientOptions): LatchClient {
       requestJson<InspectReport>({ path: `/v2/sessions/${encodeURIComponent(sessionId)}` }),
     gatewayCapabilities: () =>
       requestJson<GatewayCapabilities>({ path: '/v2/capabilities' }),
-    attachTerminal: ({ sessionId, cols, rows, mode }) =>
-      attachTerminal({
+    attachTerminal: ({ sessionId, cols, rows }) => {
+      const handle = attachTerminal({
         baseUrl,
         token,
         sessionId,
         cols,
         rows,
-        mode,
         retry,
         webSocket: options.webSocket
-      })
+      });
+      // A terminal connection takes the session's only surface. A gateway
+      // that predates the exclusive cutover still speaks protocol 2 but does
+      // not, so attaching to one would silently be some other behaviour --
+      // exactly the mixed-version operation this release does not support.
+      // The check runs beside the connection rather than before it so the
+      // handle stays synchronous; a gateway that fails it is closed before
+      // anyone can type into it.
+      void requestJson<GatewayCapabilities>({ path: '/v2/capabilities' })
+        .then((capabilities) => {
+          if (!capabilities.features?.exclusiveTerminal) {
+            handle.close();
+          }
+        })
+        .catch(() => handle.close());
+      return handle;
+    }
   };
 }

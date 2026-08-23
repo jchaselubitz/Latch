@@ -109,6 +109,20 @@ impl Harness {
             .unwrap_or(0)
     }
 
+    fn last_attach_was_raw(&self) -> bool {
+        let path = self.home.join("server.fake.json");
+        let state: Value = serde_json::from_slice(&fs::read(path).expect("read fake tmux state"))
+            .expect("parse fake tmux state");
+        state
+            .get("_last_attach_raw")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    }
+
+    fn surface_attached(&self, id: &str) -> bool {
+        self.json(&["inspect", id, "--json"])["surfaceAttached"] == true
+    }
+
     fn survive_stop(&self, id: &str) {
         self.patch_state(id, |entry| {
             entry["survive_stop"] = Value::Bool(true);
@@ -317,8 +331,7 @@ fn private_tmux_preserves_the_cli_contract_and_never_persists_launch_material() 
     });
     assert_eq!(inspect["exit"]["code"], 7);
     assert_eq!(inspect["size"], json!({"cols": 100, "rows": 30}));
-    assert_eq!(inspect["attached"], 0);
-    assert!(inspect.get("attachments").is_none());
+    assert_eq!(inspect["surfaceAttached"], false);
 
     let listed = harness.json(&["list", "--json"]);
     assert_eq!(listed["sessions"][0]["id"], id);
@@ -334,7 +347,7 @@ fn private_tmux_preserves_the_cli_contract_and_never_persists_launch_material() 
 }
 
 #[test]
-fn multiple_and_nested_attaches_are_always_accepted_and_resize_can_pin() {
+fn local_attach_uses_the_exclusive_raw_surface_and_can_steal_back() {
     let harness = Harness::new();
     let created = harness.create("sleep 30");
     let id = created["session"]["id"].as_str().unwrap();
@@ -342,6 +355,8 @@ fn multiple_and_nested_attaches_are_always_accepted_and_resize_can_pin() {
     for _ in 0..2 {
         let output = harness.command().args(["attach", id]).output().unwrap();
         assert_success(&output);
+        assert!(harness.last_attach_was_raw());
+        assert!(harness.surface_attached(id));
     }
     let output = harness
         .command()
@@ -360,6 +375,74 @@ fn multiple_and_nested_attaches_are_always_accepted_and_resize_can_pin() {
 
     let removed = harness.json(&["remove", id, "--force", "--json"]);
     assert_eq!(removed["removed"], true);
+}
+
+#[test]
+fn local_attach_fails_closed_when_the_complete_kernel_payload_is_not_installed() {
+    let harness = Harness::new();
+    let upstream = harness._temp.path().join("upstream-tmux");
+    fs::write(
+        &upstream,
+        "#!/bin/sh\necho 'unknown option: R' >&2\nexit 2\n",
+    )
+    .expect("write upstream stand-in");
+    fs::set_permissions(&upstream, fs::Permissions::from_mode(0o755))
+        .expect("chmod upstream stand-in");
+
+    let mut child = harness
+        .command()
+        .env("LATCH_TMUX_BIN", upstream)
+        .args(["create", "--manifest-file", "-", "--json"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn create with upstream stand-in");
+    serde_json::to_writer(
+        child.stdin.take().expect("create stdin"),
+        &json!({
+            "format_version": 1,
+            "launch": {
+                "argv": ["/bin/sh", "-c", "sleep 1"],
+                "cwd": harness._temp.path(),
+                "env": {},
+                "inherit_env": true,
+                "size": {"cols": 80, "rows": 24}
+            },
+            "display": {"source": {"kind": "test"}}
+        }),
+    )
+    .expect("write manifest");
+    let output = child.wait_with_output().expect("wait for rejected create");
+    assert!(!output.status.success());
+    let diagnostic = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        diagnostic.contains("complete Latch payload"),
+        "{diagnostic}"
+    );
+    assert!(
+        fs::read_dir(harness.home.join("sessions"))
+            .expect("sessions directory")
+            .next()
+            .is_none(),
+        "an unpatched kernel must be rejected before a session directory is created"
+    );
+}
+
+#[test]
+fn local_read_only_attach_is_not_a_supported_surface() {
+    let harness = Harness::new();
+    let output = harness
+        .command()
+        .args(["attach", "--read-only"])
+        .output()
+        .expect("run removed read-only attach option");
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--read-only"));
 }
 
 #[test]
@@ -603,8 +686,7 @@ fn serve_exposes_sessions_and_a_pty_terminal_behind_a_bearer_token() {
     assert_eq!(inspect.status, 200);
     let inspect_body: Value = serde_json::from_str(&inspect.body).unwrap();
     assert_eq!(inspect_body["id"], id);
-    assert_eq!(inspect_body["attached"], 0);
-    assert!(inspect_body.get("attachments").is_none());
+    assert_eq!(inspect_body["surfaceAttached"], false);
 
     let missing = http_get(HttpGet {
         addr: &gateway.addr,
@@ -704,7 +786,10 @@ fn serve_terminal_uses_query_size_and_waits_for_resize_without_it() {
     let created = harness.create("sleep 30");
     let id = created["session"]["id"].as_str().unwrap();
     let gateway = start_gateway(&harness);
-    assert_eq!(harness.json(&["inspect", id, "--json"])["attached"], 0);
+    assert_eq!(
+        harness.json(&["inspect", id, "--json"])["surfaceAttached"],
+        false
+    );
 
     let (mut waiting, _) = connect_terminal(TerminalWsRequest {
         addr: &gateway.addr,
@@ -714,7 +799,10 @@ fn serve_terminal_uses_query_size_and_waits_for_resize_without_it() {
         rows: None,
     });
     thread::sleep(Duration::from_millis(200));
-    assert_eq!(harness.json(&["inspect", id, "--json"])["attached"], 0);
+    assert_eq!(
+        harness.json(&["inspect", id, "--json"])["surfaceAttached"],
+        false
+    );
     waiting
         .send(tungstenite::Message::Text(
             r#"{"type":"resize","cols":132,"rows":43}"#.into(),
@@ -727,9 +815,6 @@ fn serve_terminal_uses_query_size_and_waits_for_resize_without_it() {
     });
     waiting.close(None).ok();
 
-    let before_query = harness.json(&["inspect", id, "--json"])["attached"]
-        .as_u64()
-        .unwrap();
     let (mut sized, _) = connect_terminal(TerminalWsRequest {
         addr: &gateway.addr,
         session: id,
@@ -740,7 +825,7 @@ fn serve_terminal_uses_query_size_and_waits_for_resize_without_it() {
     wait_for_attached(WaitAttached {
         harness: &harness,
         id,
-        min: (before_query as usize) + 1,
+        min: 1,
     });
     sized.close(None).ok();
 }
@@ -994,11 +1079,11 @@ struct WaitAttached<'a> {
 fn wait_for_attached(request: WaitAttached<'_>) -> u64 {
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
-        let attached = request.harness.json(&["inspect", request.id, "--json"])["attached"]
-            .as_u64()
-            .unwrap_or(0);
-        if attached >= request.min as u64 {
-            return attached;
+        let attached = request.harness.json(&["inspect", request.id, "--json"])["surfaceAttached"]
+            .as_bool()
+            .unwrap_or(false);
+        if attached {
+            return 1;
         }
         assert!(
             Instant::now() < deadline,

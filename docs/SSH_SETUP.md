@@ -137,10 +137,25 @@ reads for every shell including non-login ones.
 
 | Command | Use |
 | --- | --- |
-| `latch attach --retry NAME` | The default for a phone. Reconnects on a dropped socket, with bounded backoff. |
-| `latch attach --watch NAME` | Look without taking control. Does not take input control from the desk, and **never resizes the session**. |
-| `latch attach --steal NAME` | Take control from an attachment that already holds it. Only when you mean it. |
-| `latch list` / `latch inspect NAME` | Which sessions exist, and who holds control. |
+| `latch attach NAME` | Take the session's terminal. There is no separate steal flag: **every attach steals**. |
+| `latch attach --retry NAME` | The default for a phone. Retries an attach that could not start yet, with bounded backoff. |
+| `latch list` / `latch inspect NAME` | Which sessions exist, and whether one currently has a surface. |
+
+There is no `--watch` and no read-only attach. A session has exactly one human
+surface, so attaching from the phone takes it from the desk, and attaching
+again at the desk takes it back. If you only want to see what an agent is
+doing without touching it, use Conversation Hub or `latch inspect` — neither
+takes the surface.
+
+When your attach is taken, it exits and says so, leaving your terminal
+restored:
+
+```
+latch: another terminal took this session's surface; run `latch attach` to take it back
+```
+
+The exit code says the same thing to a script: `75` stolen, `76` evicted for
+not keeping up with output, `77` the session's program exited.
 
 ### What `--retry` does and does not cover
 
@@ -181,28 +196,40 @@ begins with a hard reset.
 
 ## Geometry: what the phone does to your desk screen
 
-The session's size is the current controller's size, and it reverts when that
-controller leaves (decision D4). Concretely:
+The session is the size of whatever holds its surface, and the size is adopted
+as part of the steal, before the first frame is painted. Concretely:
 
 1. The desk session is 200 columns.
-2. The phone attaches and takes control at 40 columns. The session reflows to
-   40, and the agent on it is usable on a phone.
-3. The phone disconnects — cleanly, or by walking into a tunnel. Either way the
-   session returns to 200 and the desk client's screen is intact.
+2. The phone attaches at 40 columns. The desk attach exits saying it was
+   stolen, the pane reflows to 40, and the agent is usable on a phone.
+3. You get back to the desk and run `latch attach`. The phone's attach exits
+   saying it was stolen, and the pane reflows to 200.
 
-Two ways to opt out:
+Between step 2 and step 3 the session is headless: it keeps running, keeps
+producing output, and keeps its screen. Nothing is lost by having no surface.
 
-- `latch attach --watch` never resizes. Peeking costs the desk nothing.
-- `latch resize NAME --cols 200 --rows 50 --pin` freezes the size against
-  controller changes entirely.
+To pin a size against this, use
+`latch resize NAME --cols 200 --rows 50 --pin`.
+
+## What you actually see
+
+The first thing painted after a steal is the pane's **current screen** — not
+scrollback, and not a replay of everything the program ever printed. From then
+on your terminal receives the agent's own bytes, unchanged.
+
+That makes the terminal on the other end responsible for interpreting them, so
+its dialect has to match what Latch tells programs it is. Latch runs sessions
+under a fixed `TERM` (see `latch inspect`); in Termius, use a profile whose
+terminal type matches it, leave "report terminal type" alone, and turn off any
+setting that rewrites or filters escape sequences. iTerm and Terminal.app need
+no special configuration.
 
 ---
 
 ## Sessions that already ended
 
 Attaching to an exited session is not an error. It paints the last screen the
-session had, says how it ended, and exits — read-only, with no raw mode
-entered and nothing to type at:
+session had, says how it ended, and exits, with nothing to type at:
 
 ```
 [latch] ses_01J… exited with status 0; this is its last screen — reclaim it with `latch prune`
@@ -225,7 +252,8 @@ come back.
 | Connection times out from cell, works on home Wi-Fi | Tailscale not running on the phone, or the Mac dropped off the tailnet | `tailscale status` on both; check the Mac is awake |
 | `latch: command not found` over SSH but not in iTerm | Non-login shell `PATH` | Absolute path, or set `PATH` in `~/.zshenv` |
 | Screen is garbled after attaching | `TERM` is not `xterm-256color` | Fix the Termius terminal type; `echo $TERM` to confirm |
-| Typing does nothing, screen updates fine | You attached `--watch`, or someone else holds control | `latch inspect NAME`; reattach without `--watch`, or `--steal` |
+| Your attach exited saying it was stolen | Something else took the session's one surface — the phone, the Desktop viewer, or another window | Run `latch attach NAME` again to take it back |
+| Your attach exited saying it could not keep up | The terminal stopped reading output — usually a backgrounded app — and was evicted so the session could keep running | Reattach; the session kept going without you |
 | Desk session stayed narrow after the phone left | The size was pinned, or the phone still holds an attachment | `latch inspect NAME`; `latch resize NAME --cols … --rows …` |
 | Screen frozen with no `[latch]` line | Nothing is wrong with the link — the agent is working | Wait |
 | Screen frozen *and* the last line says `gave up` | The worker is gone or the socket is unreachable | `latch list`; `latch doctor` |

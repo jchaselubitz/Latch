@@ -1,23 +1,44 @@
 //! Generated from `schemas/remote-access/v2/*.schema.json`; do not edit by hand.
-//! Canonical schema set SHA-256: 9748aeed7a8177c6a99df66613bec8a1bedc75dfb6d6f05a2adf7c4f37da4d77
+//! Canonical schema set SHA-256: 1d338cbd9193604ba624d923cd12a61848a75ccfb2b3ba6c1cc7dc79b76bc044
 
 use serde::{Deserialize, Serialize};
 
 pub const REMOTE_ACCESS_SCHEMA_VERSION: u8 = 2;
 pub const OPERATION_RETENTION_SECONDS: u64 = 10 * 60;
 
-#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-pub enum TerminalAccessMode {
-    #[default]
-    Control,
-    ReadOnly,
+/// Reason carried in a terminal WebSocket close frame. `Detached` is a clean
+/// end; every other value says why the single exclusive surface was taken away.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalCloseReason {
+    Detached,
+    Stolen,
+    SlowClient,
+    SessionExited,
+    KernelError,
+}
+
+impl TerminalCloseReason {
+    /// Application close code paired with this reason. `Detached` uses the
+    /// ordinary 1000.
+    pub const fn close_code(self) -> u16 {
+        match self {
+            Self::Detached => 1000,
+            Self::SlowClient => 4408,
+            Self::Stolen => 4409,
+            Self::SessionExited => 4410,
+            Self::KernelError => 4500,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct GatewayFeatures {
-    pub read_only_terminal: bool,
+    /// Always true: a terminal connection is the session's one exclusive
+    /// surface. The field remains so a client can detect a gateway that
+    /// predates the exclusive cutover and refuse it.
+    pub exclusive_terminal: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

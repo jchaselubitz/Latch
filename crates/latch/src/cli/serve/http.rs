@@ -129,16 +129,21 @@ fn router(state: AppState) -> Router {
 
 /// Builds the production router, including the token and grant middleware, for
 /// tests that need a real socket rather than a hand-rolled handler.
+///
+/// `latch_bin` is what the terminal route spawns as its attach client, so a
+/// test can substitute a stub that behaves like one — including exiting with
+/// the kernel's release codes — without standing up a tmux server.
 #[cfg(test)]
 pub(crate) fn test_router(
     home: LatchHome,
     token_file: std::path::PathBuf,
     conversation_hub: ConversationHub,
+    latch_bin: std::path::PathBuf,
 ) -> Router {
     router(AppState {
         home,
         token_file,
-        latch_bin: std::path::PathBuf::from("latch"),
+        latch_bin,
         bind_is_loopback: true,
         gateway_instance_id: "gw-test".to_owned(),
         conversation_hub,
@@ -295,7 +300,7 @@ async fn gateway_capabilities(State(state): State<AppState>) -> Response {
             conversation: true,
         },
         features: GatewayFeatures {
-            read_only_terminal: true,
+            exclusive_terminal: true,
         },
         gateway_instance_id: state.gateway_instance_id,
         operation_retention_seconds: OPERATION_RETENTION_SECONDS,
@@ -343,7 +348,6 @@ async fn terminal_ws(
         session: id,
         cols: query.cols,
         rows: query.rows,
-        mode: query.mode,
     };
     upgrade.on_upgrade(move |socket| terminal::run(socket, connect))
 }

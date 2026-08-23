@@ -212,9 +212,16 @@ enum ControlPlaneLabel {
         "\u{2013}": "-", "\u{2014}": "-", "\u{2212}": "-",
     ]
 
+    /// `CharacterSet.letters` includes combining marks, so a variation
+    /// selector or a stray accent would otherwise survive as an invisible
+    /// "letter" the service then rejects — a Mac named "Mac 🖥️ Studio" reduces
+    /// to "Mac ️ Studio", with the emoji gone and its selector left behind.
+    /// Composition above has already folded every mark that belongs to a base
+    /// character, so whatever is still non-base here has nothing to attach to.
     private static let allowed: CharacterSet = CharacterSet.letters
         .union(.decimalDigits)
         .union(CharacterSet(charactersIn: " ._'()-"))
+        .subtracting(.nonBaseCharacters)
 
     static func enrollable(_ raw: String, fallback: String = ControlPlaneLabel.fallback) -> String {
         let composed = raw.precomposedStringWithCanonicalMapping

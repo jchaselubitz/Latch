@@ -2338,7 +2338,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn noise_proxy_carries_the_v2_read_only_terminal_and_closes_on_revocation() {
+    async fn noise_proxy_carries_the_v2_terminal_for_control_and_closes_on_revocation() {
         let (_dir, home) = home();
         set_enabled(&home, true).unwrap();
         let paths = Paths::new(&home);
@@ -2351,7 +2351,9 @@ mod tests {
             &pairing.secret,
             &phone_public,
             "LAN test phone",
-            DevicePermission::Observe,
+            // A terminal is the session's one exclusive surface, so only a
+            // control device may open it. There is no observing terminal.
+            DevicePermission::Control,
         )
         .unwrap();
 
@@ -2367,8 +2369,8 @@ mod tests {
                 .windows(b"Authorization: Bearer test-gateway-token".len())
                 .any(|part| part == b"Authorization: Bearer test-gateway-token"));
             assert!(request
-                .windows(b"x-latch-device-grant: observe".len())
-                .any(|part| part == b"x-latch-device-grant: observe"));
+                .windows(b"x-latch-device-grant: control".len())
+                .any(|part| part == b"x-latch-device-grant: control"));
             stream
                 .write_all(
                     b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n",
@@ -2406,7 +2408,7 @@ mod tests {
         encrypt_record(
             &mut writer,
             &mut transport,
-            b"GET /v2/sessions/ses_1/terminal?mode=read-only HTTP/1.1\r\nHost: latch\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
+            b"GET /v2/sessions/ses_1/terminal?cols=80&rows=24 HTTP/1.1\r\nHost: latch\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
         )
         .await
         .unwrap();
@@ -2466,7 +2468,12 @@ mod tests {
         let token_path = paths.runtime().join("gateway.token");
         write_bytes_atomic(&token_path, b"tunnel-gateway-token").unwrap();
         let hub = crate::conversation::ConversationHub::new(dir.path().join("hub")).unwrap();
-        let app = crate::cli::serve::test_router(home.clone(), token_path.clone(), hub);
+        let app = crate::cli::serve::test_router(
+            home.clone(),
+            token_path.clone(),
+            hub,
+            std::path::PathBuf::from("latch"),
+        );
         let gateway_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let gateway_addr = gateway_listener.local_addr().unwrap();
         tokio::spawn(async move {

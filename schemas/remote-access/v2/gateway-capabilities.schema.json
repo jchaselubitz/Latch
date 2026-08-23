@@ -33,9 +33,9 @@
     },
     "features": {
       "type": "object",
-      "required": ["readOnlyTerminal"],
+      "required": ["exclusiveTerminal"],
       "properties": {
-        "readOnlyTerminal": { "type": "boolean" }
+        "exclusiveTerminal": { "type": "boolean" }
       },
       "additionalProperties": false
     },

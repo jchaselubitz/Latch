@@ -258,7 +258,8 @@ pub fn create(request: CreateRequest) -> Result<CreateResult> {
     let mut watch = timing::Stopwatch::start();
     request.home.ensure()?;
     ensure_config(&request.home)?;
-    ensure_tmux_available()?;
+    ensure_latch_raw_kernel()?;
+    ensure_latch_raw_server(&request.home)?;
     let mut manifest = request.manifest;
     materialize_environment(&mut manifest);
     crate::observer::prepare_claude_launch(&request.home, &mut manifest)?;
@@ -390,24 +391,85 @@ pub fn launch_from_fifo(path: &Path) -> Result<()> {
     Err(error).context("cannot execute session command")
 }
 
-/// Attaches the calling terminal to a session.
-pub fn attach(home: &LatchHome, id: &SessionId) -> Result<()> {
-    attach_with_mode(home, id, false)
+/// Why the patched kernel released an exclusive raw surface.
+///
+/// The kernel reports these as process exit codes on the raw client, so a
+/// supervising caller — a terminal, or the gateway's PTY host — learns why its
+/// surface ended without parsing tmux's human message. `KernelError` is not
+/// produced here: an exit that is neither clean nor one of the kernel's
+/// reasoned codes is surfaced as an error instead, so a real attach failure is
+/// never reported as an orderly release.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SurfaceRelease {
+    /// The client detached on its own, or the pane's command finished.
+    Normal,
+    /// Another attach preflighted successfully and took the surface.
+    Stolen,
+    /// The kernel evicted this client to keep the pane making progress.
+    SlowClient,
+    /// The pane exited under this client.
+    SessionExited,
 }
 
-/// Attaches a terminal as an observer. tmux's read-only client mode protects
-/// the session even if a caller later writes to its PTY.
-pub fn attach_read_only(home: &LatchHome, id: &SessionId) -> Result<()> {
-    attach_with_mode(home, id, true)
-}
+impl SurfaceRelease {
+    /// Kernel exit code carrying "another client stole the surface".
+    const EXIT_STOLEN: i32 = 75;
+    /// Kernel exit code carrying "this client could not drain output".
+    const EXIT_SLOW_CLIENT: i32 = 76;
+    /// Kernel exit code carrying "the pane this client owned exited".
+    const EXIT_SESSION_EXITED: i32 = 77;
 
-fn attach_with_mode(home: &LatchHome, id: &SessionId, read_only: bool) -> Result<()> {
-    ensure_config(home)?;
-    let mut command = tmux(home)?;
-    command.arg("attach-session");
-    if read_only {
-        command.arg("-r");
+    /// Maps one raw-client exit code, or `None` when the code is not a
+    /// reasoned kernel release.
+    pub fn from_exit_code(code: Option<i32>) -> Option<Self> {
+        match code? {
+            0 => Some(Self::Normal),
+            Self::EXIT_STOLEN => Some(Self::Stolen),
+            Self::EXIT_SLOW_CLIENT => Some(Self::SlowClient),
+            Self::EXIT_SESSION_EXITED => Some(Self::SessionExited),
+            _ => None,
+        }
     }
+
+    /// Process exit code `latch attach` re-reports for this release, so a
+    /// supervising process observes the kernel's reason unchanged.
+    pub const fn exit_code(self) -> i32 {
+        match self {
+            Self::Normal => 0,
+            Self::Stolen => Self::EXIT_STOLEN,
+            Self::SlowClient => Self::EXIT_SLOW_CLIENT,
+            Self::SessionExited => Self::EXIT_SESSION_EXITED,
+        }
+    }
+
+    /// Stable wire name shared by the CLI's message and the gateway's close
+    /// reason. These strings are contract, not diagnostics.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::Stolen => "stolen",
+            Self::SlowClient => "slow_client",
+            Self::SessionExited => "session_exited",
+        }
+    }
+}
+
+/// Attaches the calling terminal through Latch's exclusive raw-surface kernel.
+///
+/// `-R` is intentionally not emulated. It is accepted only by the bundled
+/// patched kernel, which records raw intent before the client probes the tty
+/// and performs the preflight/steal/frame transition in its event loop. An
+/// upstream tmux therefore fails closed before it can disturb an existing
+/// surface.
+///
+/// Returns why the surface was released. A failed preflight — the case that
+/// must leave the current surface live — is an error, not a release.
+pub fn attach_exclusive(home: &LatchHome, id: &SessionId) -> Result<SurfaceRelease> {
+    ensure_config(home)?;
+    ensure_latch_raw_kernel()?;
+    ensure_latch_raw_server(home)?;
+    let mut command = tmux(home)?;
+    command.args(["-R", "attach-session"]);
     let mut child = command
         .args(["-t", id.as_str()])
         .spawn()
@@ -418,13 +480,11 @@ fn attach_with_mode(home: &LatchHome, id: &SessionId, read_only: bool) -> Result
             .try_wait()
             .with_context(|| format!("cannot wait for attachment to session {id}"))?
         {
-            if status.success() {
-                signal_first_viewer(home, id);
-                return Ok(());
-            }
-            bail!("tmux could not attach to session {id}");
+            let release = surface_release(status, id)?;
+            signal_first_viewer(home, id);
+            return Ok(release);
         }
-        if attached_clients(home, id).is_some_and(|attached| attached > 0) {
+        if raw_surface_acknowledged(home, id) {
             signal_first_viewer(home, id);
             break;
         }
@@ -436,10 +496,36 @@ fn attach_with_mode(home: &LatchHome, id: &SessionId, read_only: bool) -> Result
     let status = child
         .wait()
         .with_context(|| format!("cannot wait for attachment to session {id}"))?;
-    if !status.success() {
-        bail!("tmux could not attach to session {id}");
-    }
-    Ok(())
+    surface_release(status, id)
+}
+
+/// Classifies one raw-client exit. Anything the kernel did not label is an
+/// attach failure: reporting it as an orderly release would tell a viewer the
+/// surface was handed over when in fact it never opened.
+fn surface_release(status: std::process::ExitStatus, id: &SessionId) -> Result<SurfaceRelease> {
+    SurfaceRelease::from_exit_code(status.code())
+        .ok_or_else(|| anyhow!("tmux could not attach to session {id}"))
+}
+
+/// Whether the patched kernel has acknowledged an exclusive raw surface for
+/// `id`. This deliberately does not use `session_attached`: that count includes
+/// ordinary tmux clients and used to let a non-viewer query release the first
+/// viewer gate. The raw client flag is set as part of the kernel's pre-tty
+/// identification protocol.
+fn raw_surface_acknowledged(home: &LatchHome, id: &SessionId) -> bool {
+    let Ok(mut command) = tmux(home) else {
+        return false;
+    };
+    let Ok(output) = command
+        .args(["list-clients", "-t", id.as_str(), "-F", "#{client_flags}"])
+        .output()
+    else {
+        return false;
+    };
+    output.status.success()
+        && String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .any(|flags| flags.split(',').any(|flag| flag == "latch-raw"))
 }
 
 /// Overlord's create-then-open launch is deliberately two operations. Hold its
@@ -555,6 +641,15 @@ pub fn attached_clients(home: &LatchHome, id: &SessionId) -> Option<usize> {
         .success()
         .then(|| String::from_utf8(output.stdout).ok()?.trim().parse().ok())
         .flatten()
+}
+
+/// Whether the patched kernel currently reports an active human surface.
+///
+/// This is presentation evidence for `latch open`; first-viewer gating uses
+/// [`raw_surface_acknowledged`] instead so an ordinary command client cannot
+/// release a launch gate.
+pub fn surface_attached(home: &LatchHome, id: &SessionId) -> bool {
+    raw_surface_acknowledged(home, id)
 }
 
 /// Returns whether tmux still owns a named session.
@@ -951,6 +1046,67 @@ fn ensure_tmux_available() -> Result<()> {
         bail!("bundled tmux {} is not executable", binary.display());
     }
     Ok(())
+}
+
+/// Reject an upstream or partial tmux payload before it can create a session
+/// or touch an existing human surface. `-R` is the kernel's wire-level
+/// capability: patched tmux accepts it during client identification, while
+/// stock tmux rejects it before opening a terminal or contacting the server.
+fn ensure_latch_raw_kernel() -> Result<()> {
+    ensure_tmux_available()?;
+    let output = Command::new(tmux_binary()?)
+        .args(["-R", "-V"])
+        .output()
+        .context("cannot verify the bundled Latch tmux kernel")?;
+    if !output.status.success() {
+        bail!("bundled tmux lacks latch-raw-attach-v1; update the complete Latch payload");
+    }
+    let version = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if version != format!("tmux {TMUX_VERSION}") {
+        bail!(
+            "bundled tmux is {version}; expected latch-tmux {TMUX_VERSION}; update the complete Latch payload"
+        );
+    }
+    Ok(())
+}
+
+/// The capability string the patched kernel reports through its own format
+/// variable. Upstream tmux resolves an unknown format to the empty string.
+const LATCH_RAW_CAPABILITY: &str = "latch-raw-attach-v1";
+
+/// Reject a *running* server that is not the Latch kernel.
+///
+/// [`ensure_latch_raw_kernel`] checks the binary this process would launch,
+/// which is not the same thing as the server on the other end of the socket:
+/// installing the payload does not restart a tmux server that is already up.
+/// An upstream server accepts an ordinary attach and silently ignores the
+/// raw-attach identify flag, so without this a machine that upgraded without
+/// stopping its sessions gets tmux's own renderer, no steal, and no warning —
+/// exactly the mixed-version operation this release does not support.
+///
+/// A server that is not running at all is fine: the next command starts one
+/// from the verified binary. Only a server that answers, and answers wrong, is
+/// refused.
+fn ensure_latch_raw_server(home: &LatchHome) -> Result<()> {
+    let mut command = tmux(home)?;
+    let Ok(output) = command
+        .args(["display-message", "-p", "#{latch_raw_kernel}"])
+        .output()
+    else {
+        return Ok(());
+    };
+    if !output.status.success() {
+        // No server, or one that cannot answer: not evidence of an old one.
+        return Ok(());
+    }
+    if String::from_utf8_lossy(&output.stdout).trim() == LATCH_RAW_CAPABILITY {
+        return Ok(());
+    }
+    bail!(
+        "the running Latch tmux server predates this release and cannot provide an exclusive \
+         surface; stop its sessions and run `latch stop --all` (or kill the server) so the next \
+         command starts the patched kernel"
+    )
 }
 
 fn materialize_environment(manifest: &mut LaunchManifest) {

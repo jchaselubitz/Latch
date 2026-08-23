@@ -21,8 +21,36 @@ probed, or adapted.
 `@latch/client` supports session listing, inspection, discovery, and terminal
 attachment. The terminal socket is
 `WS /v2/sessions/{id}/terminal`; the token is carried by the `latch.v2.*`
-subprotocol. `mode=read-only` is explicit and only valid when discovery
-advertises the feature.
+subprotocol.
+
+A terminal connection is the session's **single exclusive surface**, so it
+always requires the `control` grant. There is no read-only or observing
+terminal mode: opening this socket takes the session's terminal from whatever
+was showing it — an iTerm window, or another device — and a later `latch
+attach` takes it back. `cols` and `rows` are required before the steal
+commits, either as query parameters or as a `resize` control frame; a socket
+that never declares a size is closed without disturbing the current surface.
+
+The first frame after the steal is a paint of the pane's current screen and
+terminal modes. Everything after it is the agent's own byte stream, unchanged:
+no scrollback, no PTY replay, and no re-encoding.
+
+Every reasoned close names why the surface ended, as both a close code and a
+close reason:
+
+| Code | Reason | Meaning |
+| --- | --- | --- |
+| 1000 | `detached` | The attach ended cleanly. |
+| 4408 | `slow_client` | This peer stopped draining output and was evicted. The session kept running. |
+| 4409 | `stolen` | Another terminal took the surface. |
+| 4410 | `session_exited` | The session's program exited. |
+| 4500 | `kernel_error` | The session kernel could not hand over a surface. |
+
+None of these is retried automatically. Reconnecting after `stolen` would take
+the surface back from whoever just claimed it, and two clients set to
+reconnect would trade the session forever; reattaching is a decision for the
+person at the keyboard. `@latch/client` reconnects only from transport-level
+drops, which carry no reasoned code.
 
 Conversation transport is
 `WS /v2/sessions/{id}/conversation`. It is server-first: the client provides

@@ -1,9 +1,15 @@
-import type { GatewayFeatures, TerminalAccessMode } from './generated.ts';
+import type { GatewayFeatures, TerminalCloseReason } from './generated.ts';
+import { TERMINAL_CLOSE_CODES } from './generated.ts';
 
-export type {
-  GatewayFeatures,
-  TerminalAccessMode
-} from './generated.ts';
+export type { GatewayFeatures, TerminalCloseReason } from './generated.ts';
+export { TERMINAL_CLOSE_CODES } from './generated.ts';
+
+/// The reason behind one observed close code, or undefined when the gateway
+/// sent a code this contract does not define.
+export function terminalCloseReason(code: number): TerminalCloseReason | undefined {
+  const match = Object.entries(TERMINAL_CLOSE_CODES).find(([, value]) => value === code);
+  return match?.[0] as TerminalCloseReason | undefined;
+}
 
 export type RetryPolicy = { initialMs: number; maxMs: number; multiplier: number };
 
@@ -44,7 +50,13 @@ export type InspectReport = {
 };
 
 export type TerminalState = 'connecting' | 'open' | 'reconnecting' | 'closed';
-export type TerminalCloseInfo = { code: number; reason: string };
+export type TerminalCloseInfo = {
+  code: number;
+  reason: string;
+  /// Why the session's single surface ended, when the close was reasoned.
+  /// `stolen` means another terminal took it; reattaching steals it back.
+  surface?: TerminalCloseReason;
+};
 export type TerminalHandle = {
   readonly sessionId: string;
   write(bytes: Uint8Array): void;
@@ -76,10 +88,5 @@ export type LatchClient = {
   listSessions(): Promise<ListReport>;
   inspectSession(options: { sessionId: string }): Promise<InspectReport>;
   gatewayCapabilities(): Promise<GatewayCapabilities>;
-  attachTerminal(options: {
-    sessionId: string;
-    cols?: number;
-    rows?: number;
-    mode?: TerminalAccessMode;
-  }): TerminalHandle;
+  attachTerminal(options: { sessionId: string; cols?: number; rows?: number }): TerminalHandle;
 };

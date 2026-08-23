@@ -53,8 +53,9 @@ Before a stream is handed to the desktop proxy, an adapter must provide:
 
 The proxy maps those permissions to the fixed gateway paths. It does not
 accept a target host, port, gateway token, or a claimed identity from stream
-payload. `observe` selects the read-only terminal mode; `control` is required
-for terminal input or resize.
+payload. `control` is required for any terminal connection; `observe` and
+`interact` are refused the terminal route outright, because connecting takes
+the session's single surface from whatever holds it.
 
 WebRTC data channels are message-oriented, so the adapter uses bounded
 length-prefixed records internally and presents ordered byte-stream semantics
@@ -95,8 +96,8 @@ Compatibility rules:
    whichever limit is reached; duplicate in-flight calls wait for the original
    result. The cache is intentionally in-memory and `gatewayInstanceId`
    changes on a restart.
-5. `mode=read-only` is additive; missing mode remains `control` so existing
-   CLI and Remote SDK terminal behavior is unchanged.
+5. There is no terminal `mode` parameter. Every terminal connection is a
+   control surface and requires the `control` grant.
 
 ## Swift generation path
 

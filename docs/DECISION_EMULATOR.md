@@ -6,6 +6,13 @@
 **Scope:** `crates/latch-term`. The choice is named in `src/terminal.rs` and
 nowhere else; the worker holds a `Screen`.
 
+> **Superseded.** `crates/latch-term` was archived under the
+> `archive/latch-term-v1` tag. Latch no longer runs a terminal emulator on the
+> live path at all: the patched `latch-tmux` kernel owns the screen model, and
+> a surface is painted one current frame and then the pane's own bytes. This
+> record is kept for why the emulator was chosen when there was one. See
+> [`DECISION_EXCLUSIVE_ATTACH.md`](DECISION_EXCLUSIVE_ATTACH.md).
+
 This closes open item 2 in [`../planning/IMPLEMENTATION_PLAN.md`](../planning/IMPLEMENTATION_PLAN.md).
 
 ## How it was decided

@@ -1,5 +1,17 @@
 # Latch Project Architecture
 
+> **Status: historical.** This document records the original architecture,
+> including the in-process terminal worker and its multi-client attachment
+> model. Both were superseded. The worker, framing, attachment registry,
+> screen model, and resize-authority modules were archived under the
+> `archive/latch-term-v1` tag, and a session now has **at most one human
+> surface**: a successful attach always steals it. The sections below on
+> multiple watching clients, `watch` versus `control` attachment, and
+> controller demotion describe behavior Latch no longer has.
+>
+> For current behavior see [`../docs/ARCHITECTURE_RULES.md`](../docs/ARCHITECTURE_RULES.md)
+> and [`../docs/DECISION_EXCLUSIVE_ATTACH.md`](../docs/DECISION_EXCLUSIVE_ATTACH.md).
+
 ## Problem statement
 
 Developers increasingly run long-lived coding agents, development servers, and

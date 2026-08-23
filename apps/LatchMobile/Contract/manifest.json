@@ -3,7 +3,7 @@
   "generator": "Tools/generate-contract.py",
   "generated": {
     "path": "Sources/LatchMobileKit/Generated/LatchContract.swift",
-    "sha256": "82af192f7bc96948542bf9656f679b0e75af8f26f9079ab6c44704e2fc2d7995"
+    "sha256": "36cb7e23892029dc49c96199eb9dea615a3b2acc64e75048614e9281246ffc51"
   },
   "schemas": [
     {
@@ -20,11 +20,11 @@
     },
     {
       "source": "schemas/remote-access/v2/gateway-capabilities.schema.json",
-      "sha256": "25d6559544488e3cc8e35472cf8e1d3e05fe06ada2e6cf43907e1a74ca375830"
+      "sha256": "3c6f925557320c001084471310de72652247714d57bd03fd4e263bd28545981d"
     },
     {
       "source": "schemas/remote-access/v2/terminal-connection.schema.json",
-      "sha256": "6df98b8a5dd4b0c35f52d5827662d6713f7a4fd5d1ec9c3eab627cca06d26604"
+      "sha256": "c2a785957baaf38eccc32e9e85e0084686604264a48072f7efbafa17f4516be8"
     }
   ]
 }

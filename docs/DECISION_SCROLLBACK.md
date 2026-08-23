@@ -9,9 +9,18 @@
 2. An exited session stays on disk, readable, for **24 hours**, after which
    `latch prune` reclaims it. `latch prune --all` reclaims it sooner.
 
-**Scope:** `latch_term::HistoryPolicy` and `Screen::attach_snapshot`;
-`WorkerTuning::attach_history_lines` / `attach_history_bytes`;
-`manage::DEFAULT_EXITED_RETENTION`.
+**Scope:** `manage::DEFAULT_EXITED_RETENTION`.
+
+> **Partly superseded.** Choice 1 and everything below about history on attach
+> describes the in-process terminal worker (`latch_term::HistoryPolicy`,
+> `Screen::attach_snapshot`, `WorkerTuning`), which was archived under the
+> `archive/latch-term-v1` tag. Latch no longer sends scrollback on attach at
+> all: the patched kernel paints the **current frame** once and then forwards
+> the pane's own bytes, so there is no history payload to bound. See
+> [`DECISION_EXCLUSIVE_ATTACH.md`](DECISION_EXCLUSIVE_ATTACH.md).
+>
+> Choice 2 — 24-hour retention for exited sessions, reclaimed by `latch prune`
+> — is current and is what the rest of this document is still authority for.
 
 This closes open item 2 in
 [`../planning/IMPLEMENTATION_PLAN.md`](../planning/IMPLEMENTATION_PLAN.md).
@@ -235,21 +244,23 @@ Nothing prunes automatically. There is no daemon, and putting a filesystem sweep
 on session creation would put it on the startup path of every terminal window —
 the one cost the architecture is most protective of.
 
-### What "attachable read-only" means concretely
+### What "still attachable" means concretely
 
-At exit the worker writes the session's final screen to `screen` in the session
-directory, mode `0600`. These are the same snapshot bytes a live worker would
-have sent a client that attached a moment earlier — not a journal to be
-replayed. `latch attach` on an exited session paints that screen, reports how
-the session ended, and exits successfully. No raw mode is entered: there is
-nothing left to type at, and a terminal put into raw mode for a read-only view
-is one that can be left broken for no benefit.
+The kernel runs with `remain-on-exit on`, so a pane whose command has finished
+keeps its window and its final grid. Attaching to a retained session paints
+that last screen through the ordinary exclusive attach, reports how the session
+ended, and exits with the kernel's `session_exited` reason. It is a frame, not
+a journal to be replayed, and there is nothing left to type at.
+
+This is not a read-only attach — that no longer exists as a mode. It is the
+same single-surface attach, over a pane that has already exited.
 
 `--retry` does not treat an exited session as a link that might come back.
 
-A session that left no `screen` — one from an older build, or whose worker was
-killed outright — still reports its exit. The screen is a courtesy, and a
-courtesy that becomes a precondition is a new way to fail.
+`latch prune` is what makes the last screen unavailable; until then it is
+there. A session whose kernel was killed outright keeps no grid and still
+reports its exit, because the screen is a courtesy and a courtesy that becomes
+a precondition is a new way to fail.
 
 ---
 

@@ -2,12 +2,29 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://latch.cooperativ.dev/schemas/remote-access/v2/terminal-connection.schema.json",
   "title": "LatchTerminalConnectionV2",
-  "description": "Query contract for WS /v2/sessions/{id}/terminal. Direct loopback clients default to control. Paired clients require control unless mode=read-only.",
+  "description": "Query contract for WS /v2/sessions/{id}/terminal. A terminal connection is the session's single exclusive surface: it always requires the control grant, and connecting steals the surface from whatever holds it. cols and rows are required before the steal commits, either here or as a resize frame.",
   "type": "object",
   "properties": {
-    "mode": { "enum": ["control", "read-only"], "default": "control" },
     "cols": { "type": "integer", "minimum": 1, "maximum": 65535 },
     "rows": { "type": "integer", "minimum": 1, "maximum": 65535 }
   },
-  "additionalProperties": false
+  "additionalProperties": false,
+  "$defs": {
+    "closeReason": {
+      "description": "Reason carried in the WebSocket close frame. `detached` is a clean end; every other value says why the surface was taken away.",
+      "enum": ["detached", "stolen", "slow_client", "session_exited", "kernel_error"]
+    },
+    "closeCode": {
+      "description": "Application close codes paired with closeReason. 1000 accompanies `detached`.",
+      "type": "object",
+      "required": ["stolen", "slowClient", "sessionExited", "kernelError"],
+      "properties": {
+        "stolen": { "const": 4409 },
+        "slowClient": { "const": 4408 },
+        "sessionExited": { "const": 4410 },
+        "kernelError": { "const": 4500 }
+      },
+      "additionalProperties": false
+    }
+  }
 }

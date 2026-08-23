@@ -254,8 +254,7 @@ fn open_iterm(request: ViewerRequest<'_>) -> anyhow::Result<ViewerArrival> {
         // An attached client is better evidence than the launcher's exit: the
         // viewer is already showing the session, whatever osascript is still
         // finishing.
-        if crate::engine::attached_clients(request.home, request.id).is_some_and(|count| count > 0)
-        {
+        if crate::engine::surface_attached(request.home, request.id) {
             return Ok(ViewerArrival::Arrived);
         }
         if Instant::now() >= deadline {

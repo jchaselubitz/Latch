@@ -37,14 +37,7 @@ output_dir="${LATCH_RELEASE_DIR:-dist}"
 archive_name="latch-${version}-${target}.zip"
 archive_path="$output_dir/$archive_name"
 stage_dir="$output_dir/.stage-$target"
-tmux_version="3.7b"
-tmux_sha256="87f2e99e3b685973f2ca002ffd6ed7e51a5744f7009daae5a15670b6d532db96"
-tmux_source="$output_dir/tmux-$tmux_version.tar.gz"
-tmux_build="$output_dir/.tmux-$target"
-utf8proc_version="2.11.3"
-utf8proc_sha256="abfed50b6d4da51345713661370290f4f4747263ee73dc90356299dfc7990c78"
-utf8proc_source="$output_dir/utf8proc-$utf8proc_version.tar.gz"
-utf8proc_build="$output_dir/.utf8proc-$target"
+tmux_work="$output_dir/.tmux-$target"
 
 cargo build --locked --release --package latch --package latch-remote --target "$target"
 
@@ -53,45 +46,12 @@ mkdir -p "$stage_dir"
 cp "target/$target/release/latch" "$stage_dir/latch"
 cp "target/$target/release/latch-remote" "$stage_dir/latch-remote"
 
-curl --fail --silent --show-error --location --proto '=https' \
-  "https://github.com/tmux/tmux/releases/download/$tmux_version/tmux-$tmux_version.tar.gz" \
-  -o "$tmux_source"
-printf '%s  %s\n' "$tmux_sha256" "$tmux_source" | shasum -a 256 -c -
-rm -rf "$tmux_build"
-mkdir -p "$tmux_build"
-tar -xzf "$tmux_source" -C "$tmux_build" --strip-components=1
-
-libevent_prefix="$(brew --prefix libevent)"
-curl --fail --silent --show-error --location --proto '=https' \
-  "https://github.com/JuliaStrings/utf8proc/archive/refs/tags/v$utf8proc_version.tar.gz" \
-  -o "$utf8proc_source"
-printf '%s  %s\n' "$utf8proc_sha256" "$utf8proc_source" | shasum -a 256 -c -
-rm -rf "$utf8proc_build"
-mkdir -p "$utf8proc_build"
-tar -xzf "$utf8proc_source" -C "$utf8proc_build" --strip-components=1
-make -C "$utf8proc_build"
-utf8proc_build="$(cd "$utf8proc_build" && pwd -P)"
-utf8proc_include="$utf8proc_build"
-utf8proc_library="$utf8proc_build/libutf8proc.a"
-(
-  cd "$tmux_build"
-  PKG_CONFIG_PATH="$libevent_prefix/lib/pkgconfig" \
-  LDFLAGS="-L$libevent_prefix/lib" \
-  LIBEVENT_CORE_CFLAGS="-I$libevent_prefix/include" \
-  LIBEVENT_CORE_LIBS="$libevent_prefix/lib/libevent_core.a" \
-  LIBEVENT_CFLAGS="-I$libevent_prefix/include" \
-  LIBEVENT_LIBS="$libevent_prefix/lib/libevent.a" \
-  LIBUTF8PROC_CFLAGS="-I$utf8proc_include" \
-  LIBUTF8PROC_LIBS="$utf8proc_library" \
-  ./configure --enable-utf8proc
-  make -j"$(sysctl -n hw.ncpu)"
-)
-cp "$tmux_build/tmux" "$stage_dir/latch-tmux"
-"$stage_dir/latch-tmux" -V | grep -Fx "tmux $tmux_version"
-if otool -L "$stage_dir/latch-tmux" | grep -Fq "$libevent_prefix"; then
-  echo "Vendored tmux still links to a Homebrew build dependency" >&2
-  exit 1
-fi
+# The patched session kernel is built by the same script the Phase 0 conformance
+# harness uses, so a shipped kernel and a tested kernel are never built
+# differently. It verifies the source checksum, applies every Latch patch at
+# zero fuzz, and refuses to emit a binary that does not advertise the raw-attach
+# capability.
+scripts/build-tmux.sh "$stage_dir/latch-tmux" "$tmux_work"
 
 if [[ -n "${LATCH_CODESIGN_IDENTITY:-}" ]]; then
   codesign --force --options runtime --timestamp --sign "$LATCH_CODESIGN_IDENTITY" "$stage_dir/latch"
@@ -112,7 +72,7 @@ if [[ -n "${LATCH_NOTARY_PROFILE:-}" ]]; then
   xcrun notarytool submit "$archive_path" --keychain-profile "$LATCH_NOTARY_PROFILE" --wait
 fi
 
-rm -rf "$stage_dir" "$tmux_build" "$tmux_source" "$utf8proc_build" "$utf8proc_source"
+rm -rf "$stage_dir" "$tmux_work"
 
 checksum="$(shasum -a 256 "$archive_path" | awk '{print $1}')"
 printf '%s  %s\n' "$checksum" "$archive_name" > "$archive_path.sha256"

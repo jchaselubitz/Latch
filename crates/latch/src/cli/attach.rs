@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use anyhow::{bail, Context};
 
-use crate::engine;
+use crate::engine::{self, SurfaceRelease};
 use crate::session::meta;
 use crate::session::paths::{LatchHome, SessionId};
 
@@ -15,8 +15,6 @@ pub struct AttachOptions {
     pub home: LatchHome,
     /// Session id or display name; omitted selects the newest session.
     pub session: Option<String>,
-    /// Attach as an observer. tmux will not accept input or resize the window.
-    pub read_only: bool,
 }
 
 /// Retry policy for `latch attach --retry`.
@@ -54,7 +52,7 @@ impl RetryPolicy {
 }
 
 /// Attaches once.
-pub fn attach(options: AttachOptions) -> anyhow::Result<()> {
+pub fn attach(options: AttachOptions) -> anyhow::Result<SurfaceRelease> {
     attach_session(options, None)
 }
 
@@ -62,11 +60,17 @@ pub fn attach(options: AttachOptions) -> anyhow::Result<()> {
 /// running session whose attach client dropped). Permanent errors — missing
 /// session, exited pane, missing tmux binary — fail immediately with the last
 /// error.
-pub fn attach_with_retry(options: AttachOptions, policy: RetryPolicy) -> anyhow::Result<()> {
+pub fn attach_with_retry(
+    options: AttachOptions,
+    policy: RetryPolicy,
+) -> anyhow::Result<SurfaceRelease> {
     attach_session(options, Some(policy))
 }
 
-fn attach_session(options: AttachOptions, policy: Option<RetryPolicy>) -> anyhow::Result<()> {
+fn attach_session(
+    options: AttachOptions,
+    policy: Option<RetryPolicy>,
+) -> anyhow::Result<SurfaceRelease> {
     let id = match options.session.as_deref() {
         Some(session) => resolve_session(&options.home, session)?,
         None => most_recent_session(&options.home)?,
@@ -75,8 +79,8 @@ fn attach_session(options: AttachOptions, policy: Option<RetryPolicy>) -> anyhow
     let extra_attempts = policy.map(|policy| policy.attempts).unwrap_or(0);
     let mut attempt = 0;
     loop {
-        match attach_once(&options.home, &id, options.read_only) {
-            Ok(()) => return Ok(()),
+        match attach_once(&options.home, &id) {
+            Ok(release) => return Ok(release),
             Err(_)
                 if attempt < extra_attempts && engine::attach_is_retryable(&options.home, &id) =>
             {
@@ -90,10 +94,9 @@ fn attach_session(options: AttachOptions, policy: Option<RetryPolicy>) -> anyhow
     }
 }
 
-fn attach_once(home: &LatchHome, id: &SessionId, read_only: bool) -> anyhow::Result<()> {
+fn attach_once(home: &LatchHome, id: &SessionId) -> anyhow::Result<SurfaceRelease> {
     match engine::inspect(home, id)? {
-        Some(_) if read_only => engine::attach_read_only(home, id),
-        Some(_) => engine::attach(home, id),
+        Some(_) => engine::attach_exclusive(home, id),
         None if engine::tmux_server_is_absent(home) => {
             bail!("no Latch tmux server is running")
         }

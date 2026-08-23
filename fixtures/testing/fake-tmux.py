@@ -7,12 +7,16 @@ import sys
 import time
 
 args = sys.argv[1:]
-if args == ["-V"]:
+if args == ["-V"] or args == ["-R", "-V"]:
     print("tmux 3.7b")
     raise SystemExit(0)
 
 socket = args[args.index("-S") + 1]
 args = args[args.index("-f") + 2:]
+raw_attach = False
+if args and args[0] == "-R":
+    raw_attach = True
+    args.pop(0)
 state_path = socket + ".fake.json"
 
 def load():
@@ -191,6 +195,12 @@ elif command == "display-message":
     entry = refresh(state[session])
     print(session_row(session, entry))
     save_if_changed(state, before)
+elif command == "list-clients":
+    session = args[args.index("-t") + 1]
+    if session not in state or not isinstance(state.get(session), dict) or "pid" not in state[session]:
+        missing_session(session)
+    if state.get("_surface_owner") == session:
+        print("attached,latch-raw")
 elif command == "capture-pane":
     session = args[args.index("-t") + 1]
     print(state[session].get("screen", ""), end="")
@@ -239,8 +249,13 @@ elif command == "attach-session":
         print("unable to attach to session " + session, file=sys.stderr)
         raise SystemExit(1)
     state["_last_attach"] = session
-    state["_last_attach_read_only"] = "-r" in args
-    entry["attached"] = entry.get("attached", 0) + 1
+    state["_last_attach_raw"] = raw_attach
+    if not raw_attach:
+        print("exclusive raw attach is required", file=sys.stderr)
+        raise SystemExit(1)
+    state["_surface_owner"] = session
+    state["_surface_generation"] = state.get("_surface_generation", 0) + 1
+    entry["attached"] = 1
     save(state)
     signal_path = socket + ".latch-first-viewer-" + session + ".signal"
     open(signal_path, "a").close()

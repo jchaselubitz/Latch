@@ -40,10 +40,11 @@ that credential, and cannot select any destination other than the supervised
 `127.0.0.1:0` gateway. After the HTTP/WebSocket upgrade, the same encrypted
 stream carries the existing gateway bytes unchanged.
 
-`observe` allows lists, inspection, capabilities, events, and only
-`mode=read-only` terminals. `interact` also permits message and prompt
-resolution submissions. `control` is required for terminal control and
-`keys` submissions. The proxy examines the complete initial HTTP request
+`observe` allows lists, inspection, capabilities, and events. It does not
+allow a terminal at all: a terminal connection is the session's single
+exclusive surface, so opening one takes that surface from whatever holds it.
+`interact` also permits message and prompt resolution submissions. `control`
+is required for any terminal connection and for `keys` submissions. The proxy examines the complete initial HTTP request
 before opening its loopback connection and rejects an attempted gateway
 `Authorization` header.
 

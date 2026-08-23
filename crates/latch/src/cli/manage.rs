@@ -104,7 +104,11 @@ pub fn inspect(options: InspectOptions) -> anyhow::Result<InspectReport> {
         initial_size: metadata.initial_size,
         size: info.as_ref().map(|value| value.size),
         exit: info.as_ref().and_then(engine::exit_record),
-        attached: info.as_ref().map(|value| value.attached),
+        // The kernel invariant is one raw human surface. Do not expose the
+        // tmux client count: administrative commands are clients too.
+        surface_attached: info
+            .as_ref()
+            .map(|_| engine::surface_attached(&options.home, &id)),
         launch_timings: timing::read(&options.home.session(&id)),
     })
 }

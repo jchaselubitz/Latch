@@ -1,6 +1,13 @@
 export const SOCKET_OPEN = 1;
 // Close codes `latch serve` uses to say retrying is pointless.
-export const FATAL_CLOSE_CODES = new Set([4404, 1008]);
+//
+// Every reasoned terminal close is fatal, including `stolen`. A terminal
+// connection is the session's one exclusive surface, so an automatic reconnect
+// after a steal would take the surface back from whoever just claimed it, and
+// two clients set to reconnect would trade it forever. Reattaching after a
+// steal is a decision for the person at the keyboard. Reconnecting is left to
+// transport-level drops, which carry no reasoned code.
+export const FATAL_CLOSE_CODES = new Set([1000, 1008, 4400, 4404, 4408, 4409, 4410, 4500]);
 
 export function latchProtocols({ token }: { token: string }): string[] {
   return [`latch.v2.${token}`];

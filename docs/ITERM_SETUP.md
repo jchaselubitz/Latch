@@ -63,7 +63,7 @@ a Dynamic Profile plist, or register a service.
 | --- | --- |
 | Open a new window with the Latch profile | A shell appears almost instantly; `echo $LATCH_SESSION_ID` prints a `ses_…` id. |
 | Close the window (or disconnect) | The session keeps running. `latch list` still shows it. |
-| `latch attach <id>` from another window | The screen is restored, including alternate-screen apps mid-run. |
+| `latch attach <id>` from another window | That window takes the session's surface, including alternate-screen apps mid-run; the window that had it exits saying it was stolen. |
 | Type `exit` in the shell | The session ends and disappears from `latch list` after prune, or shows as exited. |
 | Run `latch` again inside the session | Attaches to the enclosing session — never creates a session within a session. |
 | `latch run -- something` inside a session | Declines with an error rather than nesting. |
@@ -74,13 +74,30 @@ a Dynamic Profile plist, or register a service.
 latch list                  # most recently active first, with idle time
 latch attach                # most recent session
 latch attach ses_01J…       # a specific session
-latch attach --watch NAME   # look without taking input control
 latch open ses_01J… --with iterm  # open a new iTerm attachment
 latch open ses_01J… --with iterm --as tab   # …as a tab in the current window
 latch stop NAME             # end that session's process group only
 latch stop --all --yes      # confirm and end every running session
 latch prune                 # reclaim exited / lost session directories
 ```
+
+## One window at a time
+
+A session has exactly one surface. Attaching from a second window takes the
+session from the first, which exits with a message saying so and leaves its
+terminal restored; attaching again from the first takes it back. Between the
+two the session is headless — still running, still producing output, still
+holding its screen.
+
+There is no way to have two windows showing the same session live, and no
+read-only or watch attach. To see what an agent is doing without taking the
+terminal, use Conversation Hub or `latch inspect`.
+
+What you see immediately after attaching is the pane's current screen, painted
+once. Everything after that is the program's own output, byte for byte — iTerm
+does the interpreting, exactly as it would if the program were running in that
+window directly. iTerm needs no configuration for this beyond the profile
+above.
 
 ## Window or tab
 

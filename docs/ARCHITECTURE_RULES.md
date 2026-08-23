@@ -26,10 +26,44 @@ Latch invokes the bundled `latch-tmux` executable by absolute path with both
 `-S ~/.latch/server` and `-f ~/.latch/tmux.conf`. It must never discover the
 user's tmux executable, configuration, socket, or sessions.
 
+`latch-tmux` is not stock tmux. It is the pinned tmux source plus
+[`patches/tmux/`](../patches/tmux/), which adds the exclusive raw-attach
+primitive Latch depends on. It is a required part of the Latch payload, never
+an optional system dependency, and an unpatched or partially patched kernel is
+rejected before a session is created or an existing surface is touched.
+
+Two separate things are checked, because they can differ. The **binary** is
+probed with the raw-attach flag, which upstream tmux rejects as an unknown
+option. The **running server** is asked for `#{latch_raw_kernel}`, which
+upstream resolves to nothing — installing the payload does not restart a tmux
+server that is already up, and an upstream server would otherwise accept an
+ordinary attach and ignore the raw-attach identify flag, giving tmux's own
+renderer with no steal and no warning. A server that answers wrong is refused
+with an instruction to stop its sessions so the next command starts the
+patched kernel. There is no fallback in either case.
+
 The generated configuration has no status bar, prefix, or copy-mode keys. It
-sets `remain-on-exit on`, `window-size latest`, and a deliberate
-`default-terminal`. The child environment removes `TMUX`; nesting is detected
-only through `LATCH_SESSION_ID`.
+sets `remain-on-exit on` and a deliberate `default-terminal`. The child
+environment removes `TMUX`; nesting is detected only through
+`LATCH_SESSION_ID`.
+
+## A session has at most one human surface
+
+Every human attach — `latch attach`, bare `latch`, `latch open`, a Desktop
+viewer, an SSH or Termius session, and the gateway's WebSocket terminal — goes
+through the same exclusive attach. It preflights, then atomically takes the
+surface: the previous holder is detached with a reason, its terminal is
+restored, and the pane adopts the new geometry before a single complete frame
+is painted. After that frame the tty receives the pane's own bytes.
+
+A failed preflight leaves the current surface live and untouched. There is no
+mirrored attach, no watch mode, no read-only live terminal, and no ordinary
+user-facing `tmux attach-session`. Someone who only wants to observe uses
+Conversation Hub or `latch inspect`.
+
+Latch remains the execution/session provider, not a terminal emulator. iTerm,
+Terminal, Termius, and the mobile terminal are viewers; changing or stealing
+the viewer must never recreate the agent session.
 
 ## Cloud services are independent deployables
 

@@ -32,6 +32,23 @@ install -m 755 latch-tmux ~/.local/bin/latch-tmux
 latch --version
 ```
 
+All three binaries are required. `latch-tmux` in particular is **not** stock
+tmux and is not an optional system dependency: it is the pinned tmux source
+plus Latch's own patch, which provides the exclusive attach the CLI, Desktop,
+and gateway all depend on. Latch refuses to create a session or touch an
+existing surface when the `latch-tmux` it finds is unpatched, so a partial
+install fails closed rather than falling back to ordinary tmux behaviour.
+
+Stop existing sessions before installing. Replacing the payload does not
+restart a tmux server that is already running, and Latch refuses to attach
+through a server that predates this release rather than falling back to an
+ordinary tmux attach — so an upgrade over live sessions is refused with an
+instruction, not silently downgraded.
+
+There is no mixed-version operation. The CLI, Desktop, gateway, mobile
+contract, and `latch-tmux` ship together and are upgraded together; an older
+component paired with a newer one is refused rather than adapted.
+
 Ensure `~/.local/bin` is on your `PATH`. The ZIP is Developer ID signed and
 Apple-notarized; GitHub also publishes a provenance attestation for each
 archive in the release workflow. Verify it with
@@ -81,3 +98,58 @@ Set `LATCH_CODESIGN_IDENTITY` to apply local code signing and
 Set `LATCH_RELEASE_TAG=v<version>` to require that a release tag matches the
 Cargo version. The generated archive and adjacent `.sha256` file are placed in
 `dist/`.
+
+## Building the patched session kernel
+
+`latch-tmux` is built by `scripts/build-tmux.sh`, which is the only place that
+knows how to produce it. `scripts/release-cli.sh` and the release workflow both
+call it, so the kernel that ships and the kernel the conformance suites run
+against are built the same way.
+
+```bash
+scripts/build-tmux.sh dist/latch-tmux
+```
+
+It reads `patches/tmux/manifest.json` for the pinned upstream version, its
+SHA-256, and every Latch patch with its own checksum. It then verifies the
+source archive, applies each patch with `patch -F 0` so a hunk that no longer
+matches is a build failure rather than a silently relocated edit, links
+libevent and utf8proc statically, and refuses to emit a binary that does not
+accept the raw-attach flag. A patch that needs rebasing, a changed upstream
+tarball, or a build that produced stock tmux all stop the release here.
+
+### Updating the pinned tmux
+
+1. Change `upstream.version`, `upstream.url`, and `upstream.sha256` in
+   `patches/tmux/manifest.json`.
+2. Rebase the patch until it applies with zero fuzz, then record its new
+   SHA-256 in the manifest. Regenerate it as a single diff of pristine against
+   patched source; a patch assembled from separately generated hunks will apply
+   only with fuzz, which hides a hunk landing in the wrong place.
+3. Run the kernel conformance and soak gates below against the rebuilt binary.
+
+## Release gates
+
+Run these against the binaries extracted from the archive that will actually be
+published, not against a working-tree build.
+
+```bash
+# Kernel primitive: snapshot/raw boundary, byte identity, query ownership,
+# steal ordering, slow-client eviction, tty restoration.
+LATCH_TMUX_PHASE0_BIN=<latch-tmux> python3 scripts/test-latch-tmux-phase0.py
+
+# End to end: the real CLI and gateway over real PTYs, including local steal,
+# WebSocket steal and steal-back, racing owners, resize ownership, pane exit,
+# eviction, and old-kernel rejection. Must run serially.
+LATCH_E2E_TMUX_BIN=<latch-tmux> \
+    cargo test -p latch --test exclusive_attach_e2e -- --test-threads=1
+
+# Soak: full-screen redraw at desk geometry, an agent blocked on a prompt
+# through long idle periods, and repeated desk/phone steals.
+scripts/soak-exclusive-attach.py --tmux <latch-tmux> --latch <latch> \
+    --minutes 20 --steals 1000
+```
+
+The end-to-end suite skips itself when `LATCH_E2E_TMUX_BIN` is unset, so a
+plain `cargo test` does not need a built kernel. That is a convenience for
+development, not a licence to skip it before a release.

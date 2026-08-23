@@ -3,8 +3,8 @@ import Foundation
 /// What a paired phone is allowed to do once its authenticated transport is
 /// established. The order is a strict ladder: `control` implies `interact`,
 /// which implies `observe`. The CLI enforces this before anything reaches
-/// `/v1`; the app mirrors it so the UI can never offer an action the device
-/// would be refused for.
+/// the gateway; the app mirrors it so the UI can never offer an action the
+/// device would be refused for.
 enum DevicePermission: String, Codable, CaseIterable, Identifiable, Sendable {
     case observe
     case interact
@@ -23,11 +23,11 @@ enum DevicePermission: String, Codable, CaseIterable, Identifiable, Sendable {
     var detail: String {
         switch self {
         case .observe:
-            return "Read sessions, events, and an output-only terminal."
+            return "Read sessions, conversations, and events."
         case .interact:
             return "Also send messages and resolve prompts."
         case .control:
-            return "Also send terminal keystrokes and resize the terminal."
+            return "Also open the terminal, which takes it from whatever is showing it."
         }
     }
 

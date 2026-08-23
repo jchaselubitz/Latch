@@ -57,9 +57,36 @@ public enum LatchContract {
     public static let protocolVersion = 2
 }
 
-public enum TerminalAccessMode: String, Codable, Sendable {
-    case control
-    case readOnly = "read-only"
+/// Reason carried in a terminal WebSocket close frame. `detached` is a clean
+/// end; every other value says why the session's single exclusive surface was
+/// taken away from this device.
+public enum TerminalCloseReason: String, Codable, Sendable {
+    case detached
+    case stolen
+    case slowClient = "slow_client"
+    case sessionExited = "session_exited"
+    case kernelError = "kernel_error"
+
+    /// Application close code paired with this reason.
+    public var closeCode: Int {
+        switch self {
+        case .detached: return 1000
+        case .slowClient: return 4408
+        case .stolen: return 4409
+        case .sessionExited: return 4410
+        case .kernelError: return 4500
+        }
+    }
+
+    /// The reason for one observed close code, or `nil` when the gateway sent
+    /// a code this contract does not define.
+    public static func forCloseCode(_ code: Int) -> TerminalCloseReason? {
+        allCases.first { $0.closeCode == code }
+    }
+
+    private static let allCases: [TerminalCloseReason] = [
+        .detached, .stolen, .slowClient, .sessionExited, .kernelError
+    ]
 }
 
 public struct GatewayEndpoints: Codable, Equatable, Sendable {
@@ -91,20 +118,23 @@ public extension GatewayEndpoints {
 }
 
 public struct GatewayFeatures: Codable, Equatable, Sendable {
-    public var readOnlyTerminal: Bool
+    /// Always true on a current gateway: a terminal connection is the
+    /// session's one exclusive surface. The field remains so this app can
+    /// detect a Mac that predates the exclusive cutover and refuse it.
+    public var exclusiveTerminal: Bool
 
-    public init(readOnlyTerminal: Bool = false) {
-        self.readOnlyTerminal = readOnlyTerminal
+    public init(exclusiveTerminal: Bool = false) {
+        self.exclusiveTerminal = exclusiveTerminal
     }
 }
 
 public enum GatewayFeaturesName: String, CaseIterable, Sendable {
-    case readOnlyTerminal
+    case exclusiveTerminal
 }
 
 public extension GatewayFeatures {
     func isEnabled(_ name: GatewayFeaturesName) -> Bool {
-        switch name { case .readOnlyTerminal: return readOnlyTerminal }
+        switch name { case .exclusiveTerminal: return exclusiveTerminal }
     }
 }
 

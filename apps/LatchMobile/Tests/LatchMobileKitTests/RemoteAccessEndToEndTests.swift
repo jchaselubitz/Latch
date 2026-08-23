@@ -160,7 +160,7 @@ final class RemoteAccessEndToEndTests: XCTestCase {
              "capabilities":{"create":true,"openViewer":true,"localAttach":true,
               "cloudAttach":false,"selfUpdate":true,"extensions":[]},
              "endpoints":{"sessions":true,"terminal":true,"conversation":false},
-             "features":{"readOnlyTerminal":true},"gatewayInstanceId":"paired-gateway",
+             "features":{"exclusiveTerminal":true},"gatewayInstanceId":"paired-gateway",
              "operationRetentionSeconds":600}
             """
         )

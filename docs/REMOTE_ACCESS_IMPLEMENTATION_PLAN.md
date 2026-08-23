@@ -2,7 +2,14 @@
 
 ## Status
 
-Proposed.
+Proposed, and partly superseded.
+
+The read-only terminal capability this plan lists as future protocol work was
+designed and then removed: a session has exactly one human surface, and a
+terminal connection requires the `control` grant. Observation is Conversation
+Hub and `latch inspect`. See
+[`DECISION_EXCLUSIVE_ATTACH.md`](DECISION_EXCLUSIVE_ATTACH.md); the rest of
+this plan still stands.
 
 This plan describes how an iOS client can securely attach to Latch sessions on
 a user's Mac without requiring the user to configure SSH, router port

@@ -65,7 +65,7 @@ final class GatewayV2Tests: XCTestCase {
          "capabilities":{"create":true,"openViewer":true,"localAttach":true,
           "cloudAttach":false,"selfUpdate":true,"extensions":[]},
          "endpoints":{"sessions":true,"terminal":true,"conversation":false},
-         "features":{"readOnlyTerminal":true},"gatewayInstanceId":"gw-a-b",
+         "features":{"exclusiveTerminal":true},"gatewayInstanceId":"gw-a-b",
          "operationRetentionSeconds":600}
         """)
         StubProtocol.stub(path: "/v2/sessions", body: #"{"sessions":[]}"#)

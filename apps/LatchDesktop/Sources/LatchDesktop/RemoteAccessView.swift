@@ -87,7 +87,7 @@ struct RemoteAccessSettingsView: View {
                 SettingsSectionHeader("Paired Devices")
             } footer: {
                 SettingsFootnote(
-                    "Observe can watch. Interact can also send messages and answer prompts. Control can also type into the terminal. Latch checks this on every request before anything reaches a session."
+                    "Observe can read sessions and conversations. Interact can also send messages and answer prompts. Control can also open a session's terminal, which takes that terminal from whatever is currently showing it. Latch checks this on every request before anything reaches a session."
                 )
             }
 

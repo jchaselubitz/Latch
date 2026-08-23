@@ -11,11 +11,13 @@ pub const DEVICE_GRANT_HEADER: &str = "x-latch-device-grant";
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Grant {
-    /// Read discovery, sessions, conversations, and output-only terminals.
+    /// Read discovery, sessions, and conversations.
     Observe,
     /// Also apply structured conversation actions.
     Interact,
-    /// Also write terminal bytes and resize panes.
+    /// Also take the session's single terminal surface: write bytes and
+    /// resize its pane. There is no lesser terminal grant — connecting a
+    /// terminal steals whatever surface the session currently has.
     Control,
 }
 
@@ -105,12 +107,7 @@ pub(crate) fn route_for(method: &str, target: &str) -> Option<(RouteSpec, Grant)
         .iter()
         .copied()
         .find(|spec| spec.method == method && path_matches(spec.pattern, path))?;
-    let required = if spec.id == RouteId::Terminal && read_only_terminal(target) {
-        Grant::Observe
-    } else {
-        spec.required_grant
-    };
-    Some((spec, required))
+    Some((spec, spec.required_grant))
 }
 
 fn path_matches(pattern: &str, path: &str) -> bool {
@@ -132,13 +129,6 @@ fn path_matches(pattern: &str, path: &str) -> bool {
     path.next().is_none()
 }
 
-fn read_only_terminal(target: &str) -> bool {
-    target
-        .split_once('?')
-        .map(|(_, query)| query.split('&').any(|part| part == "mode=read-only"))
-        .unwrap_or(false)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,9 +140,11 @@ mod tests {
             ("/v2/sessions", Grant::Observe),
             ("/v2/sessions/ses_1", Grant::Observe),
             ("/v2/sessions/ses_1/terminal", Grant::Control),
+            // No query string lowers the terminal's grant: an observing device
+            // cannot take the surface by asking for a gentler mode.
             (
                 "/v2/sessions/ses_1/terminal?cols=80&mode=read-only",
-                Grant::Observe,
+                Grant::Control,
             ),
             ("/v2/sessions/ses_1/conversation", Grant::Observe),
         ];

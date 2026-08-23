@@ -776,7 +776,12 @@ mod tests {
             }),
         )
         .expect("hub");
-        let app = super::super::http::test_router(home, token_file, hub);
+        let app = super::super::http::test_router(
+            home,
+            token_file,
+            hub,
+            std::path::PathBuf::from("latch"),
+        );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind");

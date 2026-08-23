@@ -10,6 +10,7 @@
 //!
 //! Behaviour behind each arm lives in [`latch::cli`].
 
+use std::io::Write;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -25,6 +26,7 @@ use latch::cli::nesting::{self, NestingDecision};
 use latch::cli::open::{self, OpenBehavior, OpenRequest};
 use latch::cli::remote_access::{self, DevicePermission};
 use latch::cli::update::{self, UpdateOptions};
+use latch::engine::SurfaceRelease;
 use latch::engine::PROTOCOL_VERSION;
 use latch::session::manifest::{DisplayMetadata, TerminalSize};
 use latch::session::paths::LatchHome;
@@ -120,9 +122,6 @@ enum Command {
         /// Reconnect automatically when the transport drops (M2).
         #[arg(long)]
         retry: bool,
-        /// Observe output without sending input or changing terminal size.
-        #[arg(long)]
-        read_only: bool,
     },
     /// List sessions, most recently active first.
     List {
@@ -196,8 +195,8 @@ enum Command {
     },
     /// Reclaim directories for exited and lost sessions.
     ///
-    /// Recently exited sessions are kept: they are still attachable read-only,
-    /// and reclaiming one is what makes its last screen unavailable.
+    /// Recently exited sessions are kept: attaching to one still paints its
+    /// last screen, and reclaiming it is what makes that screen unavailable.
     Prune {
         /// Show what would be reclaimed without reclaiming it.
         #[arg(long)]
@@ -525,23 +524,18 @@ fn dispatch(command: Option<Command>) -> Result<()> {
             }
             Ok(())
         }
-        Some(Command::Attach {
-            session,
-            retry,
-            read_only,
-        }) => {
+        Some(Command::Attach { session, retry }) => {
             let options = AttachOptions {
                 home: LatchHome::from_env()?,
                 session,
-                read_only,
             };
             // `--retry` changes only how many times the same attach is made.
-            if retry {
-                attach::attach_with_retry(options, RetryPolicy::default())?;
+            let release = if retry {
+                attach::attach_with_retry(options, RetryPolicy::default())?
             } else {
-                attach::attach(options)?;
-            }
-            Ok(())
+                attach::attach(options)?
+            };
+            finish_attach(release)
         }
         Some(Command::List { json }) => {
             let report = manage::list(ListOptions {
@@ -687,7 +681,7 @@ fn dispatch(command: Option<Command>) -> Result<()> {
             // somebody may want to attach to it, and they need its id to do so.
             if !report.retained.is_empty() {
                 println!(
-                    "kept {} recently exited session(s), still attachable read-only: {}",
+                    "kept {} recently exited session(s); attaching still shows the last screen: {}",
                     report.retained.len(),
                     report
                         .retained
@@ -1019,12 +1013,41 @@ fn refuse_nested_create() -> Result<()> {
 }
 
 fn attach_created_session(session: &str) -> Result<()> {
-    attach::attach(AttachOptions {
+    let release = attach::attach(AttachOptions {
         home: LatchHome::from_env()?,
         session: Some(session.to_owned()),
-        read_only: false,
     })?;
-    Ok(())
+    finish_attach(release)
+}
+
+/// Ends the process carrying the kernel's release reason.
+///
+/// Attach is always the last thing these paths do, so exiting here is not
+/// skipping later work. The exit code is the contract: a supervising process —
+/// a terminal profile, or the gateway's PTY host — learns why the surface
+/// ended without parsing output, and the human message says what to do next.
+fn finish_attach(release: SurfaceRelease) -> ! {
+    let message = match release {
+        SurfaceRelease::Normal => None,
+        SurfaceRelease::Stolen => Some(
+            "latch: another terminal took this session's surface; \
+             run `latch attach` to take it back",
+        ),
+        SurfaceRelease::SlowClient => Some(
+            "latch: detached because this terminal could not keep up with the \
+             session's output; the session kept running",
+        ),
+        SurfaceRelease::SessionExited => Some("latch: the session's program exited"),
+    };
+    if let Some(message) = message {
+        // Deliberately not `eprintln!`, which panics when the write fails.
+        // The terminal being unwritable is precisely the `SlowClient` case, so
+        // reporting it must never be what destroys the exit code that names
+        // it: a supervisor would see a panic's 101 and read `kernel_error`
+        // where the truth was `slow_client`.
+        let _ = writeln!(std::io::stderr(), "{message}");
+    }
+    std::process::exit(release.exit_code())
 }
 
 fn terminal_size() -> TerminalSize {
@@ -1094,7 +1117,7 @@ fn print_inspect_human(report: &latch::cli::json::InspectReport) {
     if let Some(exit) = &report.exit {
         println!("exited:\t\t{}", exit.exited_at);
     }
-    if let Some(attached) = report.attached {
-        println!("attached:\t{attached}");
+    if let Some(surface_attached) = report.surface_attached {
+        println!("surface attached:\t{surface_attached}");
     }
 }

@@ -49,9 +49,18 @@ removed from the Mac allowlist, active streams close, and later handshakes are
 rejected. A gateway-token rotation affects new internal handshakes only; that
 token is never sent to a phone.
 
-The v1 read-only terminal mode is defence in depth: the gateway ignores input
-and resize frames and starts tmux in read-only mode. The desktop transport
-still enforces the `observe` permission before the WebSocket is opened.
+There is no read-only terminal mode to fall back on. A terminal connection is
+the session's single exclusive surface, so the gateway requires the `control`
+grant for the terminal route and refuses `observe` and `interact` before the
+WebSocket is opened. Observation without control is served by the conversation
+socket, which cannot take the surface or type into a pane.
+
+Two further limits keep a terminal connection from being used as a denial of
+service against the session itself. The steal only commits once the socket has
+declared a real terminal size, so an unauthenticated or half-initialised
+socket cannot evict the desk surface. And a peer that stops draining output is
+closed and its attach reaped, rather than being allowed to hold the surface
+while the pane stalls behind it.
 
 ## Abuse cases and mitigations
 
@@ -64,7 +73,8 @@ still enforces the `observe` permission before the WebSocket is opened.
 | Browser-origin attack on gateway | Keep loopback binding, reject non-loopback origins, require bearer authentication, and do not expose the token to remote clients. |
 | Confused deputy to another local service | The remote agent has one fixed loopback target and an allowlisted `/v1` surface; no host/port supplied by a device is ever dialed. |
 | Duplicate submit after reconnect | `Idempotency-Key` binds one message or resolve payload to one resolved session for the gateway instance's bounded retry window. Reuse with different content returns 409. |
-| Terminal-control escalation | Explicit `control` grant; `observe` streams use `mode=read-only`; authorizer checks every terminal operation. |
+| Terminal-control escalation | Explicit `control` grant on the terminal route, with no lesser terminal mode to downgrade into; authorizer checks every terminal operation. |
+| Surface denial of service | A steal commits only after a valid size is declared; socket writes are deadline-bounded and a non-draining peer is evicted and its attach reaped, so a stalled device cannot hold the surface or block the pane. |
 | Connection exhaustion | Per-device/account connection, frame, request, and buffered-byte limits; reject before proxying; audit aggregate failure category only. |
 | Hostile terminal output | Treat output as terminal bytes, never markup; use a hardened renderer and avoid putting content in diagnostics, notifications, or logs. |
 | Update/dependency compromise | Signed/notarized helper, signed update metadata, pinned dependency review, and rollback/runbook before production rollout. |

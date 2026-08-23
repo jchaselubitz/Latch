@@ -51,18 +51,39 @@ use serde::{Deserialize, Serialize};
 pub const REMOTE_ACCESS_SCHEMA_VERSION: u8 = 2;
 pub const OPERATION_RETENTION_SECONDS: u64 = 10 * 60;
 
-#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-pub enum TerminalAccessMode {
-    #[default]
-    Control,
-    ReadOnly,
+/// Reason carried in a terminal WebSocket close frame. `Detached` is a clean
+/// end; every other value says why the single exclusive surface was taken away.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalCloseReason {
+    Detached,
+    Stolen,
+    SlowClient,
+    SessionExited,
+    KernelError,
+}
+
+impl TerminalCloseReason {
+    /// Application close code paired with this reason. `Detached` uses the
+    /// ordinary 1000.
+    pub const fn close_code(self) -> u16 {
+        match self {
+            Self::Detached => 1000,
+            Self::SlowClient => 4408,
+            Self::Stolen => 4409,
+            Self::SessionExited => 4410,
+            Self::KernelError => 4500,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct GatewayFeatures {
-    pub read_only_terminal: bool,
+    /// Always true: a terminal connection is the session's one exclusive
+    /// surface. The field remains so a client can detect a gateway that
+    /// predates the exclusive cutover and refuse it.
+    pub exclusive_terminal: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -253,8 +274,20 @@ def typescript_source(schema_digest: str) -> str:
 // Canonical schema set SHA-256: {schema_digest}
 ''' + '''
 
-export type TerminalAccessMode = 'control' | 'read-only';
-export type GatewayFeatures = { readOnlyTerminal: boolean };
+export type TerminalCloseReason =
+  | 'detached'
+  | 'stolen'
+  | 'slow_client'
+  | 'session_exited'
+  | 'kernel_error';
+export const TERMINAL_CLOSE_CODES = {
+  detached: 1000,
+  slow_client: 4408,
+  stolen: 4409,
+  session_exited: 4410,
+  kernel_error: 4500
+} as const satisfies Record<TerminalCloseReason, number>;
+export type GatewayFeatures = { exclusiveTerminal: boolean };
 export type GatewayReadiness = {
   formatVersion: 2;
   address: string;

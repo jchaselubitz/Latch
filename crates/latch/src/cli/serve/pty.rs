@@ -4,11 +4,22 @@ use std::fs::File;
 use std::io;
 use std::os::fd::{FromRawFd, RawFd};
 use std::os::unix::io::AsRawFd;
-use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::{ExitStatus, Stdio};
+use std::time::{Duration, Instant};
 
-use crate::engine::DEFAULT_TERMINAL;
+use tokio::process::{Child, Command};
+
+use crate::engine::{SurfaceRelease, DEFAULT_TERMINAL};
+
+/// Gap between reap attempts after signalling the attach process. Short
+/// enough that a closing socket does not visibly hold the surface, long
+/// enough not to spin.
+const REAP_POLL_INTERVAL: Duration = Duration::from_millis(10);
+/// Ceiling on how long one shutdown waits for the attach to become reapable.
+const REAP_TIMEOUT: Duration = Duration::from_secs(10);
+/// Scratch size for discarding PTY output while shutting down.
+const DRAIN_BUFFER: usize = 32 * 1024;
 
 #[cfg(target_os = "linux")]
 #[link(name = "util")]
@@ -24,8 +35,6 @@ pub struct SpawnAttachRequest<'a> {
     pub cols: u16,
     /// Initial rows.
     pub rows: u16,
-    /// Spawn tmux's read-only attach mode.
-    pub read_only: bool,
 }
 
 /// A live attach process sitting on a PTY master.
@@ -76,7 +85,6 @@ impl PtyChild {
         let mut command = Command::new(request.latch_bin);
         command
             .arg("attach")
-            .args(request.read_only.then_some("--read-only"))
             .arg(request.session_id)
             .env("TERM", DEFAULT_TERMINAL)
             .stdin(Stdio::from(slave.try_clone()?))
@@ -101,17 +109,69 @@ impl PtyChild {
         Ok(Self { master, child })
     }
 
-    /// Asks the attach process to exit.
-    pub fn kill(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+    /// Waits for the attach process and reports why the surface ended.
+    ///
+    /// A status the kernel did not label is a kernel failure, not an orderly
+    /// release: the caller must not tell its peer the surface was handed over
+    /// when the attach in fact failed.
+    pub async fn wait(&mut self) -> Option<SurfaceRelease> {
+        let status = self.child.wait().await.ok()?;
+        release_of(status)
+    }
+
+    /// Kills the attach process and reaps it.
+    ///
+    /// Reaping matters as much as killing: an unwaited attach child would stay
+    /// a zombie holding the surface accounting open after its socket is gone.
+    ///
+    /// Draining matters just as much. The attach owns the PTY as its
+    /// controlling terminal, and a process cannot finish exiting while that
+    /// terminal's output buffer is full — which is exactly the state a peer
+    /// that stopped reading leaves it in. Killing without draining therefore
+    /// wedges the child mid-exit and it never becomes reapable. `try_wait` is
+    /// used rather than the async `wait` so this path asks the kernel directly
+    /// instead of depending on a `SIGCHLD` wakeup.
+    pub async fn shutdown(&mut self) {
+        let _ = self.child.start_kill();
+        let deadline = Instant::now() + REAP_TIMEOUT;
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(_)) | Err(_) => return,
+                // Giving up leaves a zombie, which is bad; blocking this task
+                // forever would be worse, and it is the gateway's own socket
+                // handling that would stall.
+                Ok(None) if Instant::now() >= deadline => return,
+                Ok(None) => {
+                    self.drain();
+                    tokio::time::sleep(REAP_POLL_INTERVAL).await;
+                }
+            }
+        }
+    }
+
+    /// Discards whatever the PTY currently holds. The master is non-blocking,
+    /// so this returns as soon as the buffer is empty.
+    fn drain(&mut self) {
+        let mut scratch = [0u8; DRAIN_BUFFER];
+        loop {
+            // SAFETY: `master` is an open non-blocking descriptor and
+            // `scratch` is writable for its whole length.
+            let read = unsafe {
+                libc::read(
+                    self.master.as_raw_fd(),
+                    scratch.as_mut_ptr().cast(),
+                    scratch.len(),
+                )
+            };
+            if read <= 0 {
+                return;
+            }
+        }
     }
 }
 
-impl Drop for PtyChild {
-    fn drop(&mut self) {
-        self.kill();
-    }
+fn release_of(status: ExitStatus) -> Option<SurfaceRelease> {
+    SurfaceRelease::from_exit_code(status.code())
 }
 
 fn set_nonblocking(fd: RawFd) -> io::Result<()> {

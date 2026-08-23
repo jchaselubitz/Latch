@@ -78,10 +78,10 @@ pub struct InspectReport {
     /// Exit record, when the session has exited.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit: Option<ExitRecord>,
-    /// Number of tmux clients currently attached, when the private server
-    /// reported the session.
+    /// Whether one human terminal surface currently owns the session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub attached: Option<usize>,
+    #[serde(rename = "surfaceAttached")]
+    pub surface_attached: Option<bool>,
     /// Per-phase launch timings, oldest first, recorded by `create`, `open`,
     /// and the session's own launcher. Empty for sessions created before the
     /// sidecar existed.

@@ -231,7 +231,7 @@ struct SettingsView: View {
 
     static func label(_ feature: GatewayFeaturesName) -> String {
         switch feature {
-        case .readOnlyTerminal: return "Read-only terminal"
+        case .exclusiveTerminal: return "Exclusive terminal"
         }
     }
 }

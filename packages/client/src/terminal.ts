@@ -1,11 +1,6 @@
 import { backoffDelay } from './reconnect.ts';
-import type {
-  RetryPolicy,
-  TerminalCloseInfo,
-  TerminalHandle,
-  TerminalState,
-  TerminalAccessMode
-} from './types.ts';
+import type { RetryPolicy, TerminalCloseInfo, TerminalHandle, TerminalState } from './types.ts';
+import { terminalCloseReason } from './types.ts';
 import { FATAL_CLOSE_CODES, SOCKET_OPEN, latchProtocols, sessionWsUrl } from './ws.ts';
 
 const WRITE_QUEUE_LIMIT = 32;
@@ -16,7 +11,6 @@ type AttachTerminalOptions = {
   sessionId: string;
   cols?: number;
   rows?: number;
-  mode?: TerminalAccessMode;
   retry: RetryPolicy;
   webSocket?: new (url: string, protocols?: string | string[]) => WebSocket;
 };
@@ -62,9 +56,6 @@ export function attachTerminal(options: AttachTerminalOptions): TerminalHandle {
     if (lastSize) {
       query.cols = String(lastSize.cols);
       query.rows = String(lastSize.rows);
-    }
-    if (options.mode === 'read-only') {
-      query.mode = 'read-only';
     }
     return sessionWsUrl({
       baseUrl: options.baseUrl,
@@ -126,10 +117,11 @@ export function attachTerminal(options: AttachTerminalOptions): TerminalHandle {
       const code = event?.code ?? 0;
       const reason = event?.reason ?? '';
       if (FATAL_CLOSE_CODES.has(code)) {
-        // The session is gone or the gateway refused this client. Reconnecting
-        // would loop forever against an answer that will not change.
+        // The gateway said why this surface ended. Reconnecting would either
+        // loop against an answer that will not change, or — after a steal —
+        // take the surface back from whoever just claimed it.
         closed = true;
-        emitClose({ code, reason });
+        emitClose({ code, reason, surface: terminalCloseReason(code) });
         setState('closed');
         return;
       }
