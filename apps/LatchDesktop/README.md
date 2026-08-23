@@ -35,7 +35,7 @@ selected CLI and private tmux versions, reports `latch doctor` findings, and can
 check for or install a CLI update when that installation advertises
 `selfUpdate` support.
 
-To assemble a local universal `.app` with no bundled CLI, run:
+To assemble a local Apple Silicon `.app` with no bundled CLI, run:
 
 ```sh
 apps/LatchDesktop/build-app.sh
@@ -55,7 +55,7 @@ LATCH_APP_ARCHIVE='dist/Latch-macos.zip' \
 apps/LatchDesktop/build-app.sh
 ```
 
-The script signs the universal app, submits a ZIP archive to Apple, staples the
+The script signs the Apple Silicon app, submits a ZIP archive to Apple, staples the
 accepted ticket to the app, verifies the signature and Gatekeeper assessment,
 and recreates the archive with the stapled app. The ZIP contains only
 `Latch.app`; `LATCH_NOTARY_PROFILE` requires `LATCH_CODESIGN_IDENTITY`.
@@ -116,8 +116,9 @@ to the release's `checksums.txt` instead of publishing a fifth sidecar asset.
 Without that attachment the in-app updater has nothing to find; if the upload
 does not happen the script prints the recovery commands.
 
-A complete release contains exactly the universal desktop ZIP, the two
-architecture-specific CLI ZIPs, and `checksums.txt`. The CLI is installed
+A complete release contains exactly the Apple Silicon desktop ZIP, the two
+architecture-specific CLI ZIPs, and `checksums.txt`. The CLI still ships Intel
+and Apple Silicon archives; the desktop app does not. The CLI is installed
 independently. The app validates protocol version 1 and requires CLI version
 `0.2608132217.0` or newer before its first refresh; this is the first release
 whose tmux-backed list/inspect contracts match the desktop models. A self-update

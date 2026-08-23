@@ -22,7 +22,7 @@ than code.
 
 ## Install
 
-Download the standalone CLI payload and the universal macOS desktop app from the same
+Download the standalone CLI payload and the Apple Silicon macOS desktop app from the same
 [GitHub Release](https://github.com/jchaselubitz/Latch/releases/latest). The
 current desktop archive is
 [Latch-0.2608230944.0-macos.zip](https://github.com/jchaselubitz/Latch/releases/download/v0.2608230944.0/Latch-0.2608230944.0-macos.zip);

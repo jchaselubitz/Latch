@@ -18,35 +18,26 @@ EOF
     exit 1
 fi
 
-# Build both slices explicitly so the one desktop download runs natively on
-# Apple Silicon and Intel. The CLI is a separate release asset and is never
-# copied into the application bundle. SwiftPM uses one default build directory
-# regardless of --arch, so the second build otherwise replaces the first slice
-# and lipo receives two copies of the host architecture.
+# Apple Silicon only. The CLI is a separate release asset and is never copied
+# into the application bundle. Keep a dedicated scratch path so SwiftPM does
+# not wipe the assembled .app.
 arm64_build_dir="$desktop_dir/.build/arm64-release"
-x86_64_build_dir="$desktop_dir/.build/x86_64-release"
-rm -rf -- "$arm64_build_dir" "$x86_64_build_dir"
+rm -rf -- "$arm64_build_dir" "$desktop_dir/.build/x86_64-release"
 
 swift build --package-path "$desktop_dir" -c release --arch arm64 --scratch-path "$arm64_build_dir"
-swift build --package-path "$desktop_dir" -c release --arch x86_64 --scratch-path "$x86_64_build_dir"
 
 arm64_bin_dir="$(swift build --package-path "$desktop_dir" -c release --arch arm64 --scratch-path "$arm64_build_dir" --show-bin-path)"
-x86_64_bin_dir="$(swift build --package-path "$desktop_dir" -c release --arch x86_64 --scratch-path "$x86_64_build_dir" --show-bin-path)"
 app_dir="$desktop_dir/.build/release/Latch.app"
 contents_dir="$app_dir/Contents"
 
 rm -rf -- "$app_dir"
 mkdir -p "$contents_dir/MacOS" "$contents_dir/Resources"
-lipo -create \
-    "$arm64_bin_dir/LatchDesktop" \
-    "$x86_64_bin_dir/LatchDesktop" \
-    -output "$contents_dir/MacOS/LatchDesktop"
-# `-verify_arch` takes one architecture and one input at a time.  Invoking it
-# twice makes both required universal slices explicit without asking lipo to
-# parse multiple input files.
-lipo "$contents_dir/MacOS/LatchDesktop" -verify_arch arm64
-lipo "$contents_dir/MacOS/LatchDesktop" -verify_arch x86_64
-chmod 0755 "$contents_dir/MacOS/LatchDesktop"
+install -m 0755 "$arm64_bin_dir/LatchDesktop" "$contents_dir/MacOS/LatchDesktop"
+archs="$(lipo -archs "$contents_dir/MacOS/LatchDesktop")"
+if [[ "$archs" != "arm64" ]]; then
+    echo "Expected an arm64-only LatchDesktop binary, got: $archs" >&2
+    exit 1
+fi
 install -m 0644 "$desktop_dir/Info.plist" "$contents_dir/Info.plist"
 
 # Build a complete, native macOS icon set from the approved transparent Latch
