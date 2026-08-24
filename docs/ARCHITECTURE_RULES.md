@@ -61,6 +61,15 @@ mirrored attach, no watch mode, no read-only live terminal, and no ordinary
 user-facing `tmux attach-session`. Someone who only wants to observe uses
 Conversation Hub or `latch inspect`.
 
+`GET /v2/sessions/{id}/preview` does not contradict that rule. It is a
+`capture-pane` query — the same one-shot grid read the Conversation Hub already
+performs to observe a pane's screen — returning the cells as they stood at one
+instant, with the time they were read. It does not enter the exclusive attach,
+does not paint continuously, does not follow the session, and cannot carry
+input. It is therefore allowed at the `observe` grant, which the terminal route
+refuses. A still is not a second live surface; the moment a client wants the
+next frame it must take the surface like everyone else.
+
 Latch remains the execution/session provider, not a terminal emulator. iTerm,
 Terminal, Termius, and the mobile terminal are viewers; changing or stealing
 the viewer must never recreate the agent session.

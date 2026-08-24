@@ -155,6 +155,7 @@ fn register(router: Router<AppState>, spec: RouteSpec) -> Router<AppState> {
         RouteId::Capabilities => router.route(spec.pattern, get(gateway_capabilities)),
         RouteId::Sessions => router.route(spec.pattern, get(list_sessions)),
         RouteId::Session => router.route(spec.pattern, get(inspect_session)),
+        RouteId::Preview => router.route(spec.pattern, get(preview_session)),
         RouteId::Terminal => router.route(spec.pattern, get(terminal_ws)),
         RouteId::Conversation => router.route(spec.pattern, get(conversation_ws)),
     }
@@ -287,6 +288,7 @@ struct GatewayCapabilities {
 #[derive(Serialize)]
 struct GatewayEndpoints {
     sessions: bool,
+    preview: bool,
     terminal: bool,
     conversation: bool,
 }
@@ -296,6 +298,7 @@ async fn gateway_capabilities(State(state): State<AppState>) -> Response {
         engine: manage::capabilities(),
         endpoints: GatewayEndpoints {
             sessions: true,
+            preview: true,
             terminal: true,
             conversation: true,
         },
@@ -328,6 +331,106 @@ async fn inspect_session(
             .map_err(|_| internal("inspect session"))?
             .map_err(map_engine_error)?;
     Ok(Json(report).into_response())
+}
+
+/// Upper bound on the scrollback a preview will read, matching the number
+/// `DECISION_SCROLLBACK.md` chose for the same reason: past a screen or two of
+/// history nothing is being decided, and the payload is not free.
+const PREVIEW_SCROLLBACK_CAP: u32 = 200;
+
+/// A preview is a screen-open convenience. If tmux cannot answer inside this,
+/// the phone says so and offers Attach rather than holding a spinner for the
+/// 30 seconds the engine helper defaults to.
+const PREVIEW_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PreviewQuery {
+    #[serde(default)]
+    scrollback_lines: Option<u32>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionPreview {
+    /// Escape-encoded pane content, drawable by the same renderer as the live
+    /// terminal stream.
+    content: String,
+    cols: u16,
+    rows: u16,
+    /// True while a full-screen application owns the pane. Scrollback does not
+    /// exist there, so a client stops asking for what it cannot receive.
+    alternate_screen: bool,
+    /// A preview is stale the moment it is taken; a screen showing a still has
+    /// to be able to say when it was taken.
+    captured_at: String,
+    /// Lines of scrollback actually included, after the cap and the alternate
+    /// screen have had their say.
+    scrollback_lines: u32,
+}
+
+/// Reads the live pane without attaching.
+///
+/// This is the only terminal-shaped route an observing device may call, and it
+/// is allowed precisely because `capture-pane` is a query: it does not enter
+/// the exclusive surface, so nothing is stolen from whoever holds it.
+async fn preview_session(
+    Path(id): Path<String>,
+    Query(query): Query<PreviewQuery>,
+    State(state): State<AppState>,
+) -> Result<Response, ApiError> {
+    let home = state.home.clone();
+    let requested = query
+        .scrollback_lines
+        .unwrap_or(0)
+        .min(PREVIEW_SCROLLBACK_CAP);
+    let preview = tokio::task::spawn_blocking(move || -> anyhow::Result<SessionPreview> {
+        let started = std::time::Instant::now();
+        let session = manage::resolve_existing(&home, &id)?;
+        let metrics = crate::engine::pane_metrics_with_timeout(
+            &home,
+            &session,
+            PREVIEW_DEADLINE.saturating_sub(started.elapsed()),
+        )?;
+        // The alternate screen has no history to read, so asking for some
+        // would only widen the capture window over the same one screen.
+        let scrollback_lines = if metrics.alternate_screen {
+            0
+        } else {
+            requested
+        };
+        let content = crate::engine::capture_pane_with_timeout(
+            &home,
+            &session,
+            PREVIEW_DEADLINE.saturating_sub(started.elapsed()),
+            crate::engine::CapturePaneOptions {
+                styled: true,
+                scrollback_lines,
+            },
+        )?;
+        // tmux ends a capture with a newline after the last row. Fed into an
+        // emulator whose grid is exactly `rows` tall, that newline scrolls the
+        // whole still up one line and the top row is lost. Measured against
+        // every `fixtures/vt` case: with the trailing newline the replayed
+        // grid is off by one row, and without it the grid — colors included —
+        // is byte-identical to the source pane.
+        let content = content
+            .strip_suffix('\n')
+            .map(str::to_owned)
+            .unwrap_or(content);
+        Ok(SessionPreview {
+            content,
+            cols: metrics.cols,
+            rows: metrics.rows,
+            alternate_screen: metrics.alternate_screen,
+            captured_at: crate::engine::format_rfc3339(SystemTime::now()),
+            scrollback_lines,
+        })
+    })
+    .await
+    .map_err(|_| internal("preview session"))?
+    .map_err(map_engine_error)?;
+    Ok(Json(preview).into_response())
 }
 
 async fn terminal_ws(
@@ -445,7 +548,7 @@ mod tests {
 
     #[test]
     fn every_registered_handler_comes_from_the_shared_route_table() {
-        assert_eq!(ROUTES.len(), 5);
+        assert_eq!(ROUTES.len(), 6);
         let mut ids = ROUTES.iter().map(|route| route.id).collect::<Vec<_>>();
         ids.sort_by_key(|id| *id as u8);
         ids.dedup();

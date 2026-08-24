@@ -14,7 +14,7 @@ client, which speaks the canonical v2 conversation socket directly.
 
 Use `GET /v2/capabilities` before opening a gateway connection. It reports
 protocol major 2, the gateway instance ID, operation retention, and the
-available `sessions`, `terminal`, and `conversation` endpoints. A consumer must
+available `sessions`, `terminal`, `preview`, and `conversation` endpoints. A consumer must
 require `protocolVersion: 2`; v1 has been removed and is not negotiated,
 probed, or adapted.
 
@@ -34,6 +34,30 @@ that never declares a size is closed without disturbing the current surface.
 The first frame after the steal is a paint of the pane's current screen and
 terminal modes. Everything after it is the agent's own byte stream, unchanged:
 no scrollback, no PTY replay, and no re-encoding.
+
+`GET /v2/sessions/{id}/preview` is the one terminal-shaped thing a client may
+do without taking the surface, and it is available at the `observe` grant
+because it takes nothing. It is a `capture-pane` query, not a second live
+surface: one read of the pane's cells at one instant, returning
+
+| Field | Meaning |
+| --- | --- |
+| `content` | the cells as escape-encoded text, drawable by the same renderer as the live stream, rows joined by newlines with none at the end |
+| `cols`, `rows` | the pane's current grid |
+| `alternateScreen` | true while a full-screen application owns the pane |
+| `capturedAt` | when the read happened; a still is stale the moment it is taken |
+| `scrollbackLines` | how many lines of history were included, after the cap |
+
+`scrollbackLines` may be requested as a query parameter and is capped at 200.
+It is forced to zero while `alternateScreen` is true, because the alternate
+screen has no history to read. The route has its own short capture deadline, so
+a client waits briefly or is told the read failed.
+
+It does not update, follow the session, or accept input, and there is no
+streaming variant of it. A client that wants the next frame opens the terminal
+socket and takes the surface like everyone else. Discovery reports it as
+`endpoints.preview`; a gateway that predates the route omits the key, which
+decodes as absent rather than failing the discovery document.
 
 Every reasoned close names why the surface ended, as both a close code and a
 close reason:

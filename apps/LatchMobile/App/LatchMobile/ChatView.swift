@@ -21,7 +21,7 @@ struct ChatView: View {
             } else {
                 terminalFallback(
                     title: "Conversation unavailable",
-                    detail: "This Mac does not offer the v2 Conversation Hub. Use terminal attach on the Mac for this session."
+                    detail: "This Mac does not offer the v2 Conversation Hub."
                 )
             }
         }
@@ -39,7 +39,7 @@ struct ChatView: View {
         if store.state?.connector == nil, store.socketState == .open {
             terminalFallback(
                 title: "Conversation unsupported",
-                detail: "This session's connector cannot provide a conversation. Terminal attach remains available for recovery."
+                detail: "This session's connector cannot provide a conversation."
             )
         } else {
             VStack(spacing: 0) {
@@ -61,12 +61,36 @@ struct ChatView: View {
         }
     }
 
+    /// Both dead ends keep their explanation and gain a way out.
+    ///
+    /// Telling someone to walk to their Mac, on a session that is live,
+    /// reachable and already authenticated, is what this feature exists to
+    /// remove — so the button appears whenever this device's grant and the
+    /// Mac's routes actually allow a terminal, and the old sentence about
+    /// attaching on the Mac stays only for the case where they do not.
+    @ViewBuilder
     private func terminalFallback(title: String, detail: String) -> some View {
-        ContentUnavailableView(
-            title,
-            systemImage: "terminal",
-            description: Text(detail)
-        )
+        if appModel.surface.terminal {
+            ContentUnavailableView {
+                Label(title, systemImage: "terminal")
+            } description: {
+                Text(detail + " The session's terminal can be opened here instead.")
+            } actions: {
+                NavigationLink("Open terminal") {
+                    // Never auto-attach from here. The user arrived asking for
+                    // chat; the steal is not implied by a tap that asked for
+                    // something else.
+                    TerminalView(session: session, autoAttach: false)
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        } else {
+            ContentUnavailableView(
+                title,
+                systemImage: "terminal",
+                description: Text(detail + " Use `latch attach` on the Mac for this session.")
+            )
+        }
     }
 }
 

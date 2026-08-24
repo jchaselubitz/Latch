@@ -14,11 +14,11 @@ repository without leaving a dependency on the Latch checkout behind.
 - **Settings** links the phone to one `latch serve` gateway and shows what that
   gateway reports it can do, and holds **Remote access**: pairing this phone
   with a Mac's own identity by scanning the code it shows.
-- Tapping a session opens a conversation placeholder. Chat, composer, and
-  interaction controls appear only after a host advertises its v2 Conversation
-  Hub; this client does not probe or fall back to protocol major 1.
-
-It does not yet render the terminal or conversation surface.
+- Tapping a session opens either its **terminal** or its **chat**, decided by
+  the *Session view* setting and by what the session and the grant actually
+  allow. Chat, composer, and interaction controls appear only after a host
+  advertises its v2 Conversation Hub; this client does not probe or fall back
+  to protocol major 1.
 
 ## Layout
 
@@ -36,9 +36,19 @@ Sources/LatchMobileKit/
   GatewayCompatibility.swift      protocol-major-2 discovery rules
   LinkStore.swift                 keychain storage for the address and token
   AppModel.swift                  observable session-list model
+  SessionPresentation.swift       the Session view and Terminal size settings,
+                                  and the pure tap-routing table
+  TerminalSocket.swift            the terminal WebSocket and its close reasons
+  TerminalSession.swift           attach/detach/send/resize, output as a stream
+  TerminalKey.swift               logical keys and their encodings
+  TerminalGeometry.swift          which grid to attach at, and when to resize
 App/LatchMobile.xcodeproj         the iOS app target
 App/LatchMobile/*.swift           the SwiftUI screens
 App/LatchMobile/QRScannerView.swift the camera preview that reads QR codes
+App/LatchMobile/SessionTerminalSurface.swift the renderer seam, and a stub
+App/LatchMobile/SwiftTermSurface.swift the only file that names SwiftTerm
+App/LatchMobile/TerminalKeyBar.swift the key row above the keyboard
+App/LatchMobile/TerminalView.swift  the terminal screen and its states
 Contract/                         vendored schemas and their digests
 Tools/generate-contract.py        the contract generator and drift gate
 ```
@@ -63,6 +73,17 @@ xcodebuild build -project App/LatchMobile.xcodeproj -scheme LatchMobile \
 
 Signing is left unset, so a device build needs a development team selected in
 Xcode. The simulator needs none.
+
+SwiftTerm ships a Metal renderer and processes `Shaders.metal` as a package
+resource, so a machine without the Metal toolchain cannot build the app at all.
+`xcodebuild -downloadComponent MetalToolchain` installs it (~838 MB). `swift
+test` needs it too, because `TerminalEmulatorTests` compiles SwiftTerm — it is
+a separate target from `LatchMobileKitTests` precisely so the kit never sees
+the emulator. Run `swift test --filter LatchMobileKitTests` to exercise the
+client alone.
+
+SwiftTerm is pinned `.upToNextMinor(from: "1.18.0")`. `Package.swift` says why
+and what to check before lifting the pin.
 
 Six of the tests check the client against a real gateway instead of a stub, and
 skip when there is not one to talk to:
@@ -91,6 +112,107 @@ a tunnel to it, not the gateway itself:
 
 Rotating the token with `latch serve token` invalidates it for new connections
 immediately; re-link in Settings afterwards.
+
+## The terminal view
+
+A session with no Claude or Codex connector — every plain shell, and every
+`latch run -- <anything else>` — has no conversation to show. The phone now
+opens its terminal instead of telling the user to walk to their Mac.
+
+`docs/DECISION_MOBILE_TERMINAL_FALLBACK.md` in the Latch repository is why this
+exists and why the emulator was never the hard part;
+`docs/PLAN_MOBILE_TERMINAL_VIEW.md` is what was built.
+
+### Which screen a tap opens
+
+**Settings → Session view** chooses **Terminal** or **Chat**, and it ships
+defaulting to Terminal. It is a *default presentation*, not a fallback rule: a
+phone set to Terminal opens a Claude session's terminal too. Either screen can
+still be impossible for a given session, and the resolution is:
+
+| Setting | Session's connector | Where the tap lands |
+| --- | --- | --- |
+| Terminal | any | the terminal, attaching on arrival |
+| Chat | `claude` / `codex` | chat |
+| Chat | none (a plain shell) | the terminal, *not* attaching — the person asked for chat, so the steal is not implied by that tap |
+| Chat | unknown (a Mac too old to report the field) | chat, exactly as before this feature existed |
+
+Each row in **Sessions** carries a trailing glyph naming its destination, so
+what a tap will do to the Mac is legible before the tap. Both screens carry the
+switcher to the other one, so the global default is a default and not a trap.
+
+### It requires the `control` grant
+
+A terminal connection is the session's single exclusive surface. Opening it
+takes the terminal from whatever is showing it on the Mac — an iTerm window, or
+another device — which is why the gateway requires `control` and refuses
+`observe` and `interact` before the socket is opened. A phone paired with a
+lesser grant is told which of the two problems it has: too little permission,
+or a Mac too old to advertise the route at all. A manually entered `latch
+serve` link is unrestricted, because it carries no grant header and the gateway
+grants loopback requests control.
+
+### The preview is a still, not a live view
+
+Opening a session first asks for `GET /v2/sessions/{id}/preview`, which reads
+the pane without attaching and therefore takes nothing from anyone. That is why
+a phone paired at `observe` — one that may never attach — still sees the
+screen it is being told it cannot type at.
+
+The preview is a **still**. It does not update. It does not follow the session.
+It shows what the pane held at the moment it was captured, with the time it was
+captured, and it changes only when the user taps **Refresh** or **Attach**. A
+still of a full-screen application carries no scrollback, because the alternate
+screen has no history to read.
+
+The still is also what decides the attach geometry. **Settings → Terminal
+size** defaults to *Match the Mac*, which attaches at the grid the preview
+reported: the pane does not resize at all — no `SIGWINCH`, no reflow, and a
+paused prompt that cannot repaint transfers exactly as it stands. The phone
+renders that grid at whatever font size fits and pans when it does not. The
+other choices — *Readable*, *80 × 24*, *100 × 30* — set the grid here instead.
+The soft keyboard and rotation never resize the pane; only a deliberate change
+of this setting does.
+
+### Scrollback, honestly
+
+Once attached, the live surface's scrollback is only what has arrived since the
+steal. Nothing that scrolled past before the phone attached can be scrolled
+back to, and after a background/reattach cycle it is empty again.
+
+That is a property of exclusive attach, not a defect of this feature: the first
+frame after a steal is a paint of the pane's *current* screen, and everything
+after it is the agent's own byte stream, unchanged. The preview can carry a
+bounded tail of primary-screen history before the attach; the live surface
+cannot reconstruct one after it.
+
+### The key bar
+
+An iPhone soft keyboard has no Escape, Control, Tab, or arrows, which are
+exactly the keys the prompts this feature exists to reach are answered with. A
+single 34pt row rides above the keyboard as its accessory view: `esc ctrl tab ←
+↓ ↑ → ⌃C …`, the whole row scrolling horizontally, with a keyboard-dismiss
+button pinned at the trailing edge so it never scrolls away. `ctrl` is sticky —
+tap to arm for one key, long-press to lock — and it modifies the system
+keyboard as well as the bar. Arrows repeat on hold.
+
+At 375 pt, the narrowest supported width, everything through `→` is on screen
+without scrolling; `⌃C` is the first key that costs a swipe, and stops costing
+one at 390 pt.
+
+The bar emits logical keys and the emulator encodes them against its live
+cursor-key mode, because `↑` is `ESC [ A` normally and `ESC O A` under DECCKM,
+and a bar with the sequence baked in would work in a shell and send garbage
+into a TUI. The bar is not shown while the session is not attached: there is
+nothing to type at during a preview.
+
+### Lifecycle
+
+Holding the desk's only surface is not something to do by accident, so all
+three of these are deliberate: leaving the screen detaches, backgrounding the
+app detaches, and returning to the foreground does **not** silently reattach —
+it returns to a closed screen with a **Reattach** button, because reattaching
+is another steal and the user should watch it happen.
 
 ## Pairing with a Mac
 
@@ -256,7 +378,15 @@ gateway offers*, so a missing control has a stated reason.
 
 ## Known gaps
 
-- No terminal view. Discovery reports the endpoint; the app does not use it yet.
+- The terminal view has not been exercised on a physical device. It builds and
+  its logic is under test — the eleven `fixtures/vt` streams replay through the
+  emulator in `Tests/TerminalEmulatorTests`, and both cursor-key modes are
+  asserted against recorded Claude and Codex traffic — but the accessory bar's
+  behaviour above a real soft keyboard, the feel of sticky `ctrl` and
+  hold-to-repeat, and paint throughput under `high-rate-output` are device
+  facts and remain unverified.
+- Terminal scrollback begins at the attach. See *Scrollback, honestly* above;
+  it follows from exclusive attach rather than from this app.
 - A paired phone uses the pinned Noise tunnel for its session list. Direct ICE
   is attempted before Cloudflare TURN credentials
   are requested; the manually entered `latch serve` link remains a coequal

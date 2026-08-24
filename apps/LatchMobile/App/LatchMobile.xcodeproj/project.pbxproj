@@ -16,6 +16,11 @@
 		ABCDEF0123456789ABCD001D /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD001C /* Assets.xcassets */; };
 		ABCDEF0123456789ABCD001B /* LatchMobileKit in Frameworks */ = {isa = PBXBuildFile; productRef = ABCDEF0123456789ABCD001A /* LatchMobileKit */; };
 		ABCDEF0123456789ABCD0024 /* LatchTransportNative in Frameworks */ = {isa = PBXBuildFile; productRef = ABCDEF0123456789ABCD0023 /* LatchTransportNative */; };
+		ABCDEF0123456789ABCD0032 /* SessionTerminalSurface.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD0030 /* SessionTerminalSurface.swift */; };
+		ABCDEF0123456789ABCD0033 /* TerminalKeyBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD0031 /* TerminalKeyBar.swift */; };
+		ABCDEF0123456789ABCD0035 /* SwiftTermSurface.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD0034 /* SwiftTermSurface.swift */; };
+		ABCDEF0123456789ABCD0041 /* TerminalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD0040 /* TerminalView.swift */; };
+		ABCDEF0123456789ABCD0038 /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = ABCDEF0123456789ABCD0037 /* SwiftTerm */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -28,6 +33,10 @@
 		ABCDEF0123456789ABCD001F /* QRScannerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRScannerView.swift; sourceTree = "<group>"; };
 		ABCDEF0123456789ABCD0014 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		ABCDEF0123456789ABCD001C /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		ABCDEF0123456789ABCD0030 /* SessionTerminalSurface.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionTerminalSurface.swift; sourceTree = "<group>"; };
+		ABCDEF0123456789ABCD0031 /* TerminalKeyBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalKeyBar.swift; sourceTree = "<group>"; };
+		ABCDEF0123456789ABCD0034 /* SwiftTermSurface.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SwiftTermSurface.swift; sourceTree = "<group>"; };
+		ABCDEF0123456789ABCD0040 /* TerminalView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -37,6 +46,7 @@
 			files = (
 				ABCDEF0123456789ABCD001B /* LatchMobileKit in Frameworks */,
 				ABCDEF0123456789ABCD0024 /* LatchTransportNative in Frameworks */,
+				ABCDEF0123456789ABCD0038 /* SwiftTerm in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -60,6 +70,10 @@
 				ABCDEF0123456789ABCD0013 /* SettingsView.swift */,
 				ABCDEF0123456789ABCD001E /* PairingView.swift */,
 				ABCDEF0123456789ABCD001F /* QRScannerView.swift */,
+				ABCDEF0123456789ABCD0030 /* SessionTerminalSurface.swift */,
+				ABCDEF0123456789ABCD0031 /* TerminalKeyBar.swift */,
+				ABCDEF0123456789ABCD0034 /* SwiftTermSurface.swift */,
+				ABCDEF0123456789ABCD0040 /* TerminalView.swift */,
 				ABCDEF0123456789ABCD001C /* Assets.xcassets */,
 				ABCDEF0123456789ABCD0014 /* Info.plist */,
 			);
@@ -93,6 +107,7 @@
 			packageProductDependencies = (
 				ABCDEF0123456789ABCD001A /* LatchMobileKit */,
 				ABCDEF0123456789ABCD0023 /* LatchTransportNative */,
+				ABCDEF0123456789ABCD0037 /* SwiftTerm */,
 			);
 			productName = LatchMobile;
 			productReference = ABCDEF0123456789ABCD0003 /* Latch.app */;
@@ -124,6 +139,7 @@
 			mainGroup = ABCDEF0123456789ABCD0004;
 			packageReferences = (
 				ABCDEF0123456789ABCD0019 /* XCLocalSwiftPackageReference ".." */,
+				ABCDEF0123456789ABCD0036 /* XCRemoteSwiftPackageReference "SwiftTerm" */,
 			);
 			productRefGroup = ABCDEF0123456789ABCD0006 /* Products */;
 			projectDirPath = "";
@@ -154,6 +170,10 @@
 				ABCDEF0123456789ABCD0016 /* SessionsView.swift in Sources */,
 				ABCDEF0123456789ABCD0017 /* ChatView.swift in Sources */,
 				ABCDEF0123456789ABCD0018 /* SettingsView.swift in Sources */,
+				ABCDEF0123456789ABCD0032 /* SessionTerminalSurface.swift in Sources */,
+				ABCDEF0123456789ABCD0033 /* TerminalKeyBar.swift in Sources */,
+				ABCDEF0123456789ABCD0035 /* SwiftTermSurface.swift in Sources */,
+				ABCDEF0123456789ABCD0041 /* TerminalView.swift in Sources */,
 				ABCDEF0123456789ABCD0021 /* PairingView.swift in Sources */,
 				ABCDEF0123456789ABCD0022 /* QRScannerView.swift in Sources */,
 			);
@@ -284,6 +304,17 @@
 		};
 /* End XCLocalSwiftPackageReference section */
 
+/* Begin XCRemoteSwiftPackageReference section */
+		ABCDEF0123456789ABCD0036 /* XCRemoteSwiftPackageReference "SwiftTerm" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/migueldeicaza/SwiftTerm.git";
+			requirement = {
+				kind = upToNextMinorVersion;
+				minimumVersion = 1.18.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
 /* Begin XCSwiftPackageProductDependency section */
 		ABCDEF0123456789ABCD001A /* LatchMobileKit */ = {
 			isa = XCSwiftPackageProductDependency;
@@ -292,6 +323,11 @@
 		ABCDEF0123456789ABCD0023 /* LatchTransportNative */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = LatchTransportNative;
+		};
+		ABCDEF0123456789ABCD0037 /* SwiftTerm */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = ABCDEF0123456789ABCD0036 /* XCRemoteSwiftPackageReference "SwiftTerm" */;
+			productName = SwiftTerm;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

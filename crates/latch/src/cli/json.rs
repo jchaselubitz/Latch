@@ -43,6 +43,15 @@ pub struct SessionSummary {
     /// Milliseconds since last activity, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_ms: Option<u64>,
+    /// The conversation connector this session uses, or null when it has none
+    /// and never will.
+    ///
+    /// Deliberately serialized even when `None`: absent means *this gateway
+    /// predates the field*, null means *this session is a plain terminal*.
+    /// A client that collapsed the two would read an older Latch as a fleet of
+    /// connector-less sessions, so no `skip_serializing_if` here.
+    #[serde(default)]
+    pub connector: Option<String>,
 }
 
 /// `latch list --json`.
@@ -87,6 +96,12 @@ pub struct InspectReport {
     /// sidecar existed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub launch_timings: Vec<LaunchPhase>,
+    /// The conversation connector this session uses, or null when it has none.
+    ///
+    /// Same field, same rules, as `SessionSummary::connector`, so inspecting a
+    /// session cannot contradict the list it came from.
+    #[serde(default)]
+    pub connector: Option<String>,
 }
 
 /// `latch stop --json`.

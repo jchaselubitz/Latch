@@ -1,0 +1,424 @@
+# Proposal: a Latch-native headless session kernel
+
+**Status:** proposal, coo:847. Decision at the end.
+**Question:** if we replaced the private patched tmux (`latch-tmux`) with a
+kernel built for Latch, what would it look like — and should we build it?
+
+Requirements, as given:
+
+1. A headless terminal: it contains the session and makes it available to
+   clients that attach. No windows, tabs, or panes — presentation is the
+   client's job.
+2. Absolutely minimal overhead: a connected client feels directly connected to
+   the underlying process.
+3. Any TUI the session runs paints the client directly — no transcoding
+   screen model on the live path.
+4. Persistence and detach/reattach are the features copied from tmux.
+5. First-class primitives for the Conversation Hub / chat system to drive a
+   session.
+6. Multiple concurrent sessions per host.
+
+Requirements 2 and 3 are not aspirations; they are the shipped contract of
+[`DECISION_EXCLUSIVE_ATTACH.md`](../docs/DECISION_EXCLUSIVE_ATTACH.md): one
+human surface, exclusive steal, one current-frame snapshot, then the pane's
+own bytes. This proposal does not revisit that contract. It asks what the
+smallest process that can honor it looks like.
+
+---
+
+## Part 1 — What we actually use from tmux
+
+The honest starting point is an inventory. `crates/latch/src/engine.rs` is the
+only module that talks to the kernel, and its entire demand on tmux is:
+
+| Engine call | tmux mechanism | Notes |
+| --- | --- | --- |
+| `create` | `new-session -d`, `remain-on-exit on` | plus a FIFO launch shim |
+| `attach_exclusive` | **our patch** (`-R attach-session`) | steal, snapshot, raw splice |
+| `list` / `inspect` | `list-sessions` + format strings | polled |
+| `capture_pane` | `capture-pane -p -J` | subprocess per call |
+| `paste_message` | `load-buffer` + `paste-buffer` + `send-keys Enter` | three subprocesses |
+| `send_keys` | `send-keys` | subprocess per call |
+| `resize` | `resize-window` | |
+| `stop` / `kill_session` | signal pane, `kill-session` | |
+| exit records | `remain-on-exit` + pane format variables | |
+| first-viewer gate | `wait-for` channel | |
+| kernel verification | probe binary flag + `#{latch_raw_kernel}` | needed only because the kernel is replaceable-by-accident |
+
+That is the whole surface. Everything tmux is famous for — per-client grid
+rendering, terminfo translation per attached terminal, windows, panes,
+layouts, copy mode, the status line, space-multiplexing — is either configured
+off (`~/.latch/tmux.conf` strips the status bar, prefix, and copy-mode keys)
+or **patched out of the data path** by
+[`patches/tmux/0001-latch-exclusive-raw-attach.patch`](../patches/tmux/0001-latch-exclusive-raw-attach.patch).
+
+And the load-bearing behavior — the thing requirement 2 and 3 rest on — is
+not tmux at all. It is ~860 lines of our own C, applied to pinned tmux 3.7b
+internals:
+
+- **Patch 1, exclusive raw attach:** a client that identifies with `-R` steals
+  the session, receives one snapshot of the pane grid, and is then spliced to
+  raw pane bytes. tmux's renderer never touches the live stream.
+- **Patch 2, deferred parse:** because tmux's architecture assumes the grid is
+  parsed synchronously on the pane read callback, keeping its grid current
+  *while also* forwarding raw bytes required rescheduling `input_parse_pane`
+  onto a 1 ms timer in 4 KiB slices, with a 256 KiB backlog cap, a bounded
+  catch-up slice so steal and `MSG_EXIT` are not starved, and a full
+  parse barrier before every snapshot
+  ([`ai/history/2026-08-23-coo-840-kernel-patch-2.md`](../ai/history/2026-08-23-coo-840-kernel-patch-2.md)).
+
+Patch 2 exists because we are holding tmux's event loop in a shape it was
+never designed for. It works — 18 e2e tests, ~70k CSI frames/s without
+stalling the child — but it is us maintaining a concurrency model *inside*
+someone else's single-threaded C server, against internals with no stable
+API, on a pinned release, with our own build pipeline
+(`scripts/build-tmux.sh`, utf8proc vendoring, patch manifests with sha256s,
+and a third Developer-ID-signed binary in every payload). The last two days of
+`ai/history/` include a malformed-hunk incident in that patch pipeline.
+
+So the question is not "can we write something as good as tmux." It is: **the
+part of tmux we depend on is already custom code we wrote; should it live as
+patches inside a 60k-line C server we use 5% of, or as a small program we
+own end to end?**
+
+## Part 2 — Why this is not latch-term v1 again
+
+This repository has already built and deleted a custom terminal server.
+[`ATTACHMENT_ARCHITECTURE_REVIEW.md`](./ATTACHMENT_ARCHITECTURE_REVIEW.md)
+diagnosed why v1 failed, and the diagnosis was specific — two invariants tmux
+held and v1 did not:
+
+1. *The grid is the only thing a client ever sees* — tmux re-renders every
+   client from its screen model at that client's geometry; v1 broadcast raw
+   bytes to multiple clients at mismatched sizes and repainted nobody on
+   resize.
+2. *Attaching cannot fail* — v1 made "who may type" a connect-time gate and
+   returned errors where tmux returned a screen.
+
+Both failure causes are structurally absent from what we would build now,
+because [`DECISION_EXCLUSIVE_ATTACH.md`](../docs/DECISION_EXCLUSIVE_ATTACH.md)
+changed the product contract underneath them:
+
+- There is **at most one surface**, so there is no fan-out of raw bytes to
+  clients at the wrong geometry — the one surface *is* the geometry. The
+  entire per-client rendering problem, the hardest thing tmux does and the
+  thing v1 got wrong, no longer exists in the requirements.
+- Attach **steals by design**, so there is no connect-time refusal path. The
+  v1 `ControlBusy` error is not a bug to avoid; it is a state that cannot be
+  expressed.
+
+v1 failed because it broadcast raw bytes while pretending to multiplex over
+space. The current contract multiplexes over time only. A kernel built for
+that contract is a different, much smaller program — and we know it is
+buildable, because we already built it twice: once as latch-term v1's worker
+(wrong contract, right mechanics) and once as the tmux patches (right
+contract, wrong host).
+
+`docs/ARCHITECTURE_RULES.md` currently forbids recreating "worker, framing,
+attachment registry, screen-model, or resize-authority modules in the active
+workspace." That rule encodes ENGINE_PLAN's decision. Adopting this proposal
+supersedes that line for the new kernel crate specifically; the rule's intent
+— never put a screen model on the live path, never gate attach — stays and is
+restated below as invariants.
+
+## Part 3 — Architecture: `latchd`
+
+One new crate, `crates/latchd`, producing one binary that replaces
+`latch-tmux` in the payload. `engine.rs` keeps its exact public surface and
+becomes a client of `latchd` instead of a driver of tmux subprocesses.
+
+### 3.1 Process model: one daemon per session
+
+`latch create` forks a `latchd` instance per session: double-fork, `setsid`,
+PTY master via `openpty`, child spawned in the PTY slave as session leader.
+There is **no central server**.
+
+```text
+~/.latch/sessions/<id>/
+  ctl.sock        # unix socket, 0600, dir 0700; control + attach
+  manifest.json   # existing launch manifest (unchanged)
+  daemon.pid
+  exit.json       # written on child exit; survives until prune
+```
+
+- `latch list` scans the directory and liveness-checks each daemon (connect
+  or `kill(pid, 0)`), instead of round-tripping `list-sessions` format
+  strings through a server.
+- **No shared fate.** A crash, upgrade, or kill of one session's daemon
+  touches one session. The coo:751 field report found the tmux server 53
+  minutes old under a 25-hour desktop uptime — every session predating that
+  restart silently became `lost`. With per-session daemons that failure class
+  disappears, and `latch update` can replace the kernel binary without
+  ending anything already running.
+- Sessions are enumerable and inspectable even when a daemon is dead: the
+  directory with `exit.json`, or without a live pid, *is* the `exited` /
+  `lost` state. Today those states are derived by diffing metadata against a
+  tmux server that may have restarted.
+
+The cost is N processes instead of one. A daemon at rest is one PTY fd, one
+listening socket, a grid, and a bounded scrollback ring — the measured
+`latch-tmux` server was 3.3 MB RSS for four sessions; expect a few MB per
+daemon. For the tens of concurrent agent sessions Latch targets, this is
+noise, and it buys the isolation.
+
+### 3.2 The hot path: a splice, nothing else
+
+The daemon's event loop owns three things: the PTY master, the control
+listener, and at most one **live surface** connection.
+
+```text
+child PTY ──read──► daemon ──write──► surface socket ──► latch attach ──► tty
+        ◄──write── daemon ◄──read───                 ◄── keystrokes ◄──
+```
+
+Output is forwarded byte-for-byte, unmodified. Input is written to the PTY
+byte-for-byte, unmodified. No parsing, no framing, no per-message headers on
+the live path — after the attach handshake the socket *is* the byte stream in
+both directions. That is one `read` and one `write` per direction through a
+unix socket, the same hop count as the patched tmux path today, implemented
+in a loop small enough to read in one sitting.
+
+Backpressure policy is copied from what patch 2 proved out: the child is
+never stalled to protect a surface. If the surface's socket buffer fills past
+a bound, the surface is **evicted with a reason** (the slow-client eviction
+the e2e suite already asserts), the session keeps running headless, and the
+next attach gets a current frame.
+
+### 3.3 The grid: off the hot path, on a thread
+
+The daemon keeps a current-frame model so that attach and the Hub always have
+"the pane now" — the same reason the deferred-parse patch exists. But in a
+process we own, the entire patch collapses into ordinary threading:
+
+- Bytes read from the PTY are forwarded to the surface first, then appended
+  to a queue consumed by a **parser thread** owning the screen model.
+- The parser can never starve the event loop, because it is not in it. The
+  1 ms slice timer, the 4 KiB slices, the 256 KiB backlog cap, the bounded
+  catch-up slice — patch 2's whole apparatus — become "a thread."
+- Snapshot requests carry a sequence barrier: the daemon notes the byte
+  offset at request time and the parser answers when it has parsed past it.
+  Same guarantee as patch 2's full-parse-before-snapshot, without a timer
+  dance. A Rust VT parser processes input orders of magnitude faster than any
+  child produces it; the barrier is microseconds in practice.
+
+The screen model is `vt100` plus the adapter work from `archive/latch-term-v1`
+— the mode tracker, the whole-sequence/whole-character chunk filter, the
+wide-character resize repair.
+[`DECISION_EMULATOR.md`](../docs/DECISION_EMULATOR.md) measured that stack at
+11/11 snapshot-fidelity on the recorded agent fixtures, with
+`state_formatted` producing 71–1431 bytes per screen, and its accepted gaps
+(blink/conceal/strikethrough, IRM/DECAWM enforcement) verified absent from
+every recorded Claude/Codex stream. The fixture suite in `fixtures/vt/` is
+the acceptance gate, re-run, not re-argued.
+
+Note what the grid is *not* for: it never renders to the live surface
+(invariant, carried over from the exclusive-attach decision). It exists for
+exactly three consumers: the attach snapshot, the Hub's structured snapshot,
+and scrollback capture.
+
+### 3.4 Attach: steal, one frame, then bytes
+
+The wire realization of the existing contract:
+
+1. Client connects to `ctl.sock`, sends `Attach { cols, rows, reason }`.
+2. Preflight: session must exist and the daemon be live. A live session with
+   another surface is valid — there is no busy error, only steal.
+3. Atomically: the previous surface (if any) is sent
+   `Detached { reason: stolen }` and closed; its `latch attach` restores the
+   tty and exits with the same reasoned release codes `SurfaceRelease`
+   classifies today (stolen / session-ended / attach-failed).
+4. The PTY is resized to the new winsize; the child gets `SIGWINCH`.
+5. Parser barrier, then the daemon writes the **current frame** — cursor,
+   modes, alternate screen, title — as standard xterm sequences
+   (`state_formatted`), framed as the last control payload.
+6. A `Live` marker, after which the socket is raw bytes both ways and the
+   daemon is a splice.
+
+`latch attach` keeps its interface; `engine::attach_exclusive` stops spawning
+a tmux client and speaks this handshake directly. The gateway's
+`/v2/sessions/{id}/terminal` WebSocket and the Desktop viewer follow the
+identical sequence, as they are required to today. The
+first-viewer gate (`wait-for` today) becomes daemon state: `create
+--hold-until-viewer` defers the child's launch until the first successful
+attach or an explicit `release` verb.
+
+### 3.5 The control plane: what the chat system actually gets
+
+This is the part that is a genuine capability gain rather than a port.
+Today every Hub interaction with a live session is a subprocess: composing a
+message is `load-buffer` + `paste-buffer` + `send-keys` (three tmux client
+processes, three server round-trips), and observation is polling
+`capture-pane`. There are no events; "did the agent stop and ask something"
+is inferred by re-capturing and diffing.
+
+`latchd` exposes the control plane on the same socket as typed frames
+(length-prefixed JSON; a connection that never sends `Attach` is a control
+connection, any number may be open concurrently):
+
+**Verbs**
+
+| Verb | Replaces | Notes |
+| --- | --- | --- |
+| `write { bytes }` | `send-keys --` | raw injection |
+| `key { name }` | `send-keys` named keys | small table, mode-aware (DECCKM, keypad) |
+| `paste { text }` | buffer dance | wrapped in bracketed paste iff the grid says DECSET 2004 is on — the daemon *knows*, today we guess |
+| `submit { text }` | `paste_message` | paste + Enter as one atomic verb, so the "pasted but not submitted" recovery note in `engine.rs` disappears |
+| `snapshot { format }` | `capture-pane` | `text`, `escape-stream`, or structured JSON (cells + attrs + cursor + modes) for the Hub |
+| `history { max }` | — | bounded primary-screen scrollback ring (below) |
+| `stat` | `list-sessions` formats | pid, cwd, winsize, state, surface holder, child exit |
+| `resize`, `signal`, `kill`, `release` | resize-window / kill-session | |
+
+**Events** — a control connection can `subscribe` and receive pushes:
+
+- `child-exited { status }`
+- `surface-attached` / `surface-detached { reason }`
+- `title-changed`, `bell`
+- `alt-screen { entered/left }`, `cursor-visibility`, `mode-changed`
+- `output-quiet { ms }` — quiescence notification, the primitive behind
+  "the agent has stopped painting and is probably waiting on input"
+
+Events are what tmux structurally cannot give us without yet another patch:
+its client protocol has no push channel we could subscribe from Rust without
+holding a control-mode client and parsing its notification text. For the
+Conversation Hub — whose channel-2 observation today leans on transcript
+files precisely because the terminal side is opaque — `output-quiet`,
+`alt-screen`, and `child-exited` as pushes replace polling loops.
+
+Latency also improves category, not degree: a control verb is a write on an
+already-open socket (microseconds) instead of `fork`/`exec` of a tmux client
+plus a server round-trip (milliseconds) per call.
+
+### 3.6 Persistence, exit, scrollback, security
+
+- **Exit retention:** on child exit the daemon writes `exit.json`, keeps the
+  final grid, and lingers so `latch attach` on an exited session still shows
+  the last frame (the `remain-on-exit` behavior). The 24-hour retention and
+  `latch prune` policy from
+  [`DECISION_SCROLLBACK.md`](../docs/DECISION_SCROLLBACK.md) is unchanged;
+  prune ends the daemon and removes the directory.
+- **Scrollback:** a bounded primary-screen ring mirrored out of the parser
+  (the latch-term mechanism), alternate-screen output excluded, oldest
+  dropped first, dropped count kept. It is served **only** through the
+  `history` control verb for `latch inspect` and the Hub. It is not an attach
+  payload — attach stays "last frame, not replay."
+- **Security:** session dir 0700, socket 0600, peer-uid check
+  (`LOCAL_PEERCRED`) on every connection. Same posture as the private tmux
+  socket, minus the risk of a user's own tmux ever being confused for the
+  kernel — the entire binary-probe and `#{latch_raw_kernel}` verification
+  machinery in `engine.rs` is deleted, because there is no upstream binary
+  the kernel can be accidentally swapped for.
+- **Environment:** the child env handling (`TMUX` removal becomes moot,
+  `LATCH_SESSION_ID` stays the nesting marker) and the FIFO launch shim carry
+  over unchanged.
+
+### 3.7 Invariants (carried forward, enforceable in review)
+
+1. The screen model is never on the live path. After `Live`, the daemon
+   forwards bytes it does not interpret.
+2. Attach never fails because someone else is attached. Steal is the only
+   contention semantic.
+3. The child is never stalled to protect a surface or the parser. Slow
+   consumers are evicted or lag; the session is primary.
+4. One human surface at a time. Observation without control goes through
+   `snapshot` / `history` / events, which cannot back-pressure the pane.
+
+## Part 4 — What we give up, honestly
+
+- **tmux's field-testing.** Twenty years of tty arcana: signal edge cases,
+  exotic terminals, forkpty quirks across platforms. Mitigation is scope: the
+  daemon needs no terminfo at all (the client terminal renders; snapshots are
+  emitted as plain xterm sequences against the already-pinned
+  `default-terminal`), supports one OS family today (macOS, Linux next), and
+  the tty-handling surface is `openpty` + `SIGWINCH` + raw mode — the same
+  narrow slice v1's worker and every Rust PTY crate already exercise.
+- **Grid emulation maturity.** tmux's `input.c` handles sequences vt100 does
+  not. The measured answer from DECISION_EMULATOR stands: across every
+  recorded agent stream, the vt100+adapter stack was byte-perfect on
+  snapshot round-trips and the gaps were unused. The risk is a *future* TUI
+  using something outside that envelope; the fixture corpus and its
+  chunk-size sweeps are the regression net, and recording new fixtures is
+  the standing procedure when an agent misbehaves.
+- **A second kernel during migration.** For one release window the payload
+  carries both kernels behind a flag. Bounded by the cutover plan below.
+- **Opportunity cost.** Realistically 4–6 engineer-weeks to the parity gate
+  (Part 5), against a kernel that works today. This is the strongest argument
+  for "stay," and the reason the recommendation is staged rather than a
+  rewrite-in-place.
+
+Prior art worth naming: `shpool` (Rust, session-per-daemon, attach/detach,
+explicitly "dtach with a plan") validates the shape at production quality,
+though it restores by replaying a raw ring rather than a grid snapshot, which
+is exactly the piece our exclusive-attach contract requires and our vt100
+work supplies. `dtach`/`abduco` are the same shape minus any screen model —
+they demonstrate how little a headless kernel needs, but cannot produce a
+last frame. Zellij is a full multiplexer with the same
+renderer-on-the-path property we just patched out of tmux.
+
+## Part 5 — Migration: behind the seam we already have
+
+`engine.rs` is the single choke point, and the test suites are
+kernel-relative already (`LATCH_E2E_TMUX_BIN` selects the binary under test).
+
+1. **Phase A — parity.** Build `latchd` to the surface in Part 3.1–3.4 only
+   (create, list/inspect, attach/steal/snapshot/splice, resize, stop, exit
+   records, first-viewer gate). Gate: the existing `exclusive_attach_e2e`
+   (18 tests) and phase-0 kernel suites pass against `latchd`; the
+   `fixtures/vt/` corpus passes through the parser at every chunk size; the
+   patch-2 performance assertions hold (child unstalled under a ~70k
+   frames/s writer, 1.0000x post-boundary amplification, slow-client
+   eviction).
+2. **Phase B — cutover.** Payload ships `latchd`; `latch-tmux` remains in
+   the payload one release behind a `LATCH_KERNEL=tmux` escape hatch. New
+   sessions use the new kernel; existing tmux-hosted sessions run to
+   completion on the old one (no live migration — sessions are days, not
+   months). Soak on our own machines first, as with every kernel change so
+   far.
+3. **Phase C — the control plane.** `snapshot`/`submit`/`key`/events land,
+   the Hub's injection path (`conversation/connectors/jsonl.rs`) moves off
+   subprocess `send-keys`, and `capture-pane` polling is retired. This phase
+   is where the build pays rent beyond parity.
+4. **Retire** the patch pipeline: `patches/tmux/`, `scripts/build-tmux.sh`,
+   the manifest sha256 machinery, the kernel-verification preflights, and
+   one of three signed binaries in the payload.
+
+## Recommendation
+
+**Build it — staged as above, keeping `latch-tmux` shipping until the parity
+gate is green and soaked.** Not because tmux is failing us today (patch level
+2 passes its suite and holds its numbers), but because of where the
+trajectory points:
+
+1. **We already own the hard part.** The behavior Latch depends on —
+   exclusive raw attach, snapshot-then-splice, deferred parsing — is our
+   code, maintained as patches against the internals of a C server that
+   assumes the opposite architecture. Each patch fights tmux's design
+   (patch 2 is a hand-rolled scheduler inside its event loop); each upstream
+   release is a rebase of that fight; the patch pipeline has already produced
+   incidents. The custom kernel is not *more* custom code than we have — it
+   is the same custom behavior moved to a host that agrees with it.
+2. **The next requirement lands worse in tmux.** The chat system needs a
+   control plane with events and structured snapshots. In tmux that is patch
+   3 and patch 4 — more private C against a moving upstream, or subprocess
+   polling forever. In `latchd` it is the natural API of a process we own.
+   Requirement 5 is the tiebreaker: staying with tmux means the Hub's
+   terminal-side primitives stay subprocess-and-poll.
+3. **The v1 failure does not forecast this build.** v1 failed on two
+   specific invariants — per-client rendering and connect-time exclusivity —
+   both of which the exclusive-attach contract has since removed from the
+   requirements. The risky component that remains (screen-model fidelity)
+   is the one piece v1 demonstrably got right, is already measured at
+   11/11 on the fixture corpus, and sits off the hot path.
+4. **Shared fate is a real, observed defect.** The coo:751 report shows a
+   tmux server restart orphaning every session's metadata at once.
+   Per-session daemons remove that class, and make kernel updates
+   non-disruptive.
+
+**Stay with tmux instead if** any of these holds: the team cannot spend the
+4–6 weeks before the chat control plane is needed; a product direction toward
+space-multiplexing (two live mirrored surfaces) re-emerges, which would
+resurrect the per-client rendering problem tmux solves and this design
+deliberately does not; or Phase A misses its parity gate on fixture fidelity,
+which would mean the emulation envelope was measured wrong and tmux's
+`input.c` is load-bearing after all. In that world, the fallback is explicit:
+keep the patched kernel, accept subprocess-and-poll as the Hub's terminal
+interface, and budget a rebase per upstream tmux release.

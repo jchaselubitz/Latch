@@ -54,6 +54,7 @@ pub(crate) enum RouteId {
     Capabilities,
     Sessions,
     Session,
+    Preview,
     Terminal,
     Conversation,
 }
@@ -83,6 +84,14 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
     RouteSpec {
         id: RouteId::Session,
         pattern: "/v2/sessions/{id}",
+        method: "GET",
+        required_grant: Grant::Observe,
+    },
+    // A capture, not an attach: reading the pane takes nothing from whoever
+    // holds the surface, so an observing device may ask for it.
+    RouteSpec {
+        id: RouteId::Preview,
+        pattern: "/v2/sessions/{id}/preview",
         method: "GET",
         required_grant: Grant::Observe,
     },
@@ -139,6 +148,11 @@ mod tests {
             ("/v2/capabilities", Grant::Observe),
             ("/v2/sessions", Grant::Observe),
             ("/v2/sessions/ses_1", Grant::Observe),
+            ("/v2/sessions/ses_1/preview", Grant::Observe),
+            (
+                "/v2/sessions/ses_1/preview?scrollbackLines=40",
+                Grant::Observe,
+            ),
             ("/v2/sessions/ses_1/terminal", Grant::Control),
             // No query string lowers the terminal's grant: an observing device
             // cannot take the surface by asking for a gentler mode.

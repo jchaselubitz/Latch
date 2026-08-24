@@ -12,6 +12,7 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
+                sessionViewSection
                 remoteAccessSection
 
                 switch model.linkState {
@@ -22,6 +23,45 @@ struct SettingsView: View {
                 }
             }
             .navigationTitle("Settings")
+        }
+    }
+
+    // MARK: - Session view
+
+    /// Placed above *Remote access* because it is the setting a person looks
+    /// for first: it decides what happens when they tap a session.
+    @ViewBuilder
+    private var sessionViewSection: some View {
+        @Bindable var model = model
+        Section {
+            Picker("Session view", selection: $model.sessionPresentation) {
+                ForEach(SessionPresentation.allCases, id: \.self) { presentation in
+                    Text(presentation.label).tag(presentation)
+                }
+            }
+            .pickerStyle(.inline)
+        } header: {
+            Text("Session view")
+        } footer: {
+            Text("""
+            Terminal opens the session's live terminal and takes it from whatever is \
+            attached on your Mac. Sessions without a Claude or Codex connector — every \
+            plain shell — always open in the terminal.
+            """)
+        }
+
+        Section {
+            Picker("Terminal size", selection: $model.terminalSize) {
+                ForEach(TerminalSize.allCases, id: \.self) { size in
+                    Text(size.label).tag(size)
+                }
+            }
+        } footer: {
+            Text("""
+            Match the Mac attaches at the size the pane already has, so nothing on \
+            your Mac resizes or reflows. The other choices set the grid here and fit \
+            the text to it.
+            """)
         }
     }
 
@@ -224,6 +264,7 @@ struct SettingsView: View {
     static func label(_ endpoint: GatewayEndpointsName) -> String {
         switch endpoint {
         case .sessions: return "Session list"
+        case .preview: return "Screen preview"
         case .terminal: return "Terminal"
         case .conversation: return "Conversation"
         }

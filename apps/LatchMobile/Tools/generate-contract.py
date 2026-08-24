@@ -91,18 +91,41 @@ public enum TerminalCloseReason: String, Codable, Sendable {
 
 public struct GatewayEndpoints: Codable, Equatable, Sendable {
     public var sessions: Bool
+    /// One-shot pane capture at the observe grant. A gateway that predates the
+    /// preview route omits the key entirely, so it decodes as false and the
+    /// client asks for nothing it cannot get.
+    public var preview: Bool
     public var terminal: Bool
     public var conversation: Bool
 
-    public init(sessions: Bool = false, terminal: Bool = false, conversation: Bool = false) {
+    public init(
+        sessions: Bool = false,
+        preview: Bool = false,
+        terminal: Bool = false,
+        conversation: Bool = false
+    ) {
         self.sessions = sessions
+        self.preview = preview
         self.terminal = terminal
         self.conversation = conversation
+    }
+
+    // Hand-written so an older Mac, whose document has no `preview` key at
+    // all, still decodes. The synthesized initializer would throw on it and
+    // fail the whole discovery document over one endpoint this app can do
+    // without.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        sessions = try container.decode(Bool.self, forKey: .sessions)
+        preview = try container.decodeIfPresent(Bool.self, forKey: .preview) ?? false
+        terminal = try container.decode(Bool.self, forKey: .terminal)
+        conversation = try container.decode(Bool.self, forKey: .conversation)
     }
 }
 
 public enum GatewayEndpointsName: String, CaseIterable, Sendable {
     case sessions
+    case preview
     case terminal
     case conversation
 }
@@ -111,6 +134,7 @@ public extension GatewayEndpoints {
     func isEnabled(_ name: GatewayEndpointsName) -> Bool {
         switch name {
         case .sessions: return sessions
+        case .preview: return preview
         case .terminal: return terminal
         case .conversation: return conversation
         }

@@ -779,9 +779,83 @@ fn inspect_once(home: &LatchHome, id: &SessionId) -> Result<SessionQuery> {
     })
 }
 
+/// How a pane capture should be rendered.
+///
+/// An options struct rather than more positional arguments: the two callers
+/// that classify input want plain text, and the gateway preview wants the
+/// escape sequences a terminal emulator can redraw.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CapturePaneOptions {
+    /// Emit SGR escapes (`-e`) so the capture keeps its colors.
+    pub styled: bool,
+    /// Lines of primary-screen scrollback above the viewport (`-S -<n>`).
+    ///
+    /// The alternate screen has no scrollback, so a caller previewing a
+    /// full-screen application should leave this at zero.
+    pub scrollback_lines: u32,
+}
+
+/// Live pane geometry and screen mode, read without attaching.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PaneMetrics {
+    /// Pane width in cells.
+    pub cols: u16,
+    /// Pane height in cells.
+    pub rows: u16,
+    /// Whether the pane is currently on the alternate screen, which is where
+    /// every full-screen TUI lives and where scrollback does not exist.
+    pub alternate_screen: bool,
+}
+
+const PANE_METRICS_FORMAT: &str = "#{pane_width}\u{1f}#{pane_height}\u{1f}#{alternate_on}";
+
+/// Reads one pane's geometry and screen mode.
+///
+/// Like [`capture_pane_with_timeout`], this is a query and not an attach: it
+/// takes no surface from whoever currently holds one.
+pub fn pane_metrics_with_timeout(
+    home: &LatchHome,
+    id: &SessionId,
+    timeout: Duration,
+) -> Result<PaneMetrics> {
+    ensure_config(home)?;
+    let mut command = tmux(home)?;
+    command.args([
+        "display-message",
+        "-p",
+        "-t",
+        id.as_str(),
+        "-F",
+        PANE_METRICS_FORMAT,
+    ]);
+    let output = output_with_timeout(command, timeout, "read the private tmux pane geometry")?;
+    if !output.status.success() {
+        return Err(tmux_error("read pane geometry", output));
+    }
+    let row = String::from_utf8(output.stdout).context("tmux returned non-UTF-8 pane geometry")?;
+    let row = row.trim_end_matches(['\r', '\n']);
+    let mut fields = row.split(SESSION_ROW_SEPARATOR);
+    let cols = fields.next().unwrap_or_default().trim();
+    let rows = fields.next().unwrap_or_default().trim();
+    let alternate = fields.next().unwrap_or_default().trim();
+    match (cols.parse::<u16>(), rows.parse::<u16>()) {
+        (Ok(cols), Ok(rows)) => Ok(PaneMetrics {
+            cols,
+            rows,
+            alternate_screen: alternate == "1",
+        }),
+        _ => bail!("tmux did not report pane geometry for this session"),
+    }
+}
+
 /// Captures the currently visible pane for input-safety classification.
 pub fn capture_pane(home: &LatchHome, id: &SessionId) -> Result<String> {
-    capture_pane_with_timeout(home, id, Duration::from_secs(30))
+    capture_pane_with_timeout(
+        home,
+        id,
+        Duration::from_secs(30),
+        CapturePaneOptions::default(),
+    )
 }
 
 /// Captures the visible pane while retaining ownership of the tmux client so a
@@ -790,10 +864,20 @@ pub fn capture_pane_with_timeout(
     home: &LatchHome,
     id: &SessionId,
     timeout: Duration,
+    options: CapturePaneOptions,
 ) -> Result<String> {
     ensure_config(home)?;
     let mut command = tmux(home)?;
-    command.args(["capture-pane", "-p", "-J", "-t", id.as_str()]);
+    command.args(["capture-pane", "-p", "-J"]);
+    if options.styled {
+        command.arg("-e");
+    }
+    let start;
+    if options.scrollback_lines > 0 {
+        start = format!("-{}", options.scrollback_lines);
+        command.args(["-S", start.as_str()]);
+    }
+    command.args(["-t", id.as_str()]);
     let output = output_with_timeout(command, timeout, "capture the private tmux pane")?;
     if !output.status.success() {
         return Err(tmux_error("capture session screen", output));

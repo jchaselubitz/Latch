@@ -52,10 +52,11 @@ struct SessionsView: View {
             .refreshable { await model.refreshSessions() }
         } else {
             List(model.sessions) { session in
+                let route = model.route(for: session)
                 NavigationLink {
-                    ChatView(session: session)
+                    destination(for: session, route: route)
                 } label: {
-                    SessionRow(session: session)
+                    SessionRow(session: session, route: route)
                 }
             }
             .refreshable { await model.refreshSessions() }
@@ -66,10 +67,84 @@ struct SessionsView: View {
             }
         }
     }
+
+    /// The screen a tap lands on. `AppModel.route(for:)` decides; this only
+    /// builds what it named.
+    @ViewBuilder
+    private func destination(for session: SessionSummary, route: SessionRoute) -> some View {
+        switch route {
+        case .terminal(let autoAttach):
+            TerminalView(session: session, autoAttach: autoAttach)
+        case .chat:
+            ChatView(session: session)
+        case .unavailable(let block):
+            SessionUnavailableView(session: session, block: block)
+        }
+    }
+}
+
+/// Why neither screen can be opened, said as what to do rather than what
+/// failed.
+private struct SessionUnavailableView: View {
+    let session: SessionSummary
+    let block: SessionRouteBlock
+
+    var body: some View {
+        Group {
+            switch block {
+            case .needsControlGrant:
+                // The preview needs only `observe`, so an observing phone may
+                // read the pane. Showing it behind the explanation is the
+                // difference between an explanation and a dead end.
+                VStack(spacing: 0) {
+                    TerminalStillView(session: session)
+                    VStack(spacing: 8) {
+                        Text("This phone can't open a terminal")
+                            .font(.headline)
+                        Text(
+                            """
+                            It's paired to observe. Open Latch on your Mac, find this phone \
+                            under Remote Access, and raise it to Control.
+                            """
+                        )
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(16)
+                    .background(.bar)
+                }
+            case .noTerminalEndpoint:
+                MessageView(
+                    icon: "arrow.up.circle",
+                    title: "This Mac has no terminal route",
+                    detail: """
+                    This session has no conversation connector, and the Mac is older than the \
+                    terminal route that would stand in for one. Update Latch on the Mac.
+                    """
+                )
+            case .noConversation:
+                MessageView(
+                    icon: "terminal",
+                    title: "Nothing to open",
+                    detail: """
+                    This Mac offers neither the Conversation Hub nor a terminal route. Use \
+                    `latch attach` on the Mac for this session.
+                    """
+                )
+            }
+        }
+        .navigationTitle(session.displayName)
+        .navigationBarTitleDisplayMode(.inline)
+    }
 }
 
 private struct SessionRow: View {
     let session: SessionSummary
+    /// Shown as a trailing glyph. On a build where the tap can be destructive,
+    /// telling the user where it goes is not decoration.
+    let route: SessionRoute
 
     var body: some View {
         HStack(spacing: 12) {
@@ -100,8 +175,32 @@ private struct SessionRow: View {
                     .foregroundStyle(.tertiary)
                     .monospacedDigit()
             }
+
+            Image(systemName: destinationGlyph)
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+                .accessibilityLabel(destinationLabel)
         }
         .padding(.vertical, 2)
+    }
+
+    private var destinationGlyph: String {
+        switch route {
+        case .terminal: "terminal"
+        case .chat: "bubble.left.and.bubble.right"
+        case .unavailable: "exclamationmark.circle"
+        }
+    }
+
+    private var destinationLabel: String {
+        switch route {
+        // Named separately because the two taps do different things to the
+        // Mac, and the row is the last place to say so before one of them does.
+        case .terminal(let autoAttach):
+            autoAttach ? "Opens the terminal, taking it from your Mac" : "Opens the terminal"
+        case .chat: "Opens the conversation"
+        case .unavailable: "Cannot be opened"
+        }
     }
 
     private var color: Color {

@@ -24,6 +24,20 @@ use super::super::{
 const MAX_RECORD_BYTES: usize = 1024 * 1024;
 const MAX_READ_BYTES: usize = 2 * 1024 * 1024;
 
+/// The connector a session's persisted harness marker selects, or `None` when
+/// the session has no conversation connector and never will.
+///
+/// This is the single answer to "does this session have a connector". The
+/// session list reports it and the Conversation Hub builds from it, so the two
+/// cannot drift apart into contradicting each other about the same session.
+pub fn connector_kind(harness: Option<&str>) -> Option<&'static str> {
+    match harness {
+        Some("claude") => Some("claude"),
+        Some("codex") => Some("codex"),
+        _ => None,
+    }
+}
+
 /// Builds exactly one agent adapter from the session's persisted launch marker.
 /// The factory never searches a working directory or selects a recently changed
 /// transcript: an adapter stays pending until its own agent supplied a binding.
@@ -37,9 +51,9 @@ pub fn connector_for_session(
     let harness = meta::read(&home.session(&session))
         .ok()
         .and_then(|meta| meta.harness);
-    match harness.as_deref() {
-        Some("claude") | Some("codex") => Box::new(JsonlConnector::for_session(home, session)),
-        _ => Box::new(super::super::PendingConnector::new()),
+    match connector_kind(harness.as_deref()) {
+        Some(_) => Box::new(JsonlConnector::for_session(home, session)),
+        None => Box::new(super::super::PendingConnector::new()),
     }
 }
 
@@ -123,13 +137,9 @@ impl JsonlConnector {
     pub fn for_session(home: LatchHome, session: SessionId) -> Self {
         let harness = meta::read(&home.session(&session))
             .ok()
-            .and_then(|value| value.harness)
-            .unwrap_or_default();
-        let (id, version) = match harness.as_str() {
-            "claude" => ("claude", "1"),
-            "codex" => ("codex", "1"),
-            _ => ("unknown", "1"),
-        };
+            .and_then(|value| value.harness);
+        let id = connector_kind(harness.as_deref()).unwrap_or("unknown");
+        let version = "1";
         let binding = read_binding(&home, &session, id);
         let source = binding.as_ref().map(|binding| binding.0.clone());
         Self {
@@ -952,8 +962,12 @@ impl Connector for JsonlConnector {
                     .map(|last| last.elapsed() >= Duration::from_millis(1_500))
                     .unwrap_or(true));
         if refresh_screen {
-            let screen =
-                engine::capture_pane_with_timeout(&self.home, &self.session, budget.deadline)?;
+            let screen = engine::capture_pane_with_timeout(
+                &self.home,
+                &self.session,
+                budget.deadline,
+                engine::CapturePaneOptions::default(),
+            )?;
             mutations.extend(self.observe_screen(&screen));
             self.last_screen_refresh = Some(Instant::now());
         }
@@ -1035,7 +1049,12 @@ impl Connector for JsonlConnector {
                 .filter(|remaining| !remaining.is_zero())
                 .ok_or_else(|| anyhow::anyhow!("connector action deadline exceeded"))
         };
-        let screen = engine::capture_pane_with_timeout(&self.home, &self.session, remaining()?)?;
+        let screen = engine::capture_pane_with_timeout(
+            &self.home,
+            &self.session,
+            remaining()?,
+            engine::CapturePaneOptions::default(),
+        )?;
         if action.id == ACTION_SEND_MESSAGE {
             if !screen.lines().any(|line| is_empty_composer(self.id, line)) {
                 return Ok(ApplyResult::Refused {
@@ -1224,6 +1243,14 @@ fn message_status(object: &serde_json::Map<String, Value>) -> MessageStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_recognized_harness_markers_select_a_connector() {
+        assert_eq!(connector_kind(Some("claude")), Some("claude"));
+        assert_eq!(connector_kind(Some("codex")), Some("codex"));
+        assert_eq!(connector_kind(Some("bash")), None);
+        assert_eq!(connector_kind(None), None);
+    }
 
     fn corpus(agent: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))

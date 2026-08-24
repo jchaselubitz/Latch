@@ -53,7 +53,20 @@ There is no read-only terminal mode to fall back on. A terminal connection is
 the session's single exclusive surface, so the gateway requires the `control`
 grant for the terminal route and refuses `observe` and `interact` before the
 WebSocket is opened. Observation without control is served by the conversation
-socket, which cannot take the surface or type into a pane.
+socket, which cannot take the surface or type into a pane, and by
+`GET /v2/sessions/{id}/preview`.
+
+That preview is not the read-only terminal this rule denies. It is a
+`capture-pane` query — one read of the pane's cells at one instant, the same
+kind of read the conversation connector already performs to observe a screen —
+so it enters no attach, paints no second surface, follows nothing, and carries
+no input. `observe` therefore permits it. It does widen what an `observe`
+device can read: the pane's rendered screen, and up to 200 lines of
+primary-screen history, which the conversation projection does not expose
+verbatim. That is deliberate and bounded — the same session content the grant
+already entitles the device to read through the conversation socket, in the
+form the pane holds it — and it is capped, deadline-bounded, and forced to zero
+history while a full-screen application owns the pane.
 
 Two further limits keep a terminal connection from being used as a denial of
 service against the session itself. The steal only commits once the socket has

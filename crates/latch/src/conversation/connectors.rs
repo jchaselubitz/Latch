@@ -3,4 +3,4 @@
 
 mod jsonl;
 
-pub use jsonl::connector_for_session;
+pub use jsonl::{connector_for_session, connector_kind};

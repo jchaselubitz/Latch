@@ -6,14 +6,20 @@ final class StubProtocol: URLProtocol {
     struct Reply { var status: Int; var body: String }
     private static let lock = NSLock()
     nonisolated(unsafe) private static var replies: [String: Reply] = [:]
-    nonisolated(unsafe) private static var seen: [(path: String, headers: [String: String], body: String)] = []
+    nonisolated(unsafe) private static var seen: [(path: String, query: String?, headers: [String: String], body: String)] = []
 
     static func stub(path: String, status: Int = 200, body: String) {
         lock.withLock { replies[path] = Reply(status: status, body: body) }
     }
     static func reset() { lock.withLock { replies = [:]; seen = [] } }
-    static var requests: [(path: String, headers: [String: String], body: String)] {
+    static var requests: [(path: String, query: String?, headers: [String: String], body: String)] {
         lock.withLock { seen }
+    }
+
+    /// Path and raw query per request, for assertions about what ended up on
+    /// the URL rather than only which route was called.
+    static var requestQueries: [(String, String?)] {
+        lock.withLock { seen.map { ($0.path, $0.query) } }
     }
     static func session() -> URLSession {
         let configuration = URLSessionConfiguration.ephemeral
@@ -24,9 +30,12 @@ final class StubProtocol: URLProtocol {
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
         let path = request.url?.path ?? ""
+        let query = request.url.flatMap {
+            URLComponents(url: $0, resolvingAgainstBaseURL: false)?.query
+        }
         let body = Self.body(of: request)
         Self.lock.withLock {
-            Self.seen.append((path, request.allHTTPHeaderFields ?? [:], String(decoding: body, as: UTF8.self)))
+            Self.seen.append((path, query, request.allHTTPHeaderFields ?? [:], String(decoding: body, as: UTF8.self)))
         }
         let found = Self.lock.withLock { Self.replies[path] }
             ?? Reply(status: 404, body: #"{"error":"not found"}"#)

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -95,20 +96,30 @@ def client_is_utf8():
             return "utf-8" in lower or "utf8" in lower
     return False
 
-def session_row(name, entry):
-    status = "" if entry["status"] is None else str(entry["status"])
-    row = "\x1f".join([
-        name,
-        "1" if entry["dead"] else "0",
-        status,
-        str(entry["cols"]),
-        str(entry["rows"]),
-        str(entry["activity"]),
-        str(entry["attached"]),
-        str(entry["pid"]),
-        "" if entry["dead_at"] is None else str(entry["dead_at"]),
-        "" if entry["signal"] is None else str(entry["signal"])
-    ])
+def expand_format(name, entry, template):
+    # Real tmux expands each #{...} token independently. Reproducing that,
+    # rather than special-casing the session-listing format, is what lets a
+    # caller ask for pane geometry without getting a session row back.
+    tokens = {
+        "session_name": name,
+        "pane_dead": "1" if entry["dead"] else "0",
+        "pane_dead_status": "" if entry["status"] is None else str(entry["status"]),
+        "window_width": str(entry["cols"]),
+        "window_height": str(entry["rows"]),
+        "pane_width": str(entry["cols"]),
+        "pane_height": str(entry["rows"]),
+        "alternate_on": "1" if entry.get("alternate") else "0",
+        "session_activity": str(entry["activity"]),
+        "session_attached": str(entry["attached"]),
+        "pane_pid": str(entry["pid"]),
+        "pane_dead_time": "" if entry["dead_at"] is None else str(entry["dead_at"]),
+        "pane_dead_signal": "" if entry["signal"] is None else str(entry["signal"]),
+    }
+    row = re.sub(
+        r"#\{([a-z_]+)\}",
+        lambda match: tokens.get(match.group(1), ""),
+        template,
+    )
     if not client_is_utf8():
         row = row.replace("\x1f", "_")
     return row
@@ -185,7 +196,7 @@ elif command == "list-sessions":
     before = snapshot(state)
     for name, entry in each_session(state):
         refresh(entry)
-        print(session_row(name, entry))
+        print(expand_format(name, entry, args[args.index("-F") + 1]))
     save_if_changed(state, before)
 elif command == "display-message":
     session = args[args.index("-t") + 1]
@@ -193,7 +204,7 @@ elif command == "display-message":
         missing_session(session)
     before = snapshot(state)
     entry = refresh(state[session])
-    print(session_row(session, entry))
+    print(expand_format(session, entry, args[args.index("-F") + 1]))
     save_if_changed(state, before)
 elif command == "list-clients":
     session = args[args.index("-t") + 1]
@@ -203,7 +214,15 @@ elif command == "list-clients":
         print("attached,latch-raw")
 elif command == "capture-pane":
     session = args[args.index("-t") + 1]
-    print(state[session].get("screen", ""), end="")
+    screen = state[session].get("screen", "")
+    if "-e" in args:
+        screen = state[session].get("styled_screen", screen)
+    if "-S" in args:
+        lines = int(args[args.index("-S") + 1].lstrip("-"))
+        history = state[session].get("history", "")
+        if history and lines:
+            screen = "\n".join(history.splitlines()[-lines:] + [screen])
+    print(screen, end="")
 elif command == "send-keys":
     session = args[args.index("-t") + 1]
     if state[session].get("fail_send_keys"):

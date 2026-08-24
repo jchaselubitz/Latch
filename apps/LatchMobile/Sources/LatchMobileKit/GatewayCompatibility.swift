@@ -44,7 +44,8 @@ public enum GatewayCompatibility {
         return SessionSurface(
             chat: conversation,
             composer: conversation,
-            interactionControls: conversation
+            interactionControls: conversation,
+            terminal: supports(endpoint: .terminal, capabilities: capabilities)
         )
     }
 }
@@ -103,15 +104,55 @@ public struct SessionSurface: Equatable, Sendable {
     public let chat: Bool
     public let composer: Bool
     public let interactionControls: Bool
+    /// Whether this device may take the session's exclusive terminal surface.
+    public let terminal: Bool
+    /// Whether the *gateway* offers a terminal route at all, before this
+    /// device's grant is applied. It survives `restricted(to:)` on purpose:
+    /// an observing phone and a Mac too old to have the route both resolve
+    /// `terminal == false`, and the screen explaining the refusal has to tell
+    /// them apart — one is answered by pairing again, the other by updating.
+    public let terminalAdvertised: Bool
 
-    public init(chat: Bool, composer: Bool, interactionControls: Bool) {
+    public init(
+        chat: Bool,
+        composer: Bool,
+        interactionControls: Bool,
+        terminal: Bool = false,
+        terminalAdvertised: Bool? = nil
+    ) {
         self.chat = chat
         self.composer = composer
         self.interactionControls = interactionControls
+        self.terminal = terminal
+        self.terminalAdvertised = terminalAdvertised ?? terminal
     }
 
+    /// `nil` means unrestricted, and that is not an oversight: a manual
+    /// `latch serve` link sends no grant header at all, and `http.rs` grants
+    /// loopback requests `Grant::Control`. Only a paired device carries a
+    /// permission to narrow by.
     public func restricted(to permission: DevicePermission?) -> SessionSurface {
-        guard let permission, !permission.permits(.interact) else { return self }
-        return SessionSurface(chat: chat, composer: false, interactionControls: false)
+        guard let permission else { return self }
+        // A terminal is a control surface: it sends raw bytes into the pane
+        // and resizes the child. Observe and interact grants may not open one,
+        // so it is cleared before the interact check below, which returns
+        // early for a control grant.
+        let terminal = terminal && permission.permits(.control)
+        guard !permission.permits(.interact) else {
+            return SessionSurface(
+                chat: chat,
+                composer: composer,
+                interactionControls: interactionControls,
+                terminal: terminal,
+                terminalAdvertised: terminalAdvertised
+            )
+        }
+        return SessionSurface(
+            chat: chat,
+            composer: false,
+            interactionControls: false,
+            terminal: terminal,
+            terminalAdvertised: terminalAdvertised
+        )
     }
 }

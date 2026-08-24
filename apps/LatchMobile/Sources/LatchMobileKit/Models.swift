@@ -1,5 +1,29 @@
 import Foundation
 
+/// Whether a session has a conversation connector, as the gateway reported it.
+///
+/// Three states, not two. A gateway that predates the field says nothing at
+/// all, which is not the same claim as a gateway saying this session has no
+/// connector — the first is ignorance, the second is a fact. Routing a tap
+/// treats them differently, so the decoder keeps them apart.
+///
+/// `commandLabel` is not a substitute and must not be used as one: it
+/// describes what was launched, not whether a connector bound to it.
+public enum SessionConnector: Equatable, Sendable {
+    /// The gateway omitted the field, so this build cannot know.
+    case unknown
+    /// Explicit null: this session has no connector and never will.
+    case none
+    /// The named connector, `"claude"` or `"codex"` today.
+    case named(String)
+
+    /// The connector's name when there is one.
+    public var name: String? {
+        guard case .named(let name) = self else { return nil }
+        return name
+    }
+}
+
 /// One row of `GET /v2/sessions`.
 ///
 /// The session list is the CLI's `latch list --json` report, which is
@@ -16,6 +40,7 @@ public struct SessionSummary: Decodable, Equatable, Identifiable, Sendable {
     public let createdAt: String
     public let lastActivityAt: String?
     public let idleMs: Int?
+    public let connector: SessionConnector
 
     private enum CodingKeys: String, CodingKey {
         case id
@@ -27,6 +52,7 @@ public struct SessionSummary: Decodable, Equatable, Identifiable, Sendable {
         case createdAt = "created_at"
         case lastActivityAt = "last_activity_at"
         case idleMs = "idle_ms"
+        case connector
     }
 
     public init(
@@ -38,7 +64,8 @@ public struct SessionSummary: Decodable, Equatable, Identifiable, Sendable {
         commandLabel: String,
         createdAt: String,
         lastActivityAt: String? = nil,
-        idleMs: Int? = nil
+        idleMs: Int? = nil,
+        connector: SessionConnector = .unknown
     ) {
         self.id = id
         self.name = name
@@ -49,6 +76,31 @@ public struct SessionSummary: Decodable, Equatable, Identifiable, Sendable {
         self.createdAt = createdAt
         self.lastActivityAt = lastActivityAt
         self.idleMs = idleMs
+        self.connector = connector
+    }
+
+    // Written out rather than synthesized because `connector` has three
+    // states and `decodeIfPresent` can only report two: it maps both a missing
+    // key and an explicit null to nil, collapsing exactly the distinction the
+    // field exists to make.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        title = try container.decodeIfPresent(String.self, forKey: .title)
+        state = try container.decode(String.self, forKey: .state)
+        cwd = try container.decode(String.self, forKey: .cwd)
+        commandLabel = try container.decode(String.self, forKey: .commandLabel)
+        createdAt = try container.decode(String.self, forKey: .createdAt)
+        lastActivityAt = try container.decodeIfPresent(String.self, forKey: .lastActivityAt)
+        idleMs = try container.decodeIfPresent(Int.self, forKey: .idleMs)
+        if !container.contains(.connector) {
+            connector = .unknown
+        } else if try container.decodeNil(forKey: .connector) {
+            connector = .none
+        } else {
+            connector = .named(try container.decode(String.self, forKey: .connector))
+        }
     }
 
     /// What to show as the session's heading.
@@ -66,6 +118,48 @@ public struct SessionSummary: Decodable, Equatable, Identifiable, Sendable {
     /// Whether the session is still live enough to accept input.
     public var isRunning: Bool {
         state == "running" || state == "creating"
+    }
+}
+
+/// `GET /v2/sessions/{id}/preview` — one read of the live pane.
+///
+/// This is a still, not a stream. The gateway captures the pane without
+/// attaching, so obtaining one takes nothing from whoever holds the session's
+/// single exclusive surface; the cost is that it stops being true the moment
+/// the session repaints. A screen showing one has to say when it was taken.
+///
+/// Unlike the session list, the preview is a gateway document and so is
+/// camelCase on the wire.
+public struct SessionPreview: Decodable, Equatable, Sendable {
+    /// Escape-encoded pane content, drawable by the same renderer as the live
+    /// terminal stream. There is deliberately no second display path.
+    public let content: String
+    /// The desk's current grid. Attaching at this size is what makes the
+    /// attach non-destructive: the pane does not resize, so nothing reflows.
+    public let cols: Int
+    public let rows: Int
+    /// True while a full-screen application owns the pane, where scrollback
+    /// does not exist. A client that sees this stops asking for it.
+    public let alternateScreen: Bool
+    public let capturedAt: String
+    /// Lines of scrollback actually included, after the server's cap and the
+    /// alternate screen have had their say.
+    public let scrollbackLines: Int
+
+    public init(
+        content: String,
+        cols: Int,
+        rows: Int,
+        alternateScreen: Bool,
+        capturedAt: String,
+        scrollbackLines: Int
+    ) {
+        self.content = content
+        self.cols = cols
+        self.rows = rows
+        self.alternateScreen = alternateScreen
+        self.capturedAt = capturedAt
+        self.scrollbackLines = scrollbackLines
     }
 }
 

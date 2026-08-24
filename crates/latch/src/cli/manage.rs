@@ -15,6 +15,7 @@ use crate::cli::json::{
     ListReport, PruneReport, RemoveReport, RenameReport, ResizeReport, RetainedSession,
     SessionSummary, StopAllReport, StopReport,
 };
+use crate::conversation::connector_kind;
 use crate::engine::{self, SessionState, PROTOCOL_VERSION};
 use crate::session::manifest::TerminalSize;
 use crate::session::meta;
@@ -60,6 +61,9 @@ pub fn list(options: ListOptions) -> anyhow::Result<ListReport> {
             },
             |value| value.activity,
         );
+        // The same helper the Conversation Hub builds from, so a routing
+        // client and the Hub can never disagree about one session.
+        let connector = connector_kind(metadata.harness.as_deref()).map(str::to_owned);
         sessions.push(SessionSummary {
             id: metadata.id,
             name: metadata.name,
@@ -70,6 +74,7 @@ pub fn list(options: ListOptions) -> anyhow::Result<ListReport> {
             created_at: metadata.created_at,
             last_activity_at: Some(engine::format_rfc3339(activity)),
             idle_ms: Some(now.duration_since(activity).unwrap_or_default().as_millis() as u64),
+            connector,
         });
     }
     sessions.sort_by_key(|session| session.idle_ms);
@@ -93,6 +98,7 @@ pub fn inspect(options: InspectOptions) -> anyhow::Result<InspectReport> {
     let state = info
         .as_ref()
         .map_or(SessionState::Lost, |value| value.state);
+    let connector = connector_kind(metadata.harness.as_deref()).map(str::to_owned);
     Ok(InspectReport {
         id: metadata.id,
         name: metadata.name,
@@ -110,6 +116,7 @@ pub fn inspect(options: InspectOptions) -> anyhow::Result<InspectReport> {
             .as_ref()
             .map(|_| engine::surface_attached(&options.home, &id)),
         launch_timings: timing::read(&options.home.session(&id)),
+        connector,
     })
 }
 

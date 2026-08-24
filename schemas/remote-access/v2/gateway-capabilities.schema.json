@@ -26,6 +26,7 @@
       "required": ["sessions", "terminal", "conversation"],
       "properties": {
         "sessions": { "type": "boolean" },
+        "preview": { "type": "boolean", "description": "One-shot pane capture at the observe grant. Absent on a gateway that predates the preview route, which a client must read as unavailable rather than as false-by-default." },
         "terminal": { "type": "boolean" },
         "conversation": { "type": "boolean" }
       },

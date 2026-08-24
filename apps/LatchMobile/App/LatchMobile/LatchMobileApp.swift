@@ -51,7 +51,18 @@ struct RootView: View {
                 // prior path as live when iOS has already reclaimed it.
                 model.suspendPairedTransport()
                 model.suspendConversations()
+                // While attached, the phone holds the session's only surface.
+                // A phone suspended with the socket open holds it hostage from
+                // a locked pocket; the gateway's 4408 slow-client eviction
+                // bounds the damage, but relying on being evicted is not a
+                // design.
+                model.suspendTerminals()
             }
+            // Terminals are deliberately absent from what comes back.
+            // `resumeAfterSuspension` resumes conversations because that is
+            // free; reattaching is another steal, so it returns to
+            // `.closed(.detached)` with a Reattach button the user presses.
+            //
             // Coming back from the background is a reconnect. The contract
             // requires repeating discovery before resuming application
             // traffic, because capabilities may have changed while away.

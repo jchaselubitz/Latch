@@ -37,7 +37,41 @@ public final class AppModel {
     /// pushed chat can reconnect from its cached revision instead of replaying
     /// the conversation after every back-navigation.
     private var conversationStores: [String: ConversationStore] = [:]
+    /// Terminal connections are retained here for the same reason, plus one
+    /// more: while attached, the phone holds the session's only surface, so
+    /// something outside the pushed screen must be able to release it.
+    private var terminalSessions: [String: TerminalSession] = [:]
 
+    /// The screen a tap on a session lands on, when the session offers a
+    /// choice. Read from the store at init and written back on change, so a
+    /// person who set it once is not asked again.
+    public var sessionPresentation: SessionPresentation {
+        didSet {
+            guard sessionPresentation != oldValue else { return }
+            presentationStore.save(sessionPresentation)
+        }
+    }
+
+    /// The grid the phone attaches a terminal at.
+    public var terminalSize: TerminalSize {
+        didSet {
+            guard terminalSize != oldValue else { return }
+            terminalSizeStore.save(terminalSize)
+        }
+    }
+
+    /// Opens one terminal connection for a session at a declared grid.
+    ///
+    /// A seam for tests, in the same shape as `sessionFactory`: the lifecycle
+    /// rules — backgrounding detaches, foregrounding does not reattach — are
+    /// properties of this model, and asserting them should not require a
+    /// WebSocket listener.
+    public typealias TerminalConnecting =
+        @Sendable (String, Int, Int) async throws -> any TerminalSocketConnection
+
+    private let terminalConnector: TerminalConnecting?
+    private let presentationStore: any SessionPresentationStoring
+    private let terminalSizeStore: any TerminalSizeStoring
     private let storage: LinkStorage
     private let sessionFactory: @Sendable (GatewayLink) -> LatchGateway
     private let pairedGatewayFactory: @Sendable (PairedDeviceRecord) async throws -> LatchGateway
@@ -50,8 +84,16 @@ public final class AppModel {
         storage: LinkStorage = KeychainLinkStorage(),
         sessionFactory: @escaping @Sendable (GatewayLink) -> LatchGateway = { LatchGateway(link: $0) },
         identityStore: any DeviceIdentityStoring = KeychainDeviceIdentityStore(),
-        pairedGatewayFactory: (@Sendable (PairedDeviceRecord) async throws -> LatchGateway)? = nil
+        pairedGatewayFactory: (@Sendable (PairedDeviceRecord) async throws -> LatchGateway)? = nil,
+        presentationStore: any SessionPresentationStoring = UserDefaultsSessionPresentationStore(),
+        terminalSizeStore: any TerminalSizeStoring = UserDefaultsTerminalSizeStore(),
+        terminalConnector: TerminalConnecting? = nil
     ) {
+        self.terminalConnector = terminalConnector
+        self.presentationStore = presentationStore
+        self.terminalSizeStore = terminalSizeStore
+        self.sessionPresentation = presentationStore.load()
+        self.terminalSize = terminalSizeStore.load()
         self.storage = storage
         self.sessionFactory = sessionFactory
         self.pairedGatewayFactory = pairedGatewayFactory ?? { record in
@@ -77,6 +119,16 @@ public final class AppModel {
         }
         return GatewayCompatibility.sessionSurface(for: capabilities)
             .restricted(to: linkSource == .paired ? pairedDevice?.permission : nil)
+    }
+
+    /// Where a tap on this session row goes.
+    public func route(for session: SessionSummary) -> SessionRoute {
+        SessionRoute.route(
+            preference: sessionPresentation,
+            connector: session.connector,
+            surface: surface,
+            isRunning: session.isRunning
+        )
     }
 
     /// The gateway's product version, for Settings.
@@ -117,6 +169,7 @@ public final class AppModel {
         sessionsError = nil
         conversationStores.values.forEach { $0.stop() }
         conversationStores = [:]
+        detachAllTerminals()
         linkState = .unlinked
     }
 
@@ -136,6 +189,67 @@ public final class AppModel {
         )
         conversationStores[session.id] = store
         return store
+    }
+
+    /// Returns the one terminal connection for this session, or nil when this
+    /// device may not open one — gated on `surface.terminal`, the way
+    /// `conversationStore(for:)` is gated on the conversation endpoint.
+    public func terminalSession(for session: SessionSummary) -> TerminalSession? {
+        guard let gateway, surface.terminal else { return nil }
+        if let existing = terminalSessions[session.id] { return existing }
+        let id = session.id
+        let connector = terminalConnector
+        let created = TerminalSession(sessionID: id) { cols, rows in
+            if let connector {
+                return try await connector(id, cols, rows)
+            }
+            return try await gateway.openTerminal(sessionID: id, cols: cols, rows: rows)
+        }
+        terminalSessions[id] = created
+        return created
+    }
+
+    /// Reads the pane without attaching, so nothing is taken from the Mac.
+    ///
+    /// This is the first thing the terminal screen does, and it is deliberately
+    /// not gated on `surface.terminal`: the route needs only `observe`, so a
+    /// phone that may never attach can still see what it cannot type at.
+    public func previewSession(
+        for session: SessionSummary,
+        scrollbackLines: Int = 0
+    ) async throws -> SessionPreview {
+        guard let gateway else { throw LatchError.transport("Not linked to a computer.") }
+        return try await gateway.previewSession(
+            sessionID: session.id,
+            scrollbackLines: scrollbackLines
+        )
+    }
+
+    /// Releases every held surface before the app is suspended.
+    ///
+    /// The sessions themselves are kept, so foregrounding returns to
+    /// `.closed(.detached)` with a Reattach button rather than silently taking
+    /// the surface back from whoever is now using it.
+    public func suspendTerminals() {
+        terminalSessions.values.forEach { $0.detach() }
+    }
+
+    /// Releases one session's surface and forgets the connection.
+    ///
+    /// This is what back-navigation uses rather than `detach()` alone: nothing
+    /// displays the connection's state once the screen is gone, and a screen
+    /// re-entered later re-reads the pane through the preview anyway. Keeping
+    /// it would also leave a second reader on an output stream that only ever
+    /// has one.
+    public func discardTerminal(for session: SessionSummary) {
+        guard let existing = terminalSessions.removeValue(forKey: session.id) else { return }
+        existing.detach()
+    }
+
+    /// Releases every held surface and forgets the connections.
+    public func detachAllTerminals() {
+        terminalSessions.values.forEach { $0.detach() }
+        terminalSessions = [:]
     }
 
     private func connect(to link: GatewayLink, persist: Bool) async {
