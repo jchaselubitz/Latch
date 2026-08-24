@@ -8,7 +8,7 @@
  
  	struct input_ctx *ictx;
  
-@@ -2128,6 +2129,14 @@
+@@ -2128,6 +2129,16 @@
   * merely the binary it launched.
   */
  #define LATCH_RAW_CAPABILITY "latch-raw-attach-v1"
