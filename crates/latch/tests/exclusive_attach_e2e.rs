@@ -23,13 +23,14 @@
 //! where "run it" is enforced.
 
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::TcpStream;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -172,6 +173,23 @@ impl Harness {
         String::from_utf8_lossy(&output.stdout).into_owned()
     }
 
+    #[allow(dead_code)]
+    fn format(&self, id: &str, template: &str) -> String {
+        let output = Command::new(&self.tmux)
+            .args([
+                "-S",
+                self.home.join("server").to_str().unwrap(),
+                "display-message",
+                "-p",
+                "-t",
+                id,
+                template,
+            ])
+            .output()
+            .expect("display-message");
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
     /// Attaches on a real PTY, the way a terminal emulator does.
     fn attach(&self, id: &str, cols: u16, rows: u16) -> Surface {
         Surface::spawn(
@@ -183,7 +201,21 @@ impl Harness {
     }
 
     fn remove(&self, id: &str) {
-        let _ = self.command().args(["remove", id, "--force"]).output();
+        let Ok(mut child) = self.command().args(["remove", id, "--force"]).spawn() else {
+            return;
+        };
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) | Err(_) => return,
+                Ok(None) if Instant::now() >= deadline => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return;
+                }
+                Ok(None) => thread::sleep(Duration::from_millis(20)),
+            }
+        }
     }
 }
 
@@ -231,9 +263,12 @@ impl Surface {
     }
 
     /// Drains whatever the surface has been painted so far.
+    ///
+    /// Caps each call so a CSI flood cannot trap us in `read` forever
+    /// before the caller can check a deadline or a needle.
     fn pump(&mut self) -> &[u8] {
         let mut buf = [0u8; 65536];
-        loop {
+        for _ in 0..8 {
             match self.master.read(&mut buf) {
                 Ok(0) => break,
                 Ok(read) => self.output.extend_from_slice(&buf[..read]),
@@ -253,6 +288,20 @@ impl Surface {
                 return false;
             }
             thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Like `wait_for`, but does not sleep. Needed when the pane is writing
+    /// faster than the slow-client chunk bound can tolerate a 10ms pause.
+    fn wait_for_busy(&mut self, needle: &[u8], within: Duration) -> bool {
+        let deadline = Instant::now() + within;
+        loop {
+            if find(self.pump(), needle).is_some() {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
         }
     }
 
@@ -284,9 +333,26 @@ impl Surface {
     /// Waits for the attach process to exit and returns its exit code, which
     /// is the kernel's release reason.
     fn release(&mut self, within: Duration) -> Option<i32> {
+        self.release_while_pumping_inner(None, within)
+    }
+
+    /// Like `release`, but keeps draining another surface so a burst writer
+    /// cannot fill that PTY and stall the kernel before it finishes steal.
+    fn release_while_pumping(&mut self, other: &mut Surface, within: Duration) -> Option<i32> {
+        self.release_while_pumping_inner(Some(other), within)
+    }
+
+    fn release_while_pumping_inner(
+        &mut self,
+        mut other: Option<&mut Surface>,
+        within: Duration,
+    ) -> Option<i32> {
         let deadline = Instant::now() + within;
         loop {
             self.pump();
+            if let Some(other) = other.as_mut() {
+                other.pump();
+            }
             match self.child.try_wait().expect("wait for attach") {
                 Some(status) => {
                     self.pump();
@@ -299,15 +365,71 @@ impl Surface {
     }
 
     fn kill(&mut self) {
+        match self.child.try_wait() {
+            Ok(Some(_)) => return,
+            _ => {}
+        }
+        let pid = self.child.id() as i32;
+        unsafe {
+            libc::kill(-pid, libc::SIGKILL);
+        }
         let _ = self.child.kill();
-        let _ = self.child.wait();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(_)) | Err(_) => return,
+                Ok(None) if Instant::now() >= deadline => return,
+                Ok(None) => thread::sleep(Duration::from_millis(10)),
+            }
+        }
     }
 }
 
 impl Drop for Surface {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        self.kill();
+    }
+}
+
+/// Extra reader on a surface's PTY master so a CSI burst cannot fill the
+/// kernel queue while the test is busy spawning a second attach.
+struct Drain {
+    stop: Arc<AtomicBool>,
+    join: Option<thread::JoinHandle<()>>,
+}
+
+impl Drain {
+    fn start(master: &std::fs::File) -> Self {
+        let mut fd = master.try_clone().expect("clone pty master");
+        set_nonblocking(&fd);
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = stop.clone();
+        let join = thread::spawn(move || {
+            let mut buf = [0u8; 65536];
+            while !flag.load(Ordering::Relaxed) {
+                match fd.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(_) => {}
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_micros(200));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        Self {
+            stop,
+            join: Some(join),
+        }
+    }
+}
+
+impl Drop for Drain {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
     }
 }
 
@@ -667,6 +789,167 @@ fn post_boundary_output_is_byte_identical_to_what_the_pane_wrote() {
             );
 
             surface.kill();
+            harness.remove(&id);
+        },
+    );
+}
+
+#[test]
+fn a_high_rate_csi_writer_keeps_advancing_while_a_raw_client_is_attached() {
+    with_kernel(
+        "a_high_rate_csi_writer_keeps_advancing_while_a_raw_client_is_attached",
+        |harness| {
+            // Realistic TUI load: CUP/ED/SGR, not NUL-to-y fill. If grid parse
+            // still runs to completion on the PTY read callback, the child
+            // blocks on a full kernel buffer and this counter stalls.
+            let counter = harness.temp.path().join("frames");
+            let writer = harness.temp.path().join("csi_writer.py");
+            fs::write(
+                &writer,
+                "import os, sys\n\
+                 p = sys.argv[1]\n\
+                 os.write(1, b'\\x1b[?1049h\\x1b[?25l\\x1b[?2004hREADY\\n')\n\
+                 n = 0\n\
+                 while True:\n\
+                 \tn += 1\n\
+                 \tos.write(1, b'\\x1b[H\\x1b[2J\\x1b[31;1m' + f'frame-{n:08d}'.encode() + b'\\x1b[0m\\x1b[10;5H*')\n\
+                 \tif n % 20 == 0:\n\
+                 \t\topen(p + '.tmp', 'w').write(str(n))\n\
+                 \t\tos.replace(p + '.tmp', p)\n",
+            )
+            .expect("write csi writer");
+            let shell = format!(
+                "stty raw -echo; python3 {} {}",
+                writer.display(),
+                counter.display()
+            );
+            let id = harness.create(&shell);
+            wait_until(
+                || harness.visible(&id).contains("READY") || harness.visible(&id).contains("frame-"),
+                "the CSI writer never painted",
+                Duration::from_secs(10),
+            );
+
+            let mut surface = harness.attach(&id, 100, 30);
+            assert!(
+                surface.wait_for(b"frame-", Duration::from_secs(10)),
+                "the raw surface was not painted the CSI writer's frame"
+            );
+
+            wait_until(
+                || {
+                    surface.pump();
+                    fs::read_to_string(&counter)
+                        .ok()
+                        .and_then(|text| text.trim().parse::<u64>().ok())
+                        .unwrap_or(0)
+                        >= 50
+                },
+                "the CSI writer never started counting",
+                Duration::from_secs(10),
+            );
+            let start = fs::read_to_string(&counter)
+                .ok()
+                .and_then(|text| text.trim().parse::<u64>().ok())
+                .unwrap_or(0);
+            let started = Instant::now();
+            wait_until(
+                || {
+                    surface.pump();
+                    fs::read_to_string(&counter)
+                        .ok()
+                        .and_then(|text| text.trim().parse::<u64>().ok())
+                        .unwrap_or(0)
+                        >= start + 400
+                },
+                "a high-rate CSI pane stalled while a raw client was attached; \
+                 grid parse is still blocking the child",
+                Duration::from_secs(8),
+            );
+            let end = fs::read_to_string(&counter)
+                .ok()
+                .and_then(|text| text.trim().parse::<u64>().ok())
+                .unwrap_or(0);
+            let elapsed = started.elapsed().as_secs_f64().max(0.001);
+            eprintln!(
+                "measure: csi_frames start={start} end={end} rate={:.0}/s",
+                end.saturating_sub(start) as f64 / elapsed
+            );
+
+            surface.kill();
+            harness.remove(&id);
+        },
+    );
+}
+
+#[test]
+fn steal_during_a_redraw_burst_restores_alt_screen_cursor_and_modes() {
+    with_kernel(
+        "steal_during_a_redraw_burst_restores_alt_screen_cursor_and_modes",
+        |harness| {
+            let writer = harness.temp.path().join("burst_prompt.py");
+            fs::write(
+                &writer,
+                "import os, time\n\
+                 os.write(1, b'\\x1b[?1049h\\x1b[?25l\\x1b[?2004h')\n\
+                 os.write(1, b'\\x1b[H\\x1b[2J\\x1b[5;10HTRUST-PROMPT')\n\
+                 n = 0\n\
+                 while True:\n\
+                 \tn += 1\n\
+                 \tos.write(1, b'\\x1b[H\\x1b[2J\\x1b[5;10HTRUST-PROMPT\\x1b[31m\\x1b[6;1H' + (b'x' * 48))\n\
+                 \ttime.sleep(0.0002)\n",
+            )
+            .expect("write burst writer");
+            let shell = format!("stty raw -echo; python3 {}", writer.display());
+            let id = harness.create(&shell);
+
+            // Do not capture-pane during the flood: a busy parse loop can
+            // delay control clients past wait_until's timeout check.
+            let mut desk = harness.attach(&id, 100, 30);
+            assert!(
+                desk.wait_for_busy(b"TRUST-PROMPT", Duration::from_secs(10)),
+                "the first surface was not painted the burst prompt"
+            );
+            let _drain = Drain::start(&desk.master);
+            let mut phone = harness.attach(&id, 80, 24);
+            let deadline = Instant::now() + Duration::from_secs(15);
+            loop {
+                if find(phone.pump(), b"TRUST-PROMPT").is_some() {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "steal during a redraw burst did not restore the current prompt"
+                );
+                thread::sleep(Duration::from_millis(10));
+            }
+            let snapshot = phone.pump().to_vec();
+            let stolen = desk.release_while_pumping(&mut phone, Duration::from_secs(15));
+            drop(_drain);
+            phone.kill();
+            desk.kill();
+
+            assert!(
+                stolen == Some(EXIT_STOLEN) || stolen == Some(EXIT_SLOW_CLIENT),
+                "the outgoing surface did not exit as stolen or slow_client: {stolen:?}"
+            );
+
+            assert!(
+                find(&snapshot, b"\x1b[?1049h").is_some()
+                    || find(&snapshot, b"\x1b[?47h").is_some(),
+                "steal during a burst did not restore alt-screen; tail={:?}",
+                String::from_utf8_lossy(&snapshot[snapshot.len().saturating_sub(200)..])
+            );
+            assert!(
+                find(&snapshot, b"\x1b[?25l").is_some(),
+                "steal during a burst did not restore a hidden cursor"
+            );
+            assert!(
+                find(&snapshot, b"\x1b[?2004h").is_some(),
+                "steal during a burst did not restore bracketed-paste mode"
+            );
+
+            phone.kill();
             harness.remove(&id);
         },
     );
@@ -1433,6 +1716,22 @@ fn a_hard_writing_pane_keeps_the_kernel_bounded_and_the_session_progressing() {
                 "the evicted client is still counted as the session's surface"
             );
 
+            let mut next = harness.attach(&id, 100, 30);
+            assert!(
+                next.wait_for(b"y", Duration::from_secs(10)),
+                "the next attach after slow-client eviction did not get a current frame"
+            );
+            let after_attach = fs::read_to_string(&counter).unwrap_or_default();
+            wait_until(
+                || {
+                    next.pump();
+                    fs::read_to_string(&counter).unwrap_or_default() != after_attach
+                },
+                "the pane stalled after the next attach took over",
+                Duration::from_secs(20),
+            );
+
+            next.kill();
             stalled.kill();
             harness.remove(&id);
         },

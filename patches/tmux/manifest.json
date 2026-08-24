@@ -12,11 +12,15 @@
   },
   "latch": {
     "capability": "latch-raw-attach-v1",
-    "patchLevel": 1,
+    "patchLevel": 2,
     "patches": [
       {
         "file": "0001-latch-exclusive-raw-attach.patch",
         "sha256": "3d4a48dadc7bdde733470812f6526eefce88e4d254c6ed8a8df98629c3a8591e"
+      },
+      {
+        "file": "0002-latch-deferred-parse.patch",
+        "sha256": "f95f2b127a84f9b74a574d58b06ff1025854df8c57126d97419e7ba25250a9a6"
       }
     ]
   }

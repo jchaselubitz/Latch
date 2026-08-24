@@ -1,0 +1,192 @@
+--- a/tmux.h
++++ b/tmux.h
+@@ -1304,6 +1304,7 @@
+ 	struct window_pane_resizes resize_queue;
+ 	struct event	 resize_timer;
+ 	struct event	 sync_timer;
++	struct event	 parse_timer;
+ 
+ 	struct input_ctx *ictx;
+ 
+@@ -2128,6 +2129,14 @@
+  * merely the binary it launched.
+  */
+ #define LATCH_RAW_CAPABILITY "latch-raw-attach-v1"
++/*
++ * Grid parse is deferred and time-sliced so a CSI burst cannot monopolize
++ * the only server thread. LATCH_PARSE_SLICE is the bytes consumed per
++ * event-loop turn; LATCH_PARSE_CATCHUP is the overflow slice; LATCH_PARSE_BACKLOG
++ * is the unparsed cap. Overflow parses a bounded catch-up chunk and returns
++ * to the event loop — it must not stall steal, MSG_EXIT, or the child.
++ */
++#define LATCH_PARSE_SLICE	4096
++#define LATCH_PARSE_CATCHUP	65536
++#define LATCH_PARSE_BACKLOG	(256 * 1024)
+ #define CLIENT_BRACKETPASTING 0x1000000000ULL
+ #define CLIENT_ASSUMEPASTING 0x2000000000ULL
+ #define CLIENT_REDRAWSCROLLBARS 0x4000000000ULL
+@@ -3188,6 +3197,7 @@
+ void	 input_reset(struct input_ctx *, int);
+ struct evbuffer *input_pending(struct input_ctx *);
+ void	 input_parse_pane(struct window_pane *);
++void	 input_parse_pane_n(struct window_pane *, size_t);
+ void	 input_parse_buffer(struct window_pane *, const u_char *, size_t);
+ void	 input_parse_screen(struct input_ctx *, struct screen *,
+ 	     screen_write_init_ctx_cb, void *, const u_char *, size_t);
+--- a/window.c
++++ b/window.c
+@@ -72,6 +72,10 @@
+ static void	window_pane_destroy(struct window_pane *);
+ static void	window_pane_full_size_offset(struct window_pane *wp,
+ 		    int *xoff, int *yoff, u_int *sx, u_int *sy);
++static size_t	window_pane_unparsed(struct window_pane *);
++static void	window_pane_parse_timer(int, short, void *);
++static void	window_pane_schedule_parse(struct window_pane *);
++static void	window_pane_parse_work(struct window_pane *);
+ 
+ RB_GENERATE(windows, window, entry, window_cmp);
+ RB_GENERATE(winlinks, winlink, entry, winlink_cmp);
+@@ -1120,6 +1124,8 @@
+ 		event_del(&wp->resize_timer);
+ 	if (event_initialized(&wp->sync_timer))
+ 		event_del(&wp->sync_timer);
++	if (event_initialized(&wp->parse_timer))
++		event_del(&wp->parse_timer);
+ 	TAILQ_FOREACH_SAFE(r, &wp->resize_queue, entry, r1) {
+ 		TAILQ_REMOVE(&wp->resize_queue, r, entry);
+ 		free(r);
+@@ -1177,7 +1183,15 @@
+ 			}
+ 		}
+ 	}
+-	input_parse_pane(wp);
++	/*
++	 * Forwarding already happened above. Grid parse is deferred and
++	 * sliced so a CSI burst cannot monopolize the only server thread.
++	 * Overflow catches the parser up in a bounded chunk rather than
++	 * stalling the child or the rest of the event loop.
++	 */
++	if (window_pane_unparsed(wp) > LATCH_PARSE_BACKLOG)
++		input_parse_pane_n(wp, LATCH_PARSE_CATCHUP);
++	window_pane_schedule_parse(wp);
+ 	bufferevent_disable(wp->event, EV_READ);
+ }
+ 
+@@ -1198,8 +1212,56 @@
+ 
+ 	if (window_pane_destroy_ready(wp))
+ 		server_destroy_pane(wp, 1);
++}
++
++static size_t
++window_pane_unparsed(struct window_pane *wp)
++{
++	size_t	used;
++
++	if (wp->event == NULL)
++		return (0);
++	used = wp->offset.used - wp->base_offset;
++	if (used >= EVBUFFER_LENGTH(wp->event->input))
++		return (0);
++	return (EVBUFFER_LENGTH(wp->event->input) - used);
++}
++
++static void
++window_pane_parse_timer(__unused int fd, __unused short events, void *data)
++{
++	window_pane_parse_work(data);
+ }
+ 
++static void
++window_pane_schedule_parse(struct window_pane *wp)
++{
++	struct timeval	tv = { .tv_sec = 0, .tv_usec = 1000 };
++
++	if (window_pane_unparsed(wp) == 0)
++		return;
++	if (!event_initialized(&wp->parse_timer))
++		evtimer_set(&wp->parse_timer, window_pane_parse_timer, wp);
++	if (!evtimer_pending(&wp->parse_timer, NULL))
++		evtimer_add(&wp->parse_timer, &tv);
++}
++
++static void
++window_pane_parse_work(struct window_pane *wp)
++{
++	size_t	unparsed;
++
++	unparsed = window_pane_unparsed(wp);
++	if (unparsed == 0)
++		return;
++	if (unparsed > LATCH_PARSE_BACKLOG)
++		input_parse_pane_n(wp, LATCH_PARSE_CATCHUP);
++	else
++		input_parse_pane_n(wp, LATCH_PARSE_SLICE);
++	if (window_pane_unparsed(wp) > 0)
++		window_pane_schedule_parse(wp);
++}
++
+ void
+ window_pane_set_event(struct window_pane *wp)
+ {
+--- a/input.c
++++ b/input.c
+@@ -1013,10 +1013,19 @@
+ void
+ input_parse_pane(struct window_pane *wp)
+ {
++	input_parse_pane_n(wp, SIZE_MAX);
++}
++
++/* Parse at most limit new bytes from the pane. */
++void
++input_parse_pane_n(struct window_pane *wp, size_t limit)
++{
+ 	void	*new_data;
+ 	size_t	 new_size;
+ 
+ 	new_data = window_pane_get_new_data(wp, &wp->offset, &new_size);
++	if (new_size > limit)
++		new_size = limit;
+ 	input_parse_buffer(wp, new_data, new_size);
+ 	window_pane_update_used_data(wp, &wp->offset, new_size);
+ }
+--- a/server-client.c
++++ b/server-client.c
+@@ -1567,6 +1567,14 @@
+ 	TAILQ_FOREACH(c, &clients, entry) {
+ 		server_client_check_exit(c);
+ 		if (c->session != NULL && c->session->curw != NULL) {
++			/*
++			 * Flush grid parse before the exclusive-attach
++			 * snapshot so steal sees the current alt-screen,
++			 * cursor, and modes rather than a lagged frame.
++			 */
++			if (c->latch_raw_state == LATCH_RAW_SNAPSHOT &&
++			    c->latch_raw_wp != NULL)
++				input_parse_pane(c->latch_raw_wp);
+ 			server_client_check_modes(c);
+ 			server_client_check_redraw(c);
+ 			if (c->latch_raw_state == LATCH_RAW_SNAPSHOT &&
+@@ -1733,6 +1741,11 @@
+ 		if (c->session == NULL)
+ 			continue;
+ 		attached_clients++;
++
++		if (c->latch_raw_state == LATCH_RAW_LIVE &&
++		    c->latch_raw_wp == wp &&
++		    c->latch_raw_offset.used < minimum)
++			minimum = c->latch_raw_offset.used;
+ 
+ 		if (~c->flags & CLIENT_CONTROL) {
+ 			off = 0;
+@@ -1775,6 +1788,9 @@
+ 		if (wp->pipe_fd != -1)
+ 			wp->pipe_offset.used -= wp->base_offset;
+ 		TAILQ_FOREACH(c, &clients, entry) {
++			if (c->latch_raw_state == LATCH_RAW_LIVE &&
++			    c->latch_raw_wp == wp)
++				c->latch_raw_offset.used -= wp->base_offset;
+ 			if (c->session == NULL || (~c->flags & CLIENT_CONTROL))
+ 				continue;
+ 			wpo = control_pane_offset(c, wp, &flag);
