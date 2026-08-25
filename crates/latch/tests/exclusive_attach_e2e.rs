@@ -825,7 +825,10 @@ fn a_high_rate_csi_writer_keeps_advancing_while_a_raw_client_is_attached() {
             );
             let id = harness.create(&shell);
             wait_until(
-                || harness.visible(&id).contains("READY") || harness.visible(&id).contains("frame-"),
+                || {
+                    harness.visible(&id).contains("READY")
+                        || harness.visible(&id).contains("frame-")
+                },
                 "the CSI writer never painted",
                 Duration::from_secs(10),
             );

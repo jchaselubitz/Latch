@@ -38,9 +38,13 @@ control-plane recovery mechanism is allowed to synthesize device grants.
 
 - `latch remote-access disable` is the global incident switch.
 - `latch remote-access relay disable` independently prevents new relay
-  credentials while leaving LAN/direct access available. The first attempt is
-  direct with STUN only; TURN credentials are requested only after that attempt
-  fails.
+  credentials while leaving LAN/direct access available. It is a refusal at
+  issuance, not a client-side ordering rule: relay candidates are now offered
+  to the first attempt, and preferring a direct path is left to ICE's own pair
+  priority, which ranks host and reflexive candidates above relayed ones.
+  Withholding TURN until a direct attempt had failed bought no stronger
+  preference and cost every genuinely symmetric-NAT phone a guaranteed second
+  round trip.
 - LAN handshakes have a ten-second deadline and a 32-connection cap. The
   Cloudflare TURN fallback uses short-lived service credentials and the
   control-plane device rate limit; its availability and capacity are a release
@@ -80,14 +84,16 @@ updates and has no privileged helper.
 
 ## Verification matrix
 
-The repository test suites provide deterministic protocol coverage; physical
-network rows require preproduction infrastructure and are called out rather
-than being represented as real-world measurements.
+The repository test suites provide deterministic protocol coverage, now
+including NAT behaviour against simulated networks with a real TURN server.
+Rows that need a physical network are called out as not yet run rather than
+being represented as real-world measurements; how they are run and recorded is
+in [REMOTE_ACCESS_FIELD_VERIFICATION.md](REMOTE_ACCESS_FIELD_VERIFICATION.md).
 
 | Area | Automated evidence | Result |
 | --- | --- | --- |
 | Pairing expiry/replay/cancellation and secret-at-rest | Rust remote-access plus LatchMobileKit pairing tests | Pass |
-| Presence, rendezvous, ICE candidate validation, and direct-first TURN issuance | Control-plane, desktop-host, and LatchMobileKit signaling tests | Pass |
+| Presence, rendezvous, ICE candidate validation, and TURN issuance | Control-plane, desktop-host, and LatchMobileKit signaling tests | Pass |
 | Paired-phone flow: pair, signal, pinned Noise, list, send, then revoke | LatchMobileKit composed end-to-end test; Rust LAN proxy and ICE record round trips | Pass in deterministic test environment |
 | Noise identity pin | Rust transcript vectors and LatchMobileKit Noise tests; the pin is the paired record, never the rendezvous claim | Pass |
 | Observe/interact/control routing, prompt/message/key distinctions | Rust proxy tests plus gateway/SDK suites | Pass |
@@ -95,16 +101,54 @@ than being represented as real-world measurements.
 | Read-only and controlling terminal modes | Rust gateway integration and Remote SDK tests | Pass |
 | Duplicate submission prevention | gateway idempotency integration tests | Pass |
 | Direct setup, reconnect, path migration | in-process ICE host-candidate and policy tests | Pass in deterministic test environment |
-| TURN fallback, end-to-end secrecy, credential expiry | Direct-first policy and Noise tests; no relay soak environment | Pass for policy/cryptography; deployment evidence deferred |
+| Path selection is recorded and readable | Mac audit-trail counters in the diagnostics bundle and phone-side counters, both content-free; unit tests on both | Pass |
+| TURN fallback, end-to-end secrecy, credential expiry | Prefer-direct policy and Noise tests; simulated-NAT relay selection against a real in-process TURN server; no deployed relay soak | Pass for policy, cryptography, and path selection; deployed-relay evidence deferred |
 | Immediate revocation and device-key rotation | Rust remote-access tests | Pass |
+| Terminal grant separate from base access; permission downgrade closes a live terminal stream | Rust `proxy_connection` downgrade test (`permission_downgraded` audit row), LatchDesktop `RemoteAccessTests`, `SessionRouteTests` | Pass |
+| Phone-side Face ID/passcode gate before a terminal opens; chat stays ungated | LatchMobileKit `TerminalUnlock`/`AppModel` tests | Pass at the unit level; the Face ID prompt itself needs a physical device — see below |
+| Idle terminal release while backgrounded | LatchMobileKit `AppModel` idle-countdown tests | Pass |
+| ICE responder in the helper (offer → `latch-noise-v1` data channel → Noise handshake → proxy) | Rust integration test over `webrtc`'s in-memory network; presence candidate ordering tests | Pass in deterministic test environment |
+| Relay-from-start policy (STUN + TURN gathered together, relay a legitimate first-attempt outcome) | latch-transport and latch-transport-ffi policy tests, LatchMobileKit `GatewayTransportTests` | Pass |
+| `CloudflareTurnProvider` parses both the documented object shape and an `iceServers` array | `services/control-plane/src/cloudflare-turn.test.ts` | Pass |
+| Never-relay backed by presence host-candidate filtering; Tailscale/tailnet host candidate usable as a plain TCP Noise target | Desktop `presenceCandidates(neverRelay:)` tests, phone-side direct-target tests | Pass |
+| Sleep prevention while a phone is connected | `SleepAssertion` unit coverage | Pass |
 | Loopback isolation and stale gateway credential | Rust gateway/supervision tests | Pass |
 | Parser, timeout, quota, symlink, and interrupted-write failures | Rust hardening tests | Pass |
 | Same-LAN path on the CI host | Authenticated listener Noise round trip, post-handshake lifetime, and revocation-close test | Pass |
-| Home IPv4 NAT, IPv6, cellular-to-home, double/CGNAT | Protocol simulation only; no physical lab attached | Deferred preproduction evidence |
-| Symmetric NAT / UDP blocked | TURN retry policy only; no physical or deployed-relay run | Deferred preproduction evidence |
-| Captive portal, latency/loss/reordering, sleep/wake/logout | State/failure injection only | Deferred preproduction evidence |
+| Symmetric NAT forces the relay; a cone NAT does not | Virtual WAN, two LANs behind configurable NATs, and a real in-process TURN server: cone/cone nominates a reflexive pair, symmetric/symmetric nominates a relayed one, records round-trip on both | Pass against simulated NATs; no carrier or venue network involved |
+| Home IPv4 NAT, IPv6, cellular-to-home, double/CGNAT | No physical run: no phone paired to a Mac running an ICE-capable helper during this objective | Not yet run — see below |
+| Hotel/corporate Wi-Fi with UDP blocked (TURN over TLS 443) | No physical run; the relay path is exercised only against the simulated NATs above | Not yet run — see below |
+| Wi-Fi to cellular migration mid-terminal, Mac sleep/wake, phone background/foreground | No physical run; reconnect and the sleeping-Mac message are covered by phone-side unit tests only | Not yet run — see below |
+| Captive portal, latency/loss/reordering, logout | State/failure injection only | Deferred preproduction evidence |
 | Sustained regional relay availability and latency SLO | No deployed relay/load environment in this repository | Deferred preproduction evidence |
 | External security review | No independent reviewer attached to this objective | Required release gate |
+
+## The rows that are not yet run
+
+Four rows above say "not yet run" rather than "deferred preproduction
+evidence". The change of wording is the point: the obstacle is no longer that
+the infrastructure does not exist. The instrumentation, the procedure, and the
+recorder exist, and are described in
+[REMOTE_ACCESS_FIELD_VERIFICATION.md](REMOTE_ACCESS_FIELD_VERIFICATION.md).
+What is missing is a person, a phone, and the networks.
+
+Two specific things blocked the run during this objective, and both are worth
+knowing before someone attempts it:
+
+- The helper installed on the development Mac predates the ICE responder
+  entirely — it has no `--ice-server` flag and its readiness document carries no
+  ICE credentials — so a phone pointed at it falls back to Bonjour and then
+  fails. That failure looks like a network result and is not one. Installing
+  the current helper and toggling Remote Access to relaunch it is a
+  prerequisite, not a detail.
+- The helper reads the Mac identity from the Keychain, which prompts, so it
+  cannot be launched from a headless shell. The relaunch has to happen in a
+  desktop session.
+
+Once a run happens, `scripts/field-run.sh` records it into `docs/field-runs/`
+and `scripts/field-run.sh matrix` regenerates the table from what was actually
+recorded. These rows should be replaced with that output rather than with
+prose.
 
 ## Residual release gates
 
@@ -117,7 +161,10 @@ production rollout remains gated on all of the following:
   results.
 
 Physical NAT traversal, cellular, captive-portal, sleep/wake, and sustained
-relay-availability evidence are also still deferred. Remote access and relay
-must remain off by rollout policy until those external gates are satisfied.
-These are deployment evidence gaps, not permissions for the phone client to
-bypass the documented boundaries.
+relay-availability evidence are also still outstanding — now as unrun
+procedures rather than as absent capability. The Face ID/passcode terminal
+gate is likewise unverified on real biometric hardware, since the simulator
+has none to exercise; the permission logic it wraps is covered by unit tests
+only. Remote access and relay must remain off by rollout policy until those
+external gates are satisfied. These are deployment evidence gaps, not
+permissions for the phone client to bypass the documented boundaries.

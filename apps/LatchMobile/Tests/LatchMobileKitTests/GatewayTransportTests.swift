@@ -32,16 +32,23 @@ final class GatewayTransportTests: XCTestCase {
         )
     }
 
-    func testRelayIsWithheldUntilDirectFailure() async throws {
+    func testRelayIsAllowedFromTheFirstAttemptButNeedsARelayServer() async throws {
         let policy = RemoteTransportPolicy()
+        let stun = IceServer(urls: ["stun:stun.example:3478"])
+        let turn = IceServer(
+            urls: ["stun:stun.example:3478", "turns:relay.example:5349?transport=tcp"],
+            username: "device",
+            credential: "secret"
+        )
+        XCTAssertFalse(stun.isTurn)
+        XCTAssertTrue(turn.isTurn)
         do {
-            try await policy.authorizeRelayRetry()
-            XCTFail("relay should be withheld")
+            try await policy.authorizeRelayAttempt(servers: [stun])
+            XCTFail("a STUN-only list was accepted as a relay attempt")
         } catch {
-            XCTAssertEqual(error as? RemoteTransportPolicyError, .relayBeforeDirectFailure)
+            XCTAssertEqual(error as? RemoteTransportPolicyError, .missingTurnServer)
         }
-        await policy.recordDirectFailure()
-        try await policy.authorizeRelayRetry()
+        try await policy.authorizeRelayAttempt(servers: [stun, turn])
     }
 
     func testPathChangeRequiresCapabilityRediscoveryOnlyOnChange() async {

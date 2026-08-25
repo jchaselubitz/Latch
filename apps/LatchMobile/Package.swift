@@ -1,22 +1,27 @@
 // swift-tools-version: 5.9
 
 import PackageDescription
-import Foundation
 
 // LatchMobileKit holds everything the phone app does that is not a view: the
 // generated wire contract, gateway client, transport, and compatibility rules.
 // Keeping it a plain library means `swift test` exercises
 // the client without a simulator, and the Xcode app target consumes it as a
 // local package rather than compiling a second copy of the sources.
+// The shared Rust transport is a hard dependency, not an optional extra: it
+// is the only thing that reaches a Mac that is not on this network, and a
+// build that quietly dropped it would ship an app whose remote access works
+// on the couch and nowhere else. `scripts/build-latch-transport-xcframework.sh`
+// generates it; without it, resolution fails here rather than later and
+// silently.
 let nativeFrameworkPath = "Native/LatchTransportFFI.xcframework"
-let hasNativeFramework = FileManager.default.fileExists(
-    atPath: URL(fileURLWithPath: #filePath)
-        .deletingLastPathComponent()
-        .appendingPathComponent(nativeFrameworkPath)
-        .path
-)
 
-var targets: [Target] = [
+let targets: [Target] = [
+    .binaryTarget(name: "LatchTransportFFI", path: nativeFrameworkPath),
+    .target(
+        name: "LatchTransportNative",
+        dependencies: ["LatchMobileKit", "LatchTransportFFI"],
+        path: "Sources/LatchTransportNative"
+    ),
     .target(
         name: "LatchMobileKit",
         path: "Sources/LatchMobileKit"
@@ -45,23 +50,11 @@ var targets: [Target] = [
         path: "Tests/TerminalEmulatorTests"
     )
 ]
-if hasNativeFramework {
-    targets.append(.binaryTarget(name: "LatchTransportFFI", path: nativeFrameworkPath))
-    targets.append(
-        .target(
-            name: "LatchTransportNative",
-            dependencies: ["LatchMobileKit", "LatchTransportFFI"],
-            path: "Sources/LatchTransportNative"
-        )
-    )
-}
 
-var products: [Product] = [
-    .library(name: "LatchMobileKit", targets: ["LatchMobileKit"])
+let products: [Product] = [
+    .library(name: "LatchMobileKit", targets: ["LatchMobileKit"]),
+    .library(name: "LatchTransportNative", targets: ["LatchTransportNative"])
 ]
-if hasNativeFramework {
-    products.append(.library(name: "LatchTransportNative", targets: ["LatchTransportNative"]))
-}
 
 let package = Package(
     name: "LatchMobile",

@@ -1285,9 +1285,10 @@ dependencies = [
 
 [[package]]
 name = "latch"
-version = "0.2608241212.0"
+version = "0.2608251357.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "clap",
  "libc",
@@ -1306,23 +1307,26 @@ dependencies = [
 
 [[package]]
 name = "latch-remote"
-version = "0.2608241212.0"
+version = "0.2608251357.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "clap",
  "latch",
  "latch-transport",
+ "tokio",
 ]
 
 [[package]]
 name = "latch-transport"
-version = "0.2608241212.0"
+version = "0.2608251357.0"
 dependencies = [
  "anyhow",
  "async-trait",
  "bytes",
  "thiserror 2.0.19",
  "tokio",
+ "turn",
  "webrtc-data",
  "webrtc-dtls",
  "webrtc-ice",
@@ -1333,14 +1337,14 @@ dependencies = [
 
 [[package]]
 name = "latch-transport-bindgen"
-version = "0.2608241212.0"
+version = "0.2608251357.0"
 dependencies = [
  "uniffi",
 ]
 
 [[package]]
 name = "latch-transport-ffi"
-version = "0.2608241212.0"
+version = "0.2608251357.0"
 dependencies = [
  "latch-transport",
  "thiserror 2.0.19",

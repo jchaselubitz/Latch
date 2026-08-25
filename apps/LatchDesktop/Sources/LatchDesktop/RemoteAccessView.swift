@@ -87,7 +87,7 @@ struct RemoteAccessSettingsView: View {
                 SettingsSectionHeader("Paired Devices")
             } footer: {
                 SettingsFootnote(
-                    "Observe can read sessions and conversations. Interact can also send messages and answer prompts. Control can also open a session's terminal, which takes that terminal from whatever is currently showing it. Latch checks this on every request before anything reaches a session."
+                    "Observe can read sessions and conversations. Interact can also send messages and answer prompts. Allow terminal additionally lets a device open a session's terminal and run commands on this Mac, which takes that terminal from whatever is currently showing it. Latch checks this on every request before anything reaches a session, and turning the terminal off closes one a device is already holding."
                 )
             }
 
@@ -108,14 +108,27 @@ struct RemoteAccessSettingsView: View {
                     get: { controller.status.relayEnabled },
                     set: { enabled in Task { await controller.setRelayEnabled(enabled) } }
                 ))
+                .disabled(!controller.isEnabled || controller.status.neverRelay)
+
+                Toggle("Never use the relay", isOn: Binding(
+                    get: { controller.status.neverRelay },
+                    set: { never in Task { await controller.setNeverRelay(never) } }
+                ))
                 .disabled(!controller.isEnabled)
+
+                if controller.isPreventingSleep {
+                    LabeledContent("Sleep") {
+                        Text("Held awake for a connected phone")
+                            .foregroundStyle(.secondary)
+                    }
+                }
 
                 Button("Export Diagnostics…") { exportDiagnostics() }
             } header: {
                 SettingsSectionHeader("Connectivity")
             } footer: {
                 SettingsFootnote(
-                    "Turning the relay off keeps same-network and direct connections working. Diagnostics contain counts and switch states only — no names, addresses, keys, or session content — and are never uploaded."
+                    "Turning the relay off keeps same-network and direct connections working. Never use the relay goes further: this Mac also stops publishing the addresses that a relayed path is found through, so a phone can only reach it on the same network or over a private network such as Tailscale. While a phone is connected, this Mac is kept from falling asleep on its idle timer — closing the lid or choosing Sleep still works. Diagnostics contain counts and switch states only — no names, addresses, keys, or session content — and are never uploaded."
                 )
             }
 
@@ -195,34 +208,87 @@ struct RemoteAccessSettingsView: View {
     }
 }
 
+/// One paired phone, with the two decisions that are actually separate: how
+/// much of the conversation it can take part in, and whether it may hold this
+/// Mac's terminal.
+///
+/// The terminal is deliberately its own switch rather than the top notch of a
+/// severity dropdown. It is the one grant that hands a phone the ability to
+/// run commands here, and taking a session's single terminal surface is
+/// visible to whoever was using it, so it should be turned on by an act that
+/// reads as turning it on.
 private struct RemoteDeviceRow: View {
     let device: RemoteDevice
     @ObservedObject var controller: RemoteAccessController
 
-    var body: some View {
-        HStack {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(device.name)
-                Text(device.permission.detail)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            Spacer()
-            Picker("", selection: Binding(
-                get: { device.permission },
-                set: { permission in
-                    Task { await controller.grant(device, permission: permission) }
-                }
-            )) {
-                ForEach(DevicePermission.allCases) { permission in
-                    Text(permission.label).tag(permission)
-                }
-            }
-            .labelsHidden()
-            .frame(width: 120)
+    /// The permission the device holds when the terminal is not allowed. It is
+    /// tracked here because `control` erases it: a device switched to the
+    /// terminal and back should return to Interact or Observe as it was, not
+    /// to a default.
+    @State private var baseAccess: DevicePermission
 
-            Button("Revoke", role: .destructive) {
-                Task { await controller.revoke(device) }
+    init(device: RemoteDevice, controller: RemoteAccessController) {
+        self.device = device
+        self.controller = controller
+        _baseAccess = State(initialValue: device.permissionWithoutTerminal)
+    }
+
+    /// Everything below `control`, in ladder order. `control` is not offered
+    /// here because it is the terminal toggle.
+    private static let baseChoices: [DevicePermission] = [.observe, .interact]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(device.name)
+                    Text(device.permission.detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Picker("", selection: Binding(
+                    get: { baseAccess },
+                    set: { permission in
+                        baseAccess = permission
+                        // Allowing the terminal already implies everything
+                        // below it, so this only takes effect once the
+                        // terminal is off again.
+                        guard !device.allowsTerminal else { return }
+                        Task { await controller.grant(device, permission: permission) }
+                    }
+                )) {
+                    ForEach(Self.baseChoices) { permission in
+                        Text(permission.label).tag(permission)
+                    }
+                }
+                .labelsHidden()
+                .frame(width: 120)
+
+                Button("Revoke", role: .destructive) {
+                    Task { await controller.revoke(device) }
+                }
+            }
+            Toggle("Allow terminal", isOn: Binding(
+                get: { device.allowsTerminal },
+                set: { allowed in
+                    Task {
+                        await controller.grant(
+                            device,
+                            permission: allowed ? .control : baseAccess
+                        )
+                    }
+                }
+            ))
+            .toggleStyle(.switch)
+            .controlSize(.small)
+            .font(.callout)
+        }
+        // A device revoked and re-granted, or changed from another window,
+        // must not leave a stale base behind the toggle.
+        .onChange(of: device.permission) { permission in
+            if permission != .control {
+                baseAccess = permission
             }
         }
     }
@@ -294,7 +360,7 @@ private struct RemotePairingSheet: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
             progressLabel
-            Text("New devices start with Interact. Change or revoke that at any time in Remote Access settings.")
+            Text("New devices start with Interact and cannot open a terminal. Grant that, change it, or revoke the device at any time in Remote Access settings.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

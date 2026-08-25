@@ -34,6 +34,24 @@ public final class TerminalSession {
 
     public let sessionID: String
 
+    /// When this phone last typed at, resized, or took the terminal.
+    ///
+    /// Output from the Mac deliberately does not move it. A build printing for
+    /// ten minutes is the Mac working, not the person watching, and holding a
+    /// session's one surface open on the strength of it is exactly what the
+    /// idle release exists to stop.
+    public private(set) var lastInputAt: Date
+
+    /// Whether this phone currently holds — or is taking — the session's one
+    /// surface. The connecting case counts: the steal is already under way.
+    public var holdsSurface: Bool {
+        switch state {
+        case .connecting, .attached: return true
+        case .idle, .closed, .failed: return false
+        }
+    }
+
+    private let now: @Sendable () -> Date
     private let connect: @Sendable (Int, Int) async throws -> any TerminalSocketConnection
     private var socket: TerminalSocket?
     private let stream: AsyncStream<Data>
@@ -43,9 +61,12 @@ public final class TerminalSession {
 
     public init(
         sessionID: String,
+        now: @escaping @Sendable () -> Date = { Date() },
         connect: @escaping @Sendable (Int, Int) async throws -> any TerminalSocketConnection
     ) {
         self.sessionID = sessionID
+        self.now = now
+        self.lastInputAt = now()
         self.connect = connect
         // Buffer rather than drop: a repainting TUI emits faster than a first
         // consumer attaches, and dropping those bytes loses grid state that
@@ -68,6 +89,7 @@ public final class TerminalSession {
         }
         self.cols = cols
         self.rows = rows
+        lastInputAt = now()
         let connect = connect
         let socket = TerminalSocket(
             makeConnection: { try await connect(cols, rows) },
@@ -89,6 +111,7 @@ public final class TerminalSession {
 
     public func send(_ bytes: ArraySlice<UInt8>) {
         guard let socket else { return }
+        lastInputAt = now()
         let data = Data(bytes)
         Task { try? await socket.send(data) }
     }
@@ -100,6 +123,7 @@ public final class TerminalSession {
         guard let socket, self.cols != cols || self.rows != rows else { return }
         self.cols = cols
         self.rows = rows
+        lastInputAt = now()
         Task { try? await socket.resize(cols: cols, rows: rows) }
     }
 

@@ -60,22 +60,45 @@ final class RemoteAccessController: ObservableObject {
     /// plane offer is never enough to authorize the local gateway.
     private(set) var approvedRendezvousOffers: [ControlPlaneRendezvousOffer] = []
     /// The ICE credentials presence advertises. They belong to the agent that
-    /// answers connectivity checks — the helper — so they are generated once
-    /// per helper run and survive every presence refresh in between. Rotating
-    /// them on the refresh timer would strand a phone that read them early in
-    /// a presence window and started its checks late in it.
-    private(set) var iceCredentials: ControlPlaneIceCredentials?
+    /// answers connectivity checks — the helper — so the helper mints them once
+    /// per run and reports them through the readiness document this app already
+    /// polls. Generating them here would advertise a ufrag no agent recognises
+    /// and every connectivity check would fail with 401.
+    var iceCredentials: ControlPlaneIceCredentials? {
+        status.ice.map { ControlPlaneIceCredentials(ufrag: $0.ufrag, pwd: $0.password) }
+    }
+    /// Offers already handed to the helper. The control plane's queue is
+    /// one-shot, but presence refreshes faster than an ICE attempt completes,
+    /// so this stops a still-in-flight request being answered twice.
+    private var deliveredOffers: Set<String> = []
     private var terminationObserver: NSObjectProtocol?
+    /// Keeps the Mac out of idle sleep while a phone is connected to it.
+    private let sleepAssertion: SleepAssertionHolder
+    /// Watches the connection count on its own clock. The general status poll
+    /// backs off to a minute once Latch is not the app in front — which is
+    /// exactly the state a Mac falls asleep from, so the assertion cannot wait
+    /// for it. This asks for status alone, not the device list or the audit
+    /// trail, so the extra cadence is one short-lived read.
+    private var sleepWatch: Task<Void, Never>?
+    private static let sleepPollInterval: UInt64 = 10_000_000_000
 
     convenience init() {
         self.init(client: LatchClient(), controlPlane: ControlPlaneHost())
     }
 
-    init(client: LatchClient, controlPlane: ControlPlaneHost) {
+    init(
+        client: LatchClient,
+        controlPlane: ControlPlaneHost,
+        sleepAssertion: SleepAssertionHolder = SleepAssertionHolder()
+    ) {
         self.client = client
         self.controlPlane = controlPlane
+        self.sleepAssertion = sleepAssertion
         self.controlPlaneAddress = controlPlane.address?.absoluteString ?? ""
     }
+
+    /// Whether this Mac is currently being kept awake for a connected phone.
+    var isPreventingSleep: Bool { sleepAssertion.isHeld }
 
     var isEnabled: Bool { status.enabled }
 
@@ -144,14 +167,15 @@ final class RemoteAccessController: ObservableObject {
 
     private func startSupervision() {
         guard supervision == nil else { return }
+        startSleepWatch()
         phase = .starting
         let executableURL = client.executableURL
         supervision = Task { [weak self] in
             var attempt = 0
             while !Task.isCancelled {
-                // A restarted helper is a new agent, so it gets new credentials
-                // here and nowhere else.
-                self?.iceCredentials = .generate()
+                // A restarted helper is a new agent with new credentials. It
+                // mints them itself and reports them through readiness, so
+                // there is nothing to reset here.
                 let supervisor = RemoteAccessSupervisor(executableURL: executableURL)
                 RemoteAccessController.supervisorRegistry.register(supervisor)
                 defer { RemoteAccessController.supervisorRegistry.remove(supervisor) }
@@ -174,12 +198,37 @@ final class RemoteAccessController: ObservableObject {
     private func stopSupervision() {
         supervision?.cancel()
         supervision = nil
-        // No helper, no agent: the credentials would authenticate checks
-        // nothing is listening for.
-        iceCredentials = nil
+        sleepWatch?.cancel()
+        sleepWatch = nil
+        // No helper, no connections. Dropped here rather than waiting for the
+        // next status poll, so turning remote access off releases the Mac at
+        // the moment the person asked for it.
+        sleepAssertion.apply(false)
+        // No helper, no agent, and no readiness document: `iceCredentials`
+        // reads as nil from the next status poll on its own.
         // Cancelling the task is not enough on its own: the child is only
         // reaped once it is asked to terminate.
         RemoteAccessController.terminateHelpers()
+    }
+
+    /// Matches the sleep assertion to the helper's connection count.
+    ///
+    /// A read that fails changes nothing: a CLI that could not be asked has not
+    /// said the phone went away, and dropping the assertion on a transient
+    /// failure would put the Mac to sleep underneath a live terminal. The next
+    /// successful read — or `stopSupervision`, which is the person turning this
+    /// off — releases it.
+    private func startSleepWatch() {
+        guard sleepWatch == nil else { return }
+        sleepWatch = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                if let current = try? await self.client.remoteAccessStatus() {
+                    self.sleepAssertion.apply(current.hasLiveConnection)
+                }
+                try? await Task.sleep(nanoseconds: Self.sleepPollInterval)
+            }
+        }
     }
 
     private func recordHelperFailure(_ error: Error) {
@@ -223,6 +272,7 @@ final class RemoteAccessController: ObservableObject {
         presenceTask?.cancel()
         presenceTask = nil
         approvedRendezvousOffers = []
+        deliveredOffers = []
         guard clear else { return }
         Task { [controlPlane] in await controlPlane.clearPresence() }
     }
@@ -237,24 +287,28 @@ final class RemoteAccessController: ObservableObject {
               let publicKey = status.publicKey, controlPlane.isConfigured else {
             return nil
         }
-        // A helper that is up but whose credentials were never generated (a
-        // restore path, most often) gets them now rather than publishing an
-        // agentless presence a phone cannot run checks against.
-        let ice = iceCredentials ?? {
-            let generated = ControlPlaneIceCredentials.generate()
-            iceCredentials = generated
-            return generated
-        }()
+        // Presence advertises what the helper's agent actually gathered — its
+        // host and server-reflexive candidates, tunnel interfaces included —
+        // rather than only the LAN listener, which no phone off this network
+        // can reach. A helper without an agent publishes no ICE at all instead
+        // of credentials nothing will answer.
+        let ice = iceCredentials
+        let gathered = status.ice?.candidates ?? []
+        let agentCandidates = Self.presenceCandidates(from: gathered, neverRelay: status.neverRelay)
+            .map(\.published)
         do {
             let presence = try await controlPlane.publishPresence(
                 publicKey: publicKey,
                 macName: Self.macName,
                 listenerAddress: listener,
-                ice: ice
+                interfaceHosts: Self.interfaceHosts(from: gathered),
+                ice: ice,
+                agentCandidates: agentCandidates
             )
             let locallyAuthorized = Set(devices.filter { !$0.revoked }.map(\.deviceID))
             let offers = try await controlPlane.rendezvousOffers()
             approvedRendezvousOffers = offers.filter { locallyAuthorized.contains($0.peerDeviceID) }
+            deliverApprovedOffers()
             return presence.ttlSeconds
         } catch {
             // Presence expiry is safe-fail: the Mac becomes unavailable rather
@@ -262,6 +316,95 @@ final class RemoteAccessController: ObservableObject {
             // retry on a short bounded cadence.
             errorMessage = error.localizedDescription
             return nil
+        }
+    }
+
+    /// Chooses which gathered candidates presence carries.
+    ///
+    /// Presence takes at most eight, and the LAN listener already holds one of
+    /// them. A Mac with several interfaces — physical, a VPN or tailnet tunnel,
+    /// IPv6 for each — gathers more than that, so something has to be dropped.
+    /// It must not be the server-reflexive candidates: they are the only ones a
+    /// phone off this network can use at all, and ICE ranks them *below* host
+    /// candidates precisely because it assumes both ends see the whole list.
+    /// Host candidates fill whatever is left, highest priority first, so the
+    /// LAN and tailnet paths keep the places they earn.
+    /// - Parameter neverRelay: when the Mac refuses the relay outright, the
+    ///   server-reflexive candidates are withheld as well. They exist to find a
+    ///   path through the internet when neither end is on the other's network,
+    ///   which is the situation that ends in a relay; a Mac that has said never
+    ///   should publish only addresses that are reachable without one — its LAN
+    ///   and its tailnet.
+    static func presenceCandidates(
+        from gathered: [RemoteIceCandidate],
+        neverRelay: Bool = false
+    ) -> [RemoteIceCandidate] {
+        let gathered = neverRelay ? gathered.filter { $0.type == "host" } : gathered
+        let ordered = gathered.enumerated().sorted { left, right in
+            let leftIsHost = left.element.type == "host"
+            let rightIsHost = right.element.type == "host"
+            if leftIsHost != rightIsHost { return rightIsHost }
+            if left.element.priority != right.element.priority {
+                return left.element.priority > right.element.priority
+            }
+            // Gathering order is stable, so ties keep it rather than shuffling
+            // the published list between presence refreshes.
+            return left.offset < right.offset
+        }
+        return ordered
+            .map(\.element)
+            .prefix(ControlPlaneHost.maxCandidates - ControlPlaneHost.maxListenerCandidates)
+            .map { $0 }
+    }
+
+    /// The interface addresses the authenticated TCP listener is reachable at.
+    ///
+    /// Taken from the agent's gathered host candidates, which is the one place
+    /// this app learns which interfaces exist — tunnel interfaces included,
+    /// which is the whole point. Only the address is kept: the listener has its
+    /// own port, and the agent's UDP port would reach nothing over TCP.
+    static func interfaceHosts(from gathered: [RemoteIceCandidate]) -> [String] {
+        var seen: Set<String> = []
+        return gathered
+            .filter { $0.type == "host" }
+            .compactMap { hostComponent(of: $0.address) }
+            .filter { seen.insert($0).inserted }
+    }
+
+    /// The address half of a candidate's `host:port`, IPv6 brackets removed.
+    static func hostComponent(of address: String) -> String? {
+        if address.hasPrefix("[") {
+            guard let close = address.firstIndex(of: "]") else { return nil }
+            return String(address[address.index(after: address.startIndex)..<close])
+        }
+        guard let colon = address.lastIndex(of: ":") else { return nil }
+        return String(address[..<colon])
+    }
+
+    /// Hands every newly approved offer to the helper's ICE agent.
+    ///
+    /// A failure here is not a presence failure: the phone can still reach this
+    /// Mac on the LAN, and its next rendezvous request produces a fresh offer.
+    /// It is recorded rather than raised in front of the person.
+    private func deliverApprovedOffers() {
+        let pending = approvedRendezvousOffers.filter { !deliveredOffers.contains($0.requestID) }
+        guard !pending.isEmpty else { return }
+        // Expired request ids are forgotten so this set cannot grow with the
+        // life of the app.
+        let now = UInt64(Date().timeIntervalSince1970)
+        deliveredOffers = deliveredOffers.intersection(
+            approvedRendezvousOffers.filter { $0.expiresAt > now }.map(\.requestID)
+        )
+        for offer in pending {
+            deliveredOffers.insert(offer.requestID)
+            guard let document = RemoteRendezvousOfferDocument(offer) else { continue }
+            Task { [client] in
+                do {
+                    try await client.recordRendezvousOffer(document)
+                } catch {
+                    await MainActor.run { self.errorMessage = error.localizedDescription }
+                }
+            }
         }
     }
 
@@ -275,6 +418,7 @@ final class RemoteAccessController: ObservableObject {
             RemoteAccessController.terminateHelpers()
             Task { @MainActor [weak self] in
                 self?.stopPresence(clear: true)
+                self?.sleepAssertion.apply(false)
             }
         }
     }
@@ -305,6 +449,10 @@ final class RemoteAccessController: ObservableObject {
             if let nextAudit = try? await client.remoteAudit(), nextAudit != auditEvents {
                 auditEvents = nextAudit
             }
+            // Recomputed from status rather than driven by connection events:
+            // a missed close cannot then leave a Mac awake indefinitely, since
+            // the next poll that reports no connections drops the assertion.
+            sleepAssertion.apply(status.hasLiveConnection)
             if !status.enabled {
                 assignPhase(.off)
                 stopPresence(clear: true)
@@ -453,7 +601,8 @@ final class RemoteAccessController: ObservableObject {
                 secret: material.secret,
                 devicePublicKey: phone.publicKey,
                 name: phone.name,
-                permission: phone.permission ?? .interact
+                permission: phone.permission ?? .interact,
+                controlPlaneDeviceID: phone.deviceID
             )
             pairingProgress = .enrolled(name: confirmation.name, phrase: confirmation.pairingPhrase)
             errorMessage = nil
@@ -473,11 +622,43 @@ final class RemoteAccessController: ObservableObject {
     func grant(_ device: RemoteDevice, permission: DevicePermission) async {
         guard permission != device.permission else { return }
         do {
+            // The local store is written first and on its own. It is what the
+            // helper enforces, so a grant is in force — or withdrawn — before
+            // any network call is attempted, and a control plane that cannot
+            // be reached never leaves this Mac allowing more than the person
+            // just asked for.
             try await client.grantRemoteDevice(device.deviceID, permission: permission)
             errorMessage = nil
             await refresh()
+            await mirrorGrant(device, permission: permission)
         } catch {
             errorMessage = error.localizedDescription
+        }
+    }
+
+    /// Convenience for the Settings row: the terminal is carried by `control`
+    /// and by nothing below it, so allowing it means granting `control` and
+    /// withdrawing it means dropping back to what the device had otherwise.
+    func setTerminalAllowed(_ allowed: Bool, for device: RemoteDevice) async {
+        await grant(device, permission: allowed ? .control : device.permissionWithoutTerminal)
+    }
+
+    /// Restates the new permission in the control-plane directory the phone
+    /// reads its own grant from.
+    ///
+    /// A failure here is reported but never rolls the local change back: the
+    /// Mac's answer is the one that decides what a request is allowed to do,
+    /// and the directory is a convenience for the phone's UI.
+    private func mirrorGrant(_ device: RemoteDevice, permission: DevicePermission) async {
+        guard isControlPlaneConfigured, let directoryID = device.controlPlaneDeviceID else { return }
+        do {
+            try await controlPlane.mirrorPermission(
+                clientDeviceID: directoryID,
+                permission: permission
+            )
+        } catch {
+            errorMessage =
+                "\(device.name) now has \(permission.label) on this Mac, but the change could not be sent to the control plane. The phone may still show its old permission until it reconnects."
         }
     }
 
@@ -488,6 +669,24 @@ final class RemoteAccessController: ObservableObject {
             await refresh()
         } catch {
             errorMessage = error.localizedDescription
+        }
+    }
+
+    /// The strict refusal: no relay admission, and presence narrowed to
+    /// addresses a phone can reach without one.
+    ///
+    /// It is the same account-level kill switch underneath, so a control plane
+    /// that cannot be reached still leaves this Mac protected — the local
+    /// refusal is written first, exactly as `setRelayEnabled(false)` does.
+    func setNeverRelay(_ never: Bool) async {
+        do {
+            try await client.setRemoteNeverRelay(never)
+            try await controlPlane.setRelayEnabled(false)
+            errorMessage = nil
+            await refresh()
+        } catch {
+            errorMessage = error.localizedDescription
+            await refresh()
         }
     }
 

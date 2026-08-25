@@ -355,8 +355,10 @@ enum RemoteAccessCommand {
     },
     /// Independently enable or disable encrypted relay fallback.
     Relay {
-        /// `enable` or `disable`.
-        #[arg(value_parser = ["enable", "disable"])]
+        /// `enable`, `disable`, or `never`. `never` also narrows published
+        /// presence to host candidates, so a phone is only ever offered
+        /// addresses it can reach directly.
+        #[arg(value_parser = ["enable", "disable", "never"])]
         state: String,
     },
     /// Export inspectable privacy-safe diagnostics as JSON.
@@ -373,6 +375,11 @@ enum RemoteAccessCommand {
         #[arg(long, default_value = "0.0.0.0:0")]
         bind: String,
     },
+    /// Hand one approved rendezvous offer, read as JSON on stdin, to the
+    /// running helper's ICE agent. The control plane authorizes nothing: the
+    /// caller has already checked the peer against the local device store, and
+    /// Noise still decides who the peer is.
+    Offer,
     /// Attempt an outbound-only direct UDP rendezvous probe for a paired
     /// device. This is a headless transport smoke surface, not a phone UI.
     DirectProbe {
@@ -418,6 +425,11 @@ enum PairCommand {
         /// Initial permission; defaults to observe plus structured interaction.
         #[arg(long, default_value = "interact", value_parser = parse_remote_permission)]
         permission: DevicePermission,
+        /// The phone's device row in the control-plane directory, if it
+        /// enrolled against one. Recorded so a later grant change can be
+        /// mirrored there; it never authorizes anything on its own.
+        #[arg(long)]
+        control_plane_device_id: Option<String>,
     },
 }
 
@@ -786,7 +798,13 @@ fn dispatch(command: Option<Command>) -> Result<()> {
                         println!(
                             "remote access {}\nrelay {}\ndevice {}\npaired {} ({} revoked)\nlistener {}",
                             if status.enabled { "enabled" } else { "disabled" },
-                            if status.relay_enabled { "enabled" } else { "disabled" },
+                            if status.never_relay {
+                                "never"
+                            } else if status.relay_enabled {
+                                "enabled"
+                            } else {
+                                "disabled"
+                            },
                             status.device_id.as_deref().unwrap_or("none"),
                             status.paired_devices,
                             status.revoked_devices,
@@ -815,6 +833,7 @@ fn dispatch(command: Option<Command>) -> Result<()> {
                             device_public_key,
                             name,
                             permission,
+                            control_plane_device_id,
                         },
                 } => {
                     let device = remote_access::confirm_pairing(
@@ -824,6 +843,7 @@ fn dispatch(command: Option<Command>) -> Result<()> {
                         &device_public_key,
                         &name,
                         permission,
+                        control_plane_device_id.as_deref(),
                     )?;
                     println!("{}", serde_json::to_string(&device)?);
                     Ok(())
@@ -867,8 +887,16 @@ fn dispatch(command: Option<Command>) -> Result<()> {
                     Ok(())
                 }
                 RemoteAccessCommand::Relay { state } => {
-                    remote_access::set_relay_enabled(&home, state == "enable")?;
-                    println!("relay {state}d");
+                    let mode = match state.as_str() {
+                        "enable" => remote_access::RelayMode::Enabled,
+                        "never" => remote_access::RelayMode::Never,
+                        _ => remote_access::RelayMode::Disabled,
+                    };
+                    remote_access::set_relay_mode(&home, mode)?;
+                    match mode {
+                        remote_access::RelayMode::Never => println!("relay never"),
+                        _ => println!("relay {state}d"),
+                    }
                     Ok(())
                 }
                 RemoteAccessCommand::Diagnostics => {
@@ -893,7 +921,20 @@ fn dispatch(command: Option<Command>) -> Result<()> {
                     home,
                     bind.parse().context("invalid --bind address")?,
                     std::env::current_exe().context("cannot locate the latch binary")?,
+                    // The terminal-facing binary owns no ICE agent. Only the
+                    // dedicated `latch-remote` helper supplies one.
+                    None,
                 ),
+                RemoteAccessCommand::Offer => {
+                    let mut document = String::new();
+                    std::io::Read::read_to_string(&mut std::io::stdin(), &mut document)
+                        .context("cannot read the offer document from stdin")?;
+                    let offer: remote_access::RemoteOffer = serde_json::from_str(&document)
+                        .context("invalid rendezvous offer document")?;
+                    remote_access::record_offer(&home, &offer)?;
+                    println!("Recorded a rendezvous offer for the running helper.");
+                    Ok(())
+                }
                 RemoteAccessCommand::DirectProbe {
                     bind,
                     rendezvous_id,

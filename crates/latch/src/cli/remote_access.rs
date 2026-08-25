@@ -4,16 +4,18 @@
 //! opening a connection to the existing loopback-only gateway. It never
 //! forwards a caller-selected destination or the gateway bearer token.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context};
+use async_trait::async_trait;
 use mdns_sd::{ServiceDaemon, ServiceInfo};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -41,10 +43,27 @@ const RELAY_RATE_WINDOW: Duration = Duration::from_secs(60);
 const MAX_PAIRED_DEVICES: usize = 32;
 const MAX_PENDING_PAIRINGS: usize = 8;
 const MAX_LAN_CONNECTIONS: usize = 32;
+const MAX_OFFER_CANDIDATES: usize = 16;
+/// How many pending offer documents one drain pass will act on. A desktop app
+/// publishes at most a handful per presence refresh; anything beyond this is a
+/// stale directory, not a workload.
+const MAX_PENDING_OFFERS: usize = 32;
+/// How often the helper looks for offers the desktop app recorded and for a
+/// re-gathered agent description. Short enough that a phone waiting on a
+/// rendezvous does not notice it, long enough to be free when nothing happens.
+const OFFER_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
-// This is deliberately an inactivity deadline, not a lifetime for the
-// connection. A WebSocket may be useful for much longer than ten seconds.
-const PROXY_IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// The deadline every peer transport applies to a single record read.
+///
+/// This is deliberately an inactivity deadline, not a lifetime for the
+/// connection: a WebSocket may be useful for much longer than ten seconds. It
+/// is public because the helper's ICE transport implements the same contract
+/// and must not invent a second number for it.
+pub const PROXY_IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// Audit event naming the route an authorized connection took.
+const PATH_SELECTED_EVENT: &str = "path_selected";
+/// Audit event naming the outcome of one ICE answer by the helper.
+const ICE_ANSWER_EVENT: &str = "ice_answer";
 const MAX_AUDIT_EVENTS: usize = 1_024;
 const MAX_AUDIT_BYTES: usize = 512 * 1024;
 #[cfg(all(target_os = "macos", not(test)))]
@@ -723,6 +742,11 @@ pub struct DeviceSummary {
     pub permission: DevicePermission,
     /// Whether this device can no longer establish a connection.
     pub revoked: bool,
+    /// The device's row in the control-plane directory, when one was recorded
+    /// at pairing. Present so the app can mirror a grant change; absent for
+    /// devices paired before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_plane_device_id: Option<String>,
     /// Short authentication phrase for the pairing that enrolled this device.
     /// Present only on the confirmation answer: it is what the Mac shows so
     /// the person can check it against the phone's screen.
@@ -745,6 +769,12 @@ struct Settings {
     enabled: bool,
     #[serde(default = "enabled_by_default")]
     relay_enabled: bool,
+    /// The strict form of the relay switch. It refuses relay admission the same
+    /// way `relay_enabled: false` does, and additionally tells the desktop app
+    /// to publish host candidates only, so nothing this Mac advertises can be
+    /// paired with a relay candidate in the first place.
+    #[serde(default)]
+    never_relay: bool,
 }
 
 impl Default for Settings {
@@ -752,6 +782,7 @@ impl Default for Settings {
         Self {
             enabled: false,
             relay_enabled: true,
+            never_relay: false,
         }
     }
 }
@@ -771,6 +802,13 @@ struct DeviceRecord {
     public_key: String,
     permission: DevicePermission,
     revoked: bool,
+    /// The row this phone occupies in the control-plane directory, recorded
+    /// when it enrolled. It exists so a local grant change can be mirrored to
+    /// the directory the phone reads its own permission from. It is a
+    /// convenience, never an authority: a device paired before this field
+    /// existed simply has no mirror, and this Mac still enforces the grant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    control_plane_device_id: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -804,6 +842,45 @@ pub struct DiagnosticsExport {
     pub revoked_devices: usize,
     /// Coarse event counters from the bounded local audit trail.
     pub event_counts: HashMap<String, u64>,
+    /// How the connections this Mac actually served were routed.
+    pub path_selection: PathSelectionMetrics,
+}
+
+/// Non-content path-selection counters.
+///
+/// These answer one question — of the connections this Mac served, how many
+/// went direct and how many were relayed — without naming a device, a network,
+/// an address, or a moment. They are derived from the bounded audit trail, so
+/// they cover the retained window rather than all time, and a busy Mac
+/// eventually ages the oldest ones out. That is the right trade for a counter
+/// that must never become a connection log.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PathSelectionMetrics {
+    /// Authorized connections by route slug, including routes with no hits, so
+    /// a reader can tell "never relayed" from "not instrumented".
+    pub routes: BTreeMap<String, u64>,
+    /// Authorized connections counted here in total.
+    pub connections: u64,
+    /// Of those, the ones that were not relayed.
+    pub direct: u64,
+    /// Of those, the ones that were relayed.
+    pub relay: u64,
+    /// ICE answers the helper attempted, whether or not a pair was nominated.
+    pub ice_answers: u64,
+    /// ICE answers that produced a connected data channel.
+    pub ice_answers_connected: u64,
+}
+
+impl PathSelectionMetrics {
+    /// Share of served connections that were relayed, `None` before any.
+    ///
+    /// Expressed as a fraction rather than a percentage so the caller decides
+    /// how to round; a release gate reading "0.02" should not owe its verdict
+    /// to this function's choice of decimal places.
+    pub fn relay_share(&self) -> Option<f64> {
+        (self.connections > 0).then(|| self.relay as f64 / self.connections as f64)
+    }
 }
 
 /// Owner-facing lifecycle snapshot for the desktop app.
@@ -821,6 +898,12 @@ pub struct RemoteAccessStatus {
     pub enabled: bool,
     /// Whether the hosted relay path may be selected.
     pub relay_enabled: bool,
+    /// Whether this Mac refuses the relay outright. Stricter than
+    /// `relay_enabled: false`: the desktop app also narrows presence to host
+    /// candidates, so a direct or tailnet address is the only thing a phone
+    /// ever has to work with.
+    #[serde(default)]
+    pub never_relay: bool,
     /// Opaque Mac device identifier, present once an identity exists.
     pub device_id: Option<String>,
     /// The Mac's pinned Noise static public key, hex encoded. Phones verify
@@ -836,6 +919,320 @@ pub struct RemoteAccessStatus {
     /// or `None` when no helper is running. This is the authenticated
     /// transport listener, never the plaintext gateway.
     pub listener_address: Option<String>,
+    /// The running helper's ICE agent description. The desktop app publishes
+    /// these credentials and candidates as presence; it does not invent its
+    /// own, because the helper is the process that answers the checks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ice: Option<IceReadiness>,
+    /// How many phones currently hold an authenticated stream to this Mac.
+    ///
+    /// Counted after the Noise handshake and the route authorization, never at
+    /// accept: this number decides whether the desktop app keeps the Mac awake,
+    /// and anything that can open a socket must not be able to move it.
+    #[serde(default)]
+    pub active_connections: usize,
+}
+
+/// One direction of an authenticated peer transport, framed as discrete byte
+/// records.
+///
+/// The LAN listener supplies TCP halves with a two-byte length prefix; the
+/// helper's ICE data channel supplies SCTP messages that already carry their
+/// own boundaries. Everything above this seam — the Noise handshake, the single
+/// route authorization, and the 250ms device-state check — is identical for
+/// both, which is the point: a phone off the LAN gets the same enforcement as a
+/// phone on it, not a second implementation of it.
+#[async_trait]
+pub trait PeerReader: Send {
+    /// Reads one record, giving up after the proxy inactivity deadline.
+    async fn read_record(&mut self) -> anyhow::Result<Vec<u8>>;
+}
+
+/// The write half of [`PeerReader`]'s transport.
+#[async_trait]
+pub trait PeerWriter: Send {
+    /// Writes one record.
+    async fn write_record(&mut self, record: &[u8]) -> anyhow::Result<()>;
+}
+
+/// How an accepted peer stream reaches the phone.
+///
+/// This exists so the direct-versus-relay rate is measurable after the fact
+/// rather than guessed at. It is derived from candidate types and the listener
+/// that accepted the stream: no address, port, interface name, or peer
+/// identity is carried in it, which is what lets it be written to the audit
+/// trail and read back out of the content-free diagnostics bundle.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PeerRoute {
+    /// The authenticated TCP listener on this network accepted it.
+    Lan,
+    /// ICE nominated a host pair: the same network, or a tunnel interface
+    /// such as a tailnet that presents as one.
+    DirectHost,
+    /// ICE nominated a reflexive pair: a hole was punched through a NAT.
+    DirectReflexive,
+    /// ICE nominated a relayed pair: the bytes take the TURN detour.
+    Relay,
+    /// The transport produced a stream without saying how. Counted rather than
+    /// dropped, so a gap in instrumentation cannot silently flatter the
+    /// direct rate.
+    #[default]
+    Unknown,
+}
+
+impl PeerRoute {
+    /// Stable slug for counters and the audit trail.
+    pub fn slug(self) -> &'static str {
+        match self {
+            Self::Lan => "lan",
+            Self::DirectHost => "direct_host",
+            Self::DirectReflexive => "direct_reflexive",
+            Self::Relay => "relay",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// Every slug, so a counter map can name a zero as well as a hit.
+    pub fn all() -> [Self; 5] {
+        [
+            Self::Lan,
+            Self::DirectHost,
+            Self::DirectReflexive,
+            Self::Relay,
+            Self::Unknown,
+        ]
+    }
+}
+
+/// An accepted peer transport, split so each direction can be driven by its
+/// own task.
+pub struct PeerStream {
+    /// Records arriving from the peer.
+    pub reader: Box<dyn PeerReader>,
+    /// Records sent to the peer.
+    pub writer: Box<dyn PeerWriter>,
+    /// How this stream reached the phone. Metrics only: nothing in the proxy
+    /// grants, refuses, or shortcuts anything on the strength of it, because
+    /// the Noise handshake is what decides who the peer is on every path.
+    pub route: PeerRoute,
+}
+
+impl PeerStream {
+    /// Frames an accepted LAN socket.
+    pub fn from_tcp(stream: TcpStream) -> Self {
+        let (reader, writer) = stream.into_split();
+        Self {
+            reader: Box::new(TcpPeerReader(reader)),
+            writer: Box::new(TcpPeerWriter(writer)),
+            route: PeerRoute::Lan,
+        }
+    }
+}
+
+struct TcpPeerReader(tokio::net::tcp::OwnedReadHalf);
+struct TcpPeerWriter(tokio::net::tcp::OwnedWriteHalf);
+
+#[async_trait]
+impl PeerReader for TcpPeerReader {
+    async fn read_record(&mut self) -> anyhow::Result<Vec<u8>> {
+        read_frame_with_idle_timeout(&mut self.0).await
+    }
+}
+
+#[async_trait]
+impl PeerWriter for TcpPeerWriter {
+    async fn write_record(&mut self, record: &[u8]) -> anyhow::Result<()> {
+        write_frame(&mut self.0, record).await
+    }
+}
+
+/// An additional source of authenticated peer streams, injected by the
+/// dedicated helper.
+///
+/// The ICE/DTLS/SCTP stack deliberately lives outside this crate: the
+/// terminal-facing `latch` binary must not link the internet-facing protocol
+/// code, and `latch-remote` is its sole owner. `serve_lan` therefore takes the
+/// transport as a boundary and, once a stream is accepted, cannot tell it apart
+/// from a LAN socket.
+#[async_trait]
+pub trait PeerTransport: Send + Sync + 'static {
+    /// Gathers candidates and returns the description presence must publish.
+    async fn start(&self) -> anyhow::Result<IceReadiness>;
+    /// Applies one approved rendezvous offer collected by the desktop app.
+    async fn offer(&self, offer: RemoteOffer) -> anyhow::Result<()>;
+    /// The description presence should currently publish. Re-gathering after a
+    /// connection changes the agent's ports, so the readiness document is
+    /// refreshed from this rather than written once at startup.
+    async fn local_description(&self) -> Option<IceReadiness>;
+    /// Yields the next accepted peer stream, or `None` when the transport ends.
+    ///
+    /// This is driven inside a `select!`, so an implementation must be
+    /// cancel-safe: dropping the returned future may not consume a stream that
+    /// has already been accepted.
+    async fn accept(&self) -> Option<PeerStream>;
+}
+
+/// One ICE candidate in the control plane's published shape.
+///
+/// This is transport metadata only: an interface address and its ordering
+/// parameters. It names no session, no route, and no credential.
+#[allow(missing_docs)] // The enclosing type and serialized field names are the contract docs.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct IceCandidateRecord {
+    #[serde(rename = "type")]
+    pub candidate_type: String,
+    pub priority: u32,
+    pub foundation: String,
+    pub component: u16,
+    pub protocol: String,
+    /// `ip:port` literal.
+    pub address: String,
+    // Absent rather than null is the ordinary form here: a Swift encoder omits
+    // nil, and these three are meaningless for most candidates.
+    #[serde(default)]
+    pub related_address: Option<String>,
+    #[serde(default)]
+    pub related_port: Option<u16>,
+    #[serde(default)]
+    pub tcp_type: Option<String>,
+    pub expires_at: u64,
+}
+
+impl IceCandidateRecord {
+    /// Applies the control plane's publication rules locally so a malformed
+    /// candidate is a helper-side error rather than a 400 the desktop app's
+    /// presence loop retries into.
+    pub fn validate(&self, now: u64) -> anyhow::Result<()> {
+        if !matches!(
+            self.candidate_type.as_str(),
+            "host" | "srflx" | "prflx" | "relay"
+        ) {
+            bail!("{} is not an ICE candidate type", self.candidate_type);
+        }
+        if !matches!(self.protocol.as_str(), "udp" | "tcp") {
+            bail!("{} is not an ICE transport", self.protocol);
+        }
+        if self.component != 1 && self.component != 2 {
+            bail!("an ICE component is 1 or 2");
+        }
+        if self.foundation.is_empty() || self.foundation.len() > 32 {
+            bail!("an ICE foundation is 1 to 32 characters");
+        }
+        let address: SocketAddr = self
+            .address
+            .parse()
+            .context("an ICE candidate address is an ip:port literal")?;
+        if address.port() == 0 || !routable_candidate_ip(address.ip()) {
+            bail!("an ICE candidate address must be routable and non-loopback");
+        }
+        if self.related_address.is_some() != self.related_port.is_some() {
+            bail!("relatedAddress and relatedPort are published together or not at all");
+        }
+        if let Some(related) = &self.related_address {
+            let ip: IpAddr = related
+                .parse()
+                .context("a related address is an IP literal")?;
+            if ip.is_loopback() {
+                bail!("a related address must not be loopback");
+            }
+        }
+        if let Some(tcp_type) = &self.tcp_type {
+            if !matches!(tcp_type.as_str(), "active" | "passive" | "so") {
+                bail!("{tcp_type} is not a TCP candidate type");
+            }
+            if self.protocol != "tcp" {
+                bail!("tcpType applies only to TCP candidates");
+            }
+        }
+        if self.expires_at <= now || self.expires_at > now + PRESENCE_LIFETIME.as_secs() {
+            bail!("an ICE candidate has an invalid lifetime");
+        }
+        Ok(())
+    }
+}
+
+/// The helper's gathered ICE agent description.
+///
+/// The password is a STUN short-term credential, not a capability: it
+/// authenticates connectivity checks and grants nothing on its own. It is
+/// published to paired peers through the control plane by design, which is why
+/// it travels the same owner-facing readiness channel as the listener address
+/// and not the private gateway credential path.
+#[allow(missing_docs)] // The enclosing type and serialized field names are the contract docs.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct IceReadiness {
+    pub ufrag: String,
+    pub password: String,
+    pub candidates: Vec<IceCandidateRecord>,
+}
+
+impl IceReadiness {
+    /// Mints one agent's short-term ICE credentials.
+    ///
+    /// RFC 8445 requires at least 24 bits of ufrag and 128 bits of password.
+    /// These are 48 and 144, inside the control plane's length bounds and its
+    /// `[A-Za-z0-9+/_=-]` alphabet.
+    pub fn generate_credentials() -> anyhow::Result<(String, String)> {
+        Ok((random_hex(6)?, random_hex(18)?))
+    }
+}
+
+/// The bounded lifetime a freshly gathered candidate is published with. It
+/// matches directory presence, so a candidate can never outlive the record
+/// carrying it.
+pub fn candidate_lifetime_from_now() -> u64 {
+    unix_time() + PRESENCE_LIFETIME.as_secs()
+}
+
+/// One approved rendezvous offer handed to the helper's ICE agent.
+///
+/// It carries transport parameters only. Reaching the agent authorizes nothing:
+/// the Noise handshake still pins the paired identity and the local device
+/// store still decides what that identity may do.
+#[allow(missing_docs)] // The enclosing type and serialized field names are the contract docs.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteOffer {
+    pub request_id: String,
+    pub peer_device_id: String,
+    pub ice_ufrag: String,
+    pub ice_pwd: String,
+    pub candidates: Vec<IceCandidateRecord>,
+    pub expires_at: u64,
+}
+
+impl RemoteOffer {
+    /// Bounds everything the helper will act on before it reaches an ICE agent.
+    pub fn validate(&self, now: u64) -> anyhow::Result<()> {
+        if !valid_opaque_id(&self.request_id) || !valid_opaque_id(&self.peer_device_id) {
+            bail!("rendezvous offer contains an invalid opaque identifier");
+        }
+        if !valid_ice_credential(&self.ice_ufrag) || !valid_ice_credential(&self.ice_pwd) {
+            bail!("rendezvous offer contains invalid ICE credentials");
+        }
+        if self.candidates.is_empty() || self.candidates.len() > MAX_OFFER_CANDIDATES {
+            bail!("rendezvous offer must contain between 1 and {MAX_OFFER_CANDIDATES} candidates");
+        }
+        if self.expires_at <= now || self.expires_at > now + PRESENCE_LIFETIME.as_secs() {
+            bail!("rendezvous offer has an invalid lifetime");
+        }
+        for candidate in &self.candidates {
+            candidate.validate(now)?;
+        }
+        Ok(())
+    }
+}
+
+/// RFC 8445 bounds a ufrag and password at 4 and 22 characters minimum; the
+/// control plane's alphabet is base64url plus `+/=`.
+fn valid_ice_credential(value: &str) -> bool {
+    (4..=256).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"+/_=-".contains(&byte))
 }
 
 /// Readiness document written by `remote-access lan-serve` for a supervising
@@ -855,6 +1252,16 @@ pub struct LanReadiness {
     /// Process id of the helper serving this listener. A reader uses it to
     /// distinguish a live listener from a document left behind by a crash.
     pub pid: u32,
+    /// The helper's ICE agent description, absent when the helper runs without
+    /// one. Presence publishes these candidates rather than the bare listener
+    /// address, so a phone off the LAN has something to run checks against.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ice: Option<IceReadiness>,
+    /// Authenticated peer streams this helper is currently carrying. Rewritten
+    /// whenever the count changes, because a supervising desktop app uses it to
+    /// decide whether this Mac may go to sleep.
+    #[serde(default)]
+    pub active_connections: usize,
 }
 
 #[derive(Clone)]
@@ -894,6 +1301,9 @@ impl Paths {
     fn lan_readiness(&self) -> PathBuf {
         self.runtime().join("lan-ready.json")
     }
+    fn offers(&self) -> PathBuf {
+        self.runtime().join("offers")
+    }
 }
 
 /// Enables or disables the local remote-access service.
@@ -926,23 +1336,53 @@ pub fn set_enabled(home: &LatchHome, enabled: bool) -> anyhow::Result<()> {
     )
 }
 
-/// Independently enables or disables relay fallback. Direct and LAN paths are
-/// unaffected, which gives operators a narrow incident-response switch.
-pub fn set_relay_enabled(home: &LatchHome, enabled: bool) -> anyhow::Result<()> {
+/// How this Mac treats the hosted relay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelayMode {
+    /// Relay admission is permitted when a direct path cannot be found.
+    Enabled,
+    /// Relay admission is refused. Direct and LAN paths are unaffected, which
+    /// gives operators a narrow incident-response switch.
+    Disabled,
+    /// Relay admission is refused *and* presence is narrowed to host
+    /// candidates, so the only addresses a phone ever receives are ones it can
+    /// reach directly — a LAN address or a tailnet one.
+    Never,
+}
+
+/// Sets the relay policy.
+pub fn set_relay_mode(home: &LatchHome, mode: RelayMode) -> anyhow::Result<()> {
     let paths = Paths::new(home);
     ensure_root(&paths)?;
     let mut settings: Settings = read_json_or_default(&paths.settings())?;
-    settings.relay_enabled = enabled;
+    settings.relay_enabled = mode == RelayMode::Enabled;
+    settings.never_relay = mode == RelayMode::Never;
     write_json(&paths.settings(), &settings)?;
     audit(
         &paths,
-        if enabled {
-            "relay_enabled"
-        } else {
-            "relay_disabled"
+        match mode {
+            RelayMode::Enabled => "relay_enabled",
+            RelayMode::Disabled => "relay_disabled",
+            RelayMode::Never => "relay_never",
         },
         None,
         "ok",
+    )
+}
+
+/// Independently enables or disables relay fallback.
+///
+/// Turning the relay back on also clears the stricter never-relay state: a
+/// person who allows the relay is not left with presence still narrowed to
+/// addresses that cannot use it.
+pub fn set_relay_enabled(home: &LatchHome, enabled: bool) -> anyhow::Result<()> {
+    set_relay_mode(
+        home,
+        if enabled {
+            RelayMode::Enabled
+        } else {
+            RelayMode::Disabled
+        },
     )
 }
 
@@ -950,7 +1390,7 @@ pub fn set_relay_enabled(home: &LatchHome, enabled: bool) -> anyhow::Result<()> 
 /// plane adapters must check this before issuing a [`RelayTicket`].
 pub fn relay_enabled(home: &LatchHome) -> anyhow::Result<bool> {
     let settings: Settings = read_json_or_default(&Paths::new(home).settings())?;
-    Ok(settings.enabled && settings.relay_enabled)
+    Ok(settings.enabled && settings.relay_enabled && !settings.never_relay)
 }
 
 /// Creates a five-minute QR-compatible pairing record.
@@ -994,6 +1434,7 @@ pub fn confirm_pairing(
     device_public_key: &str,
     name: &str,
     permission: DevicePermission,
+    control_plane_device_id: Option<&str>,
 ) -> anyhow::Result<DeviceSummary> {
     let paths = Paths::new(home);
     ensure_enabled(&paths)?;
@@ -1034,6 +1475,10 @@ pub fn confirm_pairing(
         public_key: device_public_key.to_owned(),
         permission,
         revoked: false,
+        control_plane_device_id: control_plane_device_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned),
     };
     let mut summary = summary(&record);
     // The phone derives the identical words from the identical transcript, so
@@ -1150,17 +1595,29 @@ pub fn status(home: &LatchHome) -> anyhow::Result<RemoteAccessStatus> {
     } else {
         None
     };
-    let listener_address = read_lan_readiness(&paths).map(|readiness| readiness.address);
+    let readiness = read_lan_readiness(&paths);
+    let ice = readiness
+        .as_ref()
+        .and_then(|readiness| readiness.ice.clone());
+    // A helper that is gone carries no connections, so both fields fall away
+    // together rather than leaving a stale count behind a stopped listener.
+    let active_connections = readiness
+        .as_ref()
+        .map_or(0, |readiness| readiness.active_connections);
+    let listener_address = readiness.map(|readiness| readiness.address);
     Ok(RemoteAccessStatus {
         format_version: 1,
         enabled: settings.enabled,
         relay_enabled: settings.relay_enabled,
+        never_relay: settings.never_relay,
         device_id: identity.as_ref().map(|value| value.device_id.clone()),
         public_key: identity.as_ref().map(|value| value.public_key.clone()),
         key_generation: identity.as_ref().map(|value| value.key_generation),
         paired_devices: store.devices.len(),
         revoked_devices: store.devices.iter().filter(|device| device.revoked).count(),
         listener_address,
+        ice,
+        active_connections,
     })
 }
 
@@ -1189,6 +1646,24 @@ fn helper_is_running(pid: u32) -> bool {
     unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
 }
 
+/// Records one ICE answer outcome from the helper.
+///
+/// The ICE stack lives in `latch-remote`, but the audit trail lives here and
+/// there must be exactly one of it: a helper that kept its own counters would
+/// give the diagnostics bundle a second, differently-bounded source of truth
+/// about the same connections. The helper therefore writes through this
+/// function, which takes no identity and no address — only whether an answer
+/// reached a connected data channel.
+pub fn record_ice_answer(home: &LatchHome, connected: bool) -> anyhow::Result<()> {
+    let paths = Paths::new(home);
+    audit(
+        &paths,
+        ICE_ANSWER_EVENT,
+        None,
+        if connected { "connected" } else { "failed" },
+    )
+}
+
 /// Builds an inspectable, content-free support bundle locally. Upload remains
 /// an explicit caller action; this function performs no network activity.
 pub fn diagnostics_export(home: &LatchHome) -> anyhow::Result<DiagnosticsExport> {
@@ -1196,9 +1671,48 @@ pub fn diagnostics_export(home: &LatchHome) -> anyhow::Result<DiagnosticsExport>
     let settings: Settings = read_json_or_default(&paths.settings())?;
     let store: DeviceStore = read_json_or_default(&paths.devices())?;
     let mut event_counts = HashMap::new();
+    let mut path_selection = PathSelectionMetrics {
+        routes: PeerRoute::all()
+            .into_iter()
+            .map(|route| (route.slug().to_owned(), 0))
+            .collect(),
+        ..PathSelectionMetrics::default()
+    };
     for event in read_audit(home)? {
-        if let Some(name) = event.get("event").and_then(serde_json::Value::as_str) {
-            *event_counts.entry(name.to_owned()).or_insert(0) += 1;
+        let Some(name) = event.get("event").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        *event_counts.entry(name.to_owned()).or_insert(0) += 1;
+        let result = event
+            .get("result")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        match name {
+            PATH_SELECTED_EVENT => {
+                let Some(route) = PeerRoute::all()
+                    .into_iter()
+                    .find(|route| route.slug() == result)
+                else {
+                    continue;
+                };
+                *path_selection
+                    .routes
+                    .entry(route.slug().to_owned())
+                    .or_insert(0) += 1;
+                path_selection.connections += 1;
+                if route == PeerRoute::Relay {
+                    path_selection.relay += 1;
+                } else {
+                    path_selection.direct += 1;
+                }
+            }
+            ICE_ANSWER_EVENT => {
+                path_selection.ice_answers += 1;
+                if result == "connected" {
+                    path_selection.ice_answers_connected += 1;
+                }
+            }
+            _ => {}
         }
     }
     Ok(DiagnosticsExport {
@@ -1208,18 +1722,28 @@ pub fn diagnostics_export(home: &LatchHome) -> anyhow::Result<DiagnosticsExport>
         paired_devices: store.devices.len(),
         revoked_devices: store.devices.iter().filter(|device| device.revoked).count(),
         event_counts,
+        path_selection,
     })
 }
 
 /// Starts the LAN listener and supervises a private, ephemeral gateway.
-pub fn serve_lan(home: LatchHome, bind: SocketAddr, latch_bin: PathBuf) -> anyhow::Result<()> {
+///
+/// `transport` is the helper's ICE agent when one is available. `latch serve`
+/// itself passes `None`: the terminal-facing binary neither owns nor links the
+/// internet-facing protocol stack.
+pub fn serve_lan(
+    home: LatchHome,
+    bind: SocketAddr,
+    latch_bin: PathBuf,
+    transport: Option<Arc<dyn PeerTransport>>,
+) -> anyhow::Result<()> {
     let paths = Paths::new(&home);
     ensure_enabled(&paths)?;
     let identity = identity(&paths)?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    runtime.block_on(async move { run_lan(paths, identity, bind, latch_bin).await })
+    runtime.block_on(async move { run_lan(paths, identity, bind, latch_bin, transport).await })
 }
 
 /// Refuses a LAN bind that would be meaningless or unsafe for the
@@ -1240,9 +1764,14 @@ async fn run_lan(
     identity: Identity,
     bind: SocketAddr,
     latch_bin: PathBuf,
+    transport: Option<Arc<dyn PeerTransport>>,
 ) -> anyhow::Result<()> {
     validate_lan_bind(bind)?;
     ensure_private_directory(&paths.runtime())?;
+    // Clear anything a previous run left behind before the agent exists: an
+    // offer minted for a dead agent's credentials can never complete.
+    let _ = fs::remove_dir_all(paths.offers());
+    ensure_private_directory(&paths.offers())?;
     let ready = paths.runtime().join("gateway-ready.json");
     let token = paths.runtime().join("gateway.token");
     let mut gateway = start_gateway(&latch_bin, &token, &ready).await?;
@@ -1259,7 +1788,29 @@ async fn run_lan(
         .with_context(|| format!("cannot bind LAN listener {bind}"))?;
     let local_addr = listener.local_addr()?;
     let _bonjour = advertise_bonjour(&identity, local_addr.port());
-    write_lan_readiness(&paths, &identity, local_addr)?;
+    // Gathering happens before the listener is advertised so the desktop app
+    // never sees a readiness document that promises an agentless presence.
+    let mut published_ice = match &transport {
+        Some(transport) => Some(
+            transport
+                .start()
+                .await
+                .context("cannot start the ICE agent")?,
+        ),
+        None => None,
+    };
+    // The gauge the desktop app reads to decide whether this Mac may sleep. It
+    // counts authenticated streams, so it is raised inside `proxy_connection`
+    // after the handshake and the route authorization rather than here.
+    let connections = Arc::new(AtomicUsize::new(0));
+    let mut published_connections = 0_usize;
+    write_lan_readiness(
+        &paths,
+        &identity,
+        local_addr,
+        published_ice.clone(),
+        published_connections,
+    )?;
     let _readiness_guard = LanReadinessGuard {
         path: paths.lan_readiness(),
     };
@@ -1267,30 +1818,87 @@ async fn run_lan(
     let connection_limit = Arc::new(Semaphore::new(MAX_LAN_CONNECTIONS));
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .context("cannot install the terminate handler")?;
+    let mut offer_poll = tokio::time::interval(OFFER_POLL_INTERVAL);
+    let mut connection_poll = tokio::time::interval(OFFER_POLL_INTERVAL);
 
     loop {
         let ctrl_c = tokio::signal::ctrl_c();
         tokio::select! {
             accepted = listener.accept() => {
                 let (stream, _) = accepted?;
-                let paths = paths.clone();
-                let identity = identity.clone();
-                let token = token.clone();
-                let Ok(permit) = connection_limit.clone().try_acquire_owned() else {
-                    audit(&paths, "connection_rejected", None, "capacity")?;
-                    continue;
+                spawn_peer(
+                    PeerStream::from_tcp(stream),
+                    &paths,
+                    &identity,
+                    &token,
+                    gateway_addr,
+                    &connection_limit,
+                    &connections,
+                )?;
+            }
+            // An ICE data channel is a peer stream like any other once it is
+            // up: it is handed the same handshake, the same authorization, and
+            // the same connection budget as a socket off the LAN.
+            peer = async {
+                match &transport {
+                    Some(transport) => transport.accept().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                let Some(peer) = peer else {
+                    bail!("the ICE transport stopped accepting");
                 };
-                tokio::spawn(async move {
-                    let _permit = permit;
-                    if let Err(error) = proxy_connection(stream, &paths, &identity, &token, gateway_addr).await {
-                        let result = if error.to_string().contains("handshake timed out") {
-                            "timeout"
-                        } else {
-                            "rejected"
-                        };
-                        let _ = audit(&paths, "connection_rejected", None, result);
+                spawn_peer(
+                    peer,
+                    &paths,
+                    &identity,
+                    &token,
+                    gateway_addr,
+                    &connection_limit,
+                    &connections,
+                )?;
+            }
+            _ = offer_poll.tick(), if transport.is_some() => {
+                let transport = transport.as_ref().expect("guarded by the branch condition");
+                for offer in drain_offers(&paths) {
+                    let result = match transport.offer(offer).await {
+                        Ok(()) => "ok",
+                        Err(_) => "rejected",
+                    };
+                    audit(&paths, "rendezvous_offer", None, result)?;
+                }
+                // Answering an offer consumes the gathered agent, so the
+                // replacement's ports have to reach presence. Rewriting only on
+                // a real change keeps a desktop status poll stable in between.
+                if let Some(description) = transport.local_description().await {
+                    if published_ice.as_ref() != Some(&description) {
+                        published_ice = Some(description);
+                        write_lan_readiness(
+                            &paths,
+                            &identity,
+                            local_addr,
+                            published_ice.clone(),
+                            published_connections,
+                        )?;
                     }
-                });
+                }
+            }
+            // The sleep assertion on the Mac hangs off this number, so it is
+            // republished on its own timer rather than riding the offer poll,
+            // which only runs when an ICE transport exists. Rewriting only on a
+            // change keeps a status poll stable between connections.
+            _ = connection_poll.tick() => {
+                let current = connections.load(Ordering::Relaxed);
+                if current != published_connections {
+                    published_connections = current;
+                    write_lan_readiness(
+                        &paths,
+                        &identity,
+                        local_addr,
+                        published_ice.clone(),
+                        published_connections,
+                    )?;
+                }
             }
             status = gateway.wait() => {
                 status.context("cannot wait for supervised gateway")?;
@@ -1317,6 +1925,41 @@ async fn run_lan(
             }
         }
     }
+}
+
+/// Admits one accepted peer stream against the connection budget.
+#[allow(clippy::too_many_arguments)]
+fn spawn_peer(
+    peer: PeerStream,
+    paths: &Paths,
+    identity: &Identity,
+    token: &Path,
+    gateway_addr: SocketAddr,
+    connection_limit: &Arc<Semaphore>,
+    connections: &Arc<AtomicUsize>,
+) -> anyhow::Result<()> {
+    let Ok(permit) = connection_limit.clone().try_acquire_owned() else {
+        audit(paths, "connection_rejected", None, "capacity")?;
+        return Ok(());
+    };
+    let paths = paths.clone();
+    let identity = identity.clone();
+    let token = token.to_path_buf();
+    let connections = connections.clone();
+    tokio::spawn(async move {
+        let _permit = permit;
+        if let Err(error) =
+            proxy_connection(peer, &paths, &identity, &token, gateway_addr, &connections).await
+        {
+            let result = if error.to_string().contains("handshake timed out") {
+                "timeout"
+            } else {
+                "rejected"
+            };
+            let _ = audit(&paths, "connection_rejected", None, result);
+        }
+    });
+    Ok(())
 }
 
 /// Performs the direct-path portion of rendezvous using simultaneous UDP
@@ -1469,6 +2112,8 @@ fn write_lan_readiness(
     paths: &Paths,
     identity: &Identity,
     address: SocketAddr,
+    ice: Option<IceReadiness>,
+    active_connections: usize,
 ) -> anyhow::Result<()> {
     if address.ip().is_loopback() {
         bail!("refusing to advertise a loopback LAN listener");
@@ -1480,8 +2125,88 @@ fn write_lan_readiness(
             address: address.to_string(),
             device_id: identity.device_id.clone(),
             pid: std::process::id(),
+            ice,
+            active_connections,
         },
     )
+}
+
+/// Holds the authenticated-connection count up for the life of one stream.
+///
+/// A guard rather than a pair of calls because every way out of
+/// `proxy_connection` — a closed socket, a revoked device, a downgraded grant,
+/// a task that panicked — has to put the count back. A leaked increment would
+/// keep the Mac awake indefinitely with nothing connected to it.
+struct ConnectionGauge {
+    count: Arc<AtomicUsize>,
+}
+
+impl ConnectionGauge {
+    fn raise(count: &Arc<AtomicUsize>) -> Self {
+        count.fetch_add(1, Ordering::Relaxed);
+        Self {
+            count: count.clone(),
+        }
+    }
+}
+
+impl Drop for ConnectionGauge {
+    fn drop(&mut self) {
+        // Saturating rather than wrapping: an underflow here would publish
+        // `usize::MAX` connections and pin the display awake forever.
+        let _ = self
+            .count
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                Some(current.saturating_sub(1))
+            });
+    }
+}
+
+/// Records one approved rendezvous offer for a running helper to act on.
+///
+/// The desktop app reaches the helper the same way it reaches everything else
+/// in this module: through the CLI, into the private runtime directory. One
+/// file per request id rather than a shared queue, so a writer and the helper's
+/// drain can never lose an offer to a read-modify-write race.
+pub fn record_offer(home: &LatchHome, offer: &RemoteOffer) -> anyhow::Result<()> {
+    let paths = Paths::new(home);
+    ensure_enabled(&paths)?;
+    offer.validate(unix_time())?;
+    ensure_private_directory(&paths.runtime())?;
+    ensure_private_directory(&paths.offers())?;
+    // `request_id` is checked as an opaque identifier above, so it cannot
+    // traverse out of this directory or name anything but a hex file.
+    write_json(
+        &paths.offers().join(format!("{}.json", offer.request_id)),
+        offer,
+    )
+}
+
+/// Takes every pending offer document, discarding malformed and expired ones.
+///
+/// Draining is destructive on purpose: an offer is one-shot, and a document
+/// left behind after a failed ICE attempt would have the helper retry a peer
+/// that has already moved on to a fresh request.
+fn drain_offers(paths: &Paths) -> Vec<RemoteOffer> {
+    let Ok(entries) = fs::read_dir(paths.offers()) else {
+        return Vec::new();
+    };
+    let now = unix_time();
+    let mut offers = Vec::new();
+    for entry in entries.flatten().take(MAX_PENDING_OFFERS) {
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let parsed = read_json::<RemoteOffer>(&path)
+            .ok()
+            .filter(|offer| offer.validate(now).is_ok());
+        let _ = fs::remove_file(&path);
+        if let Some(offer) = parsed {
+            offers.push(offer);
+        }
+    }
+    offers
 }
 
 /// Removes the readiness document when supervision ends, including on an
@@ -1535,16 +2260,21 @@ fn advertise_bonjour(identity: &Identity, port: u16) -> anyhow::Result<ServiceDa
 }
 
 async fn proxy_connection(
-    stream: TcpStream,
+    peer: PeerStream,
     paths: &Paths,
     identity: &Identity,
     token_path: &Path,
     gateway_addr: SocketAddr,
+    connections: &Arc<AtomicUsize>,
 ) -> anyhow::Result<()> {
-    let (mut reader, mut writer) = stream.into_split();
+    let PeerStream {
+        mut reader,
+        mut writer,
+        route,
+    } = peer;
     let (mut state, peer_static) = tokio::time::timeout(
         HANDSHAKE_TIMEOUT,
-        responder_handshake(&mut reader, &mut writer, identity),
+        responder_handshake(reader.as_mut(), writer.as_mut(), identity),
     )
     .await
     .map_err(|_| anyhow!("handshake timed out"))??;
@@ -1553,28 +2283,41 @@ async fn proxy_connection(
     if device.revoked {
         bail!("revoked device");
     }
-    let mut initial = decrypt_record(&mut reader, &mut state).await?;
+    let mut initial = decrypt_peer_record(reader.as_mut(), &mut state).await?;
     while !initial.windows(4).any(|window| window == b"\r\n\r\n") {
         if initial.len() >= MAX_INITIAL_REQUEST {
             bail!("initial request headers exceed limit");
         }
-        initial.extend(decrypt_record(&mut reader, &mut state).await?);
+        initial.extend(decrypt_peer_record(reader.as_mut(), &mut state).await?);
     }
     let required_len = complete_initial_request_len(&initial)?;
     while initial.len() < required_len {
         if initial.len() >= MAX_INITIAL_REQUEST {
             bail!("initial request exceeds limit");
         }
-        initial.extend(decrypt_record(&mut reader, &mut state).await?);
+        initial.extend(decrypt_peer_record(reader.as_mut(), &mut state).await?);
     }
     let token = load_token(token_path)?;
-    let initial = authorize_and_inject(initial, device.permission, &token)?;
+    let (initial, required) = authorize_and_inject(initial, device.permission, &token)?;
     let gateway = TcpStream::connect(gateway_addr)
         .await
         .context("cannot connect to loopback gateway")?;
     let (mut gateway_reader, mut gateway_writer) = gateway.into_split();
     gateway_writer.write_all(&initial).await?;
+    // Raised here, at the same point the connection is recorded, and dropped
+    // however this function leaves. A stream that never proved a paired
+    // identity has not kept this Mac awake for a moment.
+    let _awake = ConnectionGauge::raise(connections);
     audit(paths, "connection_opened", Some(&device.device_id), "ok")?;
+    // Recorded after authorization rather than at accept: a stream that never
+    // proved a paired identity is not a path this Mac served, and counting it
+    // would let anything that can open a socket move the rate.
+    audit(
+        paths,
+        PATH_SELECTED_EVENT,
+        Some(&device.device_id),
+        route.slug(),
+    )?;
 
     let state = Arc::new(Mutex::new(state));
     let outbound_state = state.clone();
@@ -1591,13 +2334,13 @@ async fn proxy_connection(
                 let mut locked = outbound_state.lock().await;
                 encrypt_transport_record(&mut locked, &buf[..read])?
             };
-            write_frame(&mut writer, &encrypted).await?;
+            writer.write_record(&encrypted).await?;
         }
     });
     let inbound_state = state.clone();
     let mut inbound = tokio::spawn(async move {
         loop {
-            let encrypted = read_frame_with_idle_timeout(&mut reader).await?;
+            let encrypted = reader.read_record().await?;
             // Each direction has one task, so record ordering is preserved;
             // the shared state lock protects Noise counters only and never
             // spans socket I/O, which would deadlock request and response.
@@ -1610,35 +2353,53 @@ async fn proxy_connection(
         #[allow(unreachable_code)]
         Ok::<(), anyhow::Error>(())
     });
-    let mut revocation_check = tokio::time::interval(Duration::from_millis(250));
+    // The stream this connection carries — a terminal, most of all — outlives
+    // the single authorization performed above, so the record is re-read on a
+    // timer. Losing the grant matters as much as losing the pairing: a device
+    // downgraded from control while it holds a terminal has to lose the
+    // terminal, not keep writing to it until it disconnects on its own.
+    let mut state_check = tokio::time::interval(Duration::from_millis(250));
     let result = tokio::select! {
         result = &mut outbound => result.context("encrypted response task failed")?,
         result = &mut inbound => result.context("encrypted request task failed")?,
-        _ = async {
+        reason = async {
             loop {
-                revocation_check.tick().await;
+                state_check.tick().await;
                 match lookup_device(paths, &peer_key)? {
-                    Some(current) if !current.revoked => {}
-                    _ => return Ok::<(), anyhow::Error>(()),
+                    Some(current) if current.revoked => {
+                        return Ok::<&'static str, anyhow::Error>("revoked");
+                    }
+                    Some(current) if !current.permission.permits(required) => {
+                        return Ok("permission_downgraded");
+                    }
+                    Some(_) => {}
+                    None => return Ok("revoked"),
                 }
             }
         } => {
-            audit(paths, "connection_closed", Some(&device.device_id), "revoked")?;
+            audit(paths, "connection_closed", Some(&device.device_id), reason?)?;
             Ok(())
         }
     };
     // Dropping JoinHandles detaches their tasks. Abort both halves explicitly
-    // so a revoked device loses the TCP stream as soon as the state check wins.
+    // so a device that loses its pairing or its grant loses the TCP stream as
+    // soon as the state check wins.
     outbound.abort();
     inbound.abort();
     result
 }
 
+/// Checks one initial request against the device's grant and rewrites it for
+/// the loopback gateway.
+///
+/// Returns the rewritten request together with the grant the matched route
+/// requires, so a long-lived stream can keep re-checking the grant it was
+/// admitted under rather than only the one it happened to hold at handshake.
 fn authorize_and_inject(
     request: Vec<u8>,
     permission: DevicePermission,
     token: &str,
-) -> anyhow::Result<Vec<u8>> {
+) -> anyhow::Result<(Vec<u8>, DevicePermission)> {
     let end = request
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
@@ -1702,7 +2463,7 @@ fn authorize_and_inject(
         injected.extend_from_slice(b"\r\nConnection: close");
     }
     injected.extend_from_slice(&request[end..]);
-    Ok(injected)
+    Ok((injected, required))
 }
 
 fn complete_initial_request_len(request: &[u8]) -> anyhow::Result<usize> {
@@ -1735,8 +2496,8 @@ fn complete_initial_request_len(request: &[u8]) -> anyhow::Result<usize> {
 }
 
 async fn responder_handshake(
-    reader: &mut tokio::net::tcp::OwnedReadHalf,
-    writer: &mut tokio::net::tcp::OwnedWriteHalf,
+    reader: &mut dyn PeerReader,
+    writer: &mut dyn PeerWriter,
     identity: &Identity,
 ) -> anyhow::Result<(TransportState, Vec<u8>)> {
     let params: NoiseParams = NOISE_PATTERN.parse().expect("valid Noise pattern");
@@ -1744,13 +2505,13 @@ async fn responder_handshake(
     let mut handshake = Builder::new(params)
         .local_private_key(&private)
         .build_responder()?;
-    let first = read_frame(reader).await?;
+    let first = reader.read_record().await?;
     let mut scratch = vec![0_u8; MAX_RECORD];
     handshake.read_message(&first, &mut scratch)?;
     let mut response = vec![0_u8; MAX_RECORD];
     let used = handshake.write_message(&[], &mut response)?;
-    write_frame(writer, &response[..used]).await?;
-    let third = read_frame(reader).await?;
+    writer.write_record(&response[..used]).await?;
+    let third = reader.read_record().await?;
     handshake.read_message(&third, &mut scratch)?;
     let peer_static = handshake
         .get_remote_static()
@@ -1759,6 +2520,15 @@ async fn responder_handshake(
     Ok((handshake.into_transport_mode()?, peer_static))
 }
 
+async fn decrypt_peer_record(
+    reader: &mut dyn PeerReader,
+    state: &mut TransportState,
+) -> anyhow::Result<Vec<u8>> {
+    let encrypted = reader.read_record().await?;
+    decrypt_transport_record(state, &encrypted)
+}
+
+#[cfg(test)]
 async fn decrypt_record(
     reader: &mut tokio::net::tcp::OwnedReadHalf,
     state: &mut TransportState,
@@ -2009,6 +2779,7 @@ fn summary(record: &DeviceRecord) -> DeviceSummary {
         name: record.name.clone(),
         permission: record.permission,
         revoked: record.revoked,
+        control_plane_device_id: record.control_plane_device_id.clone(),
         pairing_phrase: None,
     }
 }
@@ -2201,6 +2972,179 @@ mod tests {
         );
     }
 
+    fn offer_candidate(address: &str) -> IceCandidateRecord {
+        IceCandidateRecord {
+            candidate_type: "host".into(),
+            priority: 2_130_706_431,
+            foundation: "abc123".into(),
+            component: 1,
+            protocol: "udp".into(),
+            address: address.into(),
+            related_address: None,
+            related_port: None,
+            tcp_type: None,
+            expires_at: unix_time() + 60,
+        }
+    }
+
+    fn offer(request_id: &str) -> RemoteOffer {
+        RemoteOffer {
+            request_id: request_id.into(),
+            peer_device_id: "b".repeat(32),
+            ice_ufrag: "phoneufr".into(),
+            ice_pwd: "phone-password-with-more-than-128-bits".into(),
+            candidates: vec![offer_candidate("192.168.1.30:51234")],
+            expires_at: unix_time() + 60,
+        }
+    }
+
+    #[test]
+    fn a_rendezvous_offer_is_bounded_before_it_can_reach_an_ice_agent() {
+        let now = unix_time();
+        assert!(offer(&"a".repeat(32)).validate(now).is_ok());
+
+        // A request id names a file in the private runtime directory, so a
+        // non-opaque one is refused rather than sanitized.
+        assert!(offer("../../etc/passwd").validate(now).is_err());
+        assert!(offer(&"a".repeat(31)).validate(now).is_err());
+
+        let mut loopback = offer(&"a".repeat(32));
+        loopback.candidates = vec![offer_candidate("127.0.0.1:51234")];
+        assert!(loopback.validate(now).is_err());
+
+        let mut unroutable = offer(&"a".repeat(32));
+        unroutable.candidates = vec![offer_candidate("0.0.0.0:51234")];
+        assert!(unroutable.validate(now).is_err());
+
+        let mut portless = offer(&"a".repeat(32));
+        portless.candidates = vec![offer_candidate("192.168.1.30:0")];
+        assert!(portless.validate(now).is_err());
+
+        let mut flooded = offer(&"a".repeat(32));
+        flooded.candidates = (0..MAX_OFFER_CANDIDATES + 1)
+            .map(|index| offer_candidate(&format!("192.168.1.30:{}", 40_000 + index)))
+            .collect();
+        assert!(flooded.validate(now).is_err());
+
+        let mut empty = offer(&"a".repeat(32));
+        empty.candidates.clear();
+        assert!(empty.validate(now).is_err());
+
+        let mut immortal = offer(&"a".repeat(32));
+        immortal.expires_at = now + PRESENCE_LIFETIME.as_secs() + 1;
+        assert!(immortal.validate(now).is_err());
+
+        let mut expired = offer(&"a".repeat(32));
+        expired.expires_at = now;
+        assert!(expired.validate(now).is_err());
+
+        let mut forged = offer(&"a".repeat(32));
+        forged.ice_pwd = "not a credential".into();
+        assert!(forged.validate(now).is_err());
+
+        let mut tcp_only = offer(&"a".repeat(32));
+        tcp_only.candidates = vec![IceCandidateRecord {
+            tcp_type: Some("passive".into()),
+            ..offer_candidate("192.168.1.30:51234")
+        }];
+        assert!(tcp_only.validate(now).is_err());
+    }
+
+    #[test]
+    fn status_republishes_the_helpers_ice_agent_under_the_names_the_desktop_decodes() {
+        let (_dir, home) = home();
+        set_enabled(&home, true).unwrap();
+        let paths = Paths::new(&home);
+        let identity = identity(&paths).unwrap();
+        ensure_private_directory(&paths.runtime()).unwrap();
+
+        // Without an agent the readiness document simply omits the block; a
+        // desktop app then publishes presence with no ICE rather than
+        // credentials nothing would answer.
+        write_lan_readiness(
+            &paths,
+            &identity,
+            "192.168.1.20:49221".parse().unwrap(),
+            None,
+            0,
+        )
+        .unwrap();
+        assert!(status(&home).unwrap().ice.is_none());
+        assert!(!fs::read_to_string(paths.lan_readiness())
+            .unwrap()
+            .contains("\"ice\""));
+
+        let gathered = IceReadiness {
+            ufrag: "abc123".into(),
+            password: "a-short-term-stun-credential".into(),
+            candidates: vec![
+                offer_candidate("100.64.0.7:52000"),
+                IceCandidateRecord {
+                    candidate_type: "srflx".into(),
+                    related_address: Some("192.168.1.20".into()),
+                    related_port: Some(52_000),
+                    ..offer_candidate("203.0.113.9:52000")
+                },
+            ],
+        };
+        write_lan_readiness(
+            &paths,
+            &identity,
+            "192.168.1.20:49221".parse().unwrap(),
+            Some(gathered.clone()),
+            0,
+        )
+        .unwrap();
+
+        let reported = status(&home).unwrap();
+        assert_eq!(reported.ice.as_ref(), Some(&gathered));
+        // The desktop app decodes this by name, so the wire form is the
+        // contract, not the Rust field spelling.
+        let document = serde_json::to_value(&reported).unwrap();
+        let candidate = &document["ice"]["candidates"][1];
+        assert_eq!(candidate["type"], "srflx");
+        assert_eq!(candidate["relatedAddress"], "192.168.1.20");
+        assert_eq!(candidate["relatedPort"], 52_000);
+        assert_eq!(candidate["expiresAt"], gathered.candidates[1].expires_at);
+        assert!(candidate["tcpType"].is_null());
+        // Still never the supervised gateway or its credential.
+        assert!(!document.to_string().contains("127.0.0.1"));
+    }
+
+    #[test]
+    fn recorded_offers_are_drained_once_and_never_outlive_their_window() {
+        let (_dir, home) = home();
+        set_enabled(&home, true).unwrap();
+        let paths = Paths::new(&home);
+
+        record_offer(&home, &offer(&"a".repeat(32))).unwrap();
+        record_offer(&home, &offer(&"c".repeat(32))).unwrap();
+        // A malformed offer never reaches the private directory at all.
+        let mut rejected = offer(&"d".repeat(32));
+        rejected.candidates = vec![offer_candidate("127.0.0.1:51234")];
+        assert!(record_offer(&home, &rejected).is_err());
+
+        // An expired document is dropped on the way out rather than handed to
+        // an agent that could only fail the checks it implies.
+        let mut stale = offer(&"e".repeat(32));
+        stale.expires_at = unix_time() + 60;
+        write_json(&paths.offers().join("stale.json"), &stale).unwrap();
+        let mut document: serde_json::Value =
+            serde_json::from_slice(&fs::read(paths.offers().join("stale.json")).unwrap()).unwrap();
+        document["expiresAt"] = serde_json::json!(1);
+        write_json(&paths.offers().join("stale.json"), &document).unwrap();
+
+        let mut drained: Vec<String> = drain_offers(&paths)
+            .into_iter()
+            .map(|offer| offer.request_id)
+            .collect();
+        drained.sort();
+        assert_eq!(drained, vec!["a".repeat(32), "c".repeat(32)]);
+        // Offers are one-shot: a second drain finds nothing to replay.
+        assert!(drain_offers(&paths).is_empty());
+        assert!(fs::read_dir(paths.offers()).unwrap().next().is_none());
+    }
+
     #[test]
     fn the_helper_never_advertises_the_gateway_and_status_tracks_the_listener() {
         let (_dir, home) = home();
@@ -2209,11 +3153,25 @@ mod tests {
         let identity = identity(&paths).unwrap();
         ensure_private_directory(&paths.runtime()).unwrap();
 
-        assert!(write_lan_readiness(&paths, &identity, "127.0.0.1:9100".parse().unwrap()).is_err());
+        assert!(write_lan_readiness(
+            &paths,
+            &identity,
+            "127.0.0.1:9100".parse().unwrap(),
+            None,
+            0
+        )
+        .is_err());
         assert!(validate_lan_bind("127.0.0.1:0".parse().unwrap()).is_err());
         assert!(validate_lan_bind("0.0.0.0:0".parse().unwrap()).is_ok());
 
-        write_lan_readiness(&paths, &identity, "192.168.1.20:49221".parse().unwrap()).unwrap();
+        write_lan_readiness(
+            &paths,
+            &identity,
+            "192.168.1.20:49221".parse().unwrap(),
+            None,
+            0,
+        )
+        .unwrap();
         let document = fs::read_to_string(paths.lan_readiness()).unwrap();
         assert!(!document.contains("127.0.0.1"));
         assert!(!document.contains("token"));
@@ -2226,7 +3184,14 @@ mod tests {
         write_json(&paths.lan_readiness(), &orphan).unwrap();
         assert_eq!(status(&home).unwrap().listener_address, None);
         assert!(!paths.lan_readiness().exists());
-        write_lan_readiness(&paths, &identity, "192.168.1.20:49221".parse().unwrap()).unwrap();
+        write_lan_readiness(
+            &paths,
+            &identity,
+            "192.168.1.20:49221".parse().unwrap(),
+            None,
+            0,
+        )
+        .unwrap();
 
         let running = status(&home).unwrap();
         assert!(running.enabled);
@@ -2337,6 +3302,104 @@ mod tests {
         );
     }
 
+    /// Losing the grant closes a live terminal exactly as losing the pairing
+    /// does. A device downgraded from control while it holds the surface must
+    /// not keep writing to it until it happens to disconnect.
+    #[tokio::test]
+    async fn noise_proxy_closes_a_live_terminal_when_the_grant_is_downgraded() {
+        let (_dir, home) = home();
+        set_enabled(&home, true).unwrap();
+        let paths = Paths::new(&home);
+        let mac_identity = identity(&paths).unwrap();
+        let (phone_private, phone_public) = keypair();
+        let pairing = create_pairing(&home).unwrap();
+        let device = confirm_pairing(
+            &home,
+            &pairing.pairing_id,
+            &pairing.secret,
+            &phone_public,
+            "downgrade test phone",
+            DevicePermission::Control,
+            None,
+        )
+        .unwrap();
+
+        ensure_private_directory(&paths.runtime()).unwrap();
+        let token_path = paths.runtime().join("gateway.token");
+        write_bytes_atomic(&token_path, b"test-gateway-token").unwrap();
+        let gateway_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let gateway_addr = gateway_listener.local_addr().unwrap();
+        let gateway = tokio::spawn(async move {
+            let (mut stream, _) = gateway_listener.accept().await.unwrap();
+            let _ = read_request_headers(&mut stream).await;
+            stream
+                .write_all(
+                    b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            let mut trailing = [0_u8; 1];
+            let _ = stream.read(&mut trailing).await;
+        });
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener_addr = listener.local_addr().unwrap();
+        let proxy_paths = paths.clone();
+        let proxy_identity = mac_identity.clone();
+        let proxy_token = token_path.clone();
+        let connections = Arc::new(AtomicUsize::new(0));
+        let proxy_connections = connections.clone();
+        let proxy = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            proxy_connection(
+                PeerStream::from_tcp(stream),
+                &proxy_paths,
+                &proxy_identity,
+                &proxy_token,
+                gateway_addr,
+                &proxy_connections,
+            )
+            .await
+        });
+
+        let stream = TcpStream::connect(listener_addr).await.unwrap();
+        let (mut reader, mut writer) = stream.into_split();
+        let mut transport = initiator_handshake(&mut reader, &mut writer, &phone_private).await;
+        encrypt_record(
+            &mut writer,
+            &mut transport,
+            b"GET /v2/sessions/ses_1/terminal?cols=80&rows=24 HTTP/1.1\r\nHost: latch\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
+        )
+        .await
+        .unwrap();
+        let response = decrypt_record(&mut reader, &mut transport).await.unwrap();
+        assert!(response.starts_with(b"HTTP/1.1 101"));
+        // The gauge the Mac's sleep assertion hangs off: a phone holding a
+        // terminal is exactly the case where this Mac must stay awake.
+        assert_eq!(connections.load(Ordering::Relaxed), 1);
+
+        // Still paired, still able to read and send messages — but no longer
+        // allowed to hold a terminal.
+        grant(&home, &device.device_id, DevicePermission::Interact).unwrap();
+        let closed =
+            tokio::time::timeout(Duration::from_millis(500), read_frame(&mut reader)).await;
+        assert!(
+            matches!(closed, Ok(Err(_))),
+            "a permission downgrade must close the peer stream"
+        );
+        assert!(!list_devices(&home).unwrap()[0].revoked);
+        let trail = read_audit(&home).unwrap();
+        assert!(trail.iter().any(|event| {
+            event["event"] == "connection_closed" && event["result"] == "permission_downgraded"
+        }));
+        drop(writer);
+        assert!(proxy.await.unwrap().is_ok());
+        // And released with the stream, so a Mac with nothing connected is
+        // free to sleep again.
+        assert_eq!(connections.load(Ordering::Relaxed), 0);
+        gateway.await.unwrap();
+    }
+
     #[tokio::test]
     async fn noise_proxy_carries_the_v2_terminal_for_control_and_closes_on_revocation() {
         let (_dir, home) = home();
@@ -2354,6 +3417,7 @@ mod tests {
             // A terminal is the session's one exclusive surface, so only a
             // control device may open it. There is no observing terminal.
             DevicePermission::Control,
+            None,
         )
         .unwrap();
 
@@ -2390,14 +3454,17 @@ mod tests {
         let proxy_paths = paths.clone();
         let proxy_identity = mac_identity.clone();
         let proxy_token = token_path.clone();
+        let connections = Arc::new(AtomicUsize::new(0));
+        let proxy_connections = connections.clone();
         let proxy = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             proxy_connection(
-                stream,
+                PeerStream::from_tcp(stream),
                 &proxy_paths,
                 &proxy_identity,
                 &proxy_token,
                 gateway_addr,
+                &proxy_connections,
             )
             .await
         });
@@ -2460,6 +3527,7 @@ mod tests {
             &phone_public,
             "observe-only phone",
             DevicePermission::Observe,
+            None,
         )
         .unwrap();
 
@@ -2489,14 +3557,17 @@ mod tests {
         let proxy_paths = paths.clone();
         let proxy_identity = mac_identity.clone();
         let proxy_token = token_path.clone();
+        let connections = Arc::new(AtomicUsize::new(0));
+        let proxy_connections = connections.clone();
         let proxy = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             proxy_connection(
-                stream,
+                PeerStream::from_tcp(stream),
                 &proxy_paths,
                 &proxy_identity,
                 &proxy_token,
                 gateway_addr,
+                &proxy_connections,
             )
             .await
         });
@@ -2685,6 +3756,7 @@ mod tests {
             &phone_key(),
             "Test phone",
             DEFAULT_PERMISSION,
+            None,
         )
         .unwrap();
         assert_eq!(device.permission, DevicePermission::Interact);
@@ -2694,7 +3766,8 @@ mod tests {
             &material.secret,
             &phone_key(),
             "Other",
-            DEFAULT_PERMISSION
+            DEFAULT_PERMISSION,
+            None
         )
         .is_err());
     }
@@ -2770,6 +3843,7 @@ mod tests {
             &public,
             "Phone",
             DEFAULT_PERMISSION,
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -2793,6 +3867,7 @@ mod tests {
             &phone_key(),
             "Test phone",
             DEFAULT_PERMISSION,
+            None,
         )
         .unwrap();
         revoke(&home, &device.device_id).unwrap();
@@ -2816,6 +3891,7 @@ mod tests {
             &phone_key(),
             "late phone",
             DEFAULT_PERMISSION,
+            None,
         )
         .is_err());
     }
@@ -2833,6 +3909,7 @@ mod tests {
             &old_key,
             "rotating phone",
             DevicePermission::Control,
+            None,
         )
         .unwrap();
         let new_key = phone_key();
@@ -2858,6 +3935,88 @@ mod tests {
         assert!(!export.relay_enabled);
     }
 
+    /// `never` is the strict form of the same switch: it refuses relay
+    /// admission like `disable` does, and additionally tells the desktop app to
+    /// stop publishing anything but host candidates.
+    #[test]
+    fn never_relay_refuses_admission_and_is_cleared_by_allowing_the_relay_again() {
+        let (_dir, home) = home();
+        set_enabled(&home, true).unwrap();
+
+        set_relay_mode(&home, RelayMode::Never).unwrap();
+        assert!(!relay_enabled(&home).unwrap());
+        let strict = status(&home).unwrap();
+        assert!(strict.never_relay);
+        assert!(!strict.relay_enabled);
+
+        // Turning the relay off and turning it never-off are different
+        // answers, and the plain disable must not claim the stricter one.
+        set_relay_enabled(&home, false).unwrap();
+        assert!(!status(&home).unwrap().never_relay);
+
+        set_relay_mode(&home, RelayMode::Never).unwrap();
+        // Allowing the relay again clears it, rather than leaving presence
+        // narrowed to addresses that cannot use the path just permitted.
+        set_relay_enabled(&home, true).unwrap();
+        let permissive = status(&home).unwrap();
+        assert!(!permissive.never_relay);
+        assert!(permissive.relay_enabled);
+        assert!(relay_enabled(&home).unwrap());
+
+        assert!(read_audit(&home)
+            .unwrap()
+            .iter()
+            .any(|event| event["event"] == "relay_never"));
+    }
+
+    #[test]
+    fn path_metrics_separate_direct_from_relay_and_stay_content_free() {
+        let (_dir, home) = home();
+        set_enabled(&home, true).unwrap();
+        let paths = Paths::new(&home);
+        for route in [
+            PeerRoute::Lan,
+            PeerRoute::DirectHost,
+            PeerRoute::DirectReflexive,
+            PeerRoute::Relay,
+            PeerRoute::Relay,
+        ] {
+            audit(&paths, PATH_SELECTED_EVENT, Some("dev_1"), route.slug()).unwrap();
+        }
+        record_ice_answer(&home, true).unwrap();
+        record_ice_answer(&home, false).unwrap();
+
+        let export = diagnostics_export(&home).unwrap();
+        let metrics = &export.path_selection;
+        assert_eq!(metrics.connections, 5);
+        assert_eq!(metrics.direct, 3);
+        assert_eq!(metrics.relay, 2);
+        assert_eq!(metrics.routes["lan"], 1);
+        assert_eq!(metrics.routes["direct_reflexive"], 1);
+        assert_eq!(metrics.routes["relay"], 2);
+        // A route with no hits is still named, so "never relayed" is
+        // distinguishable from "this build did not measure it".
+        assert_eq!(metrics.routes["unknown"], 0);
+        assert_eq!(metrics.ice_answers, 2);
+        assert_eq!(metrics.ice_answers_connected, 1);
+        assert_eq!(metrics.relay_share(), Some(0.4));
+
+        // The counters travel in the content-free bundle, so they must not
+        // reintroduce the identity the rest of it excludes.
+        let json = serde_json::to_string(&export.path_selection).unwrap();
+        assert!(!json.contains("dev_1"));
+    }
+
+    #[test]
+    fn path_metrics_report_no_share_before_any_connection() {
+        let (_dir, home) = home();
+        set_enabled(&home, true).unwrap();
+        let export = diagnostics_export(&home).unwrap();
+        // Zero of zero is not zero percent relayed; it is nothing measured.
+        assert_eq!(export.path_selection.relay_share(), None);
+        assert_eq!(export.path_selection.connections, 0);
+    }
+
     #[test]
     fn private_state_rejects_symlink_substitution() {
         use std::os::unix::fs::symlink;
@@ -2878,6 +4037,21 @@ mod tests {
             b"GET /v2/sessions/ses_1/terminal?mode=control HTTP/1.1\r\nHost: example\r\n\r\n"
                 .to_vec();
         assert!(authorize_and_inject(request, DevicePermission::Observe, "secret").is_err());
+    }
+
+    /// The grant a live stream has to keep holding is the route's, not the
+    /// one the device happened to have at handshake. A terminal admitted
+    /// under `control` reports `control`, which is what the periodic device
+    /// check compares against after a downgrade.
+    #[test]
+    fn proxy_authorization_reports_the_grant_the_stream_must_keep() {
+        let terminal =
+            b"GET /v2/sessions/ses_1/terminal?mode=control HTTP/1.1\r\nHost: example\r\n\r\n"
+                .to_vec();
+        let (_, required) =
+            authorize_and_inject(terminal, DevicePermission::Control, "secret").unwrap();
+        assert_eq!(required, DevicePermission::Control);
+        assert!(!DevicePermission::Interact.permits(required));
     }
 
     #[test]
@@ -2901,8 +4075,9 @@ mod tests {
         let transfer = b"GET /v2/sessions/ses_1/conversation HTTP/1.1\r\nHost: example\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n".to_vec();
         assert!(authorize_and_inject(transfer, DevicePermission::Interact, "secret").is_err());
         let ordinary = b"GET /v2/sessions HTTP/1.1\r\nHost: example\r\n\r\n".to_vec();
-        let authorized =
+        let (authorized, required) =
             authorize_and_inject(ordinary, DevicePermission::Observe, "secret").unwrap();
+        assert_eq!(required, DevicePermission::Observe);
         assert!(authorized
             .windows(b"Connection: close".len())
             .any(|part| part == b"Connection: close"));
@@ -3056,7 +4231,7 @@ mod tests {
     proptest! {
         #[test]
         fn external_http_parser_never_panics_or_expands_arbitrary_input(bytes in prop::collection::vec(any::<u8>(), 0..MAX_INITIAL_REQUEST)) {
-            if let Ok(authorized) = authorize_and_inject(bytes.clone(), DevicePermission::Observe, "bounded-token") {
+            if let Ok((authorized, _)) = authorize_and_inject(bytes.clone(), DevicePermission::Observe, "bounded-token") {
                 prop_assert!(authorized.len() <= bytes.len() + 64);
                 prop_assert!(authorized.windows(b"Authorization: Bearer bounded-token".len()).any(|part| part == b"Authorization: Bearer bounded-token"));
             }

@@ -114,25 +114,23 @@ pub struct RemoteTransport {
     connection: Mutex<Option<Arc<RtcConnection>>>,
     local: RwLock<LocalDescription>,
     credentials: IceCredentials,
-    direct_failed: AtomicBool,
+    connectivity_failure: AtomicBool,
 }
 
 #[uniffi::export(async_runtime = "tokio")]
 impl RemoteTransport {
-    /// Gathers local candidates. TURN URLs are passed only for a policy-approved retry.
+    /// Gathers local candidates from every supplied server.
+    ///
+    /// TURN URLs are accepted here: relay candidates are gathered alongside
+    /// host and reflexive ones, and ICE's pair priority still nominates a
+    /// direct pair whenever one completes. A caller with no relay credentials
+    /// — an account with relay disabled, or a credential service that is
+    /// down — passes STUN alone and gathers direct-only.
     #[uniffi::constructor]
     pub async fn gather(
         credentials: IceCredentials,
         servers: Vec<IceServer>,
     ) -> Result<Arc<Self>, TransportError> {
-        if servers
-            .iter()
-            .any(|server| CoreIceServer::from(server.clone()).is_turn())
-        {
-            return Err(TransportError::Failure {
-                message: "TURN credentials are withheld until a direct attempt fails".into(),
-            });
-        }
         let (endpoint, local) = RtcEndpoint::gather(
             credentials.clone().into(),
             &servers.into_iter().map(Into::into).collect::<Vec<_>>(),
@@ -144,7 +142,7 @@ impl RemoteTransport {
             connection: Mutex::new(None),
             local: RwLock::new(local.into()),
             credentials,
-            direct_failed: AtomicBool::new(false),
+            connectivity_failure: AtomicBool::new(false),
         }))
     }
 
@@ -156,29 +154,21 @@ impl RemoteTransport {
             .clone()
     }
 
-    /// Whether a transport-level direct attempt failed and relay may be issued.
-    pub fn relay_retry_allowed(&self) -> bool {
-        self.direct_failed.load(Ordering::Acquire)
+    /// Whether the failed attempt was a transport failure worth retrying.
+    ///
+    /// This no longer gates relay issuance — it reports whether ICE itself
+    /// failed, so a caller whose first attempt ran without TURN can tell a
+    /// connectivity failure from a misuse of this object.
+    pub fn connectivity_failed(&self) -> bool {
+        self.connectivity_failure.load(Ordering::Acquire)
     }
 
-    /// Re-gathers with TURN after this object's direct connection failed.
+    /// Re-gathers with TURN after an attempt that had no relay servers.
     pub async fn retry_with_relay(
         &self,
         servers: Vec<IceServer>,
     ) -> Result<LocalDescription, TransportError> {
-        if !self.direct_failed.load(Ordering::Acquire) {
-            return Err(TransportError::Failure {
-                message: "relay retry requires a recorded direct failure".into(),
-            });
-        }
-        if !servers
-            .iter()
-            .any(|server| CoreIceServer::from(server.clone()).is_turn())
-        {
-            return Err(TransportError::Failure {
-                message: "relay retry requires at least one TURN server".into(),
-            });
-        }
+        require_turn(&servers)?;
         let (endpoint, local) = RtcEndpoint::gather(
             self.credentials.clone().into(),
             &servers.into_iter().map(Into::into).collect::<Vec<_>>(),
@@ -207,7 +197,7 @@ impl RemoteTransport {
             Ok(connection) => connection,
             Err(error) => {
                 if matches!(&error, RtcError::Stack(_)) {
-                    self.direct_failed.store(true, Ordering::Release);
+                    self.connectivity_failure.store(true, Ordering::Release);
                 }
                 return Err(failure(error));
             }
@@ -354,30 +344,59 @@ impl From<CoreSelectedPath> for SelectedPath {
     }
 }
 
+/// A relay attempt has to carry a relay server; STUN alone cannot allocate one.
+fn require_turn(servers: &[IceServer]) -> Result<(), TransportError> {
+    servers
+        .iter()
+        .any(|server| CoreIceServer::from(server.clone()).is_turn())
+        .then_some(())
+        .ok_or_else(|| TransportError::Failure {
+            message: "a relay attempt requires at least one TURN server".into(),
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn swift_boundary_withholds_turn_on_initial_gather() {
-        let result = RemoteTransport::gather(
+    async fn swift_boundary_gathers_with_turn_from_the_first_attempt() {
+        let transport = RemoteTransport::gather(
             IceCredentials {
-                ufrag: "direct-first".into(),
+                ufrag: "preferdirect".into(),
                 password: "password-with-more-than-128-bits".into(),
             },
             vec![IceServer {
-                url: "turn:relay.example:3478".into(),
+                // Unresolvable on purpose: the assertion is that a relay URL
+                // is accepted and gathered alongside host candidates, not
+                // that this fictional server allocates anything.
+                url: "turn:relay.invalid:3478?transport=udp".into(),
                 username: "user".into(),
                 credential: "credential".into(),
             }],
         )
-        .await;
-        let Err(error) = result else {
-            panic!("initial gather accepted TURN credentials");
-        };
+        .await
+        .expect("initial gather refused TURN credentials");
+        assert!(!transport.connectivity_failed());
+    }
+
+    #[test]
+    fn a_relay_attempt_without_a_turn_server_is_refused_at_the_boundary() {
+        let error = require_turn(&[IceServer {
+            url: "stun:stun.example:3478".into(),
+            username: String::new(),
+            credential: String::new(),
+        }])
+        .expect_err("a STUN-only list was accepted as a relay attempt");
         assert_eq!(
             error.to_string(),
-            "TURN credentials are withheld until a direct attempt fails"
+            "a relay attempt requires at least one TURN server"
         );
+        assert!(require_turn(&[IceServer {
+            url: "turns:relay.example:5349?transport=tcp".into(),
+            username: "user".into(),
+            credential: "credential".into(),
+        }])
+        .is_ok());
     }
 }

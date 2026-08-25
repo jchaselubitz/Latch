@@ -8,13 +8,19 @@ license.workspace = true
 publish.workspace = true
 repository.workspace = true
 
+[lib]
+name = "latch_remote"
+path = "src/lib.rs"
+
 [[bin]]
 name = "latch-remote"
 path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+async-trait.workspace = true
 clap.workspace = true
 latch = { path = "../latch" }
 latch-transport = { path = "../latch-transport" }
+tokio.workspace = true
 

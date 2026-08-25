@@ -190,20 +190,44 @@ actor LatchClient {
         secret: String,
         devicePublicKey: String,
         name: String,
-        permission: DevicePermission
+        permission: DevicePermission,
+        controlPlaneDeviceID: String?
     ) throws -> RemotePairingConfirmation {
-        try request([
+        var arguments = [
             "remote-access", "pair", "confirm",
             "--pairing-id", pairingID,
             "--secret", secret,
             "--device-public-key", devicePublicKey,
             "--name", name,
             "--permission", permission.rawValue,
-        ])
+        ]
+        if let controlPlaneDeviceID {
+            arguments.append(contentsOf: ["--control-plane-device-id", controlPlaneDeviceID])
+        }
+        return try request(arguments)
+    }
+
+    /// Hands one approved rendezvous offer to the running helper's ICE agent.
+    ///
+    /// This is the only path from the control plane's offer queue into the
+    /// transport, and it is deliberately the same path everything else in
+    /// Remote Access takes: through the CLI, which validates the offer and
+    /// writes it into its own private runtime directory. The app never touches
+    /// that directory and never speaks to the helper directly.
+    func recordRendezvousOffer(_ offer: RemoteRendezvousOfferDocument) throws {
+        try run(["remote-access", "offer"], stdin: encoder.encode(offer))
     }
 
     func setRemoteRelayEnabled(_ enabled: Bool) throws {
         try run(["remote-access", "relay", enabled ? "enable" : "disable"])
+    }
+
+    /// The strict form of the same switch. It refuses relay admission as
+    /// `disable` does and additionally narrows what presence may publish, so
+    /// turning it off returns to the ordinary disabled state rather than
+    /// silently re-permitting the relay.
+    func setRemoteNeverRelay(_ never: Bool) throws {
+        try run(["remote-access", "relay", never ? "never" : "disable"])
     }
 
     func remoteAudit() throws -> [RemoteAuditEvent] {
@@ -216,11 +240,15 @@ actor LatchClient {
 
     /// Runs a command whose success is the whole result. Output is discarded so
     /// a human-readable confirmation line never has to be parsed.
-    private func run(_ arguments: [String], timeout: TimeInterval? = nil) throws {
+    private func run(
+        _ arguments: [String],
+        stdin: Data? = nil,
+        timeout: TimeInterval? = nil
+    ) throws {
         _ = try ProcessRunner.run(
             executableURL: executableURL,
             arguments: arguments,
-            stdin: nil,
+            stdin: stdin,
             timeout: timeout ?? self.timeout
         )
     }

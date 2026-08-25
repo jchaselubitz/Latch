@@ -23,6 +23,28 @@ entirely by its argument template, so both always open whatever their launch
 arguments produce. Background opens leave the terminal behind the app you were
 using; a Terminal tab may flash briefly so Command-T can run.
 
+## Remote access
+
+Settings → Remote Access turns on a paired-phone gateway: the app spawns a
+helper that owns a loopback-only `latch serve` gateway and a WebRTC ICE
+responder, and lets a paired iPhone reach it either on the LAN or off it. Each
+paired device's row separates two decisions — a base Observe/Interact picker
+and an explicit "Allow terminal" switch mapped to the `control` permission —
+and a change to either takes effect immediately, including on a connection
+that is already open. A "never relay" switch pairs with
+`latch remote-access relay disable` to keep TURN out of the offer entirely and
+restrict the Mac's published presence to host candidates, which is what makes
+a Tailscale/tailnet address a working path with the relay refused outright.
+
+While Remote Access is on and at least one phone is connected, the app holds
+an `IOPMAssertion` to prevent idle sleep, released the moment the last phone
+disconnects or the feature is turned off. That narrows, but does not remove,
+the hard constraint underneath all of this: **the phone can only reach a Mac
+that is running Latch Desktop and awake.** There is no server component
+independent of this app. `docs/REMOTE_ACCESS_DESKTOP.md` in the Latch
+repository is the full design record — process boundaries, pairing, the
+control-plane mirror, and what each side of the audit trail records.
+
 ## Development
 
 Open `Package.swift` in Xcode 15 or newer and run the `LatchDesktop` scheme on

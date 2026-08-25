@@ -37,11 +37,19 @@ export class CloudflareTurnProvider implements TurnProvider {
         body: JSON.stringify({ ttl: ttlSeconds }),
       },
     );
+    // An unrecognised key id answers 404, not 401, so a misconfigured relay
+    // reaches the caller as a failure to issue rather than as a device
+    // authorization problem.
     if (!response.ok) throw new Error(`Cloudflare TURN credential issuance failed (${response.status})`);
     const payload: unknown = await response.json();
     const iceServers = payload && typeof payload === 'object'
       ? (payload as { iceServers?: unknown }).iceServers
       : null;
+    // `iceServers` is an array in the endpoint Cloudflare documents today —
+    // one entry for STUN and one for TURN — but the same field has been
+    // documented unwrapped, and a single object is trivially the one-entry
+    // case. Accepting both costs a line and removes a shape change as a way
+    // for relay to stop working.
     const servers = Array.isArray(iceServers) ? iceServers : [iceServers];
     if (!servers.every(validIceServer)) {
       throw new Error('Cloudflare TURN returned an invalid ICE server response');

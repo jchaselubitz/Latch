@@ -186,9 +186,25 @@ struct SettingsView: View {
 
     @ViewBuilder
     private var linkedSections: some View {
-        Section("Linked computer") {
+        Section {
             if model.linkSource == .paired {
                 LabeledContent("Connection", value: "Secure paired connection")
+                // Which way the bytes are going. The connection is the same
+                // pinned Noise session either way, so this is about speed and
+                // relay cost, not about how much to trust the link.
+                if let path = model.remotePath {
+                    LabeledContent("Path", value: path.label)
+                        .accessibilityHint(path.detail)
+                }
+                // How the paths have resolved so far. This is here rather than
+                // buried in a debug screen because it is what a person running
+                // the connection through real networks reads afterwards.
+                if let summary = model.remotePathTally.summary {
+                    LabeledContent("Paths so far", value: summary)
+                    Button("Reset path counters", role: .destructive) {
+                        model.resetRemotePathTally()
+                    }
+                }
             } else {
                 LabeledContent("Address", value: model.link?.url.absoluteString ?? "")
                     .lineLimit(1)
@@ -197,6 +213,12 @@ struct SettingsView: View {
                 LabeledContent("Latch", value: version)
             }
             LabeledContent("Protocol", value: "v\(LatchContract.protocolVersion)")
+        } header: {
+            Text("Linked computer")
+        } footer: {
+            if model.linkSource == .paired, let path = model.remotePath {
+                Text(path.detail)
+            }
         }
 
         // What discovery said this gateway can do. It is shown rather than

@@ -119,6 +119,11 @@ public enum ControlPlaneError: Error, Equatable, Sendable, LocalizedError {
     /// The paired Mac has no current presence. Retryable: it may come online
     /// inside the next presence window.
     case macNotReachable(String)
+    /// The paired Mac published no presence at all, which in practice means
+    /// one of two things a person can act on. Kept separate from
+    /// `macNotReachable` so the message names them instead of quoting the
+    /// service's phrasing back at the person.
+    case macOffline
     /// Relay credentials were refused because the account kill switch is off.
     /// Direct and LAN paths are unaffected.
     case relayDisabled(String)
@@ -154,6 +159,8 @@ public enum ControlPlaneError: Error, Equatable, Sendable, LocalizedError {
         case .macNotReachable(let reason):
             let detail = reason.isEmpty ? "it has not published a way to reach it" : reason
             return "Your Mac is not reachable right now: \(detail)."
+        case .macOffline:
+            return "Your Mac is asleep or Latch is not running."
         case .relayDisabled(let reason):
             return reason.isEmpty
                 ? "Relay is disabled for this account. Direct or LAN access still works if your Mac is on the same network."
@@ -184,7 +191,7 @@ public enum ControlPlaneError: Error, Equatable, Sendable, LocalizedError {
     /// the Mac may publish again on its next refresh.
     public var isRetryable: Bool {
         switch self {
-        case .transport, .http, .macNotReachable: return true
+        case .transport, .http, .macNotReachable, .macOffline: return true
         default: return false
         }
     }
@@ -338,9 +345,11 @@ public actor HTTPControlPlaneClient: ControlPlaneClient, SignalingClient {
             return .pairingUnavailable
         case 409:
             if code == "already_paired" { return .alreadyPaired }
-            if code == "target_offline" {
-                return .macNotReachable(reason.isEmpty ? "target device has no current presence" : reason)
-            }
+            // The service says "target_offline" for exactly one condition:
+            // the Mac has no live presence record. That is either a sleeping
+            // Mac or a Mac with Latch closed, and both are things the person
+            // fixes at the Mac rather than on the phone.
+            if code == "target_offline" { return .macOffline }
             return .pairingUnavailable
         case 410:
             return .pairingExpired

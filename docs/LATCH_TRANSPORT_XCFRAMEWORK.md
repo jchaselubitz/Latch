@@ -37,6 +37,13 @@ libraries, generates the Swift surface from the compiled Rust metadata, and crea
 `apps/LatchMobile/Native/LatchTransportFFI.xcframework`. It never downloads or
 links a third-party prebuilt framework.
 
+`apps/LatchMobile/Package.swift` declares the binary target unconditionally,
+so the framework is a hard build dependency rather than an optional extra:
+without it SwiftPM fails at resolution instead of quietly producing an app
+whose remote access works on the local network and nowhere else. Run the
+script before `swift build`, `swift test`, or an Xcode build in a fresh
+checkout — the generated framework and Swift surface are both gitignored.
+
 The macOS slice exists so SwiftPM can validate the binary target and run the
 simulator-free `LatchMobileKit` tests after the framework is generated. The
 shipping app still consumes only the iOS device/simulator slices.

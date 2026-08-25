@@ -465,6 +465,11 @@ protocol ControlPlaneHostAPI: Sendable {
         secretDigest: String,
         permission: DevicePermission
     ) async throws
+    func setPairingPermission(
+        deviceToken: String,
+        clientDeviceID: String,
+        permission: DevicePermission
+    ) async throws
     func devices(deviceToken: String) async throws -> [ControlPlaneDevice]
     func publishPresence(
         deviceToken: String,
@@ -549,6 +554,25 @@ actor HTTPControlPlaneHostAPI: ControlPlaneHostAPI {
             body: [
                 "pairingId": pairingID,
                 "secretDigest": secretDigest,
+                "permission": permission.rawValue,
+            ]
+        )
+    }
+
+    /// Restates a pairing this Mac already authorized locally, at its current
+    /// permission. `POST /v1/pairings` is an upsert keyed by the pair, so this
+    /// is a permission update rather than a second pairing.
+    func setPairingPermission(
+        deviceToken: String,
+        clientDeviceID: String,
+        permission: DevicePermission
+    ) async throws {
+        let _: Empty = try await send(
+            path: "/v1/pairings",
+            method: "POST",
+            token: deviceToken,
+            body: [
+                "clientDeviceId": clientDeviceID,
                 "permission": permission.rawValue,
             ]
         )
@@ -852,6 +876,25 @@ final class ControlPlaneHost {
         )
     }
 
+    /// Mirrors a local grant change into the control-plane directory.
+    ///
+    /// The Mac is the authority: the local device store has already been
+    /// written by the time this runs, and the helper enforces the grant on
+    /// every request whatever the directory says. This exists so the phone,
+    /// which reads its own permission from the directory, does not go on
+    /// offering a terminal it will be refused — or hide one it now holds.
+    func mirrorPermission(clientDeviceID: String, permission: DevicePermission) async throws {
+        guard let address, let credentials = try store.load(),
+              credentials.address == address.absoluteString else {
+            throw ControlPlaneHostError.notConfigured
+        }
+        try await apiFactory(address).setPairingPermission(
+            deviceToken: credentials.deviceToken,
+            clientDeviceID: clientDeviceID,
+            permission: permission
+        )
+    }
+
     /// The phones the control plane says are paired with this Mac.
     func pairedClients() async throws -> [ControlPlaneDevice] {
         guard let address, let credentials = try store.load(),
@@ -875,14 +918,19 @@ final class ControlPlaneHost {
         publicKey: String,
         macName: String,
         listenerAddress: String,
+        interfaceHosts: [String] = [],
         ice: ControlPlaneIceCredentials? = nil,
         agentCandidates: [ControlPlaneCandidate] = [],
         now: Date = Date()
     ) async throws -> ControlPlanePresence {
-        let host = try Self.presenceCandidate(listenerAddress, now: now)
+        let listener = try Self.listenerCandidates(
+            listenerAddress,
+            interfaceHosts: interfaceHosts,
+            now: now
+        )
         // Validated here, before the round trip, so a malformed candidate is a
         // local error rather than a 400 the refresh loop retries into.
-        let candidates = try ([host] + agentCandidates).map { try $0.validatedForPublication() }
+        let candidates = try (listener + agentCandidates).map { try $0.validatedForPublication() }
         guard candidates.count <= Self.maxCandidates else {
             throw ControlPlaneHostError.malformedResponse(
                 "presence carries at most \(Self.maxCandidates) candidates"
@@ -945,7 +993,7 @@ final class ControlPlaneHost {
         lifetime: UInt64 = 90
     ) throws -> ControlPlaneCandidate {
         guard lifetime > 0, lifetime <= 90,
-              let split = splitAddress(address), !isLoopbackHost(split.host) else {
+              let split = splitAddress(address), isPublishableHost(split.host) else {
             throw ControlPlaneHostError.malformedResponse("listener address is not a publishable non-loopback IP literal")
         }
         let expiresAt = UInt64(now.timeIntervalSince1970) + lifetime
@@ -963,6 +1011,79 @@ final class ControlPlaneHost {
             protocol: "tcp",
             tcpType: "passive"
         )
+    }
+
+    /// Every address a phone can dial the authenticated TCP listener at.
+    ///
+    /// The helper binds `0.0.0.0`, so the address it reports names a port and
+    /// no reachable host at all. The reachable ones come from the ICE agent's
+    /// own gathered host candidates — which is exactly where a tailnet address
+    /// already is, the 100.x one and the fd7a: one alike — and each is
+    /// republished as the same TCP listener on the same port. That is what
+    /// lets a tailnet work with no ICE involved: the phone dials one of these
+    /// directly and runs the ordinary pinned Noise handshake over it.
+    ///
+    /// At most `maxListenerCandidates` are published. Presence carries eight
+    /// candidates in total and the agent's reflexive ones have to fit beside
+    /// these, so a Mac with many interfaces publishes its first few rather
+    /// than crowding out the only path an off-tailnet phone has.
+    static func listenerCandidates(
+        _ listenerAddress: String,
+        interfaceHosts: [String],
+        now: Date = Date(),
+        lifetime: UInt64 = 90
+    ) throws -> [ControlPlaneCandidate] {
+        guard let listener = splitAddress(listenerAddress) else {
+            throw ControlPlaneHostError.malformedResponse(
+                "listener address is not a publishable non-loopback IP literal"
+            )
+        }
+        var hosts: [String] = []
+        // The bound host first when it is a real one; a specific bind is the
+        // owner having chosen an interface, and it should keep its place.
+        if isPublishableHost(listener.host) { hosts.append(listener.host) }
+        for host in interfaceHosts where isPublishableHost(host) && !hosts.contains(host) {
+            hosts.append(host)
+        }
+        let candidates = try hosts.prefix(maxListenerCandidates).map { host in
+            try presenceCandidate(
+                joined(host: host, port: listener.port),
+                now: now,
+                lifetime: lifetime
+            )
+        }
+        guard !candidates.isEmpty else {
+            // Reached when the listener is bound to every interface and the
+            // helper reported none of them — a helper running without an ICE
+            // agent, which is where the interface addresses come from. There
+            // is nothing to publish; saying so beats advertising `0.0.0.0`,
+            // which is an address no phone can dial.
+            throw ControlPlaneHostError.malformedResponse(
+                "this Mac's listener has no address a phone could reach"
+            )
+        }
+        return candidates
+    }
+
+    /// How many of the listener's interfaces presence advertises.
+    static let maxListenerCandidates = 4
+
+    private static func joined(host: String, port: Int) -> String {
+        isIPv6Literal(host) ? "[\(host)]:\(port)" : "\(host):\(port)"
+    }
+
+    /// Whether an address names something a phone could route to.
+    ///
+    /// Loopback reaches only the Mac itself, and the unspecified address names
+    /// no interface at all — publishing `0.0.0.0` as a candidate hands a phone
+    /// something it can never dial.
+    nonisolated static func isPublishableHost(_ host: String) -> Bool {
+        !isLoopbackHost(host) && !isUnspecifiedHost(host)
+    }
+
+    nonisolated static func isUnspecifiedHost(_ host: String) -> Bool {
+        if host == "0.0.0.0" || host == "::" { return true }
+        return host.lowercased() == "0:0:0:0:0:0:0:0"
     }
 
     /// RFC 8445 §5.1.2.1: `(2^24)·type + (2^8)·local + (256 − component)`, with
@@ -985,7 +1106,7 @@ final class ControlPlaneHost {
         return String(hash, radix: 36)
     }
 
-    private static func splitAddress(_ value: String) -> (host: String, normalized: String)? {
+    private static func splitAddress(_ value: String) -> (host: String, port: Int, normalized: String)? {
         if value.hasPrefix("[") {
             guard let close = value.firstIndex(of: "]"),
                   value.index(after: close) < value.endIndex,
@@ -994,14 +1115,14 @@ final class ControlPlaneHost {
                   (1...65_535).contains(port) else { return nil }
             let host = String(value[value.index(after: value.startIndex)..<close])
             guard isIPv6Literal(host) else { return nil }
-            return (host, "[\(host)]:\(port)")
+            return (host, port, "[\(host)]:\(port)")
         }
         guard let colon = value.lastIndex(of: ":"),
               let port = Int(value[value.index(after: colon)...]),
               (1...65_535).contains(port) else { return nil }
         let host = String(value[..<colon])
         guard isIPv4Literal(host) else { return nil }
-        return (host, "\(host):\(port)")
+        return (host, port, "\(host):\(port)")
     }
 
     nonisolated private static func isIPv4Literal(_ value: String) -> Bool {

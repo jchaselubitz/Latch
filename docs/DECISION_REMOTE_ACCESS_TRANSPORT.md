@@ -19,11 +19,24 @@ certificate is deliberately not the pairing pin. Noise XX runs above the one
 reliable ordered data channel and verifies the static key against
 `PairedDeviceRecord.mac.publicKey` before gateway traffic is sent.
 
-Direct-first is enforced by information flow, not candidate preference. The
-first ICE agent receives STUN entries only. Only after that attempt records a
-failure may the client request and supply Cloudflare TURN credentials to a
-fresh agent. A relay-to-direct recovery or any other selected-pair path change
-gates application traffic until capability discovery has run again.
+Direct is still preferred, but relay is no longer withheld while a phone finds
+that out for itself. The original design gated TURN behind a recorded direct
+failure — the first ICE agent got STUN entries only, and a fresh agent with
+TURN credentials was only built after that attempt failed. In practice this
+made every genuinely off-LAN or symmetric-NAT phone pay a guaranteed failed
+attempt before the connection that was always going to be relayed could start,
+and it bought no stronger preference for direct paths: ICE already ranks host
+and server-reflexive candidate pairs above relayed ones by priority, so an
+agent handed both STUN and TURN credentials from the start still nominates a
+direct pair whenever one is reachable. The policy is now **prefer direct,
+allow relay from the start**: a client requests STUN and, when relay is not
+disabled, TURN credentials together and gathers one agent with both, and ICE's
+own pair priority is what keeps a reachable direct path from being displaced
+by a relayed one. `latch remote-access relay disable` remains a hard refusal
+at credential issuance, independent of this ordering change — it removes TURN
+from the offer entirely rather than de-prioritizing it. A relay-to-direct
+recovery or any other selected-pair path change still gates application
+traffic until capability discovery has run again.
 
 The Latch application layer depends only on the authenticated stream boundary
 below. It does not know whether the selected path is `local`, `direct`, or

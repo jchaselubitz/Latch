@@ -66,5 +66,14 @@
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Latch securely discovers and connects to your paired computer on the local network.</string>
+	<!--
+	  Face ID stands in front of the terminal and nothing else. Reading and
+	  replying in a session is what a paired phone is for; opening a terminal
+	  runs commands on your Mac and takes the session's screen from it, so it
+	  asks first. The passcode is the fallback, and no biometric data reaches
+	  Latch.
+	-->
+	<key>NSFaceIDUsageDescription</key>
+	<string>Latch asks for Face ID before opening a terminal on your Mac.</string>
 </dict>
 </plist>

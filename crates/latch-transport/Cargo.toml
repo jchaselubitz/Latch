@@ -20,3 +20,8 @@ webrtc-ice.workspace = true
 webrtc-sctp.workspace = true
 webrtc-util.workspace = true
 webrtc-util-legacy.workspace = true
+
+[dev-dependencies]
+# The TURN server used by the simulated-NAT tests. It is a dev dependency on
+# purpose: nothing shipped in this crate runs a relay, it only talks to one.
+turn = "=0.17.2"
