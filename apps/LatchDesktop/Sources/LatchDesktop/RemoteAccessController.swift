@@ -414,9 +414,9 @@ final class RemoteAccessController: ObservableObject {
             forName: NSApplication.willTerminateNotification,
             object: nil,
             queue: .main
-        ) { _ in
+        ) { [weak self] _ in
             RemoteAccessController.terminateHelpers()
-            Task { @MainActor [weak self] in
+            Task { @MainActor in
                 self?.stopPresence(clear: true)
                 self?.sleepAssertion.apply(false)
             }
