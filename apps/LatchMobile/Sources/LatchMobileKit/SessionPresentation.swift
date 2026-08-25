@@ -32,7 +32,10 @@ public protocol SessionPresentationStoring: Sendable {
 
 /// `UserDefaults`-backed storage, used by the app.
 public struct UserDefaultsSessionPresentationStore: SessionPresentationStoring {
-    private let defaults: UserDefaults
+    // UserDefaults is documented thread-safe but isn't `Sendable` in the SDK;
+    // `nonisolated(unsafe)` records that this is a deliberate, verified
+    // exemption rather than an oversight.
+    private nonisolated(unsafe) let defaults: UserDefaults
     private let key: String
 
     public init(defaults: UserDefaults = .standard, key: String = "sessionPresentation") {
@@ -121,7 +124,10 @@ public protocol TerminalSizeStoring: Sendable {
 
 /// `UserDefaults`-backed storage, used by the app.
 public struct UserDefaultsTerminalSizeStore: TerminalSizeStoring {
-    private let defaults: UserDefaults
+    // UserDefaults is documented thread-safe but isn't `Sendable` in the SDK;
+    // `nonisolated(unsafe)` records that this is a deliberate, verified
+    // exemption rather than an oversight.
+    private nonisolated(unsafe) let defaults: UserDefaults
     private let key: String
 
     public init(defaults: UserDefaults = .standard, key: String = "terminalSize") {

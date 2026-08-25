@@ -313,24 +313,41 @@ public final class NoiseTunnelGatewayTransport: GatewayTransport, @unchecked Sen
 
     private static func waitUntilReady(_ listener: NWListener) async throws {
         try await withCheckedThrowingContinuation { continuation in
-            var completed = false
+            let completion = ContinuationGuard()
             listener.stateUpdateHandler = { state in
-                guard !completed else { return }
                 switch state {
                 case .ready:
-                    completed = true
+                    guard completion.markCompleted() else { return }
                     continuation.resume(returning: ())
                 case .failed:
-                    completed = true
+                    guard completion.markCompleted() else { return }
                     continuation.resume(throwing: NoiseTunnelError.listenerUnavailable)
                 case .cancelled:
-                    completed = true
+                    guard completion.markCompleted() else { return }
                     continuation.resume(throwing: NoiseTunnelError.listenerUnavailable)
                 default:
                     break
                 }
             }
             listener.start(queue: DispatchQueue(label: "dev.cooperativ.latch.noise-listener"))
+        }
+    }
+
+    /// Guards a continuation against being resumed twice. `stateUpdateHandler`
+    /// runs serially on the queue passed to `start`, but that guarantee is not
+    /// visible to the Swift 6 concurrency checker, so the flag is kept behind
+    /// a lock rather than as a captured `var`.
+    private final class ContinuationGuard: @unchecked Sendable {
+        private let lock = NSLock()
+        private var completed = false
+
+        /// Returns `true` the first time it is called, `false` after that.
+        func markCompleted() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            guard !completed else { return false }
+            completed = true
+            return true
         }
     }
 

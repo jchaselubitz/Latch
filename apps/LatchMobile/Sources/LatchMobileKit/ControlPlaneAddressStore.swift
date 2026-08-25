@@ -42,7 +42,10 @@ public protocol ControlPlaneAddressStoring: Sendable {
 
 /// `UserDefaults`-backed storage, used by the app.
 public struct UserDefaultsControlPlaneAddressStore: ControlPlaneAddressStoring {
-    private let defaults: UserDefaults
+    // UserDefaults is documented thread-safe but isn't `Sendable` in the SDK;
+    // `nonisolated(unsafe)` records that this is a deliberate, verified
+    // exemption rather than an oversight.
+    private nonisolated(unsafe) let defaults: UserDefaults
     private let key: String
 
     public init(
