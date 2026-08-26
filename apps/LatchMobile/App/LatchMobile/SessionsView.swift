@@ -32,6 +32,7 @@ struct SessionsView: View {
             }
             .navigationTitle("Sessions")
         }
+        .task { await refreshPermission() }
     }
 
     /// The paired Mac's name, when this phone has finished pairing.
@@ -49,7 +50,10 @@ struct SessionsView: View {
                 detail: model.sessionsError
                     ?? "Start one on your computer with `latch new`, then pull to refresh."
             )
-            .refreshable { await model.refreshSessions() }
+            .refreshable {
+                await refreshPermission()
+                await model.refreshSessions()
+            }
         } else {
             List(model.sessions) { session in
                 let route = model.route(for: session)
@@ -59,7 +63,10 @@ struct SessionsView: View {
                     SessionRow(session: session, route: route)
                 }
             }
-            .refreshable { await model.refreshSessions() }
+            .refreshable {
+                await refreshPermission()
+                await model.refreshSessions()
+            }
             .overlay(alignment: .top) {
                 if let error = model.sessionsError {
                     BannerView(text: error)
@@ -79,6 +86,16 @@ struct SessionsView: View {
             ChatView(session: session)
         case .unavailable(let block):
             SessionUnavailableView(session: session, block: block)
+        }
+    }
+
+    /// A grant can change while this tab remains on screen. Re-read it when
+    /// the list appears and on pull-to-refresh, then update the linked model
+    /// synchronously so the next route decision sees the new permission.
+    private func refreshPermission() async {
+        await pairing.refreshPermission()
+        if !model.applyPairedDeviceRecord(pairing.record) {
+            await model.connectPairedDevice(pairing.record)
         }
     }
 }
@@ -103,8 +120,9 @@ private struct SessionUnavailableView: View {
                             .font(.headline)
                         Text(
                             """
-                            It's paired to observe. Open Latch on your Mac, find this phone \
-                            under Remote Access, and raise it to Control.
+                            This phone does not currently have terminal access. Open Latch on your \
+                            Mac, find this phone under Remote Access, set it to Control, and turn on \
+                            Allow terminal.
                             """
                         )
                         .font(.footnote)

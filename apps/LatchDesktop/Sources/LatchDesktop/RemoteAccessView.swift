@@ -87,7 +87,7 @@ struct RemoteAccessSettingsView: View {
                 SettingsSectionHeader("Paired Devices")
             } footer: {
                 SettingsFootnote(
-                    "Observe can read sessions and conversations. Interact can also send messages and answer prompts. Allow terminal additionally lets a device open a session's terminal and run commands on this Mac, which takes that terminal from whatever is currently showing it. Latch checks this on every request before anything reaches a session, and turning the terminal off closes one a device is already holding."
+                    "Observe can read sessions and conversations. Control can also send messages and answer prompts. Allow terminal additionally lets a device open a session's terminal and run commands on this Mac, which takes that terminal from whatever is currently showing it. New devices start with terminal access allowed; you can switch it off at any time. Latch checks this on every request before anything reaches a session, and turning the terminal off closes one a device is already holding."
                 )
             }
 
@@ -223,7 +223,7 @@ private struct RemoteDeviceRow: View {
 
     /// The permission the device holds when the terminal is not allowed. It is
     /// tracked here because `control` erases it: a device switched to the
-    /// terminal and back should return to Interact or Observe as it was, not
+    /// terminal and back should return to Control or Observe as it was, not
     /// to a default.
     @State private var baseAccess: DevicePermission
 
@@ -360,7 +360,7 @@ private struct RemotePairingSheet: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
             progressLabel
-            Text("New devices start with Interact and cannot open a terminal. Grant that, change it, or revoke the device at any time in Remote Access settings.")
+            Text("New devices start with Control and terminal access allowed. Change either setting, or revoke the device, at any time in Remote Access settings.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

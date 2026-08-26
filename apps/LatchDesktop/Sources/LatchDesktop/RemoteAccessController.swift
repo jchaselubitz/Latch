@@ -601,7 +601,10 @@ final class RemoteAccessController: ObservableObject {
                 secret: material.secret,
                 devicePublicKey: phone.publicKey,
                 name: phone.name,
-                permission: phone.permission ?? .interact,
+                // Current pairing requests grant terminal control by default.
+                // Falling back to the same answer keeps an older directory
+                // response from silently downgrading the local authority.
+                permission: phone.permission ?? .control,
                 controlPlaneDeviceID: phone.deviceID
             )
             pairingProgress = .enrolled(name: confirmation.name, phrase: confirmation.pairingPhrase)

@@ -1285,7 +1285,7 @@ dependencies = [
 
 [[package]]
 name = "latch"
-version = "0.2608251357.0"
+version = "0.2608260946.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1307,7 +1307,7 @@ dependencies = [
 
 [[package]]
 name = "latch-remote"
-version = "0.2608251357.0"
+version = "0.2608260946.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1319,7 +1319,7 @@ dependencies = [
 
 [[package]]
 name = "latch-transport"
-version = "0.2608251357.0"
+version = "0.2608260946.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1337,14 +1337,14 @@ dependencies = [
 
 [[package]]
 name = "latch-transport-bindgen"
-version = "0.2608251357.0"
+version = "0.2608260946.0"
 dependencies = [
  "uniffi",
 ]
 
 [[package]]
 name = "latch-transport-ffi"
-version = "0.2608251357.0"
+version = "0.2608260946.0"
 dependencies = [
  "latch-transport",
  "thiserror 2.0.19",

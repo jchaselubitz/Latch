@@ -424,6 +424,47 @@ public final class AppModel {
         }
     }
 
+    /// Applies a permission-only refresh without rebuilding a healthy route.
+    ///
+    /// The host checks the current local grant on every request, so the saved
+    /// record is only the phone UI's projection. Replacing that projection in
+    /// place makes a Mac-side terminal toggle visible as soon as it is read
+    /// from the control plane, while identity, endpoint, or revocation changes
+    /// still take the full reconnect path.
+    @discardableResult
+    public func applyPairedDeviceRecord(_ record: PairedDeviceRecord?) -> Bool {
+        guard linkSource == .paired,
+              let current = pairedDevice,
+              let record,
+              record.isActive,
+              current.updating(permission: record.permission) == record
+        else { return false }
+        pairedDevice = record
+        return true
+    }
+
+    /// Takes the session's terminal while its conversation is open.
+    ///
+    /// A chat still drives the Conversation Hub, but it now owns the same
+    /// exclusive session surface as the terminal screen. The preview supplies
+    /// the Mac's current grid so claiming it does not resize or reflow the
+    /// agent. The caller must consume `output` and discard the terminal when
+    /// the chat disappears.
+    public func claimTerminalForChat(for session: SessionSummary) async -> TerminalSession? {
+        guard session.isRunning, surface.terminal else { return nil }
+        let preview = try? await previewSession(for: session)
+        guard await unlockTerminal(), let terminal = terminalSession(for: session) else {
+            return nil
+        }
+        let grid = TerminalGeometry.grid(
+            for: terminalSize,
+            preview: preview,
+            viewport: .zero
+        )
+        terminal.attach(cols: grid.cols, rows: grid.rows)
+        return terminal
+    }
+
     /// Classifies a discovery failure. A protocol disagreement is the one
     /// failure where the computer is fine, so it gets its own state rather
     /// than a string the UI cannot tell apart from a dead network.

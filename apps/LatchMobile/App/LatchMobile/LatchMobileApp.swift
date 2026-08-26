@@ -23,6 +23,11 @@ struct LatchMobileApp: App {
                 .environment(pairing)
                 .task {
                     await pairing.restore()
+                    // The Mac may have changed this grant while the phone was
+                    // closed. Read it before the paired route snapshots the
+                    // record, so the first session tap is never based on the
+                    // permission saved at pairing time.
+                    await pairing.refreshPermission()
                     await model.restore()
                     await model.connectPairedDevice(pairing.record)
                 }
@@ -91,19 +96,24 @@ struct RootView: View {
                 guard suspended else { return }
                 suspended = false
                 Task {
-                    await model.resumeAfterSuspension()
                     // A revoke or a permission change happens on the Mac while
                     // the phone is away, so returning to the foreground re-reads
-                    // it for the same reason discovery is repeated: state
-                    // decided elsewhere is not assumed to have held.
+                    // it before rebuilding the paired route. Otherwise that
+                    // route snapshots the stale, pre-suspension permission.
                     await pairing.refreshPermission()
+                    await model.resumeAfterSuspension()
                 }
             @unknown default:
                 break
             }
         }
         .onChange(of: pairing.record) { _, record in
-            Task { await model.connectPairedDevice(record) }
+            // A permission-only update needs no transport teardown. Requests
+            // are authorized again by the Mac; this only updates what the UI
+            // may offer immediately.
+            if !model.applyPairedDeviceRecord(record) {
+                Task { await model.connectPairedDevice(record) }
+            }
         }
     }
 }

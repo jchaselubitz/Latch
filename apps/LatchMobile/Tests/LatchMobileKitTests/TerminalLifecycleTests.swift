@@ -183,6 +183,24 @@ final class TerminalLifecycleTests: XCTestCase {
         )
     }
 
+    /// Opening a conversation is also a handoff: the phone takes the exclusive
+    /// terminal surface for as long as that chat is the active session screen.
+    func testOpeningChatClaimsTheTerminalAndLeavingReturnsIt() async throws {
+        let model = await linkedModel()
+        let session = try XCTUnwrap(model.sessions.first)
+
+        let claimed = await model.claimTerminalForChat(for: session)
+        let terminal = try XCTUnwrap(claimed)
+        await settle()
+        XCTAssertEqual(terminal.state, .attached)
+        XCTAssertTrue(terminal.stoleSurface)
+
+        model.discardTerminal(for: session)
+        await settle()
+        XCTAssertEqual(terminal.state, .closed(.detached))
+        XCTAssertFalse(terminal.stoleSurface)
+    }
+
     /// The gate is the grant, not the screen: a phone that may not open a
     /// terminal is refused here rather than at the socket.
     func testAPhoneWithoutTheTerminalSurfaceIsNeverGivenAConnection() async throws {

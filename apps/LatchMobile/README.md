@@ -155,8 +155,8 @@ still be impossible for a given session, and the resolution is:
 | Setting | Session's connector | Where the tap lands |
 | --- | --- | --- |
 | Terminal | any | the terminal, attaching on arrival |
-| Chat | `claude` / `codex` | chat |
-| Chat | none (a plain shell) | the terminal, *not* attaching — the person asked for chat, so the steal is not implied by that tap |
+| Chat | `claude` / `codex` | chat, claiming the session surface on arrival |
+| Chat | none (a plain shell) | the terminal, attaching on arrival |
 | Chat | unknown (a Mac too old to report the field) | chat, exactly as before this feature existed |
 
 Each row in **Sessions** carries a trailing glyph naming its destination, so
@@ -181,12 +181,13 @@ Holding `control` is necessary but not sufficient. `TerminalUnlock` runs
 fallback rather than a refusal — before a `TerminalSession` is handed out, and
 caches one passed check for five minutes so attaching, reading something else,
 and reattaching costs one prompt rather than three. A phone with no passcode
-set at all is refused outright. This gate is chat's problem to not have:
-conversations open with no biometric check, because the terminal is the one
-surface that runs arbitrary commands on the Mac. A terminal held with nobody
-watching is also given up on its own: after two minutes with no input while
-the app is not frontmost, the session is released so the Mac's one terminal
-surface does not stay parked on a backgrounded phone.
+set at all is refused outright. Chat runs the same check because opening a live
+conversation now claims the session's exclusive terminal surface too; its
+terminal stream is drained in the background while the Conversation Hub drives
+what the screen renders. A terminal held with nobody watching is also given up
+on its own: after two minutes with no input while the app is not frontmost, the
+session is released so the Mac's one terminal surface does not stay parked on a
+backgrounded phone.
 
 ### The preview is a still, not a live view
 
@@ -337,10 +338,12 @@ not: it is one-time, enrollment consumed it, and keeping it would undo the point
 The Mac decides what a phone may do — `observe`, `interact`, `control` — and
 the phone displays that answer rather than deciding for itself; an unrecognized
 grant degrades to `observe` rather than to the default. The grant is re-read
-when the pairing screen appears and when the app returns to the foreground, for
-the same reason gateway discovery is repeated on reconnect: state decided
-elsewhere is not assumed to have held. A control plane that no longer knows the
-device reads as a revocation; a network failure does not.
+at startup, when the sessions list appears or is refreshed, when the pairing
+screen appears, and before reconnecting after suspension. That keeps a route
+from snapshotting the permission saved at pairing time after the Mac has
+changed it. A control plane that no longer knows the device reads as a
+revocation; a network failure does not. New pairings begin at `control`, so
+terminal access is on until the Mac owner switches it off.
 
 Unpairing from the phone deletes the record and the device identity whether or
 not the control plane can be reached, so the local half of a revoke never

@@ -243,7 +243,7 @@ final class ControlPlaneHostTests: XCTestCase {
 
         let registered = try XCTUnwrap(api.log.pairings.first)
         XCTAssertEqual(registered.pairingID, "0123456789abcdef0123456789abcdef")
-        XCTAssertEqual(registered.permission, .interact)
+        XCTAssertEqual(registered.permission, .control)
         XCTAssertNotEqual(registered.secretDigest, String(repeating: "a", count: 64))
         XCTAssertEqual(
             registered.secretDigest,

@@ -842,7 +842,7 @@ final class ControlPlaneHost {
         _ material: PairingMaterial,
         publicKey: String,
         macName: String,
-        permission: DevicePermission = .interact
+        permission: DevicePermission = .control
     ) async throws -> PairingMaterial {
         guard let address else { throw ControlPlaneHostError.notConfigured }
         let api = apiFactory(address)

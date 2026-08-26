@@ -14,7 +14,7 @@ public enum DevicePermission: String, Codable, CaseIterable, Equatable, Sendable
     case control
 
     /// What the Mac grants a newly paired phone.
-    public static let `default` = DevicePermission.interact
+    public static let `default` = DevicePermission.control
 
     public var label: String {
         switch self {

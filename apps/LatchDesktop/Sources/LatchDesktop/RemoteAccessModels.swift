@@ -15,8 +15,8 @@ enum DevicePermission: String, Codable, CaseIterable, Identifiable, Sendable {
     var label: String {
         switch self {
         case .observe: return "Observe"
-        case .interact: return "Interact"
-        case .control: return "Control"
+        case .interact: return "Control"
+        case .control: return "Control + Terminal"
         }
     }
 
@@ -27,7 +27,7 @@ enum DevicePermission: String, Codable, CaseIterable, Identifiable, Sendable {
         case .interact:
             return "Also send messages and resolve prompts."
         case .control:
-            return "Also open the terminal, which takes it from whatever is showing it."
+            return "Control sessions and open the terminal, which takes it from whatever is showing it."
         }
     }
 

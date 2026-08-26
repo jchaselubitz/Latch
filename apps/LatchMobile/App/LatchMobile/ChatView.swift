@@ -9,6 +9,8 @@ struct ChatView: View {
 
     @Environment(AppModel.self) private var appModel
     @State private var store: ConversationStore?
+    @State private var claimedTerminal: TerminalSession?
+    @State private var terminalDrain: Task<Void, Never>?
     @State private var draft = ""
     @FocusState private var composerFocused: Bool
 
@@ -31,6 +33,31 @@ struct ChatView: View {
             guard store == nil else { return }
             store = appModel.conversationStore(for: session)
             store?.start()
+            await claimSessionSurface()
+        }
+        .onDisappear {
+            terminalDrain?.cancel()
+            terminalDrain = nil
+            if claimedTerminal != nil {
+                appModel.discardTerminal(for: session)
+                claimedTerminal = nil
+            }
+        }
+    }
+
+    /// Opening a live chat is an explicit choice to continue that session on
+    /// this phone. Claim its exclusive terminal surface as well, and drain the
+    /// repaint stream even though chat renders from the Conversation Hub; a
+    /// socket whose output nobody reads would eventually be evicted as slow.
+    private func claimSessionSurface() async {
+        guard claimedTerminal == nil,
+              let terminal = await appModel.claimTerminalForChat(for: session)
+        else { return }
+        claimedTerminal = terminal
+        terminalDrain = Task {
+            for await _ in terminal.output {
+                if Task.isCancelled { return }
+            }
         }
     }
 
@@ -77,10 +104,7 @@ struct ChatView: View {
                 Text(detail + " The session's terminal can be opened here instead.")
             } actions: {
                 NavigationLink("Open terminal") {
-                    // Never auto-attach from here. The user arrived asking for
-                    // chat; the steal is not implied by a tap that asked for
-                    // something else.
-                    TerminalView(session: session, autoAttach: false)
+                    TerminalView(session: session, autoAttach: session.isRunning)
                 }
                 .buttonStyle(.borderedProminent)
             }

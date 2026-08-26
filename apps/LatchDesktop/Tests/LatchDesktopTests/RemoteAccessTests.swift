@@ -459,6 +459,12 @@ final class RemoteAccessTests: XCTestCase {
         XCTAssertEqual(terminalHolder.permissionWithoutTerminal, .interact)
     }
 
+    func testDesktopUsesControlLanguageForInteractiveAccess() {
+        XCTAssertEqual(DevicePermission.observe.label, "Observe")
+        XCTAssertEqual(DevicePermission.interact.label, "Control")
+        XCTAssertEqual(DevicePermission.control.label, "Control + Terminal")
+    }
+
     func testPairingDocumentMatchesTheCLIShapeAndCarriesNothingElse() throws {
         let source = """
         {"formatVersion":1,"pairingId":"pid","secret":"sec",\
