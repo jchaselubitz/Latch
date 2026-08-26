@@ -713,7 +713,7 @@ There are three levels, cheapest first.
 2. **Revert the integration.** The merge is a single no-fast-forward commit:
 
    ```text
-   git revert -m 1 <integration merge commit>
+   git revert -m 1 784eada   # "Integrate the latchd headless kernel (Phase A)"
    ```
 
    That removes both crates, the selector, and the CI steps in one commit and
