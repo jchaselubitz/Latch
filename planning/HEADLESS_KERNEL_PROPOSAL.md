@@ -719,9 +719,10 @@ There are three levels, cheapest first.
    That removes both crates, the selector, and the CI steps in one commit and
    returns `main` to a tmux-only build. Nothing else on `main` depends on
    either crate, so the revert is self-contained.
-3. **Rebuild the branch.** The branch
-   `design-latch-headless-terminal-alternative-847` is preserved on `origin`,
-   so a revert is recoverable by re-merging rather than by re-implementing.
+3. **Re-merge rather than re-implement.** The branch ref
+   `design-latch-headless-terminal-alternative-847` still points at the
+   integrated tip (`99a4803`), and a revert does not remove the commits from
+   history, so undoing step 2 is another merge — not a rebuild.
 
 The rollback boundary tightens at Phase B, when the daemon enters the signed
 payload, and again at the default cutover; each of those objectives owns its
