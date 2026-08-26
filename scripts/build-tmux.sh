@@ -78,8 +78,24 @@ tar -xzf "$utf8proc_source" -C "$utf8proc_build" --strip-components=1
 make -C "$utf8proc_build" >/dev/null
 
 libevent_prefix="$(brew --prefix libevent)"
+
+# macOS's <sys/queue.h> has no TAILQ_REPLACE, so tmux's configure clears
+# HAVE_QUEUE_H and compat.h falls back to the bundled OpenBSD compat/queue.h --
+# while <libproc.h>, libevent's <event.h>, and friends have already dragged the
+# SDK header in. compat/queue.h carries its own include guard and no #undefs, so
+# every macro the two headers share is redefined. The layouts are identical and
+# tmux ships this way on every macOS build; the noise is not actionable.
+#
+# tmux already knows this: Makefile.am suppresses exactly these three classes on
+# Darwin, but only under `if IS_DEBUG`, which a release configure never enters.
+# Pass the same set through CFLAGS -- empty in a release build, and appended
+# after AM_CFLAGS -- so the flags upstream considers correct for Darwin also
+# apply to the kernel we ship. Anything outside these three classes still warns.
+tmux_quiet_cflags="-Wno-macro-redefined -Wno-pointer-sign -Wno-deprecated-declarations"
+
 (
   cd "$tmux_build"
+  CFLAGS="$tmux_quiet_cflags" \
   PKG_CONFIG_PATH="$libevent_prefix/lib/pkgconfig" \
   LDFLAGS="-L$libevent_prefix/lib" \
   LIBEVENT_CORE_CFLAGS="-I$libevent_prefix/include" \
