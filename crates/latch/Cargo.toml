@@ -24,6 +24,7 @@ path = "src/lib.rs"
 anyhow.workspace = true
 axum.workspace = true
 clap.workspace = true
+latchd = { path = "../latchd" }
 libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true

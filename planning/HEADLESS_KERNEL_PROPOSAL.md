@@ -422,3 +422,80 @@ which would mean the emulation envelope was measured wrong and tmux's
 `input.c` is load-bearing after all. In that world, the fallback is explicit:
 keep the patched kernel, accept subprocess-and-poll as the Hub's terminal
 interface, and budget a rebase per upstream tmux release.
+
+---
+
+## Part 6 — Phase A, built (coo:847.r29g)
+
+The parity build in Part 5 exists. It is behind the seam, off by default, and
+green on the acceptance gates named above.
+
+### What shipped
+
+- **`crates/latch-term`** — the v1 screen model, restored from the
+  `archive/latch-term-v1` tag unchanged. It is a leaf crate (`vt100` +
+  `thiserror`), and its suite passes as recorded in `DECISION_EMULATOR.md`:
+  the `fixtures/vt/` corpus round-trips at every chunk size, and the
+  wide-character and resize cases hold. The daemon's parser thread *is* a
+  `latch_term::Terminal`.
+- **`crates/latchd`** — one binary, one session:
+  - `pty.rs` — `openpty` + `fork`/`exec`, child as session leader with the
+    slave as controlling terminal, in its own process group (so `-pid`
+    signalling reaches the job, as tmux's `pane_pid` did).
+  - `daemon.rs` — the reader/parser/surface-writer/connection threads of
+    Part 3.2–3.4. The hot path is a byte splice; the parser owns the grid off
+    the event loop; a snapshot is an item *in* the parser queue, so it is
+    answered at its exact stream position (the deferred-parse barrier, as
+    ordinary threading — patch 2 collapses). Slow surfaces are evicted at a
+    4 MiB bound; the child is never stalled.
+  - `protocol.rs` / `client.rs` — length-prefixed JSON control frames, then a
+    raw surface after the attach handshake. `attach_tty` is the human surface:
+    raw mode, paint one frame, splice, restore the tty on every exit path.
+  - `keys.rs`, `render.rs`, `paths.rs` — the `send-keys` name table
+    (mode-aware), the snapshot renderings (`text`/`styled`/`escape`/`json`),
+    and the short per-user socket directory with a `kernel.json` pointer in
+    each session dir.
+- **The seam** — `engine.rs` gained a `Kernel` selector (`LATCH_KERNEL`,
+  default `tmux`). Every verb the inventory in Part 1 listed dispatches to
+  `engine/latchd_kernel.rs` when `latchd` is selected; the returned shapes
+  (`SessionInfo`, `SurfaceRelease`) are unchanged, so nothing above the seam
+  moved. `doctor` checks the daemon instead of tmux on that kernel.
+
+### Gate results
+
+- `cargo test --workspace` (default `tmux` selector): unchanged — the tmux
+  suites, including `tmux_kernel` (23) and the library (121), still pass. The
+  daemon is inert until selected.
+- `crates/latchd` unit + integration: 6 + 14, against the real `latchd`
+  binary — attach-snapshot-then-splice, steal with reasons, control verbs
+  driving a headless child, bracketed-paste-iff-DECSET, history, exit
+  retention and last-frame-on-reattach, slow-client eviction, `output-quiet`
+  and the other events, `await_surface`, `kill`.
+- `crates/latch --test latchd_kernel_e2e` (10, opt-in on a built daemon,
+  serial): the real `latch` binary with `LATCH_KERNEL=latchd` through real
+  PTYs — the same shapes `exclusive_attach_e2e` asserts on patched tmux, plus
+  an engine-level control-plane test that drives a pane through
+  `engine::paste_message` / `send_keys` / `capture_pane`.
+
+### How to run it
+
+```text
+cargo build -p latchd                       # daemon lands next to `latch`
+LATCH_KERNEL=latchd latch create ...        # a session on the daemon kernel
+LATCH_KERNEL=latchd latch attach <id>       # exclusive raw surface
+cargo build -p latchd && \
+  cargo test -p latch --test latchd_kernel_e2e -- --test-threads=1
+```
+
+### What Phase A does *not* yet do (Part 5, Phases B–C)
+
+- No payload/packaging change: `latch update` still ships only `latch-tmux`
+  and `latch-remote`; the daemon is not signed into the release payload, and
+  the gateway PTY host (`cli/serve/pty.rs`) still spawns `latch attach`, which
+  now speaks either kernel by selector but has not been pointed at `latchd` in
+  production.
+- The Hub still calls `capture_pane` / `paste_message`; the event-driven
+  observation path (subscribe to `output-quiet` / `child-exited` instead of
+  polling) is Phase C and is not wired into `conversation/`.
+- Default stays `tmux`. Flipping the default is the Phase B soak decision,
+  not this objective.
