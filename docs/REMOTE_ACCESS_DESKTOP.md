@@ -68,7 +68,51 @@ line and refuses before the request ever reaches `/v1`. The app mirrors the same
 ladder in `DevicePermission.permits(_:)` purely so the UI cannot offer an action
 the device would be refused for. Changing a grant or revoking a device takes
 effect immediately, including for a connection that is already open (the helper
-re-checks device state every 250 ms).
+re-checks device state every 250 ms) — and this includes a *downgrade*, not
+only a revocation: the check compares the live grant against what the
+connected route requires, so dropping a device from `control` to `interact`
+closes its terminal stream while leaving a lesser-permission connection open.
+
+The device row in Settings → Remote Access renders this as two separate
+decisions rather than one severity dropdown: a base-access picker
+(Observe/Interact) and an explicit "Allow terminal" switch mapped to `control`.
+The switch remembers what the device held underneath it, so granting the
+terminal and taking it away again returns the device to Interact or Observe as
+it was, not to a default. New pairings still default to Interact. A grant
+writes the local device store first — that is what the helper enforces — and
+is mirrored to the control plane's pairing row afterward; a mirror failure is
+reported but never rolls the local grant back.
+
+## Keeping the Mac reachable
+
+Two things this app does are specifically about the Mac being reachable while
+nobody is at the keyboard, and one hard constraint neither of them removes.
+
+- **Sleep prevention.** While Remote Access is on and at least one phone is
+  currently connected, the app holds an `IOPMAssertion`
+  (`kIOPMAssertionTypePreventUserIdleSystemSleep`, in `SleepAssertion.swift`)
+  so the Mac does not idle-sleep out from under an open terminal. The
+  assertion is released the moment the last phone disconnects or Remote Access
+  is turned off — it is not held simply because the feature is enabled.
+- **Never relay / Tailscale.** The `neverRelay` switch backs the existing
+  `latch remote-access relay disable` refusal with a matching filter on
+  presence: when set, the Mac publishes only host candidates (dropping
+  server-reflexive ones), and the phone treats a presence host candidate —
+  including a Tailscale `utun` address, `100.x` or the `fd7a:` ULA form — as a
+  plain TCP Noise target with no ICE gathering required. This is what makes a
+  tailnet a usable path with the relay disabled entirely: reachability comes
+  from Tailscale's own routing, not from STUN/TURN.
+- **The constraint neither of these removes: Latch Desktop must be running and
+  the Mac must be awake.** There is no server component independent of this
+  app — the helper it supervises is what holds the gateway and the ICE
+  responder, and a slept or shut-down Mac, or a quit desktop app, presents no
+  presence, answers no rendezvous offer, and accepts no LAN connection. The
+  phone's control-plane 409 `target_offline` case is surfaced as "Your Mac is
+  asleep or Latch is not running" for exactly this reason — it is a statement
+  about this constraint, not a generic network error. Sleep prevention narrows
+  the window (a Mac with an active phone connection will not idle-sleep on its
+  own) but does not eliminate it: a lid close, a manual sleep, a reboot, or
+  quitting the app all still take the Mac offline for remote access.
 
 ## Pairing
 

@@ -3,70 +3,83 @@ import LatchMobileKit
 
 /// Opens one shared-Rust data channel for each loopback request.
 ///
-/// The direct attempt receives only the STUN configuration returned by
-/// `GET /v1/ice-servers`. TURN credentials are not even requested until that
-/// connect fails, so the ICE agent cannot silently select relay first.
+/// The first attempt receives STUN from `GET /v1/ice-servers` and, when the
+/// account allows relay, TURN from `POST /v1/turn-credentials` requested at
+/// the same time. Preferring a direct path is ICE's own job: host and
+/// reflexive candidates outrank relay candidates in the pair priority
+/// formula. Withholding TURN until a direct attempt failed never made direct
+/// more likely — it only charged every phone behind a symmetric NAT or a
+/// UDP-blocking network a full failed attempt before the relay one could
+/// start. A phone whose account has relay disabled gets a 403 here and runs
+/// direct-only; the refusal is the control plane's, not this type's.
+///
+/// Choosing between this and the local network is not this type's job: the
+/// route in `PairedGatewayRoute` tries Bonjour first and only reaches here on
+/// a miss or a failed LAN connect.
 public final class NativeRemoteChannelProvider: RemoteNoiseChannelProvider, @unchecked Sendable {
     private let record: PairedDeviceRecord
     private let signaling: any SignalingClient
-    private let lanFallback: (any RemoteNoiseChannelProvider)?
+    private let pathReporter: RemotePathReporter
     private let policy = RemoteTransportPolicy()
+    private let iceConfiguration = IceConfiguration()
     private var pathChangeHandler: (@Sendable () async -> Void)?
+
+    public convenience init(context: RemoteChannelContext) {
+        self.init(
+            record: context.record,
+            signaling: context.signaling,
+            pathReporter: context.pathReporter,
+            pathChangeHandler: context.onPathChange
+        )
+    }
 
     public init(
         record: PairedDeviceRecord,
         signaling: any SignalingClient,
-        lanFallback: (any RemoteNoiseChannelProvider)? = nil,
+        pathReporter: RemotePathReporter = RemotePathReporter(),
         pathChangeHandler: (@Sendable () async -> Void)? = nil
     ) {
         self.record = record
         self.signaling = signaling
-        self.lanFallback = lanFallback
+        self.pathReporter = pathReporter
         self.pathChangeHandler = pathChangeHandler
     }
 
     public func openChannel() async throws -> any RemoteNoiseChannel {
-        // Bonjour/TCP is the same-network fast path: it reaches the Mac's
-        // authenticated listener directly and still performs the pinned Noise
-        // handshake above this provider. ICE is the fallback only when no LAN
-        // service was discovered. Starting ICE first made a healthy LAN wait
-        // for its ten-second direct timeout, and the desktop does not yet hand
-        // collected rendezvous offers to an ICE responder.
-        if let lanFallback {
-            return try await lanFallback.openChannel()
+        async let stunTask = iceConfiguration.stun {
+            try await self.signaling.iceServers(for: self.record)
         }
-        return try await openNativeChannel()
-    }
-
-    private func openNativeChannel() async throws -> any RemoteNoiseChannel {
-        let stun = try await signaling.iceServers(for: record)
-        let credentials = Self.credentials()
+        async let relayTask = iceConfiguration.relay {
+            try await self.signaling.turnCredentials(for: self.record)
+        }
+        let stun = try await stunTask
+        let relay = await relayTask
         let transport = try await RemoteTransport.gather(
-            credentials: credentials,
-            servers: stun.flatMap(Self.nativeServers)
+            credentials: Self.credentials(),
+            servers: Self.nativeServers(stun + relay.servers)
         )
         do {
-            return try await connect(
-                transport: transport,
-                local: transport.localDescription(),
-                expectedPath: .direct
+            return try await connect(transport: transport, local: transport.localDescription())
+        } catch let failure as ConnectivityFailure {
+            // The only retry left is the one relay was meant to cover: the
+            // first attempt ran direct-only because credential issuance was
+            // unavailable. A refusal is not retried — the control plane has
+            // already said no, and asking again just spends a round trip on a
+            // path that is already failing.
+            guard relay.servers.isEmpty, !relay.refused, transport.connectivityFailed() else {
+                throw failure.underlying
+            }
+            let retry = await iceConfiguration.relay {
+                try await self.signaling.turnCredentials(for: self.record)
+            }
+            guard !retry.servers.isEmpty else { throw failure.underlying }
+            try await policy.authorizeRelayAttempt(servers: retry.servers)
+            let local = try await transport.retryWithRelay(
+                servers: Self.nativeServers(stun + retry.servers)
             )
-        } catch let failure as DirectConnectivityFailure {
-            // This is the sole issuance point for TURN credentials. Noise is
-            // above this provider, so an identity mismatch never reaches it.
-            guard transport.relayRetryAllowed() else { throw failure.underlying }
-            await policy.recordDirectFailure()
-            try await policy.authorizeRelayRetry()
-            let turn = try await signaling.turnCredentials(for: record)
-            let servers = (stun + turn.iceServers).flatMap(Self.nativeServers)
-            let local = try await transport.retryWithRelay(servers: servers)
             do {
-                return try await connect(
-                    transport: transport,
-                    local: local,
-                    expectedPath: .relay
-                )
-            } catch let failure as DirectConnectivityFailure {
+                return try await connect(transport: transport, local: local)
+            } catch let failure as ConnectivityFailure {
                 throw failure.underlying
             }
         }
@@ -74,8 +87,7 @@ public final class NativeRemoteChannelProvider: RemoteNoiseChannelProvider, @unc
 
     private func connect(
         transport: RemoteTransport,
-        local: LocalDescription,
-        expectedPath: SelectedPath
+        local: LocalDescription
     ) async throws -> NativeRemoteNoiseChannel {
         let candidates = LatchMobileKit.TransportCandidate.preferredForPublication(
             local.candidates.map(Self.signalingCandidate)
@@ -99,12 +111,11 @@ public final class NativeRemoteChannelProvider: RemoteNoiseChannelProvider, @unc
                 role: .initiator
             )
         } catch {
-            throw DirectConnectivityFailure(underlying: error)
+            throw ConnectivityFailure(underlying: error)
         }
-        guard selected == expectedPath || (expectedPath == .direct && selected == .direct) else {
-            try? await transport.close()
-            throw ControlPlaneError.transport("The ICE agent selected a path outside the direct-first policy.")
-        }
+        // Whichever pair ICE nominated is the answer: relay is a legitimate
+        // outcome of the first attempt now, and the same pinned Noise session
+        // runs over it either way. The path is reported, not judged.
         await record(path: selected)
         return NativeRemoteNoiseChannel(
             transport: transport,
@@ -114,6 +125,7 @@ public final class NativeRemoteChannelProvider: RemoteNoiseChannelProvider, @unc
 
     private func record(path: SelectedPath) async {
         let policyPath: RemoteTransportPath = path == .relay ? .relay : .direct
+        pathReporter.report(policyPath == .relay ? .relay : .direct)
         let changed = await policy.recordSelectedPath(policyPath)
         if changed, let pathChangeHandler { await pathChangeHandler() }
     }
@@ -129,13 +141,24 @@ public final class NativeRemoteChannelProvider: RemoteNoiseChannelProvider, @unc
         )
     }
 
-    private static func nativeServers(_ server: LatchMobileKit.IceServer) -> [IceServer] {
-        server.urls.map {
-            IceServer(
-                url: $0,
-                username: server.username ?? "",
-                credential: server.credential ?? ""
-            )
+    /// Flattens the control plane's entries into one URL-per-server list.
+    ///
+    /// Cloudflare returns its STUN URL inside the TURN entry as well, so the
+    /// combined list arrives with duplicates. Handing the same URL to the
+    /// agent twice gathers the same reflexive candidate twice, which costs a
+    /// round trip and publishes a redundant candidate in a list capped at
+    /// eight.
+    private static func nativeServers(_ servers: [LatchMobileKit.IceServer]) -> [IceServer] {
+        var seen: Set<String> = []
+        return servers.flatMap { server in
+            server.urls.compactMap { url in
+                guard seen.insert(url).inserted else { return nil }
+                return IceServer(
+                    url: url,
+                    username: server.username ?? "",
+                    credential: server.credential ?? ""
+                )
+            }
         }
     }
 
@@ -178,7 +201,7 @@ public final class NativeRemoteChannelProvider: RemoteNoiseChannelProvider, @unc
     }
 }
 
-private struct DirectConnectivityFailure: Error {
+private struct ConnectivityFailure: Error {
     let underlying: any Error
 }
 
@@ -215,65 +238,17 @@ private final class NativeRemoteNoiseChannel: RemoteNoiseChannel, @unchecked Sen
 }
 
 public enum NativePairedGatewayFactory {
-    /// Production paired path used by the iOS app. The manual HTTPS path and
-    /// Bonjour/TCP fallback remain in LatchMobileKit and are not replaced.
+    /// Production paired path used by the iOS app: the local network first,
+    /// then presence and ICE through the control plane. The manual HTTPS link
+    /// remains a separate, coequal route in LatchMobileKit.
     public static func make(
-        identityStore: any DeviceIdentityStoring = KeychainDeviceIdentityStore()
+        identityStore: any DeviceIdentityStoring = KeychainDeviceIdentityStore(),
+        pathReporter: RemotePathReporter = RemotePathReporter()
     ) -> @Sendable (PairedDeviceRecord) async throws -> LatchGateway {
-        { record in
-            let lanTarget = try await BonjourMacDiscovery()
-                .candidates(matching: record.mac.publicKey)
-                .first
-            let lanFallback = lanTarget.map(LANRemoteNoiseChannelProvider.init)
-            guard let controlPlane = record.controlPlane else {
-                guard let lanTarget else { throw NoiseTunnelError.macNotReachable }
-                let transport = try await NoiseTunnelGatewayTransport.start(
-                    target: lanTarget,
-                    pairedDevice: record,
-                    identityStore: identityStore
-                )
-                return LatchGateway(transport: transport)
-            }
-            let signaling = HTTPControlPlaneClient(baseURL: controlPlane)
-            let rediscovery = GatewayRediscovery()
-            let provider = NativeRemoteChannelProvider(
-                record: record,
-                signaling: signaling,
-                lanFallback: lanFallback,
-                pathChangeHandler: { await rediscovery.run() }
-            )
-            let transport = try await NoiseTunnelGatewayTransport.start(
-                channelProvider: provider,
-                pairedDevice: record,
-                identityStore: identityStore
-            )
-            let gateway = LatchGateway(transport: transport)
-            await rediscovery.install(gateway)
-            return gateway
-        }
-    }
-}
-
-private actor GatewayRediscovery {
-    private var gateway: LatchGateway?
-
-    func install(_ gateway: LatchGateway) {
-        self.gateway = gateway
-    }
-
-    /// A selected-path change invalidates and completes discovery before the
-    /// provider releases the triggering channel to application traffic.
-    func run() async {
-        guard let gateway else { return }
-        await gateway.invalidateDiscovery()
-        _ = try? await gateway.discover()
-    }
-}
-
-private extension NSLock {
-    func withLock<T>(_ body: () throws -> T) rethrows -> T {
-        lock()
-        defer { unlock() }
-        return try body()
+        PairedGatewayRoute.factory(
+            identityStore: identityStore,
+            pathReporter: pathReporter,
+            remoteProvider: { context in NativeRemoteChannelProvider(context: context) }
+        )
     }
 }

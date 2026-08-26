@@ -1,12 +1,17 @@
 # Remote access: phone transport plan
 
-**Status:** design accepted for implementation; supersedes nothing, and adds
-the missing connecting piece between `docs/REMOTE_ACCESS_IMPLEMENTATION_PLAN.md`
-(what the product should be), `docs/DECISION_REMOTE_ACCESS_TRANSPORT.md` (the
-transport boundary contract), and `docs/REMOTE_ACCESS_PHASE_4.md` (what the
-headless platform hardened). It is the plan for making a paired iPhone reach
-the Mac's gateway, which is the one thing none of those documents has yet
-delivered.
+**Status:** implemented. Phases A through F below all landed under mission
+`coo:856`: the two datapath defects are fixed and covered by a round-trip
+test, the Mac publishes real ICE presence and answers rendezvous offers, the
+phone's route tries Bonjour, then presence-plus-ICE, and relay credentials are
+requested from the first attempt rather than after a recorded direct failure.
+What remains open is not implementation but the release gates restated in
+`REMOTE_ACCESS_PHASE_4.md` — independent security review, notarized helper,
+and a soaked relay deployment — plus the physical-network verification tracked
+in `docs/field-runs/`. The rest of this document is kept as the design record
+for how the phone transport was built; treat the table immediately below as
+superseded by the summary above and read it as a historical snapshot of what
+existed before this plan started.
 
 ## The problem in one sentence
 
@@ -18,10 +23,12 @@ connects those two facts, on either end.
 
 ## What actually exists today
 
-Everything below was read, not inferred. Line numbers are current as of this
-document.
+This table is a historical snapshot from before this plan's phases were
+implemented; the "State" column below is deliberately left as it was written,
+as design-record context. For what is true today, see the Status line above
+and, for each piece, the current file it names.
 
-| Piece | Where | State |
+| Piece | Where | State (as of plan start) |
 | --- | --- | --- |
 | Noise XX responder over TCP | `crates/latch/src/cli/remote_access.rs:1764` | Works; no prologue; pins nothing itself — the caller looks the peer static key up in the device store |
 | LAN listener + loopback gateway proxy | `remote_access.rs:1232`, `:1538` | Runs; two defects below stop it carrying a request |
@@ -37,6 +44,21 @@ document.
 | Phone's gateway client | `LatchMobileKit/LatchGateway.swift`, `EventStream.swift` | Complete `/v1` client, but hard-wired to `URLSession` against a typed `GatewayLink` |
 | Phone's X25519 identity | `LatchMobileKit/DeviceIdentity.swift` | Created, Secure-Enclave-wrapped, private key reserved for exactly this handshake |
 | Phone's Noise implementation | — | Does not exist |
+
+### What exists today, after implementation
+
+| Piece | Where | State |
+| --- | --- | --- |
+| ICE responder in the helper | `crates/latch-remote` (`IceResponder`), `crates/latch/src/cli/remote_access.rs` `PeerTransport`/`PeerStream` boundary | Mints short-term ICE credentials, gathers an agent, accepts the `latch-noise-v1` data channel, and runs the same `responder_handshake` + `proxy_connection` (Noise, authorization, 250 ms revocation/downgrade check) as the TCP LAN path |
+| Presence publishing | `RemoteAccessController` (desktop), `remote-access status --json` | Publishes the helper's real gathered ufrag/pwd and host + server-reflexive candidates, including Tailscale `utun` interfaces, ordered reflexive-first then host-by-priority |
+| Mac → helper offer delivery | `remote-access offer` CLI command | Reads one approved rendezvous offer on stdin, validates it, writes it 0600 into the private runtime directory, one file per request id |
+| Phone route selection | `PairedGatewayRoute` in `LatchMobileKit`, `AppModel.pairedGatewayFactory` | Tries Bonjour first; on a miss or LAN-connect failure, reads presence, gathers via `GET /v1/ice-servers` (+ `POST /v1/turn-credentials`), runs rendezvous, and starts `NoiseTunnelGatewayTransport` over `NativeRemoteTransport` |
+| Relay policy | `RemoteTransportPolicy` (`GatewayTransport.swift`), `crates/latch-transport/src/policy.rs` | `PreferDirect`: STUN and TURN are requested together and a relay attempt is allowed from the first try; `relay disable` remains a hard refusal at credential issuance |
+| Terminal grant | `RemoteAccessView`/`RemoteAccessController` (Mac), local device store + control-plane pairing mirror | Explicit "Allow terminal" toggle mapped to the `control` permission, separate from the Observe/Interact base-access picker; new pairings default to Interact |
+| Terminal biometric gate | `TerminalUnlock` in `LatchMobileKit` | `LAContext.deviceOwnerAuthentication` (Face ID/Touch ID, passcode fallback) gates opening a `TerminalSession`, cached for a five-minute grace window; chat is ungated |
+| Idle terminal release | `AppModel.beginTerminalIdleCountdown` / `releaseIdleTerminals` | Releases a held terminal surface after two minutes with no input while the app is not frontmost |
+| Never-relay / Tailscale path | `neverRelay` switch (Mac), presence host-candidate filter, phone's plain-TCP Noise target for `100.x`/tailnet host candidates | A tailnet address is usable as a direct Noise target with no ICE; "never relay" backs the existing relay-disable switch with candidate filtering |
+| Sleep prevention | `SleepAssertion.swift` (`IOPMAssertionCreateWithName`) | Holds an idle-sleep assertion while Remote Access is on and at least one phone is connected, releases it otherwise |
 
 ### The gap is on both ends, and it is not symmetric
 

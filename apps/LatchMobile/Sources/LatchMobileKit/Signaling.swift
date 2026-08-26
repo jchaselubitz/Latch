@@ -428,9 +428,10 @@ public struct RendezvousOffer: Decodable, Equatable, Sendable {
     }
 }
 
-/// Short-lived ICE servers from `POST /v1/turn-credentials`. Requested only
-/// after a direct path has already failed; the account relay switch can
-/// refuse this even when presence is still published.
+/// Short-lived ICE servers from `POST /v1/turn-credentials`. Requested
+/// alongside STUN so relay candidates are gathered in the first attempt; the
+/// account relay switch can still refuse this outright, in which case the
+/// attempt runs direct-only rather than failing.
 public struct TurnCredentials: Decodable, Equatable, Sendable {
     public let iceServers: [IceServer]
     public let expiresAt: UInt64
@@ -467,6 +468,17 @@ public struct IceServer: Decodable, Equatable, Sendable {
         }
         username = try container.decodeIfPresent(String.self, forKey: .username)
         credential = try container.decodeIfPresent(String.self, forKey: .credential)
+    }
+
+    /// Whether any of this entry's URLs can allocate a relayed candidate.
+    ///
+    /// Cloudflare returns STUN and TURN URLs inside one entry, so this is a
+    /// property of the entry rather than a property of the response.
+    public var isTurn: Bool {
+        urls.contains { url in
+            let scheme = url.prefix { $0 != ":" }.lowercased()
+            return scheme == "turn" || scheme == "turns"
+        }
     }
 }
 

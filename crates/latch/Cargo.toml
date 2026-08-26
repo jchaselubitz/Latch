@@ -22,6 +22,7 @@ path = "src/lib.rs"
 # profile pointed at `latch`, every terminal window pays this cost.
 [dependencies]
 anyhow.workspace = true
+async-trait.workspace = true
 axum.workspace = true
 clap.workspace = true
 latchd = { path = "../latchd" }

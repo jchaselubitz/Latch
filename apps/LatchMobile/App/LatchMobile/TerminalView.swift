@@ -26,6 +26,9 @@ struct TerminalView: View {
     @State private var pump: Task<Void, Never>?
     @State private var didOpen = false
     @State private var showStealBanner = false
+    /// Set when the device-owner check refused, so the footer can say why the
+    /// terminal did not open instead of the button appearing to do nothing.
+    @State private var unlockRefusal: String?
 
     private enum PreviewState {
         case loading
@@ -143,9 +146,9 @@ struct TerminalView: View {
             } else {
                 stillWithFooter(
                     label: capturedLabel(value),
-                    detail: session.isRunning
+                    detail: unlockRefusal ?? (session.isRunning
                         ? "Attach to type. That takes the terminal from your Mac."
-                        : "This session is \(session.state). Attaching may find nothing running.",
+                        : "This session is \(session.state). Attaching may find nothing running."),
                     actionTitle: session.isRunning ? "Attach" : "Attach anyway"
                 )
             }
@@ -312,7 +315,7 @@ struct TerminalView: View {
     private func open() async {
         await loadPreview()
         guard autoAttach, session.isRunning else { return }
-        attach()
+        await attach()
     }
 
     private func loadPreview() async {
@@ -341,7 +344,16 @@ struct TerminalView: View {
         surface.feed(bytes)
     }
 
-    private func attach() {
+    /// Takes the surface, after the device owner has confirmed.
+    ///
+    /// The check comes first because everything below it is a steal: by the
+    /// time bytes are flowing the Mac has already lost its terminal.
+    private func attach() async {
+        guard await model.unlockTerminal() else {
+            unlockRefusal = model.terminalUnlockFailure
+            return
+        }
+        unlockRefusal = nil
         guard let terminal = terminalSession() else { return }
         let grid = grid
         // A full reset between the still and the first live byte. The kernel
@@ -357,7 +369,7 @@ struct TerminalView: View {
     /// Reattaching is another steal, so it is always something the user does.
     private func reattach() async {
         if preview.value == nil { await loadPreview() }
-        attach()
+        await attach()
     }
 
     private func terminalSession() -> TerminalSession? {

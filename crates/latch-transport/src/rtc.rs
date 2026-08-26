@@ -32,7 +32,95 @@ use crate::policy::{IceServer, SelectedPath};
 
 const MAX_NOISE_RECORD: usize = u16::MAX as usize;
 const DATA_CHANNEL_LABEL: &str = "latch-noise-v1";
-const ICE_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long the phone waits for a nominated pair.
+///
+/// This is the interactive end: a person is holding the phone watching a
+/// spinner. Relay candidates are now in the first attempt, so the wait no
+/// longer has to cover a direct-only attempt plus a relayed retry, and the
+/// budget can be the one a person will actually sit through.
+const INITIATOR_CONNECT_TIMEOUT: Duration = Duration::from_secs(6);
+
+/// How long the Mac helper waits for the same pair.
+///
+/// The helper is answering in the background with nobody watching it, and
+/// giving up before the phone does would turn a slow network into a failure
+/// the phone reports as the Mac's.
+const RESPONDER_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// The in-memory network used by round-trip tests. See
+/// [`RtcEndpoint::gather_on_test_network`].
+#[doc(hidden)]
+pub type TestNetwork = webrtc_util::vnet::net::Net;
+
+/// How the nominated candidate pair actually reaches the peer.
+///
+/// [`SelectedPath`] answers the policy question — is this relayed or not —
+/// and that is all the policy needs. Field verification needs one step more
+/// resolution: a pair of host candidates means the two devices were on the
+/// same network, while a server-reflexive pair means a hole was punched
+/// through at least one NAT. Collapsing those two into "direct" makes a
+/// cellular-to-home-NAT success indistinguishable from a phone sitting on the
+/// same Wi-Fi, which is exactly the distinction the direct-versus-relay rate
+/// is supposed to measure.
+///
+/// It is derived from candidate types only. No address, port, or interface
+/// name is retained.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SelectedRoute {
+    /// Both ends nominated a host candidate: same LAN, or a tunnel interface
+    /// such as a tailnet that presents as one.
+    Host,
+    /// At least one end is server- or peer-reflexive: NAT traversal worked.
+    Reflexive,
+    /// At least one end is relayed: the bytes take the TURN detour.
+    Relay,
+}
+
+impl SelectedRoute {
+    /// Sentinel stored before any pair is nominated.
+    const UNOBSERVED: u8 = 0;
+
+    /// Classifies a nominated pair by its worse half.
+    ///
+    /// A pair is only as direct as its least direct end: one relayed
+    /// candidate means every byte is relayed regardless of what the other end
+    /// contributed.
+    fn of(local: CandidateType, remote: CandidateType) -> Self {
+        if local == CandidateType::Relay || remote == CandidateType::Relay {
+            Self::Relay
+        } else if local == CandidateType::Host && remote == CandidateType::Host {
+            Self::Host
+        } else {
+            Self::Reflexive
+        }
+    }
+
+    fn code(self) -> u8 {
+        match self {
+            Self::Host => 1,
+            Self::Reflexive => 2,
+            Self::Relay => 3,
+        }
+    }
+
+    fn from_code(code: u8) -> Option<Self> {
+        match code {
+            1 => Some(Self::Host),
+            2 => Some(Self::Reflexive),
+            3 => Some(Self::Relay),
+            _ => None,
+        }
+    }
+
+    /// Stable slug for counters and the audit trail.
+    pub fn slug(self) -> &'static str {
+        match self {
+            Self::Host => "host",
+            Self::Reflexive => "reflexive",
+            Self::Relay => "relay",
+        }
+    }
+}
 
 /// ICE role and corresponding DTLS/SCTP role.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -183,6 +271,21 @@ impl RtcEndpoint {
         Self::gather_with_network(credentials, servers, false, None).await
     }
 
+    /// Test-support gathering on an in-memory network.
+    ///
+    /// A round-trip test must not depend on the machine running it having a
+    /// routable interface, and loopback candidates are excluded from real
+    /// gathering on purpose. This is the only way to exercise the full
+    /// ICE/DTLS/SCTP path deterministically; nothing in production calls it.
+    #[doc(hidden)]
+    pub async fn gather_on_test_network(
+        credentials: IceCredentials,
+        servers: &[IceServer],
+        net: Arc<TestNetwork>,
+    ) -> Result<(Self, LocalDescription), RtcError> {
+        Self::gather_with_network(credentials, servers, true, Some(net)).await
+    }
+
     async fn gather_with_network(
         credentials: IceCredentials,
         servers: &[IceServer],
@@ -232,18 +335,12 @@ impl RtcEndpoint {
                 let _ = candidate_tx.send(candidate).await;
             })
         }));
-        let selected_path = Arc::new(AtomicU8::new(0));
+        let selected_path = Arc::new(AtomicU8::new(SelectedRoute::UNOBSERVED));
         agent.on_selected_candidate_pair_change(Box::new({
             let selected_path = Arc::clone(&selected_path);
             move |local, remote| {
-                let path = if local.candidate_type() == CandidateType::Relay
-                    || remote.candidate_type() == CandidateType::Relay
-                {
-                    2
-                } else {
-                    1
-                };
-                selected_path.store(path, Ordering::Release);
+                let route = SelectedRoute::of(local.candidate_type(), remote.candidate_type());
+                selected_path.store(route.code(), Ordering::Release);
                 Box::pin(async {})
             }
         }));
@@ -285,7 +382,7 @@ impl RtcEndpoint {
         let (_cancel_tx, cancel_rx) = mpsc::channel(1);
         let ice: Arc<dyn ModernConn + Send + Sync> = match role {
             Role::Initiator => tokio::time::timeout(
-                ICE_CONNECT_TIMEOUT,
+                INITIATOR_CONNECT_TIMEOUT,
                 self.agent.dial(
                     cancel_rx,
                     remote.credentials.ufrag,
@@ -293,10 +390,10 @@ impl RtcEndpoint {
                 ),
             )
             .await
-            .map_err(|_| RtcError::Stack("ICE direct attempt timed out".into()))?
+            .map_err(|_| RtcError::Stack("ICE connectivity checks timed out".into()))?
             .map_err(stack)?,
             Role::Responder => tokio::time::timeout(
-                ICE_CONNECT_TIMEOUT,
+                RESPONDER_CONNECT_TIMEOUT,
                 self.agent.accept(
                     cancel_rx,
                     remote.credentials.ufrag,
@@ -304,7 +401,7 @@ impl RtcEndpoint {
                 ),
             )
             .await
-            .map_err(|_| RtcError::Stack("ICE direct attempt timed out".into()))?
+            .map_err(|_| RtcError::Stack("ICE connectivity checks timed out".into()))?
             .map_err(stack)?,
         };
         let selected_path = self.selected_path;
@@ -373,10 +470,18 @@ pub struct RtcConnection {
 impl RtcConnection {
     /// Selected ICE path.
     pub fn selected_path(&self) -> SelectedPath {
-        match self.selected_path.load(Ordering::Acquire) {
-            2 => SelectedPath::Relay,
+        match self.selected_route() {
+            Some(SelectedRoute::Relay) => SelectedPath::Relay,
             _ => SelectedPath::Direct,
         }
+    }
+
+    /// The nominated pair's route, at the granularity metrics need.
+    ///
+    /// `None` means no pair was ever nominated on this agent, which a
+    /// connected channel should not produce but a torn-down one can.
+    pub fn selected_route(&self) -> Option<SelectedRoute> {
+        SelectedRoute::from_code(self.selected_path.load(Ordering::Acquire))
     }
 
     /// Writes one Noise ciphertext record.
@@ -514,6 +619,9 @@ fn legacy_error(error: impl std::fmt::Display) -> webrtc_util_legacy::Error {
 fn modern_error(error: impl std::fmt::Display) -> webrtc_util::Error {
     webrtc_util::Error::Other(error.to_string())
 }
+
+#[cfg(test)]
+mod nat_tests;
 
 #[cfg(test)]
 mod tests {

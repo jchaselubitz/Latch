@@ -34,14 +34,8 @@ impl IceServer {
 /// Why the shared policy refused or lost a connection.
 #[derive(Debug, Error, Eq, PartialEq)]
 pub enum TransportPolicyError {
-    /// TURN was exposed to the first attempt, which would allow an unrecorded relay.
-    #[error("TURN credentials are withheld until a direct attempt fails")]
-    TurnBeforeDirectFailure,
-    /// Relay retry was requested without a prior failed direct attempt.
-    #[error("relay retry requires a recorded direct failure")]
-    RelayWithoutDirectFailure,
     /// The credential response contained no TURN service.
-    #[error("relay retry requires at least one TURN server")]
+    #[error("a relay attempt requires at least one TURN server")]
     MissingTurnServer,
     /// Noise proved a key other than the pairing record's pinned key.
     #[error("the remote Noise identity does not match the paired Mac")]
@@ -73,18 +67,26 @@ pub trait ConnectionBackend: Send {
     ) -> Result<Connected<Self::Channel>, TransportPolicyError>;
 }
 
-/// Direct-first coordinator.
+/// Prefer-direct coordinator.
 ///
-/// The coordinator enforces policy by withholding TURN URLs from the first
-/// agent. A relay-capable retry is impossible until that attempt has failed.
-pub struct DirectFirst<B> {
+/// Relay servers are permitted from the first attempt. Preferring a direct
+/// path is ICE's own job: host and server-reflexive candidates outrank relay
+/// candidates in the pair priority formula, so an agent that can complete a
+/// direct pair nominates it even when a TURN allocation is sitting there. What
+/// withholding TURN bought was not a stronger preference, only a guaranteed
+/// second round trip for every phone that is genuinely behind a symmetric NAT
+/// or a UDP-blocking network — paid before the relay attempt could even start.
+///
+/// Refusing relay outright remains possible, but it is enforced where the
+/// credentials are minted (the control plane refuses issuance for an account
+/// with relay disabled), not by a client-side ordering rule.
+pub struct PreferDirect<B> {
     backend: B,
-    direct_failed: bool,
     selected_path: Option<SelectedPath>,
     rediscovery_required: bool,
 }
 
-impl<B> DirectFirst<B>
+impl<B> PreferDirect<B>
 where
     B: ConnectionBackend,
 {
@@ -92,40 +94,34 @@ where
     pub fn new(backend: B) -> Self {
         Self {
             backend,
-            direct_failed: false,
             selected_path: None,
             rediscovery_required: false,
         }
     }
 
-    /// Attempts a direct connection with STUN only.
-    pub async fn connect_direct(
+    /// Attempts a connection with every server the caller obtained.
+    ///
+    /// STUN alone is a valid input: an account with relay disabled, or a
+    /// credential service that is unavailable, reaches here with no TURN URL
+    /// and the attempt is direct-only rather than refused.
+    pub async fn connect(
         &mut self,
         servers: &[IceServer],
     ) -> Result<Connected<B::Channel>, TransportPolicyError> {
-        if servers.iter().any(IceServer::is_turn) {
-            return Err(TransportPolicyError::TurnBeforeDirectFailure);
-        }
-        match self.backend.connect(servers).await {
-            Ok(connected) => {
-                self.record_path(connected.path);
-                Ok(connected)
-            }
-            Err(error) => {
-                self.direct_failed = true;
-                Err(error)
-            }
-        }
+        let connected = self.backend.connect(servers).await?;
+        self.record_path(connected.path);
+        Ok(connected)
     }
 
-    /// Retries with TURN after a recorded direct failure.
+    /// Retries with TURN after an attempt that had none.
+    ///
+    /// This is the recovery path for a first attempt that ran direct-only
+    /// because credential issuance failed, not a policy gate: a caller that
+    /// already had TURN servers has no reason to come back here.
     pub async fn retry_with_relay(
         &mut self,
         servers: &[IceServer],
     ) -> Result<Connected<B::Channel>, TransportPolicyError> {
-        if !self.direct_failed {
-            return Err(TransportPolicyError::RelayWithoutDirectFailure);
-        }
         if !servers.iter().any(IceServer::is_turn) {
             return Err(TransportPolicyError::MissingTurnServer);
         }
@@ -217,7 +213,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn turn_is_withheld_until_direct_fails() {
+    async fn turn_is_offered_to_the_first_attempt() {
+        let backend = FakeBackend {
+            results: VecDeque::from([Ok(SelectedPath::Direct)]),
+            calls: vec![],
+        };
+        let mut policy = PreferDirect::new(backend);
+
+        assert_eq!(
+            policy.connect(&[stun(), turn()]).await.unwrap().path,
+            SelectedPath::Direct
+        );
+        assert!(policy.backend.calls[0].iter().any(IceServer::is_turn));
+    }
+
+    #[tokio::test]
+    async fn a_direct_only_attempt_can_still_be_retried_with_relay() {
         let backend = FakeBackend {
             results: VecDeque::from([
                 Err(TransportPolicyError::Backend("direct failed".into())),
@@ -225,13 +236,9 @@ mod tests {
             ]),
             calls: vec![],
         };
-        let mut policy = DirectFirst::new(backend);
+        let mut policy = PreferDirect::new(backend);
 
-        assert_eq!(
-            policy.connect_direct(&[stun(), turn()]).await.unwrap_err(),
-            TransportPolicyError::TurnBeforeDirectFailure
-        );
-        assert!(policy.connect_direct(&[stun()]).await.is_err());
+        assert!(policy.connect(&[stun()]).await.is_err());
         assert_eq!(
             policy
                 .retry_with_relay(&[stun(), turn()])
@@ -247,15 +254,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn relay_without_direct_failure_is_refused_without_calling_backend() {
+    async fn a_relay_retry_without_a_turn_server_never_reaches_the_backend() {
         let backend = FakeBackend {
             results: VecDeque::new(),
             calls: vec![],
         };
-        let mut policy = DirectFirst::new(backend);
+        let mut policy = PreferDirect::new(backend);
         assert_eq!(
-            policy.retry_with_relay(&[turn()]).await.unwrap_err(),
-            TransportPolicyError::RelayWithoutDirectFailure
+            policy.retry_with_relay(&[stun()]).await.unwrap_err(),
+            TransportPolicyError::MissingTurnServer
         );
         assert!(policy.backend.calls.is_empty());
     }
@@ -275,7 +282,7 @@ mod tests {
             results: VecDeque::new(),
             calls: vec![],
         };
-        let mut policy = DirectFirst::new(backend);
+        let mut policy = PreferDirect::new(backend);
         policy.path_changed(SelectedPath::Relay);
         assert!(!policy.take_rediscovery_required());
         policy.path_changed(SelectedPath::Direct);

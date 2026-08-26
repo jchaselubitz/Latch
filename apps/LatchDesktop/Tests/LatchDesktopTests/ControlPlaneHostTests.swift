@@ -12,6 +12,11 @@ private final class StubControlPlaneHostAPI: ControlPlaneHostAPI, @unchecked Sen
         let permission: DevicePermission
         let deviceToken: String
     }
+    struct PermissionMirror: Sendable {
+        let clientDeviceID: String
+        let permission: DevicePermission
+        let deviceToken: String
+    }
     struct Presence: Sendable {
         let deviceToken: String
         let candidates: [ControlPlaneCandidate]
@@ -23,6 +28,7 @@ private final class StubControlPlaneHostAPI: ControlPlaneHostAPI, @unchecked Sen
         var enrollments: [Enrollment] = []
         var rotations: [Rotation] = []
         var pairings: [Pairing] = []
+        var permissionMirrors: [PermissionMirror] = []
         var presences: [Presence] = []
         var presenceClears: [String] = []
         var relaySettings: [Bool] = []
@@ -93,6 +99,24 @@ private final class StubControlPlaneHostAPI: ControlPlaneHostAPI, @unchecked Sen
             Pairing(
                 pairingID: pairingID,
                 secretDigest: secretDigest,
+                permission: permission,
+                deviceToken: deviceToken
+            )
+        )
+        lock.unlock()
+        if let refusal = takeRefusal() { throw refusal }
+        if let failure { throw failure }
+    }
+
+    func setPairingPermission(
+        deviceToken: String,
+        clientDeviceID: String,
+        permission: DevicePermission
+    ) async throws {
+        lock.lock()
+        recorded.permissionMirrors.append(
+            PermissionMirror(
+                clientDeviceID: clientDeviceID,
                 permission: permission,
                 deviceToken: deviceToken
             )
@@ -219,7 +243,7 @@ final class ControlPlaneHostTests: XCTestCase {
 
         let registered = try XCTUnwrap(api.log.pairings.first)
         XCTAssertEqual(registered.pairingID, "0123456789abcdef0123456789abcdef")
-        XCTAssertEqual(registered.permission, .interact)
+        XCTAssertEqual(registered.permission, .control)
         XCTAssertNotEqual(registered.secretDigest, String(repeating: "a", count: 64))
         XCTAssertEqual(
             registered.secretDigest,
@@ -278,6 +302,36 @@ final class ControlPlaneHostTests: XCTestCase {
         XCTAssertEqual(api.log.rotations.map(\.publicKey), [rotated])
         XCTAssertEqual(api.log.enrollments.count, 1)
         XCTAssertEqual(try store.load()?.publicKey, rotated)
+    }
+
+    /// A grant change made on this Mac is restated in the directory the phone
+    /// reads its own permission from, at the pairing row rather than as a new
+    /// pairing.
+    func testAGrantChangeIsMirroredIntoTheDirectory() async throws {
+        let api = StubControlPlaneHostAPI()
+        let store = MemoryHostEnrollmentStore()
+        let host = makeHost(api: api, store: store)
+        try host.setAddress("https://control.example")
+        _ = try await host.enrollment(publicKey: macKey, name: "Studio Mac")
+
+        try await host.mirrorPermission(clientDeviceID: "dev_phone", permission: .control)
+
+        XCTAssertEqual(api.log.permissionMirrors.map(\.clientDeviceID), ["dev_phone"])
+        XCTAssertEqual(api.log.permissionMirrors.map(\.permission), [.control])
+        XCTAssertTrue(api.log.pairings.isEmpty)
+    }
+
+    /// A Mac with no control plane has no directory to mirror into. The local
+    /// grant is still the one that decides, so this refuses rather than
+    /// silently enrolling to satisfy a UI action.
+    func testMirroringAGrantWithoutAControlPlaneIsRefused() async {
+        let host = makeHost(api: StubControlPlaneHostAPI(), store: MemoryHostEnrollmentStore())
+        do {
+            try await host.mirrorPermission(clientDeviceID: "dev_phone", permission: .control)
+            XCTFail("an unconfigured Mac must not mirror a grant")
+        } catch {
+            XCTAssertEqual(error as? ControlPlaneHostError, .notConfigured)
+        }
     }
 
     /// Credentials issued by one deployment name nothing in another, so a

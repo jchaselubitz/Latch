@@ -113,6 +113,28 @@ a tunnel to it, not the gateway itself:
 Rotating the token with `latch serve token` invalidates it for new connections
 immediately; re-link in Settings afterwards.
 
+A paired Mac (see *Pairing with a Mac* below) reaches the same gateway without
+any of this: the app tries Bonjour on the local network first, and on a miss —
+or a LAN connect that fails — falls through to reading the Mac's published
+presence and connecting over WebRTC ICE, requesting STUN and (unless the Mac
+has relay disabled) Cloudflare TURN credentials together so a relay attempt is
+available from the first try rather than only after a direct one fails.
+Settings shows a **Path** row under the linked computer — Local network,
+Direct, or Relay — naming whichever one the current connection actually used.
+
+In every case the Mac itself is the thing that has to be reachable: **Latch
+Desktop must be running and the Mac must be awake.** There is no server
+component independent of the desktop app, so a slept, shut-down, or
+Latch-quit Mac answers nothing. A `409 target_offline` reaching for a paired
+Mac renders as "Your Mac is asleep or Latch is not running" rather than a raw
+protocol error, because that is the actual cause almost every time this
+appears.
+
+On a Mac with `latch remote-access relay disable` (or the desktop's "never
+relay" switch) turned on, a Tailscale/tailnet address the Mac publishes in its
+presence is used directly as a Noise target over plain TCP — no ICE gathering
+required — so a tailnet remains a working path with relay refused outright.
+
 ## The terminal view
 
 A session with no Claude or Codex connector — every plain shell, and every
@@ -133,8 +155,8 @@ still be impossible for a given session, and the resolution is:
 | Setting | Session's connector | Where the tap lands |
 | --- | --- | --- |
 | Terminal | any | the terminal, attaching on arrival |
-| Chat | `claude` / `codex` | chat |
-| Chat | none (a plain shell) | the terminal, *not* attaching — the person asked for chat, so the steal is not implied by that tap |
+| Chat | `claude` / `codex` | chat, claiming the session surface on arrival |
+| Chat | none (a plain shell) | the terminal, attaching on arrival |
 | Chat | unknown (a Mac too old to report the field) | chat, exactly as before this feature existed |
 
 Each row in **Sessions** carries a trailing glyph naming its destination, so
@@ -151,6 +173,21 @@ lesser grant is told which of the two problems it has: too little permission,
 or a Mac too old to advertise the route at all. A manually entered `latch
 serve` link is unrestricted, because it carries no grant header and the gateway
 grants loopback requests control.
+
+### Opening it requires the device owner, not just the device
+
+Holding `control` is necessary but not sufficient. `TerminalUnlock` runs
+`LAContext.deviceOwnerAuthentication` — Face ID or Touch ID, passcode as a
+fallback rather than a refusal — before a `TerminalSession` is handed out, and
+caches one passed check for five minutes so attaching, reading something else,
+and reattaching costs one prompt rather than three. A phone with no passcode
+set at all is refused outright. Chat runs the same check because opening a live
+conversation now claims the session's exclusive terminal surface too; its
+terminal stream is drained in the background while the Conversation Hub drives
+what the screen renders. A terminal held with nobody watching is also given up
+on its own: after two minutes with no input while the app is not frontmost, the
+session is released so the Mac's one terminal surface does not stay parked on a
+backgrounded phone.
 
 ### The preview is a still, not a live view
 
@@ -301,10 +338,12 @@ not: it is one-time, enrollment consumed it, and keeping it would undo the point
 The Mac decides what a phone may do — `observe`, `interact`, `control` — and
 the phone displays that answer rather than deciding for itself; an unrecognized
 grant degrades to `observe` rather than to the default. The grant is re-read
-when the pairing screen appears and when the app returns to the foreground, for
-the same reason gateway discovery is repeated on reconnect: state decided
-elsewhere is not assumed to have held. A control plane that no longer knows the
-device reads as a revocation; a network failure does not.
+at startup, when the sessions list appears or is refreshed, when the pairing
+screen appears, and before reconnecting after suspension. That keeps a route
+from snapshotting the permission saved at pairing time after the Mac has
+changed it. A control plane that no longer knows the device reads as a
+revocation; a network failure does not. New pairings begin at `control`, so
+terminal access is on until the Mac owner switches it off.
 
 Unpairing from the phone deletes the record and the device identity whether or
 not the control plane can be reached, so the local half of a revoke never
@@ -387,11 +426,19 @@ gateway offers*, so a missing control has a stated reason.
   facts and remain unverified.
 - Terminal scrollback begins at the attach. See *Scrollback, honestly* above;
   it follows from exclusive attach rather than from this app.
-- A paired phone uses the pinned Noise tunnel for its session list. Direct ICE
-  is attempted before Cloudflare TURN credentials
-  are requested; the manually entered `latch serve` link remains a coequal
-  route. Physical NAT, cellular, captive-portal, sleep/wake, and relay-soak
-  validation are release gates rather than completed device evidence.
+- A paired phone uses the pinned Noise tunnel for its session list, reaching
+  the Mac by Bonjour first and falling through to presence-plus-ICE off the
+  local network; the manually entered `latch serve` link remains a coequal
+  route. STUN and TURN are now requested together so relay is available from
+  the first attempt rather than only after a direct failure, and ICE's own
+  pair priority is what keeps a reachable direct path preferred. Physical NAT,
+  cellular, captive-portal, sleep/wake, and relay-soak validation are release
+  gates rather than completed device evidence — see
+  `docs/REMOTE_ACCESS_PHASE_4.md` in the Latch repository for what has and has
+  not been run.
+- The terminal's Face ID/passcode gate has not been exercised on a physical
+  device with biometric enrollment; the simulator has none. The permission
+  logic around it (grant-only vs. grant-plus-owner-check) is under unit test.
 - Conversation actions remain unavailable until the Hub implementation lands.
 - One linked computer at a time.
 - The session list does not refresh on its own; pull to refresh.

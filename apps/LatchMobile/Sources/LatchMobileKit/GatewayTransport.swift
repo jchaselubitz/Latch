@@ -8,25 +8,34 @@ public enum RemoteTransportPath: Sendable {
 }
 
 public enum RemoteTransportPolicyError: Error, Equatable, Sendable {
-    case relayBeforeDirectFailure
+    /// A relay attempt was assembled without a relay server to attempt it with.
+    case missingTurnServer
 }
 
 /// Small platform-independent state machine mirrored by the Rust boundary.
 /// Keeping it in the kit makes relay issuance and capability invalidation
 /// testable without an XCFramework or simulator.
+///
+/// Relay servers are allowed into the first attempt. Preferring a direct path
+/// is ICE's own job — host and reflexive candidates outrank relay candidates
+/// in the pair priority formula — so withholding TURN never made direct more
+/// likely, it only guaranteed a second round trip for every phone that could
+/// not get there directly. Refusing relay outright is still possible, but it
+/// is enforced where the credentials are minted: the control plane returns 403
+/// for an account with relay disabled, and this policy never manufactures a
+/// server the control plane declined to issue.
 public actor RemoteTransportPolicy {
-    private var directFailed = false
     private var selectedPath: RemoteTransportPath?
 
     public init() {}
 
-    public func recordDirectFailure() {
-        directFailed = true
-    }
-
-    public func authorizeRelayRetry() throws {
-        guard directFailed else {
-            throw RemoteTransportPolicyError.relayBeforeDirectFailure
+    /// Checks that a relay attempt actually has a relay server behind it.
+    ///
+    /// This is the recovery path for an attempt that ran direct-only because
+    /// credential issuance failed, not a gate on issuance itself.
+    public func authorizeRelayAttempt(servers: [IceServer]) throws {
+        guard servers.contains(where: \.isTurn) else {
+            throw RemoteTransportPolicyError.missingTurnServer
         }
     }
 
@@ -91,19 +100,86 @@ public protocol RemoteNoiseChannelProvider: Sendable {
     func openChannel() async throws -> any RemoteNoiseChannel
 }
 
-/// The control-plane-free Bonjour/TCP provider retained alongside ICE.
+/// A plain TCP channel to the Mac's authenticated listener.
+///
+/// Two routes share it: a Bonjour result on the local network, and a host
+/// address the Mac published as presence — which is how a tailnet works with no
+/// ICE involved at all, because a Tailscale address is just another interface
+/// the listener is bound on. Nothing is trusted more for having come from one
+/// of those than the other; the pinned Noise handshake runs over both.
+///
+/// `openChannel` waits for the connection to be established rather than
+/// returning an optimistic one. A caller that falls through to another target
+/// needs to learn here that this one failed: handing back a channel whose
+/// connect is still in flight moves the failure into the Noise handshake, where
+/// there is no other target left to try.
 public struct LANRemoteNoiseChannelProvider: RemoteNoiseChannelProvider, @unchecked Sendable {
+    /// Long enough for a tailnet address that has to bring a tunnel up, short
+    /// enough that a list of interface addresses — most of which this phone
+    /// cannot route to — does not take a minute to walk.
+    public static let defaultConnectTimeout = Duration.seconds(4)
+
     private let target: NoiseTunnelTarget
+    private let connectTimeout: Duration
     private let queue = DispatchQueue(label: "dev.cooperativ.latch.lan-noise-channel")
 
-    public init(target: NoiseTunnelTarget) {
+    public init(
+        target: NoiseTunnelTarget,
+        connectTimeout: Duration = LANRemoteNoiseChannelProvider.defaultConnectTimeout
+    ) {
         self.target = target
+        self.connectTimeout = connectTimeout
     }
 
     public func openChannel() async throws -> any RemoteNoiseChannel {
         let connection = NWConnection(to: target.endpoint, using: .tcp)
-        connection.start(queue: queue)
+        do {
+            try await Self.start(connection, on: queue, within: connectTimeout)
+        } catch {
+            connection.cancel()
+            throw error
+        }
         return NWConnectionNoiseChannel(connection: connection)
+    }
+
+    private static func start(
+        _ connection: NWConnection,
+        on queue: DispatchQueue,
+        within timeout: Duration
+    ) async throws {
+        let completion = ContinuationGuard()
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask {
+                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                    connection.stateUpdateHandler = { state in
+                        switch state {
+                        case .ready:
+                            guard completion.markCompleted() else { return }
+                            continuation.resume()
+                        case .failed(let error):
+                            guard completion.markCompleted() else { return }
+                            continuation.resume(throwing: NoiseError.transport(error.localizedDescription))
+                        case .cancelled:
+                            guard completion.markCompleted() else { return }
+                            continuation.resume(throwing: NoiseTunnelError.macNotReachable)
+                        default:
+                            break
+                        }
+                    }
+                    connection.start(queue: queue)
+                }
+            }
+            group.addTask {
+                try await Task.sleep(for: timeout)
+                // Cancelling drives the handler above, so the waiting task is
+                // resumed by the same path a real failure takes rather than by
+                // a second continuation nobody owns.
+                connection.cancel()
+                throw NoiseTunnelError.macNotReachable
+            }
+            defer { group.cancelAll() }
+            try await group.next()
+        }
     }
 }
 
@@ -177,6 +253,24 @@ public enum NoiseTunnelError: Error, Equatable, Sendable, LocalizedError {
     }
 }
 
+/// Guards a continuation against being resumed twice. `stateUpdateHandler`
+/// runs serially on the queue passed to `start`, but that guarantee is not
+/// visible to the Swift 6 concurrency checker, so the flag is kept behind
+/// a lock rather than as a captured `var`.
+final class ContinuationGuard: @unchecked Sendable {
+    private let lock = NSLock()
+    private var completed = false
+
+    /// Returns `true` the first time it is called, `false` after that.
+    func markCompleted() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !completed else { return false }
+        completed = true
+        return true
+    }
+}
+
 /// A listener-backed paired transport.
 ///
 /// There is one fresh Noise session for every inbound loopback connection.
@@ -184,6 +278,9 @@ public enum NoiseTunnelError: Error, Equatable, Sendable, LocalizedError {
 /// requests are one authorized operation and the sole long-lived exception is
 /// the WebSocket connection URLSession itself keeps open.
 public final class NoiseTunnelGatewayTransport: GatewayTransport, @unchecked Sendable {
+    /// Marks a 502 the phone wrote itself. No gateway sends this code.
+    static let tunnelFailureCode = "tunnel_unreachable"
+
     public let gatewayLink: GatewayLink
 
     private let listener: NWListener
@@ -333,23 +430,6 @@ public final class NoiseTunnelGatewayTransport: GatewayTransport, @unchecked Sen
         }
     }
 
-    /// Guards a continuation against being resumed twice. `stateUpdateHandler`
-    /// runs serially on the queue passed to `start`, but that guarantee is not
-    /// visible to the Swift 6 concurrency checker, so the flag is kept behind
-    /// a lock rather than as a captured `var`.
-    private final class ContinuationGuard: @unchecked Sendable {
-        private let lock = NSLock()
-        private var completed = false
-
-        /// Returns `true` the first time it is called, `false` after that.
-        func markCompleted() -> Bool {
-            lock.lock()
-            defer { lock.unlock() }
-            guard !completed else { return false }
-            completed = true
-            return true
-        }
-    }
 
     private func accept(_ loopback: NWConnection) async {
         loopback.start(queue: queue)
@@ -453,8 +533,16 @@ public final class NoiseTunnelGatewayTransport: GatewayTransport, @unchecked Sen
         // This is intentionally a response rather than silently stripping a
         // header: URLSession gets a useful local failure and a future caller
         // cannot accidentally leak a credential into the paired transport.
-        let body = reason + "\n"
-        let response = "HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: \(body.utf8.count)\r\n\r\n\(body)"
+        //
+        // It is sent in the gateway's own error shape, tagged with a code no
+        // gateway uses, so the client can tell "this phone could not reach
+        // your Mac" from "your Mac answered with an error" and show the
+        // sentence rather than a status line.
+        let body = (try? JSONSerialization.data(withJSONObject: [
+            "error": Self.tunnelFailureCode,
+            "reason": reason
+        ])).flatMap { String(data: $0, encoding: .utf8) } ?? reason
+        let response = "HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: \(body.utf8.count)\r\n\r\n\(body)"
         try? await connection.sendData(Data(response.utf8))
         connection.cancel()
     }

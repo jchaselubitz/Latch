@@ -202,6 +202,13 @@ public actor LatchGateway {
             reason: reason
         ) { return .notAGateway }
         if status == 401 || status == 403 { return .unauthorized }
+        // The paired tunnel could not reach the Mac at all. That is a local
+        // transport failure wearing an HTTP status, and the reason it carries
+        // is already a sentence — a status line in front of it would only
+        // bury the part the person can act on.
+        if status == 502, code == NoiseTunnelGatewayTransport.tunnelFailureCode {
+            return .transport(reason.isEmpty ? "The connection to your Mac failed." : reason)
+        }
         return .http(
             status: status,
             path: path,

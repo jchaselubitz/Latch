@@ -31,6 +31,13 @@ public final class AppModel {
     public private(set) var gateway: LatchGateway?
     public private(set) var linkSource: LinkSource?
     public private(set) var sessions: [SessionSummary] = []
+    /// The network path the paired route is running over, once one is open.
+    /// Nil for a manual link, which is whatever tunnel the person configured.
+    public private(set) var remotePath: RemotePath?
+    /// How this phone's paired connections have resolved, across launches.
+    /// Read during a field run; it leaves the device only if a person reads it
+    /// off the screen.
+    public private(set) var remotePathTally = RemotePathTally()
     public private(set) var sessionsError: String?
     public private(set) var isLoadingSessions = false
     /// Session stores are retained here rather than by a navigation view, so a
@@ -70,9 +77,17 @@ public final class AppModel {
         @Sendable (String, Int, Int) async throws -> any TerminalSocketConnection
 
     private let terminalConnector: TerminalConnecting?
+    /// The device-owner check standing in front of the terminal. Chat has no
+    /// equivalent and deliberately so: a phone that may read and reply is
+    /// doing what it was paired for, while a terminal runs commands on the
+    /// Mac and takes the session's one surface.
+    private let terminalUnlock: TerminalUnlock
     private let presentationStore: any SessionPresentationStoring
     private let terminalSizeStore: any TerminalSizeStoring
     private let storage: LinkStorage
+    /// Where the transport writes the path it selected, so Settings can say
+    /// whether this session is on the local network, direct, or relayed.
+    private let pathReporter: RemotePathReporter
     private let sessionFactory: @Sendable (GatewayLink) -> LatchGateway
     private let pairedGatewayFactory: @Sendable (PairedDeviceRecord) async throws -> LatchGateway
     private var pairedDevice: PairedDeviceRecord?
@@ -85,10 +100,14 @@ public final class AppModel {
         sessionFactory: @escaping @Sendable (GatewayLink) -> LatchGateway = { LatchGateway(link: $0) },
         identityStore: any DeviceIdentityStoring = KeychainDeviceIdentityStore(),
         pairedGatewayFactory: (@Sendable (PairedDeviceRecord) async throws -> LatchGateway)? = nil,
+        pathReporter: RemotePathReporter = RemotePathReporter(),
         presentationStore: any SessionPresentationStoring = UserDefaultsSessionPresentationStore(),
         terminalSizeStore: any TerminalSizeStoring = UserDefaultsTerminalSizeStore(),
-        terminalConnector: TerminalConnecting? = nil
+        terminalConnector: TerminalConnecting? = nil,
+        terminalUnlock: TerminalUnlock? = nil
     ) {
+        self.pathReporter = pathReporter
+        self.terminalUnlock = terminalUnlock ?? TerminalUnlock()
         self.terminalConnector = terminalConnector
         self.presentationStore = presentationStore
         self.terminalSizeStore = terminalSizeStore
@@ -96,19 +115,18 @@ public final class AppModel {
         self.terminalSize = terminalSizeStore.load()
         self.storage = storage
         self.sessionFactory = sessionFactory
-        self.pairedGatewayFactory = pairedGatewayFactory ?? { record in
-            let candidates = try await BonjourMacDiscovery().candidates(
-                matching: record.mac.publicKey
-            )
-            guard let target = candidates.first else {
-                throw NoiseTunnelError.macNotReachable
-            }
-            let transport = try await NoiseTunnelGatewayTransport.start(
-                target: target,
-                pairedDevice: record,
-                identityStore: identityStore
-            )
-            return LatchGateway(transport: transport)
+        // The default route is the local network only. The app injects the
+        // full one — Bonjour, then presence and ICE — because the ICE stack
+        // lives in `LatchTransportNative`, which sits above this module.
+        self.pairedGatewayFactory = pairedGatewayFactory ?? PairedGatewayRoute.factory(
+            identityStore: identityStore,
+            pathReporter: pathReporter
+        )
+        pathReporter.observe { [weak self] path in
+            Task { @MainActor in self?.remotePath = path }
+        }
+        pathReporter.observeTally { [weak self] tally in
+            Task { @MainActor in self?.remotePathTally = tally }
         }
     }
 
@@ -155,6 +173,15 @@ public final class AppModel {
         }
     }
 
+    /// Clears the path counters.
+    ///
+    /// Unlinking deliberately does not: the counters describe this phone's
+    /// networks, not its relationship with one Mac, and a field run that
+    /// re-pairs between scenarios should not silently lose its own evidence.
+    public func resetRemotePathTally() {
+        pathReporter.resetTally()
+    }
+
     /// Forgets the computer and everything fetched from it.
     public func unlink() {
         if linkSource == .manual {
@@ -170,6 +197,7 @@ public final class AppModel {
         conversationStores.values.forEach { $0.stop() }
         conversationStores = [:]
         detachAllTerminals()
+        pathReporter.clear()
         linkState = .unlinked
     }
 
@@ -191,11 +219,33 @@ public final class AppModel {
         return store
     }
 
+    /// Whether the terminal is open to this device right now: it holds the
+    /// Mac's grant *and* has passed the owner check recently enough.
+    public var isTerminalUnlocked: Bool { surface.terminal && terminalUnlock.isUnlocked }
+
+    /// Why the last owner check did not open the terminal, when there is
+    /// something worth saying. A cancelled prompt leaves this nil.
+    public var terminalUnlockFailure: String? { terminalUnlock.failure }
+
+    /// Asks the device owner to confirm before a terminal is opened.
+    ///
+    /// Called by the terminal screen ahead of `terminalSession(for:)`. Inside
+    /// the grace window it answers without prompting, so attaching, reading
+    /// something else, and reattaching is one Face ID check rather than three.
+    @discardableResult
+    public func unlockTerminal() async -> Bool {
+        guard surface.terminal else { return false }
+        return await terminalUnlock.unlock(
+            reason: "Open a terminal on your Mac and run commands on it."
+        )
+    }
+
     /// Returns the one terminal connection for this session, or nil when this
     /// device may not open one — gated on `surface.terminal`, the way
-    /// `conversationStore(for:)` is gated on the conversation endpoint.
+    /// `conversationStore(for:)` is gated on the conversation endpoint, and on
+    /// a current owner check, which `unlockTerminal()` is what obtains.
     public func terminalSession(for session: SessionSummary) -> TerminalSession? {
-        guard let gateway, surface.terminal else { return nil }
+        guard let gateway, surface.terminal, terminalUnlock.isUnlocked else { return nil }
         if let existing = terminalSessions[session.id] { return existing }
         let id = session.id
         let connector = terminalConnector
@@ -225,12 +275,77 @@ public final class AppModel {
         )
     }
 
+    /// How long a held terminal survives with no input once the app stops
+    /// being the thing on screen.
+    ///
+    /// Backgrounding proper releases the surface at once — a phone in a pocket
+    /// is not using a terminal. This covers the other case: an app that is on
+    /// screen but not frontmost, which is what a pulled-down notification
+    /// centre, an incoming call banner, the app switcher, and the Face ID
+    /// prompt itself all produce. Tearing the terminal down for those would
+    /// make the phone unusable; holding it forever would leave the Mac's one
+    /// surface parked on a phone nobody is looking at.
+    public nonisolated static let terminalIdleTimeout: TimeInterval = 2 * 60
+
+    /// How often the countdown checks. It bounds how late a release can be, so
+    /// the surface comes back within a quarter-minute of the deadline rather
+    /// than only when the app is next touched.
+    private nonisolated static let terminalIdleTick: Duration = .seconds(15)
+
+    private var terminalIdleWatch: Task<Void, Never>?
+
+    /// Starts releasing idle terminals while the app is not frontmost.
+    ///
+    /// Idempotent: a scene phase that flickers does not restart the clock,
+    /// because the clock is `lastInputAt` on each session rather than a
+    /// countdown this task owns.
+    public func beginTerminalIdleCountdown(
+        timeout: TimeInterval = AppModel.terminalIdleTimeout
+    ) {
+        guard terminalIdleWatch == nil else { return }
+        terminalIdleWatch = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: AppModel.terminalIdleTick)
+                guard !Task.isCancelled, let self else { return }
+                self.releaseIdleTerminals(timeout: timeout)
+            }
+        }
+    }
+
+    /// Stops the countdown. Called when the app comes back to the front, and
+    /// when backgrounding releases every surface outright.
+    public func cancelTerminalIdleCountdown() {
+        terminalIdleWatch?.cancel()
+        terminalIdleWatch = nil
+    }
+
+    /// Releases every held surface that has had no input for `timeout`.
+    ///
+    /// The owner check goes with it. A terminal that was given up because
+    /// nobody was typing at it should be reopened deliberately, and the grace
+    /// window outlasts this timeout otherwise.
+    @discardableResult
+    public func releaseIdleTerminals(
+        timeout: TimeInterval = AppModel.terminalIdleTimeout,
+        now: Date = Date()
+    ) -> Int {
+        var released = 0
+        for session in terminalSessions.values where session.holdsSurface {
+            guard now.timeIntervalSince(session.lastInputAt) >= timeout else { continue }
+            session.detach()
+            released += 1
+        }
+        if released > 0 { terminalUnlock.lock() }
+        return released
+    }
+
     /// Releases every held surface before the app is suspended.
     ///
     /// The sessions themselves are kept, so foregrounding returns to
     /// `.closed(.detached)` with a Reattach button rather than silently taking
     /// the surface back from whoever is now using it.
     public func suspendTerminals() {
+        cancelTerminalIdleCountdown()
         terminalSessions.values.forEach { $0.detach() }
     }
 
@@ -247,9 +362,15 @@ public final class AppModel {
     }
 
     /// Releases every held surface and forgets the connections.
+    ///
+    /// This is the teardown path — unlinking, or a link that failed — so the
+    /// grace window ends with it. A phone relinked to another Mac starts from
+    /// a fresh owner check rather than inheriting one.
     public func detachAllTerminals() {
+        cancelTerminalIdleCountdown()
         terminalSessions.values.forEach { $0.detach() }
         terminalSessions = [:]
+        terminalUnlock.lock()
     }
 
     private func connect(to link: GatewayLink, persist: Bool) async {
@@ -301,6 +422,47 @@ public final class AppModel {
         } catch {
             linkState = .failed(error.localizedDescription)
         }
+    }
+
+    /// Applies a permission-only refresh without rebuilding a healthy route.
+    ///
+    /// The host checks the current local grant on every request, so the saved
+    /// record is only the phone UI's projection. Replacing that projection in
+    /// place makes a Mac-side terminal toggle visible as soon as it is read
+    /// from the control plane, while identity, endpoint, or revocation changes
+    /// still take the full reconnect path.
+    @discardableResult
+    public func applyPairedDeviceRecord(_ record: PairedDeviceRecord?) -> Bool {
+        guard linkSource == .paired,
+              let current = pairedDevice,
+              let record,
+              record.isActive,
+              current.updating(permission: record.permission) == record
+        else { return false }
+        pairedDevice = record
+        return true
+    }
+
+    /// Takes the session's terminal while its conversation is open.
+    ///
+    /// A chat still drives the Conversation Hub, but it now owns the same
+    /// exclusive session surface as the terminal screen. The preview supplies
+    /// the Mac's current grid so claiming it does not resize or reflow the
+    /// agent. The caller must consume `output` and discard the terminal when
+    /// the chat disappears.
+    public func claimTerminalForChat(for session: SessionSummary) async -> TerminalSession? {
+        guard session.isRunning, surface.terminal else { return nil }
+        let preview = try? await previewSession(for: session)
+        guard await unlockTerminal(), let terminal = terminalSession(for: session) else {
+            return nil
+        }
+        let grid = TerminalGeometry.grid(
+            for: terminalSize,
+            preview: preview,
+            viewport: .zero
+        )
+        terminal.attach(cols: grid.cols, rows: grid.rows)
+        return terminal
     }
 
     /// Classifies a discovery failure. A protocol disagreement is the one
@@ -405,6 +567,9 @@ public final class AppModel {
         linkSource = nil
         sessions = []
         sessionsError = nil
+        // The path belongs to the torn-down route. Leaving it on screen would
+        // report a live connection the phone no longer has.
+        pathReporter.clear()
         linkState = .unlinked
     }
 

@@ -49,6 +49,50 @@ removed from the Mac allowlist, active streams close, and later handshakes are
 rejected. A gateway-token rotation affects new internal handshakes only; that
 token is never sent to a phone.
 
+`control` is granted as a separate "Allow terminal" decision layered on top of
+the base `observe`/`interact` picker, not as the top notch of a single
+severity ladder: the Mac remembers what a device held underneath the grant, so
+turning the terminal off returns the device to Interact or Observe as it was
+rather than to a default. A grant is written to the local device store first —
+the store the helper actually enforces against — and then mirrored to the
+control-plane pairing row; a mirror failure is reported but never rolls the
+local grant back, because the Mac is the authority and the directory is a
+convenience for the phone's own UI. New pairings still default to Interact.
+
+Revocation and a permission *downgrade* are both enforced by the same 250 ms
+device-state check in `proxy_connection` (`crates/latch/src/cli/remote_access.rs`).
+The check compares the device's live permission against the grant the
+connected route actually required, not against the grant held at handshake
+time, so a device dropped from `control` to `interact` mid-session loses its
+terminal and keeps its chat connection — the terminal route's own requirement
+is what closes, not the whole pairing. The audit trail records a
+`permission_downgraded` event distinct from revocation so the two are
+distinguishable after the fact.
+
+On the phone, opening a terminal is additionally gated behind the device
+owner: `TerminalUnlock` runs `LAContext` with
+`deviceOwnerAuthentication` (Face ID or Touch ID, passcode fallback — never a
+refusal for a device with no biometric enrollment) before a `TerminalSession`
+is returned, and caches one passed check for a five-minute grace window so
+repeated attach/detach within that window costs one prompt rather than one per
+attach. A phone with no passcode set is refused outright rather than waved
+through. This is a client-side gate on top of the Mac's `control` grant, not a
+replacement for it: a stolen unlocked phone still needs the terminal grant to
+have been given, and a phone that has the grant but fails the device-owner
+check gets no terminal. Chat is deliberately not gated the same way — a lost
+or stolen phone still needing Face ID to read a conversation would be a
+different, and here unwanted, tradeoff.
+
+A terminal surface a phone is holding is also released unilaterally by the
+phone after inactivity: `AppModel` releases a held terminal after two minutes
+with no input while the app is not the frontmost app (backgrounding outright
+releases it immediately). This bounds how long a phone that is not actively
+being watched — a notification, an incoming call, the app switcher, the Face
+ID prompt itself — can keep the Mac's one terminal surface parked away from
+whoever is actually at the keyboard. It is a phone-side liveness cleanup, not
+a security boundary: the Mac's revocation and downgrade checks above remain
+the authoritative enforcement point.
+
 There is no read-only terminal mode to fall back on. A terminal connection is
 the session's single exclusive surface, so the gateway requires the `control`
 grant for the terminal route and refuses `observe` and `interact` before the
@@ -87,6 +131,9 @@ while the pane stalls behind it.
 | Confused deputy to another local service | The remote agent has one fixed loopback target and an allowlisted `/v1` surface; no host/port supplied by a device is ever dialed. |
 | Duplicate submit after reconnect | `Idempotency-Key` binds one message or resolve payload to one resolved session for the gateway instance's bounded retry window. Reuse with different content returns 409. |
 | Terminal-control escalation | Explicit `control` grant on the terminal route, with no lesser terminal mode to downgrade into; authorizer checks every terminal operation. |
+| Permission downgraded mid-session (not just revoked) | The 250 ms device-state check compares against the route's required grant, not the grant held at handshake, and closes a live terminal stream the moment `control` is lost while leaving a lesser-permission stream (e.g. chat) open. |
+| Stolen unlocked phone reaches the terminal | `TerminalUnlock` requires `LAContext` device-owner authentication before a `TerminalSession` opens, independent of the Mac's `control` grant; a phone with no passcode is refused. |
+| Phone left connected and unattended holds the Mac's terminal | The idle countdown releases a held terminal surface after two minutes with no input while the app is not frontmost; backgrounding releases it immediately. |
 | Surface denial of service | A steal commits only after a valid size is declared; socket writes are deadline-bounded and a non-draining peer is evicted and its attach reaped, so a stalled device cannot hold the surface or block the pane. |
 | Connection exhaustion | Per-device/account connection, frame, request, and buffered-byte limits; reject before proxying; audit aggregate failure category only. |
 | Hostile terminal output | Treat output as terminal bytes, never markup; use a hardened renderer and avoid putting content in diagnostics, notifications, or logs. |

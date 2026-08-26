@@ -15,8 +15,8 @@ enum DevicePermission: String, Codable, CaseIterable, Identifiable, Sendable {
     var label: String {
         switch self {
         case .observe: return "Observe"
-        case .interact: return "Interact"
-        case .control: return "Control"
+        case .interact: return "Control"
+        case .control: return "Control + Terminal"
         }
     }
 
@@ -27,7 +27,7 @@ enum DevicePermission: String, Codable, CaseIterable, Identifiable, Sendable {
         case .interact:
             return "Also send messages and resolve prompts."
         case .control:
-            return "Also open the terminal, which takes it from whatever is showing it."
+            return "Control sessions and open the terminal, which takes it from whatever is showing it."
         }
     }
 
@@ -50,6 +50,13 @@ struct RemoteAccessStatus: Codable, Equatable, Sendable {
     let formatVersion: Int
     let enabled: Bool
     let relayEnabled: Bool
+    /// Whether this Mac refuses the relay outright. Stricter than a relay
+    /// that is merely off: presence is narrowed to host candidates too, so a
+    /// phone is only ever handed addresses it can reach directly.
+    ///
+    /// Optional on the wire so a CLI that predates the switch still decodes.
+    /// A missing field is the permissive answer, which is what that CLI does.
+    let neverRelayFlag: Bool?
     /// Opaque identifier for this Mac, created the first time remote access is
     /// enabled and stored by the CLI (Keychain-backed private key on macOS).
     let deviceID: String?
@@ -62,24 +69,162 @@ struct RemoteAccessStatus: Codable, Equatable, Sendable {
     /// The authenticated LAN listener the helper is advertising, if running.
     /// This is never the supervised `latch serve` gateway address.
     let listenerAddress: String?
+    /// The running helper's ICE agent. Presence publishes these credentials and
+    /// candidates; the app does not invent its own, because the helper is the
+    /// process that answers the connectivity checks they authenticate.
+    let ice: RemoteIceDescription?
+    /// How many phones hold an authenticated stream right now. The helper
+    /// counts these after the Noise handshake and the route authorization, so
+    /// this is a number of paired phones and never a number of open sockets.
+    ///
+    /// Optional for the same reason as `neverRelayFlag`, and read as zero when
+    /// absent: a CLI that does not report connections has not reported one.
+    let activeConnectionCount: Int?
 
     enum CodingKeys: String, CodingKey {
         case formatVersion, enabled, relayEnabled, publicKey, keyGeneration
-        case pairedDevices, revokedDevices, listenerAddress
+        case pairedDevices, revokedDevices, listenerAddress, ice
         case deviceID = "deviceId"
+        case neverRelayFlag = "neverRelay"
+        case activeConnectionCount = "activeConnections"
     }
+
+    var neverRelay: Bool { neverRelayFlag ?? false }
+    var activeConnections: Int { activeConnectionCount ?? 0 }
+
+    /// A phone is connected and this Mac is serving it. The sleep assertion
+    /// hangs off exactly this: remote access on, and someone actually there.
+    var hasLiveConnection: Bool { enabled && activeConnections > 0 }
 
     static let unavailable = RemoteAccessStatus(
         formatVersion: 1,
         enabled: false,
         relayEnabled: false,
+        neverRelayFlag: nil,
         deviceID: nil,
         publicKey: nil,
         keyGeneration: nil,
         pairedDevices: 0,
         revokedDevices: 0,
-        listenerAddress: nil
+        listenerAddress: nil,
+        ice: nil,
+        activeConnectionCount: nil
     )
+}
+
+/// The helper's gathered ICE agent, as `remote-access status --json` reports it.
+///
+/// The password is a STUN short-term credential rather than a capability: it
+/// authenticates connectivity checks and grants nothing on its own, which is
+/// why it travels the owner-facing status channel and the supervised gateway's
+/// bearer token never does.
+struct RemoteIceDescription: Codable, Equatable, Sendable {
+    let ufrag: String
+    let password: String
+    let candidates: [RemoteIceCandidate]
+}
+
+/// One gathered candidate in the control plane's published shape.
+struct RemoteIceCandidate: Codable, Equatable, Sendable {
+    let type: String
+    let priority: UInt32
+    let foundation: String
+    let component: Int
+    let `protocol`: String
+    let address: String
+    let relatedAddress: String?
+    let relatedPort: UInt16?
+    let tcpType: String?
+    let expiresAt: UInt64
+
+    /// The presence representation. The candidate is republished exactly as the
+    /// agent gathered it: rewriting a priority or a foundation here would make
+    /// the phone's pair ordering disagree with the Mac's.
+    var published: ControlPlaneCandidate {
+        ControlPlaneCandidate(
+            address: address,
+            expiresAt: expiresAt,
+            type: type,
+            priority: priority,
+            foundation: foundation,
+            component: component,
+            protocol: self.protocol,
+            relatedAddress: relatedAddress,
+            relatedPort: relatedPort.map(Int.init),
+            tcpType: tcpType
+        )
+    }
+}
+
+/// One approved rendezvous offer, in the shape `latch remote-access offer`
+/// reads on stdin.
+///
+/// It is transport parameters and nothing else. The control plane cannot
+/// authorize this Mac's gateway, which is why an offer only ever reaches the
+/// helper after a fresh local device-state check, and why the helper still runs
+/// the full Noise handshake against the local device store afterwards.
+struct RemoteRendezvousOfferDocument: Encodable, Equatable, Sendable {
+    let requestID: String
+    let peerDeviceID: String
+    let iceUfrag: String
+    let icePwd: String
+    let candidates: [Candidate]
+    let expiresAt: UInt64
+
+    enum CodingKeys: String, CodingKey {
+        case iceUfrag, icePwd, candidates, expiresAt
+        case requestID = "requestId"
+        case peerDeviceID = "peerDeviceId"
+    }
+
+    struct Candidate: Encodable, Equatable, Sendable {
+        let type: String
+        let priority: UInt32
+        let foundation: String
+        let component: Int
+        let `protocol`: String
+        let address: String
+        let relatedAddress: String?
+        let relatedPort: Int?
+        let tcpType: String?
+        let expiresAt: UInt64
+
+        /// A candidate the helper could not run checks against is dropped
+        /// rather than sent as a partial record: the CLI requires the full ICE
+        /// ordering metadata, and a peer that published none cannot be reached
+        /// this way at all.
+        init?(_ candidate: ControlPlaneCandidate) {
+            guard let type = candidate.type, let priority = candidate.priority,
+                  let foundation = candidate.foundation, let component = candidate.component,
+                  let proto = candidate.protocol else { return nil }
+            self.type = type
+            self.priority = priority
+            self.foundation = foundation
+            self.component = component
+            self.protocol = proto
+            self.address = candidate.address
+            self.relatedAddress = candidate.relatedAddress
+            self.relatedPort = candidate.relatedPort
+            self.tcpType = candidate.tcpType
+            self.expiresAt = candidate.expiresAt
+        }
+    }
+
+    /// Builds the document for an offer that already passed the local
+    /// device-state check. Returns nil when the peer published no ICE agent, or
+    /// no candidate carrying the metadata ICE needs — neither can produce a
+    /// connection, so handing it to the helper would only burn its one agent.
+    init?(_ offer: ControlPlaneRendezvousOffer) {
+        guard let ufrag = offer.iceUfrag, let pwd = offer.icePwd else { return nil }
+        let candidates = offer.candidates.compactMap(Candidate.init)
+        guard !candidates.isEmpty else { return nil }
+        self.requestID = offer.requestID
+        self.peerDeviceID = offer.peerDeviceID
+        self.iceUfrag = ufrag
+        self.icePwd = pwd
+        self.candidates = candidates
+        self.expiresAt = offer.expiresAt
+    }
 }
 
 struct RemoteDevice: Codable, Identifiable, Equatable, Sendable {
@@ -88,10 +233,25 @@ struct RemoteDevice: Codable, Identifiable, Equatable, Sendable {
     let name: String
     let permission: DevicePermission
     let revoked: Bool
+    /// The phone's row in the control-plane directory, recorded when it
+    /// enrolled. Absent for devices paired before the CLI recorded it, which
+    /// only means a grant change here cannot be mirrored there.
+    let controlPlaneDeviceID: String?
 
     enum CodingKeys: String, CodingKey {
         case name, permission, revoked
         case deviceID = "deviceId"
+        case controlPlaneDeviceID = "controlPlaneDeviceId"
+    }
+
+    /// Whether this device may open a session's terminal.
+    var allowsTerminal: Bool { permission == .control }
+
+    /// What the device keeps when the terminal grant is taken away. `control`
+    /// is the only permission that carries the terminal, so removing it means
+    /// dropping to the highest permission that does not.
+    var permissionWithoutTerminal: DevicePermission {
+        permission == .control ? .interact : permission
     }
 }
 
@@ -233,6 +393,34 @@ struct RemoteDiagnostics: Codable, Equatable, Sendable {
     let pairedDevices: Int
     let revokedDevices: Int
     let eventCounts: [String: UInt64]
+    /// How the connections this Mac served were routed. Modelled here rather
+    /// than ignored because the app re-encodes the bundle before writing it:
+    /// a field it does not decode is a field the exported file silently loses,
+    /// and these counters are the point of exporting one during a field run.
+    ///
+    /// Optional so a bundle from an older `latch` still decodes. A missing
+    /// block means the CLI did not measure, which is not the same claim as
+    /// zero relayed connections.
+    let pathSelection: RemotePathSelection?
+}
+
+/// Non-content path counters from the bounded local audit trail.
+struct RemotePathSelection: Codable, Equatable, Sendable {
+    let routes: [String: UInt64]
+    let connections: UInt64
+    let direct: UInt64
+    let relay: UInt64
+    let iceAnswers: UInt64
+    let iceAnswersConnected: UInt64
+
+    /// Share of served connections that were relayed, `nil` before any.
+    ///
+    /// No connections is not zero percent relayed, and a release gate reading
+    /// "0%" must not be able to come from an empty counter.
+    var relayShare: Double? {
+        guard connections > 0 else { return nil }
+        return Double(relay) / Double(connections)
+    }
 }
 
 /// The supervised lifecycle the user drives from Settings.

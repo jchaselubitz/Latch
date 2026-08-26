@@ -18,6 +18,17 @@ of truth. Remote infrastructure is limited to discovery, connection
 coordination, and an encrypted fallback relay when a direct connection cannot
 be established.
 
+The phone transport this plan anticipated — reaching the terminal itself, not
+only chat, off the local network — was designed and delivered under Overlord
+mission `coo:856`. The mission's report artifact,
+[Latch Remote Terminal report](https://claude.ai/code/artifact/2731984c-4808-443e-93a2-c8458fdc50ff),
+is the design record for that work: the ChatGPT/Codex-remote comparison, the
+target flow, the security-control table, and the phased implementation
+sequence. `REMOTE_ACCESS_PHONE_TRANSPORT_PLAN.md`,
+`DECISION_REMOTE_ACCESS_TRANSPORT.md`, `REMOTE_ACCESS_THREAT_MODEL.md`, and
+`REMOTE_ACCESS_PHASE_4.md` carry the parts of it that became living
+documentation.
+
 ## Product outcome
 
 A user installs Latch on a Mac and the Latch mobile app on an iPhone, pairs the

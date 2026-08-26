@@ -220,7 +220,7 @@ final class SignalingTests: XCTestCase {
         XCTAssertEqual(updated.permission, .observe)
     }
 
-    func testTargetOfflineBecomesAReachableMacSentenceAndIsRetryable() async throws {
+    func testTargetOfflineNamesTheSleepingMacAndIsRetryable() async throws {
         StubProtocol.stub(
             path: "/v1/rendezvous",
             status: 409,
@@ -234,15 +234,11 @@ final class SignalingTests: XCTestCase {
                 requestId: "request-0001",
                 expiresAt: nil
             )
-            XCTFail("expected macNotReachable")
+            XCTFail("expected macOffline")
         } catch let error as ControlPlaneError {
-            XCTAssertEqual(
-                error,
-                .macNotReachable("target device has no current presence")
-            )
+            XCTAssertEqual(error, .macOffline)
             XCTAssertTrue(error.isRetryable)
-            XCTAssertTrue(error.message.hasPrefix("Your Mac is not reachable right now"))
-            XCTAssertTrue(error.message.contains("target device has no current presence"))
+            XCTAssertEqual(error.message, "Your Mac is asleep or Latch is not running.")
         }
     }
 
