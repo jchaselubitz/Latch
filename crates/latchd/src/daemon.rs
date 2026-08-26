@@ -380,6 +380,13 @@ fn install_signal_handlers(shared: &Shared) {
     }
 }
 
+#[cfg(any(
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
+))]
 fn peer_is_us(stream: &UnixStream) -> bool {
     let fd = stream.as_raw_fd();
     let mut uid: libc::uid_t = u32::MAX;
@@ -388,6 +395,27 @@ fn peer_is_us(stream: &UnixStream) -> bool {
     let rc = unsafe { libc::getpeereid(fd, &mut uid, &mut gid) };
     // SAFETY: getuid has no preconditions.
     rc == 0 && uid == unsafe { libc::getuid() }
+}
+
+#[cfg(target_os = "linux")]
+fn peer_is_us(stream: &UnixStream) -> bool {
+    let fd = stream.as_raw_fd();
+    // SAFETY: getsockopt writes a ucred and its length into storage we own.
+    let mut credentials: libc::ucred = unsafe { std::mem::zeroed() };
+    let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    let rc = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&mut credentials as *mut libc::ucred).cast(),
+            &mut length,
+        )
+    };
+    // SAFETY: getuid has no preconditions.
+    rc == 0
+        && length as usize == std::mem::size_of::<libc::ucred>()
+        && credentials.uid == unsafe { libc::getuid() }
 }
 
 // ---------------------------------------------------------------------------

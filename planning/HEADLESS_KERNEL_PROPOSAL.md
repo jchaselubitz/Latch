@@ -466,13 +466,14 @@ green on the acceptance gates named above.
 - `cargo test --workspace` (default `tmux` selector): unchanged — the tmux
   suites, including `tmux_kernel` (23) and the library (121), still pass. The
   daemon is inert until selected.
-- `crates/latchd` unit + integration: 6 + 14, against the real `latchd`
+- `crates/latchd` unit + integration: 6 + 15, against the real `latchd`
   binary — attach-snapshot-then-splice, steal with reasons, control verbs
   driving a headless child, bracketed-paste-iff-DECSET, history, exit
   retention and last-frame-on-reattach, slow-client eviction, `output-quiet`
-  and the other events, `await_surface`, `kill`.
-- `crates/latch --test latchd_kernel_e2e` (10, opt-in on a built daemon,
-  serial): the real `latch` binary with `LATCH_KERNEL=latchd` through real
+  and the other events, `await_surface`, `kill`, plus a byte-exact throughput
+  gate.
+- `crates/latch --test latchd_kernel_e2e` (10, mandatory and internally
+  serialized): the real `latch` binary with `LATCH_KERNEL=latchd` through real
   PTYs — the same shapes `exclusive_attach_e2e` asserts on patched tmux, plus
   an engine-level control-plane test that drives a pane through
   `engine::paste_message` / `send_keys` / `capture_pane`.
@@ -499,3 +500,230 @@ cargo build -p latchd && \
   polling) is Phase C and is not wired into `conversation/`.
 - Default stays `tmux`. Flipping the default is the Phase B soak decision,
   not this objective.
+
+---
+
+## Part 7 — Phase A hardening gate (coo:847.krze)
+
+Phase A is now a reproducible gate rather than an opt-in suite that could
+report success without finding the daemon it was meant to test.
+
+### What changed in the gate
+
+- The engine-level `latchd_kernel_e2e` harness treats a missing or invalid
+  `latchd` path as a hard failure. Its cases serialize inside the test binary,
+  so the process-wide kernel selector and real PTYs cannot race even when a
+  caller forgets `--test-threads=1`.
+- Rust CI explicitly builds `latchd`, then runs the real-kernel parity suite
+  on both `macos-latest` and `ubuntu-latest` before the workspace tests. The
+  workspace `Cargo.lock` records the current versions of the two new crates,
+  so the locked build is reproducible.
+- The daemon authenticates socket peers on both supported CI families:
+  `getpeereid` on Darwin/BSD and `SO_PEERCRED` on Linux. The real-daemon suite
+  asserts that the socket and `kernel.json` are mode `0600` and that the
+  socket belongs to the current uid. Linux target check and clippy cover the
+  Linux credential path and its platform-specific `openpty` declaration.
+- The integration sockets live in each harness's private temp directory
+  rather than the global `/tmp` namespace. Production continues to use its
+  short per-user `0700` directory; the test arrangement makes isolation and
+  cleanup deterministic.
+
+### Reproducible acceptance commands
+
+```text
+cargo test --locked --package latch-term --all-targets
+cargo test --locked --package latchd --all-targets -- --test-threads=1
+cargo build --locked --package latchd
+cargo test --locked --package latch --test latchd_kernel_e2e -- --test-threads=1
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo check --locked --target x86_64-unknown-linux-gnu --package latch --test latchd_kernel_e2e
+cargo clippy --locked --target x86_64-unknown-linux-gnu --package latchd --all-targets -- -D warnings
+```
+
+The screen-model gate is 55 tests, including recorded fixture fidelity,
+arbitrary chunk boundaries, mid-stream resize, wide characters, alternate
+screen, and bounded scrollback. The daemon gate is 6 unit plus 15
+real-binary integration tests. The engine gate is 10 real-PTY tests through
+the authored `latch` binary.
+
+The throughput case sends 200,000 fixed ten-byte CSI frames through a child
+PTY after the snapshot boundary, reads exactly 2,000,000 live bytes, and
+asserts byte identity, `1.0000x` amplification, a running child afterward,
+and at least 70,000 frames/s. A representative debug run on the arm64 macOS
+development host measured 4,471,493 frames/s, `1.0000x` amplification, and
+44 ms elapsed. This is an acceptance floor, not a claim that CI or release
+hardware will reproduce that particular peak number. The existing 16 MiB
+non-reading-surface case still proves that the 4 MiB surface queue evicts the
+client while the child reaches its completion marker and remains running.
+
+### Accepted gaps carried into soak
+
+- This objective cross-compiles and clippy-checks the Linux paths locally;
+  the real Ubuntu PTY run occurs in the CI job when the branch is integrated.
+- A cross-uid rejection cannot be manufactured by an unprivileged unit test.
+  Both platform credential APIs fail closed, and every successful integration
+  connection exercises the same-uid path.
+- The live surface queue (4 MiB), control frames (16 MiB), and scrollback
+  (50,000 lines) are hard-bounded. The off-path parser queue is deliberately
+  lossless rather than byte-capped: dropping it would make later snapshots
+  false, while blocking it would violate the child-first invariant. Phase A
+  proves catch-up across the throughput and 16 MiB backpressure cases; the
+  dogfood objective records parser backlog and RSS under longer workloads
+  before the default changes.
+
+---
+
+## Part 8 — Phase A integrated into `main` (coo:847.s08z)
+
+Phase A now lives on `main`. Nothing about a default Latch install changes:
+the shipped payload is still `latch`, `latch-tmux`, and `latch-remote`, and
+the kernel selector still resolves to `tmux` for every process that does not
+ask for otherwise.
+
+### The merged architecture
+
+`main` gains two crates and one seam, and no existing call site moved.
+
+- `crates/latch-term` — the standalone screen model (grid, modes, scrollback,
+  snapshot round-trip) with its own fixture-fidelity and chunk-boundary
+  suites. It is a library only; nothing links it except the daemon.
+- `crates/latchd` — one daemon per session: `pty.rs` forks the child as a
+  session leader in its own process group, `daemon.rs` runs the reader,
+  parser, surface-writer, and connection threads with the raw splice as the
+  hot path and the grid strictly off it, `protocol.rs`/`client.rs` carry
+  length-prefixed JSON control frames and the post-handshake raw surface, and
+  `keys.rs`/`render.rs`/`paths.rs` supply the `send-keys` name table, the
+  snapshot renderings, and the short per-user `0700` socket directory with a
+  `kernel.json` pointer per session.
+- `crates/latch/src/engine.rs` — the `Kernel` selector and its dispatch. Every
+  verb inventoried in Part 1 checks `kernel()` first and hands off to
+  `engine/latchd_kernel.rs` when the daemon is selected. `SessionInfo` and
+  `SurfaceRelease` are unchanged, so `cli/`, `conversation/`, `serve/`, and
+  the clients above them are untouched by the merge.
+
+The branch had already absorbed `main` before this objective, so integration
+is a merge with no textual conflicts and no divergence to unwind. It is
+recorded as a single no-fast-forward merge commit precisely so the rollback
+below is one revert rather than an archaeology exercise.
+
+### Proof that the daemon is inert unless selected
+
+- `kernel()` maps only the exact string `latchd` to the daemon; every other
+  value, and an unset variable, is `Kernel::Tmux`.
+- Every daemon entry point in `engine.rs` sits behind `kernel().is_latchd()`,
+  and `doctor` branches on the same selector, so a default process never
+  resolves, executes, or links against a daemon path at runtime.
+- `cargo test --workspace --all-targets` runs under the default selector and
+  the tmux suites are unchanged. The daemon suites reach `latchd` only
+  because they set the selector themselves.
+- A default-kernel `latch doctor` run on a clean `LATCH_HOME` spawns no
+  daemon process and creates no socket; it reports tmux exactly as before.
+- `LATCH_LATCHD_BIN` is honoured only under `debug_assertions`. On a release
+  build an operator who sets `LATCH_KERNEL=latchd` today gets
+  `bundled kernel .../latchd is missing; run latch update to repair the
+  complete payload` — the daemon fails closed instead of half-working from an
+  arbitrary path. Shipping it is Phase B (coo:847.c51g).
+
+### Operator commands
+
+```text
+latch <verb> ...                            # unchanged: the tmux kernel
+LATCH_KERNEL=tmux latch <verb> ...          # the same thing, said explicitly
+
+cargo build -p latchd                       # daemon lands beside `latch`
+LATCH_KERNEL=latchd latch create ...        # a session on the daemon kernel
+LATCH_KERNEL=latchd latch attach <id>       # exclusive raw surface
+LATCH_KERNEL=latchd latch doctor            # checks the daemon, not tmux
+LATCH_KERNEL=latchd latch inspect <id>      # same shapes as the tmux kernel
+```
+
+The selector is per process and per session-creating call. A session is owned
+by whichever kernel created it, so a daemon session must be addressed with
+the selector set for its whole life; there is no live migration and none is
+planned (coo:847.qaw3 preserves existing tmux sessions until they exit).
+
+Reproducing the gate locally:
+
+```text
+cargo build --locked --package latchd
+cargo test --locked --package latch --test latchd_kernel_e2e -- --test-threads=1
+cargo test --workspace --all-targets
+```
+
+### Verified at integration
+
+Run on the arm64 macOS development host against this merge:
+
+| Check | Result |
+| --- | --- |
+| `scripts/check-boundaries.sh` | ok |
+| mobile contract drift | current |
+| `cargo fmt --all -- --check` | clean |
+| `cargo clippy --workspace --all-targets -- -D warnings` | clean |
+| `cargo build --locked -p latchd` | ok |
+| `latchd_kernel_e2e` (serial, real daemon) | 10/10 |
+| `cargo test --workspace --all-targets` | all suites pass; `latchd` 6 unit + 15 integration |
+| `cargo test --workspace --doc` | clean |
+| default-kernel `latch doctor` | no daemon spawned, no socket created |
+
+### Remaining rollout risks
+
+- **Orphaned daemons have no reaper.** A daemon observed from the previous
+  objective's test run was still alive a day later, holding its socket, after
+  its session directory had been deleted underneath it: lifetime is bound to
+  the child, and the child was blocked forever on a launch FIFO that never got
+  written. On the tmux kernel a comparable abort leaves work on one shared
+  server that `latch` already knows how to clean. Before the default flips,
+  the daemon needs a bounded startup handshake and an exit when its session
+  record disappears, and `latch doctor` needs to see and clear strays. This is
+  soak-blocking (coo:847.wff1), not merge-blocking, because nothing reaches
+  this path without the selector.
+- **Linux has been checked, not exercised.** The Linux credential path
+  (`SO_PEERCRED`) and the platform-specific `openpty` declaration are covered
+  by cross-target clippy and `cargo check`; the first real Ubuntu PTY run of
+  the parity suite happens in the CI job this merge enables.
+- **The throughput floor is a floor.** 70,000 frames/s is the acceptance
+  gate; the 4.47M frames/s debug measurement is one host on one run and is not
+  a promise about CI or release hardware. A CI failure here should be read as
+  a hardware or contention signal first.
+- **The parser queue is deliberately unbounded.** Live surface (4 MiB),
+  control frames (16 MiB), and scrollback (50,000 lines) are hard-bounded; the
+  off-path parser queue is not, because dropping it makes later snapshots lie
+  and blocking it violates the child-first invariant. Backlog and RSS under
+  long workloads are soak measurements.
+- **Nothing above the seam is daemon-aware yet.** The gateway PTY host still
+  spawns `latch attach` and the Hub still polls `capture_pane` /
+  `paste_message`. Both work through the selector, but the event-driven
+  control-plane path is Phase C (coo:847.5wdg).
+- **Pre-existing and unrelated:** `scripts/generate-remote-access-types.py
+  --check` was already failing on `main` before this merge. The generated
+  Rust and TypeScript differ only in the canonical schema-set SHA-256 comment
+  — a schema edit landed without regeneration. It is fixed in its own commit
+  beside this merge so the boundaries job is green, and it touches no
+  behaviour.
+
+### Rollback path
+
+There are three levels, cheapest first.
+
+1. **Nothing to roll back at runtime.** The default is `tmux`. An operator
+   who hits daemon trouble stops passing `LATCH_KERNEL=latchd`; the next
+   process is on tmux. No release, no update, no restart of existing
+   sessions.
+2. **Revert the integration.** The merge is a single no-fast-forward commit:
+
+   ```text
+   git revert -m 1 <integration merge commit>
+   ```
+
+   That removes both crates, the selector, and the CI steps in one commit and
+   returns `main` to a tmux-only build. Nothing else on `main` depends on
+   either crate, so the revert is self-contained.
+3. **Rebuild the branch.** The branch
+   `design-latch-headless-terminal-alternative-847` is preserved on `origin`,
+   so a revert is recoverable by re-merging rather than by re-implementing.
+
+The rollback boundary tightens at Phase B, when the daemon enters the signed
+payload, and again at the default cutover; each of those objectives owns its
+own rollback and neither is unlocked by this one. This objective does not
+flip the default kernel and does not remove tmux.

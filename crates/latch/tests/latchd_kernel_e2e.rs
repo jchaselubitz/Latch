@@ -9,8 +9,10 @@
 //! lifecycle verbs (`list`, `inspect`, `stop`, `remove`) work unchanged.
 //!
 //! It needs a built daemon: `cargo build -p latchd` puts one next to the
-//! `latch` test binary, or set `LATCH_E2E_LATCHD_BIN`. Without either every
-//! test reports skipped. Run serially — each test holds real PTYs:
+//! `latch` test binary, or set `LATCH_E2E_LATCHD_BIN`. Absence is a hard
+//! failure: a parity gate must never turn green without running its kernel.
+//! The harness serializes the tests because they hold real PTYs and one case
+//! temporarily selects the process-wide engine kernel:
 //!
 //! ```text
 //! cargo build -p latchd && \
@@ -22,6 +24,7 @@ use std::io::{Read, Write};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
+use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -30,20 +33,32 @@ use serde_json::{json, Value};
 const EXIT_STOLEN: i32 = 75;
 const EXIT_SESSION_EXITED: i32 = 77;
 
-fn daemon_binary() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("LATCH_E2E_LATCHD_BIN") {
-        return fs::canonicalize(path).ok();
-    }
-    let latch = PathBuf::from(env!("CARGO_BIN_EXE_latch"));
-    let sibling = latch.parent()?.join("latchd");
-    sibling.is_file().then_some(sibling)
+static KERNEL_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+fn daemon_binary() -> PathBuf {
+    let path = if let Some(path) = std::env::var_os("LATCH_E2E_LATCHD_BIN") {
+        PathBuf::from(path)
+    } else {
+        let latch = PathBuf::from(env!("CARGO_BIN_EXE_latch"));
+        latch
+            .parent()
+            .expect("latch test binary has no parent")
+            .join("latchd")
+    };
+    fs::canonicalize(&path).unwrap_or_else(|error| {
+        panic!(
+            "latchd parity binary {} is unavailable: {error}; run `cargo build -p latchd` or set LATCH_E2E_LATCHD_BIN",
+            path.display()
+        )
+    })
 }
 
 fn with_kernel(name: &str, body: impl FnOnce(&Harness)) {
-    let Some(daemon) = daemon_binary() else {
-        eprintln!("skipping {name}: no latchd binary. Run `cargo build -p latchd` or set LATCH_E2E_LATCHD_BIN.");
-        return;
-    };
+    let _serial = KERNEL_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let daemon = daemon_binary();
+    eprintln!("latchd parity case: {name}");
     let harness = Harness::new(daemon);
     body(&harness);
 }
@@ -73,6 +88,7 @@ impl Harness {
             .env("LATCH_HOME", &self.home)
             .env("LATCH_KERNEL", "latchd")
             .env("LATCH_LATCHD_BIN", &self.daemon)
+            .env("LATCHD_SOCKET_DIR", self.temp.path().join("s"))
             .env_remove("LATCH_SESSION_ID")
             .env_remove("TMUX");
         command

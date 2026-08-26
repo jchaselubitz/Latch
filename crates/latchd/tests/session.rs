@@ -6,6 +6,7 @@
 //! eviction, and events for the chat system.
 
 use std::io::{BufRead, BufReader, Read, Write};
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
@@ -30,11 +31,34 @@ impl Daemon {
 
     fn spawn_sized(script: &str, cols: u16, rows: u16) -> Self {
         let dir = tempfile::tempdir().expect("tempdir");
+        Self::spawn_in(dir, script, cols, rows)
+    }
+
+    fn spawn_with_payload(payload: &[u8]) -> Self {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let payload_path = dir.path().join("payload.bin");
+        std::fs::write(&payload_path, payload).expect("write performance payload");
+        let quoted = format!(
+            "'{}'",
+            payload_path.display().to_string().replace('\'', "'\\''")
+        );
+        let script =
+            format!("stty -echo; printf 'READY'; IFS= read -r start; cat {quoted}; sleep 30");
+        Self::spawn_in(dir, &script, 80, 24)
+    }
+
+    fn spawn_in(dir: tempfile::TempDir, script: &str, cols: u16, rows: u16) -> Self {
         let session_dir = dir.path().join("session");
         std::fs::create_dir(&session_dir).unwrap();
-        // Short socket path: unix sockets are limited to ~104 bytes.
-        let socket = PathBuf::from(format!("/tmp/latchd-test-{}.sock", std::process::id()))
-            .with_extension(format!("{}.sock", rand_suffix()));
+        // Keep the socket inside the harness tempdir. Besides automatic cleanup,
+        // this exercises the same private-directory posture as production and
+        // works in sandboxes that intentionally forbid binding directly in /tmp.
+        let socket = dir.path().join(format!("{}.sock", rand_suffix()));
+        assert!(
+            socket.as_os_str().len() < 100,
+            "test socket path is too long: {}",
+            socket.display()
+        );
         let mut child = Command::new(env!("CARGO_BIN_EXE_latchd"))
             .args(["run", "--id", "ses_test", "--socket"])
             .arg(&socket)
@@ -160,6 +184,13 @@ fn stat_reports_a_running_child_and_the_kernel_record() {
     let record = KernelRecord::read(&daemon.session_dir).unwrap().unwrap();
     assert_eq!(record.socket, daemon.socket);
     assert_eq!(record.pid, daemon.child.id() as i32);
+
+    let socket_meta = std::fs::metadata(&daemon.socket).unwrap();
+    assert_eq!(socket_meta.permissions().mode() & 0o777, 0o600);
+    // SAFETY: getuid has no preconditions.
+    assert_eq!(socket_meta.uid(), unsafe { libc::getuid() });
+    let record_meta = std::fs::metadata(daemon.session_dir.join("kernel.json")).unwrap();
+    assert_eq!(record_meta.permissions().mode() & 0o777, 0o600);
 }
 
 #[test]
@@ -379,6 +410,46 @@ fn a_slow_surface_is_evicted_and_the_child_keeps_running() {
     daemon.wait_text("DONE");
     assert_eq!(client::stat(&daemon.socket).unwrap().state, State::Running);
     drop(surface);
+}
+
+#[test]
+fn live_surface_is_byte_exact_at_the_phase_a_throughput_gate() {
+    const FRAME: &[u8] = b"\x1b[31mX\x1b[0m";
+    const FRAMES: usize = 200_000;
+    const MIN_FRAMES_PER_SECOND: f64 = 70_000.0;
+
+    let payload = FRAME.repeat(FRAMES);
+    let daemon = Daemon::spawn_with_payload(&payload);
+    daemon.wait_text("READY");
+    let mut surface = client::attach(&daemon.socket, 80, 24).unwrap();
+    surface
+        .stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+
+    let started = Instant::now();
+    surface.stream.write_all(b"go\r").unwrap();
+    let mut received = vec![0; payload.len()];
+    surface.stream.read_exact(&mut received).unwrap();
+    let elapsed = started.elapsed();
+
+    assert_eq!(
+        received, payload,
+        "the raw surface changed or repeated bytes"
+    );
+    let amplification = received.len() as f64 / payload.len() as f64;
+    assert_eq!(amplification, 1.0);
+    let frames_per_second = FRAMES as f64 / elapsed.as_secs_f64();
+    eprintln!(
+        "measure: frames_per_second={frames_per_second:.0} post_boundary_amplification={amplification:.4} bytes={} elapsed_ms={}",
+        received.len(),
+        elapsed.as_millis()
+    );
+    assert!(
+        frames_per_second >= MIN_FRAMES_PER_SECOND,
+        "raw surface delivered only {frames_per_second:.0} frames/s; Phase A requires at least {MIN_FRAMES_PER_SECOND:.0}"
+    );
+    assert_eq!(client::stat(&daemon.socket).unwrap().state, State::Running);
 }
 
 #[test]

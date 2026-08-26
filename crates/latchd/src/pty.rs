@@ -34,7 +34,17 @@ pub fn spawn(
     }
     let mut master: RawFd = -1;
     let mut slave: RawFd = -1;
+    #[cfg(target_os = "linux")]
+    let winsize = winsize(cols, rows);
+    #[cfg(not(target_os = "linux"))]
     let mut winsize = winsize(cols, rows);
+    // libc follows each platform's openpty declaration: Linux takes a const
+    // winsize pointer while Darwin exposes a mutable one. Preserve that
+    // distinction so the Linux -D warnings gate does not need a lint waiver.
+    #[cfg(target_os = "linux")]
+    let winsize_ptr: *const libc::winsize = &winsize;
+    #[cfg(not(target_os = "linux"))]
+    let winsize_ptr: *mut libc::winsize = &mut winsize;
     // SAFETY: openpty writes two fds and reads a winsize we own.
     let rc = unsafe {
         libc::openpty(
@@ -42,7 +52,7 @@ pub fn spawn(
             &mut slave,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
-            &mut winsize,
+            winsize_ptr,
         )
     };
     if rc != 0 {

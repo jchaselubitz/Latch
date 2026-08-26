@@ -1326,7 +1326,7 @@ dependencies = [
 
 [[package]]
 name = "latch-term"
-version = "0.2608241212.0"
+version = "0.2608260946.0"
 dependencies = [
  "proptest",
  "serde_json",
@@ -1371,7 +1371,7 @@ dependencies = [
 
 [[package]]
 name = "latchd"
-version = "0.2608241212.0"
+version = "0.2608260946.0"
 dependencies = [
  "anyhow",
  "latch-term",
