@@ -341,6 +341,23 @@ pub struct DoctorOptions {
 /// Reports installation and state problems.
 pub fn doctor(options: DoctorOptions) -> anyhow::Result<DoctorReport> {
     let mut findings = Vec::new();
+    // On the daemon kernel there is no tmux to check; verify the daemon
+    // instead and report its version in the tmux_version slot the report
+    // already carries.
+    if engine::kernel() == engine::Kernel::Latchd {
+        let kernel_version = match engine::latchd_version() {
+            Ok(version) => Some(version),
+            Err(error) => {
+                findings.push(DoctorFinding {
+                    code: "kernel_missing".to_owned(),
+                    severity: "error".to_owned(),
+                    message: error.to_string(),
+                });
+                None
+            }
+        };
+        return doctor_common(options, findings, kernel_version);
+    }
     let tmux_version = match engine::tmux_version() {
         Ok(version) => {
             if version != format!("tmux {}", engine::TMUX_VERSION) {
@@ -364,6 +381,14 @@ pub fn doctor(options: DoctorOptions) -> anyhow::Result<DoctorReport> {
             None
         }
     };
+    doctor_common(options, findings, tmux_version)
+}
+
+fn doctor_common(
+    options: DoctorOptions,
+    mut findings: Vec<DoctorFinding>,
+    kernel_version: Option<String>,
+) -> anyhow::Result<DoctorReport> {
     if let Ok(executable) = std::env::current_exe().and_then(fs::canonicalize) {
         if let Some(parent) = executable.parent() {
             let remote = parent.join(engine::BUNDLED_REMOTE_NAME);
@@ -387,7 +412,7 @@ pub fn doctor(options: DoctorOptions) -> anyhow::Result<DoctorReport> {
             message: format!("Latch home {} does not exist yet", root.display()),
         });
         return Ok(DoctorReport {
-            tmux_version,
+            tmux_version: kernel_version,
             findings,
         });
     }
@@ -419,11 +444,11 @@ pub fn doctor(options: DoctorOptions) -> anyhow::Result<DoctorReport> {
         findings.push(DoctorFinding {
             code: "lost_sessions".to_owned(),
             severity: "warning".to_owned(),
-            message: format!("{lost} session(s) are absent from the private tmux server"),
+            message: format!("{lost} session(s) are absent from the session kernel"),
         });
     }
     Ok(DoctorReport {
-        tmux_version,
+        tmux_version: kernel_version,
         findings,
     })
 }

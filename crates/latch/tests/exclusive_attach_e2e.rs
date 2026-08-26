@@ -365,9 +365,8 @@ impl Surface {
     }
 
     fn kill(&mut self) {
-        match self.child.try_wait() {
-            Ok(Some(_)) => return,
-            _ => {}
+        if let Ok(Some(_)) = self.child.try_wait() {
+            return;
         }
         let pid = self.child.id() as i32;
         unsafe {

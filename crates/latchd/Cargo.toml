@@ -1,0 +1,32 @@
+[package]
+name = "latchd"
+description = "Latch's headless session kernel: one daemon per persistent terminal session."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "latchd"
+path = "src/main.rs"
+
+[lib]
+name = "latchd"
+path = "src/lib.rs"
+
+# The daemon is a splice with a screen model beside it. It links no async
+# runtime: the hot path is one blocking read and one blocking write per
+# direction, and everything else is a thread.
+[dependencies]
+anyhow.workspace = true
+latch-term = { path = "../latch-term" }
+libc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+libc.workspace = true
+tempfile.workspace = true

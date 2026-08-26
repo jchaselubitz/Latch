@@ -20,6 +20,50 @@ use crate::session::meta::{self, ExitRecord, MetaRequest, SessionMeta};
 use crate::session::paths::{LatchHome, SessionId, SessionPaths, FILE_MODE, SESSION_ID_ENV};
 use crate::session::{timing, viewer};
 
+mod latchd_kernel;
+
+pub use latchd_kernel::{latchd_binary, latchd_version, BUNDLED_LATCHD_NAME};
+
+/// Which session kernel this process drives.
+///
+/// The seam is this enum: every public verb below checks it first and hands
+/// the call to `latchd_kernel` when the daemon is selected, so nothing above
+/// `engine` knows which kernel is underneath. Selection is per process, from
+/// `LATCH_KERNEL`; the default stays `tmux` until the daemon has soaked
+/// (`planning/HEADLESS_KERNEL_PROPOSAL.md`, Phase B).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kernel {
+    /// The bundled patched tmux (`latch-tmux`).
+    Tmux,
+    /// The per-session daemon (`latchd`).
+    Latchd,
+}
+
+/// Environment variable selecting the kernel: `tmux` (default) or `latchd`.
+pub const KERNEL_ENV: &str = "LATCH_KERNEL";
+
+impl Kernel {
+    /// Stable spelling, as accepted by [`KERNEL_ENV`].
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Tmux => "tmux",
+            Self::Latchd => "latchd",
+        }
+    }
+
+    fn is_latchd(self) -> bool {
+        matches!(self, Self::Latchd)
+    }
+}
+
+/// The kernel selected for this process.
+pub fn kernel() -> Kernel {
+    match std::env::var(KERNEL_ENV).as_deref() {
+        Ok("latchd") => Kernel::Latchd,
+        _ => Kernel::Tmux,
+    }
+}
+
 /// Public protocol contract version retained across the kernel swap.
 pub const PROTOCOL_VERSION: u32 = 2;
 /// Pinned tmux release bundled by the distribution.
@@ -251,6 +295,9 @@ pub struct SendKeysRequest<'a> {
 
 /// Creates a detached tmux session and transfers launch material over a FIFO.
 pub fn create(request: CreateRequest) -> Result<CreateResult> {
+    if kernel().is_latchd() {
+        return latchd_kernel::create(request);
+    }
     // Creation is one of three processes that decide how long a launch takes,
     // so each of its phases is timed into the session's sidecar. The phases are
     // recorded once the session directory exists — the work before that is
@@ -465,6 +512,9 @@ impl SurfaceRelease {
 /// Returns why the surface was released. A failed preflight — the case that
 /// must leave the current surface live — is an error, not a release.
 pub fn attach_exclusive(home: &LatchHome, id: &SessionId) -> Result<SurfaceRelease> {
+    if kernel().is_latchd() {
+        return latchd_kernel::attach_exclusive(home, id);
+    }
     ensure_config(home)?;
     ensure_latch_raw_kernel()?;
     ensure_latch_raw_server(home)?;
@@ -562,6 +612,9 @@ fn wait_for_first_viewer(manifest: &LaunchManifest) {
 /// being justified. Returns the reason the wait ended, which is recorded beside
 /// its duration so a slow launch can be attributed afterwards.
 fn await_first_viewer(home: &LatchHome, id: &SessionId, paths: &SessionPaths) -> &'static str {
+    if kernel().is_latchd() {
+        return latchd_kernel::await_first_viewer(home, id, paths);
+    }
     let Ok(mut waiter) = tmux(home).and_then(|mut command| {
         command.args(["wait-for", &first_viewer_channel(id)]);
         command.spawn().context("cannot wait for the first viewer")
@@ -609,6 +662,9 @@ fn stop_waiter(waiter: &mut std::process::Child) {
 }
 
 fn signal_first_viewer(home: &LatchHome, id: &SessionId) {
+    if kernel().is_latchd() {
+        return;
+    }
     let Ok(mut command) = tmux(home) else {
         return;
     };
@@ -624,6 +680,12 @@ fn first_viewer_channel(id: &SessionId) -> String {
 /// server cannot answer. Used to confirm that a viewer really arrived rather
 /// than that a viewer command merely exited.
 pub fn attached_clients(home: &LatchHome, id: &SessionId) -> Option<usize> {
+    if kernel().is_latchd() {
+        return latchd_kernel::inspect(home, id)
+            .ok()
+            .flatten()
+            .map(|info| info.attached);
+    }
     let output = tmux(home)
         .ok()?
         .args([
@@ -649,11 +711,17 @@ pub fn attached_clients(home: &LatchHome, id: &SessionId) -> Option<usize> {
 /// [`raw_surface_acknowledged`] instead so an ordinary command client cannot
 /// release a launch gate.
 pub fn surface_attached(home: &LatchHome, id: &SessionId) -> bool {
+    if kernel().is_latchd() {
+        return latchd_kernel::surface_attached(home, id);
+    }
     raw_surface_acknowledged(home, id)
 }
 
 /// Returns whether tmux still owns a named session.
 pub fn has_session(home: &LatchHome, id: &SessionId) -> bool {
+    if kernel().is_latchd() {
+        return latchd_kernel::has_session(home, id);
+    }
     let Ok(mut command) = tmux(home) else {
         return false;
     };
@@ -673,6 +741,9 @@ pub fn has_session(home: &LatchHome, id: &SessionId) -> bool {
 /// for one poll; a row still half-expanded after the retries is dropped, and
 /// the caller reports that session from its own metadata.
 pub fn list(home: &LatchHome) -> Result<Vec<SessionInfo>> {
+    if kernel().is_latchd() {
+        return latchd_kernel::list(home);
+    }
     let mut described = Vec::new();
     for attempt in 0..SESSION_QUERY_ATTEMPTS {
         let (sessions, partial) = list_once(home)?;
@@ -738,6 +809,9 @@ enum SessionQuery {
 /// the session is reported as gone; a caller must not see a live session blink
 /// out because the query landed inside that window.
 pub fn inspect(home: &LatchHome, id: &SessionId) -> Result<Option<SessionInfo>> {
+    if kernel().is_latchd() {
+        return latchd_kernel::inspect(home, id);
+    }
     for attempt in 0..SESSION_QUERY_ATTEMPTS {
         match inspect_once(home, id)? {
             SessionQuery::Found(info) => return Ok(Some(info)),
@@ -818,6 +892,9 @@ pub fn pane_metrics_with_timeout(
     id: &SessionId,
     timeout: Duration,
 ) -> Result<PaneMetrics> {
+    if kernel().is_latchd() {
+        return latchd_kernel::pane_metrics(home, id);
+    }
     ensure_config(home)?;
     let mut command = tmux(home)?;
     command.args([
@@ -866,6 +943,9 @@ pub fn capture_pane_with_timeout(
     timeout: Duration,
     options: CapturePaneOptions,
 ) -> Result<String> {
+    if kernel().is_latchd() {
+        return latchd_kernel::capture_pane(home, id, timeout, options);
+    }
     ensure_config(home)?;
     let mut command = tmux(home)?;
     command.args(["capture-pane", "-p", "-J"]);
@@ -897,6 +977,9 @@ pub fn paste_message_with_timeout(
     request: PasteMessageRequest<'_>,
     timeout: Duration,
 ) -> Result<()> {
+    if kernel().is_latchd() {
+        return latchd_kernel::paste_message(request, timeout);
+    }
     let started = Instant::now();
     let buffer = format!(
         "latch-message-{}-{}",
@@ -956,6 +1039,9 @@ pub fn send_keys(request: SendKeysRequest<'_>) -> Result<()> {
 
 /// Deadline-bounded form used by Conversation Hub action workers.
 pub fn send_keys_with_timeout(request: SendKeysRequest<'_>, timeout: Duration) -> Result<()> {
+    if kernel().is_latchd() {
+        return latchd_kernel::send_keys(request, timeout);
+    }
     if request.keys.is_empty() {
         bail!("at least one key is required");
     }
@@ -968,6 +1054,9 @@ pub fn send_keys_with_timeout(request: SendKeysRequest<'_>, timeout: Duration) -
 
 /// Resizes a session and optionally pins manual geometry.
 pub fn resize(request: ResizeRequest<'_>) -> Result<()> {
+    if kernel().is_latchd() {
+        return latchd_kernel::resize(request);
+    }
     let mut command = tmux(request.home)?;
     command.args([
         "resize-window",
@@ -1039,6 +1128,9 @@ fn wait_until_exited(home: &LatchHome, id: &SessionId, polls: usize) -> Result<b
 /// Used by `latch attach --retry` so "server not up yet" is retried and
 /// "session is gone" is not.
 pub(crate) fn tmux_server_is_absent(home: &LatchHome) -> bool {
+    if kernel().is_latchd() {
+        return false;
+    }
     let Ok(mut command) = tmux(home) else {
         return false;
     };
@@ -1074,6 +1166,9 @@ fn signal_pane(info: &SessionInfo, signal: i32) -> std::io::Result<()> {
 
 /// Removes a tmux session, including its retained dead pane.
 pub fn kill_session(home: &LatchHome, id: &SessionId) -> Result<()> {
+    if kernel().is_latchd() {
+        return latchd_kernel::kill_session(home, id);
+    }
     let mut command = tmux(home)?;
     command.args(["kill-session", "-t", id.as_str()]);
     run_tmux(command, "remove session")
