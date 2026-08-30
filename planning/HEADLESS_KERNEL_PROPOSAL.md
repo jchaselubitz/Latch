@@ -727,3 +727,58 @@ The rollback boundary tightens at Phase B, when the daemon enters the signed
 payload, and again at the default cutover; each of those objectives owns its
 own rollback and neither is unlocked by this one. This objective does not
 flip the default kernel and does not remove tmux.
+
+---
+
+## Part 9 — Phase B four-binary packaging (coo:847.c51g)
+
+Phase B changes distribution, not kernel selection. Both supported CLI targets
+(`aarch64-apple-darwin` and `x86_64-apple-darwin`) now build and publish one
+coordinated payload containing `latch`, `latch-remote`, `latch-tmux`, and
+`latchd`. The default remains tmux, and `LATCH_KERNEL=tmux` remains an explicit
+escape hatch.
+
+### Release contract
+
+- `scripts/release-cli.sh` builds `latchd` with the other Rust binaries, signs
+  and verifies all four executables, and submits the archive containing all
+  four to the existing notarization flow.
+- `latch-payload.json` is included in every archive. It binds format version,
+  product version, target triple, and the ordered four-binary member list. The
+  release script checks each Rust binary's reported version before creating it.
+- The archive checksum remains the outer integrity boundary. The installer and
+  updater verify that checksum, the manifest, every required member, the
+  Developer ID team (when the current install is signed), tmux's private raw
+  attach capability, latchd's product/protocol version, and the remote helper's
+  product version before changing any installed path.
+
+### Update, repair, and rollback
+
+The updater stages beside the installed CLI so each replacement is a
+same-filesystem rename. All four members pass completeness, signature, and
+version checks before the first rename. Siblings are backed up during the
+transaction; a failure at any later member restores every earlier member, and
+`latch` is replaced last. Missing tmux, remote, or latchd members and invalid
+tmux/latchd/remote versions turn an otherwise-current update into a repair of
+the complete payload.
+
+Replacing a kernel's executable path does not signal, restart, or reconnect a
+running kernel. A test starts long-lived processes from both installed kernel
+paths, performs the four-binary replacement, and proves both old processes
+finish normally while new invocations execute the replacement binaries. This
+is the intended update boundary: live tmux servers and per-session latchd
+daemons continue from their already-mapped images; only future process starts
+use the new files.
+
+### Diagnostics and rollback boundary
+
+`latch doctor` reports the selected kernel plus separate `tmuxVersion` and
+`latchdVersion` fields and validates both shipped kernels regardless of which
+one is selected. This makes a broken fallback visible while dogfood is using
+latchd, and a broken opt-in daemon visible while the default is still tmux.
+
+Rollback is an update to an earlier complete four-binary archive. It does not
+terminate live sessions for the same reason a forward update does not. The
+operational escape hatch is cheaper: stop setting `LATCH_KERNEL=latchd`, or set
+`LATCH_KERNEL=tmux` explicitly; no default changed in Phase B and no live
+session migration is attempted.

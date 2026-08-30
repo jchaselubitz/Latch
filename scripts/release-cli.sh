@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the distributable Latch payload: CLI, remote helper, and pinned private tmux.
+# Build the distributable Latch payload: CLI, remote helper, and both kernels.
 #
 # Usage: scripts/release-cli.sh [target]
 #
@@ -39,12 +39,13 @@ archive_path="$output_dir/$archive_name"
 stage_dir="$output_dir/.stage-$target"
 tmux_work="$output_dir/.tmux-$target"
 
-cargo build --locked --release --package latch --package latch-remote --target "$target"
+cargo build --locked --release --package latch --package latch-remote --package latchd --target "$target"
 
 rm -rf "$stage_dir"
 mkdir -p "$stage_dir"
 cp "target/$target/release/latch" "$stage_dir/latch"
 cp "target/$target/release/latch-remote" "$stage_dir/latch-remote"
+cp "target/$target/release/latchd" "$stage_dir/latchd"
 
 # The patched session kernel is built by the same script the Phase 0 conformance
 # harness uses, so a shipped kernel and a tested kernel are never built
@@ -53,19 +54,31 @@ cp "target/$target/release/latch-remote" "$stage_dir/latch-remote"
 # capability.
 scripts/build-tmux.sh "$stage_dir/latch-tmux" "$tmux_work"
 
+# Refuse a mixed-version archive before it reaches signing/notarization. The
+# updater repeats these checks after extraction because an archive is the unit
+# of distribution, but catching a bad staging directory here makes the release
+# failure immediate and target-specific.
+"$stage_dir/latch" --version | grep -F " $version" >/dev/null
+"$stage_dir/latch-remote" --version | grep -F " $version" >/dev/null
+"$stage_dir/latchd" version | grep -Fx "latchd $version protocol 1" >/dev/null
+printf '{"formatVersion":1,"version":"%s","target":"%s","binaries":["latch","latch-remote","latch-tmux","latchd"]}\n' \
+  "$version" "$target" > "$stage_dir/latch-payload.json"
+
 if [[ -n "${LATCH_CODESIGN_IDENTITY:-}" ]]; then
   codesign --force --options runtime --timestamp --sign "$LATCH_CODESIGN_IDENTITY" "$stage_dir/latch"
   codesign --force --options runtime --timestamp --sign "$LATCH_CODESIGN_IDENTITY" "$stage_dir/latch-remote"
+  codesign --force --options runtime --timestamp --sign "$LATCH_CODESIGN_IDENTITY" "$stage_dir/latchd"
   codesign --force --options runtime --timestamp --sign "$LATCH_CODESIGN_IDENTITY" "$stage_dir/latch-tmux"
   codesign --verify --strict --verbose=2 "$stage_dir/latch"
   codesign --verify --strict --verbose=2 "$stage_dir/latch-remote"
+  codesign --verify --strict --verbose=2 "$stage_dir/latchd"
   codesign --verify --strict --verbose=2 "$stage_dir/latch-tmux"
 fi
 
 mkdir -p "$output_dir"
 archive_path="$(cd "$output_dir" && pwd -P)/$archive_name"
 rm -f "$archive_path"
-(cd "$stage_dir" && /usr/bin/zip -q -X "$archive_path" latch latch-remote latch-tmux)
+(cd "$stage_dir" && /usr/bin/zip -q -X "$archive_path" latch latch-remote latch-tmux latchd latch-payload.json)
 
 if [[ -n "${LATCH_NOTARY_PROFILE:-}" ]]; then
   : "${LATCH_CODESIGN_IDENTITY:?LATCH_NOTARY_PROFILE requires LATCH_CODESIGN_IDENTITY}"

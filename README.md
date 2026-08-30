@@ -25,7 +25,7 @@ than code.
 Download the standalone CLI payload and the Apple Silicon macOS desktop app from the same
 [GitHub Release](https://github.com/jchaselubitz/Latch/releases/latest). The
 current desktop archive is
-[Latch-0.2608260946.0-macos.zip](https://github.com/jchaselubitz/Latch/releases/download/v0.2608260946.0/Latch-0.2608260946.0-macos.zip);
+[Latch-0.2608300548.0-macos.zip](https://github.com/jchaselubitz/Latch/releases/download/v0.2608300548.0/Latch-0.2608300548.0-macos.zip);
 it contains only `Latch.app`. Drag the app to Applications, then install the CLI
 independently with:
 
@@ -34,14 +34,16 @@ curl -fsSL https://raw.githubusercontent.com/jchaselubitz/Latch/main/scripts/ins
 ```
 
 The installer chooses the Apple Silicon or Intel archive, verifies it against
-the release's `checksums.txt`, verifies both Developer ID signatures, and
-installs `latch`, the `latch-remote` helper, and its pinned private `latch-tmux` kernel in
-`~/.local/bin`. Latch always invokes that sibling tmux binary by absolute path; it
-never discovers or joins a tmux server the user runs.
+the release's `checksums.txt`, verifies all four Developer ID signatures and
+the payload manifest, and installs `latch`, `latch-remote`, `latch-tmux`, and
+`latchd` in `~/.local/bin`. Tmux remains the default kernel; Latch invokes the
+sibling kernel by absolute path and never discovers or joins a tmux server the
+user runs. `LATCH_KERNEL=latchd` opts into the headless kernel, while
+`LATCH_KERNEL=tmux` is the explicit fallback.
 
 ## Updating
 
-`latch update` replaces the complete three-binary payload with the newest release published
+`latch update` replaces the complete four-binary payload with the newest release published
 at [Latch releases](https://github.com/jchaselubitz/Latch/releases). It
 verifies the archive against the checksums that release publishes, and — when
 the installed binary is Developer ID signed — refuses a download signed by
@@ -56,7 +58,7 @@ identity the installed app already has.
 
 ## Status
 
-The session kernel is a private, pinned tmux server behind the Latch CLI.
+The default session kernel is a private, pinned tmux server behind the Latch CLI.
 Multiple terminals can attach, closing a terminal does not stop the process,
 and session state is queried directly from tmux.
 

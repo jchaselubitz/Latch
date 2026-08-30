@@ -1,19 +1,22 @@
 //! `latch update` — replace this install with the newest published release.
 //!
-//! Latch is installed as one signed payload — `latch`, `latch-remote`, and
-//! `latch-tmux` — so it has to be updated by replacing that payload. That is
+//! Latch is installed as one signed payload — `latch`, `latch-remote`,
+//! `latch-tmux`, and `latchd` — so it has to be updated by replacing that
+//! payload. That is
 //! the whole feature, and the risk is entirely in the details: the archive
 //! must be the one the release published, the swap must not leave a
 //! half-written binary where a working one was, and a copy that somebody else
 //! owns — a Homebrew cellar, the helper inside `Latch.app` — must be refused
 //! rather than quietly diverged from its package.
 //!
-//! Three checks stand between the network and the installed binaries:
+//! Four checks stand between the network and the installed binaries:
 //!
 //! 1. the archive's SHA-256 must match the release's own `checksums.txt`;
-//! 2. when the running binary carries a Developer ID signature, the downloaded
+//! 2. its payload manifest must name this version, target, and all four
+//!    binaries;
+//! 3. when the running binary carries a Developer ID signature, the downloaded
 //!    ones must carry a valid signature from the same team;
-//! 3. each replacement is staged beside the target and moved into place with
+//! 4. each replacement is staged beside the target and moved into place with
 //!    `rename`, so every installed path is either the old binary or the new one.
 //!
 //! Networking is `curl`, and unpacking is `ditto`/`tar`. Both are part of
@@ -30,13 +33,30 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{anyhow, bail, Context, Result};
+use serde::Deserialize;
 
 use crate::cli::json::UpdateReport;
-use crate::engine::{BUNDLED_REMOTE_NAME, BUNDLED_TMUX_NAME};
+use crate::engine::{BUNDLED_LATCHD_NAME, BUNDLED_REMOTE_NAME, BUNDLED_TMUX_NAME};
 use release::{host_target, Release, Version, DEFAULT_RELEASE_REPO};
 
 /// Extra files that ship beside `latch` in a release archive.
-const PAYLOAD_SIBLINGS: &[&str] = &[BUNDLED_TMUX_NAME, BUNDLED_REMOTE_NAME];
+const PAYLOAD_SIBLINGS: &[&str] = &[BUNDLED_TMUX_NAME, BUNDLED_REMOTE_NAME, BUNDLED_LATCHD_NAME];
+const PAYLOAD_BINARIES: &[&str] = &[
+    "latch",
+    BUNDLED_REMOTE_NAME,
+    BUNDLED_TMUX_NAME,
+    BUNDLED_LATCHD_NAME,
+];
+const PAYLOAD_MANIFEST_NAME: &str = "latch-payload.json";
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct PayloadManifest {
+    format_version: u32,
+    version: String,
+    target: String,
+    binaries: Vec<String>,
+}
 
 /// What an update run was asked to do.
 #[derive(Debug, Clone)]
@@ -207,7 +227,8 @@ pub fn update_from(options: UpdateOptions, source: &dyn ReleaseSource) -> Result
     let release = Release::parse(&source.latest_release()?)?;
 
     let newer = release.version > current;
-    let payload_incomplete = !payload_is_complete(options.executable.as_deref());
+    let payload_incomplete =
+        !payload_is_complete(options.executable.as_deref(), &options.current_version);
     if !newer && !options.force && !payload_incomplete {
         return Ok(UpdateReport {
             status: UpdateStatus::Current.as_wire().to_owned(),
@@ -254,7 +275,7 @@ pub fn update_from(options: UpdateOptions, source: &dyn ReleaseSource) -> Result
     })
 }
 
-fn payload_is_complete(executable: Option<&Path>) -> bool {
+fn payload_is_complete(executable: Option<&Path>, version: &str) -> bool {
     let executable = executable
         .map(Path::to_path_buf)
         .or_else(|| std::env::current_exe().ok());
@@ -267,6 +288,12 @@ fn payload_is_complete(executable: Option<&Path>) -> bool {
             .iter()
             .all(|name| parent.join(name).is_file())
             && kernel_is_patched(&parent.join(BUNDLED_TMUX_NAME))
+            && member_reports_version(
+                &parent.join(BUNDLED_REMOTE_NAME),
+                "--version",
+                &format!("latch-remote {version}"),
+            )
+            && latchd_reports_version(&parent.join(BUNDLED_LATCHD_NAME), version)
     })
 }
 
@@ -294,6 +321,28 @@ fn kernel_is_patched(tmux: &Path) -> bool {
         Ok(status) => status.success(),
         Err(_) => true,
     }
+}
+
+/// Whether a daemon belongs to the same coordinated release as the CLI.
+fn latchd_reports_version(daemon: &Path, version: &str) -> bool {
+    member_reports_version(
+        daemon,
+        "version",
+        &format!(
+            "latchd {version} protocol {}",
+            latchd::protocol::PROTOCOL_VERSION
+        ),
+    )
+}
+
+fn member_reports_version(binary: &Path, argument: &str, expected: &str) -> bool {
+    Command::new(binary)
+        .arg(argument)
+        .stdin(Stdio::null())
+        .output()
+        .is_ok_and(|output| {
+            output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == expected
+        })
 }
 
 /// Refuses to replace a binary that something else is responsible for.
@@ -355,6 +404,8 @@ fn install(
         .with_context(|| format!("could not create {}", unpacked.display()))?;
     unpack(&archive_path, &unpacked)?;
 
+    verify_payload_manifest(&unpacked, release, triple)?;
+
     let replacement = unpacked.join("latch");
     let siblings: Vec<(&str, PathBuf, PathBuf)> = PAYLOAD_SIBLINGS
         .iter()
@@ -362,7 +413,7 @@ fn install(
         .collect();
     if !replacement.is_file() || siblings.iter().any(|(_, source, _)| !source.is_file()) {
         bail!(
-            "{} did not contain the complete `latch`, `{BUNDLED_TMUX_NAME}`, and `{BUNDLED_REMOTE_NAME}` payload",
+            "{} did not contain the complete four-binary Latch payload",
             archive.name
         );
     }
@@ -382,6 +433,31 @@ fn install(
     for (_, source, _) in &siblings {
         fs::set_permissions(source, fs::Permissions::from_mode(0o755))
             .with_context(|| format!("could not set permissions on {}", source.display()))?;
+    }
+    let staged_tmux = unpacked.join(BUNDLED_TMUX_NAME);
+    if !kernel_is_patched(&staged_tmux) {
+        bail!(
+            "{} contains an invalid `{BUNDLED_TMUX_NAME}`; nothing was installed",
+            archive.name
+        );
+    }
+    let staged_latchd = unpacked.join(BUNDLED_LATCHD_NAME);
+    if !latchd_reports_version(&staged_latchd, &release.version.to_string()) {
+        bail!(
+            "{} contains an invalid or mixed-version `{BUNDLED_LATCHD_NAME}`; nothing was installed",
+            archive.name
+        );
+    }
+    let staged_remote = unpacked.join(BUNDLED_REMOTE_NAME);
+    if !member_reports_version(
+        &staged_remote,
+        "--version",
+        &format!("latch-remote {}", release.version),
+    ) {
+        bail!(
+            "{} contains an invalid or mixed-version `{BUNDLED_REMOTE_NAME}`; nothing was installed",
+            archive.name
+        );
     }
 
     let mut backups = Vec::new();
@@ -409,6 +485,30 @@ fn install(
         });
     }
     Ok(target.to_path_buf())
+}
+
+fn verify_payload_manifest(unpacked: &Path, release: &Release, triple: &str) -> Result<()> {
+    let path = unpacked.join(PAYLOAD_MANIFEST_NAME);
+    let bytes = fs::read(&path)
+        .with_context(|| format!("release archive has no {PAYLOAD_MANIFEST_NAME}"))?;
+    let actual: PayloadManifest = serde_json::from_slice(&bytes)
+        .with_context(|| format!("{PAYLOAD_MANIFEST_NAME} is invalid"))?;
+    let expected = PayloadManifest {
+        format_version: 1,
+        version: release.version.to_string(),
+        target: triple.to_owned(),
+        binaries: PAYLOAD_BINARIES
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect(),
+    };
+    if actual != expected {
+        bail!(
+            "{PAYLOAD_MANIFEST_NAME} does not describe the requested four-binary {} payload; nothing was installed",
+            release.version
+        );
+    }
+    Ok(())
 }
 
 /// Restores payload siblings after a failed swap. Best-effort: a restore
@@ -594,6 +694,7 @@ impl Drop for Staging {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use std::io::Write;
     use std::sync::Mutex;
 
     /// A release served from local files, so the download, verification,
@@ -644,13 +745,45 @@ mod tests {
 
     /// Builds a release whose archive contains `body` as the `latch` binary.
     fn release_with(version: &str, body: &[u8], corrupt_digest: bool) -> FakeSource {
+        release_with_versions(version, body, corrupt_digest, version, version)
+    }
+
+    fn release_with_latchd_version(
+        version: &str,
+        body: &[u8],
+        corrupt_digest: bool,
+        latchd_version: &str,
+    ) -> FakeSource {
+        release_with_versions(version, body, corrupt_digest, latchd_version, version)
+    }
+
+    fn release_with_versions(
+        version: &str,
+        body: &[u8],
+        corrupt_digest: bool,
+        latchd_version: &str,
+        manifest_version: &str,
+    ) -> FakeSource {
         let dir = tempfile::tempdir().expect("temp dir");
         let staged = dir.path().join("latch");
         fs::write(&staged, body).expect("stage binary");
         let staged_tmux = dir.path().join(BUNDLED_TMUX_NAME);
-        fs::write(&staged_tmux, b"tmux 3.7b").expect("stage tmux");
+        write_kernel(&staged_tmux, true);
         let staged_remote = dir.path().join(BUNDLED_REMOTE_NAME);
-        fs::write(&staged_remote, b"the remote helper").expect("stage remote");
+        write_remote(&staged_remote, version, "new");
+        let staged_latchd = dir.path().join(BUNDLED_LATCHD_NAME);
+        write_latchd(&staged_latchd, latchd_version, "new");
+        fs::write(
+            dir.path().join(PAYLOAD_MANIFEST_NAME),
+            serde_json::to_vec(&serde_json::json!({
+                "formatVersion": 1,
+                "version": manifest_version,
+                "target": FIXTURE_TARGET,
+                "binaries": PAYLOAD_BINARIES,
+            }))
+            .unwrap(),
+        )
+        .expect("write payload manifest");
         let archive_name = format!("latch-{version}-{FIXTURE_TARGET}.tar.gz");
         let archive = dir.path().join(&archive_name);
         let status = Command::new("tar")
@@ -658,7 +791,13 @@ mod tests {
             .arg(&archive)
             .args(["-C"])
             .arg(dir.path())
-            .args(["latch", BUNDLED_TMUX_NAME, BUNDLED_REMOTE_NAME])
+            .args([
+                "latch",
+                BUNDLED_TMUX_NAME,
+                BUNDLED_REMOTE_NAME,
+                BUNDLED_LATCHD_NAME,
+                PAYLOAD_MANIFEST_NAME,
+            ])
             .status()
             .expect("tar");
         assert!(status.success(), "tar must produce the fixture archive");
@@ -696,7 +835,7 @@ mod tests {
     /// succeed, an upstream build rejects the unknown option.
     fn write_kernel(path: &Path, patched: bool) {
         let body = if patched {
-            "#!/bin/sh\ncase \"$1\" in -R) exit 0 ;; esac\nexit 1\n"
+            "#!/bin/sh\ncase \"$1\" in -R) exit 0 ;; -V) echo 'tmux 3.7b'; exit 0 ;; session) echo 'tmux-new'; exit 0 ;; esac\nexit 1\n"
         } else {
             "#!/bin/sh\nexit 1\n"
         };
@@ -704,15 +843,52 @@ mod tests {
         fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("chmod kernel");
     }
 
+    fn write_latchd(path: &Path, version: &str, generation: &str) {
+        let body = format!(
+            "#!/bin/sh\nif [ \"$1\" = version ]; then echo 'latchd {version} protocol {}'; exit 0; fi\necho '{generation}'\n",
+            latchd::protocol::PROTOCOL_VERSION
+        );
+        fs::write(path, body).expect("write latchd");
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("chmod latchd");
+    }
+
+    fn write_remote(path: &Path, version: &str, generation: &str) {
+        let body = format!(
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'latch-remote {version}'; exit 0; fi\necho '{generation}'\n"
+        );
+        fs::write(path, body).expect("write remote");
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("chmod remote");
+    }
+
     fn installed_binary(directory: &Path) -> PathBuf {
         let path = directory.join("latch");
         fs::write(&path, b"the old binary").expect("write old binary");
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod");
         write_kernel(&directory.join(BUNDLED_TMUX_NAME), true);
-        let remote = directory.join(BUNDLED_REMOTE_NAME);
-        fs::write(&remote, b"the old remote").expect("write old remote");
-        fs::set_permissions(&remote, fs::Permissions::from_mode(0o755)).expect("chmod remote");
+        write_remote(
+            &directory.join(BUNDLED_REMOTE_NAME),
+            "0.2608101202.0",
+            "old",
+        );
+        write_latchd(
+            &directory.join(BUNDLED_LATCHD_NAME),
+            "0.2608101202.0",
+            "old",
+        );
         path
+    }
+
+    fn write_live_kernel(path: &Path, kind: &str) {
+        let version_case = if kind == "tmux" {
+            "-R) exit 0 ;; -V) echo 'tmux 3.7b'; exit 0 ;;"
+        } else {
+            "version) echo 'latchd 0.2608101202.0 protocol 1'; exit 0 ;;"
+        };
+        let body = format!(
+            "#!/bin/sh\ncase \"$1\" in {version_case} session) echo '{kind}-old-ready'; read line; echo '{kind}-old-done'; exit 0 ;; esac\nexit 1\n"
+        );
+        fs::write(path, body).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
     }
 
     #[test]
@@ -726,13 +902,16 @@ mod tests {
         assert_eq!(report.status, "installed");
         assert_eq!(report.latest_version.as_deref(), Some("0.2608101202.0"));
         assert_eq!(fs::read(&target).expect("read"), b"the new binary");
-        assert_eq!(
-            fs::read(dir.path().join(BUNDLED_TMUX_NAME)).expect("read tmux"),
-            b"tmux 3.7b"
-        );
-        assert_eq!(
-            fs::read(dir.path().join(BUNDLED_REMOTE_NAME)).expect("read remote"),
-            b"the remote helper"
+        assert!(kernel_is_patched(&dir.path().join(BUNDLED_TMUX_NAME)));
+        assert!(member_reports_version(
+            &dir.path().join(BUNDLED_REMOTE_NAME),
+            "--version",
+            "latch-remote 0.2608101202.0"
+        ));
+        assert!(
+            String::from_utf8(fs::read(dir.path().join(BUNDLED_LATCHD_NAME)).unwrap())
+                .unwrap()
+                .contains("echo 'new'")
         );
         assert_eq!(
             fs::metadata(&target).expect("stat").permissions().mode() & 0o777,
@@ -759,6 +938,47 @@ mod tests {
             b"the old binary",
             "a failed update must leave the working binary in place"
         );
+    }
+
+    #[test]
+    fn a_mixed_version_four_binary_archive_is_rejected_before_any_swap() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let target = installed_binary(dir.path());
+        let source = release_with_latchd_version(
+            "0.2608101202.0",
+            b"the new binary",
+            false,
+            "0.2608100841.0",
+        );
+
+        let error = update_from(options_for(&target, "0.2608100841.0"), &source)
+            .expect_err("a mixed release must fail");
+
+        assert!(format!("{error:#}").contains("mixed-version `latchd`"));
+        assert_eq!(fs::read(&target).unwrap(), b"the old binary");
+        assert!(latchd_reports_version(
+            &dir.path().join(BUNDLED_LATCHD_NAME),
+            "0.2608101202.0"
+        ));
+    }
+
+    #[test]
+    fn an_archive_with_a_mismatched_payload_manifest_is_rejected_before_any_swap() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let target = installed_binary(dir.path());
+        let source = release_with_versions(
+            "0.2608101202.0",
+            b"the new binary",
+            false,
+            "0.2608101202.0",
+            "0.2608100841.0",
+        );
+
+        let error = update_from(options_for(&target, "0.2608100841.0"), &source)
+            .expect_err("a mismatched manifest must fail");
+
+        assert!(format!("{error:#}").contains("does not describe"));
+        assert_eq!(fs::read(&target).unwrap(), b"the old binary");
     }
 
     #[test]
@@ -789,14 +1009,12 @@ mod tests {
 
         assert_eq!(report.status, "installed");
         assert_eq!(fs::read(&target).unwrap(), b"the repaired binary");
-        assert_eq!(
-            fs::read(dir.path().join(BUNDLED_TMUX_NAME)).unwrap(),
-            b"tmux 3.7b"
-        );
-        assert_eq!(
-            fs::read(dir.path().join(BUNDLED_REMOTE_NAME)).unwrap(),
-            b"the remote helper"
-        );
+        assert!(kernel_is_patched(&dir.path().join(BUNDLED_TMUX_NAME)));
+        assert!(member_reports_version(
+            &dir.path().join(BUNDLED_REMOTE_NAME),
+            "--version",
+            "latch-remote 0.2608101202.0"
+        ));
     }
 
     #[test]
@@ -813,10 +1031,7 @@ mod tests {
             "an upstream tmux beside `latch` is an incomplete payload, not a current one: \
              every attach would fail at the moment a user wanted one"
         );
-        assert_eq!(
-            fs::read(dir.path().join(BUNDLED_TMUX_NAME)).unwrap(),
-            b"tmux 3.7b"
-        );
+        assert!(kernel_is_patched(&dir.path().join(BUNDLED_TMUX_NAME)));
     }
 
     #[test]
@@ -830,9 +1045,160 @@ mod tests {
 
         assert_eq!(report.status, "installed");
         assert_eq!(fs::read(&target).unwrap(), b"the repaired binary");
+        assert!(member_reports_version(
+            &dir.path().join(BUNDLED_REMOTE_NAME),
+            "--version",
+            "latch-remote 0.2608101202.0"
+        ));
+    }
+
+    #[test]
+    fn a_current_cli_with_a_mixed_version_remote_repairs_the_complete_payload() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let target = installed_binary(dir.path());
+        write_remote(
+            &dir.path().join(BUNDLED_REMOTE_NAME),
+            "0.2608100841.0",
+            "old",
+        );
+        let source = release_with("0.2608101202.0", b"the repaired binary", false);
+
+        let report = update_from(options_for(&target, "0.2608101202.0"), &source).expect("repair");
+
+        assert_eq!(report.status, "installed");
+        assert!(member_reports_version(
+            &dir.path().join(BUNDLED_REMOTE_NAME),
+            "--version",
+            "latch-remote 0.2608101202.0"
+        ));
+    }
+
+    #[test]
+    fn a_current_cli_with_a_missing_latchd_repairs_the_complete_payload() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let target = installed_binary(dir.path());
+        fs::remove_file(dir.path().join(BUNDLED_LATCHD_NAME)).expect("remove latchd");
+        let source = release_with("0.2608101202.0", b"the repaired binary", false);
+
+        let report = update_from(options_for(&target, "0.2608101202.0"), &source).expect("repair");
+
+        assert_eq!(report.status, "installed");
+        assert!(latchd_reports_version(
+            &dir.path().join(BUNDLED_LATCHD_NAME),
+            "0.2608101202.0"
+        ));
+    }
+
+    #[test]
+    fn a_current_cli_with_a_mixed_version_latchd_repairs_the_complete_payload() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let target = installed_binary(dir.path());
+        write_latchd(
+            &dir.path().join(BUNDLED_LATCHD_NAME),
+            "0.2608100841.0",
+            "old",
+        );
+        let source = release_with("0.2608101202.0", b"the repaired binary", false);
+
+        let report = update_from(options_for(&target, "0.2608101202.0"), &source).expect("repair");
+
+        assert_eq!(report.status, "installed");
+        assert!(latchd_reports_version(
+            &dir.path().join(BUNDLED_LATCHD_NAME),
+            "0.2608101202.0"
+        ));
+    }
+
+    #[test]
+    fn a_swap_failure_rolls_back_every_sibling_already_replaced() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let target = installed_binary(dir.path());
+        let old_tmux = fs::read(dir.path().join(BUNDLED_TMUX_NAME)).unwrap();
+        let old_remote = fs::read(dir.path().join(BUNDLED_REMOTE_NAME)).unwrap();
+        fs::remove_file(dir.path().join(BUNDLED_LATCHD_NAME)).unwrap();
+        fs::create_dir(dir.path().join(BUNDLED_LATCHD_NAME)).unwrap();
+        fs::write(
+            dir.path().join(BUNDLED_LATCHD_NAME).join("occupied"),
+            b"keep",
+        )
+        .unwrap();
+        let source = release_with("0.2608101300.0", b"the new binary", false);
+
+        let error = update_from(options_for(&target, "0.2608101202.0"), &source)
+            .expect_err("the directory must make the sibling rename fail");
+
+        assert!(format!("{error:#}").contains("could not replace"));
+        assert_eq!(fs::read(&target).unwrap(), b"the old binary");
+        assert_eq!(
+            fs::read(dir.path().join(BUNDLED_TMUX_NAME)).unwrap(),
+            old_tmux
+        );
         assert_eq!(
             fs::read(dir.path().join(BUNDLED_REMOTE_NAME)).unwrap(),
-            b"the remote helper"
+            old_remote
+        );
+        assert_eq!(
+            fs::read(dir.path().join(BUNDLED_LATCHD_NAME).join("occupied")).unwrap(),
+            b"keep"
+        );
+    }
+
+    #[test]
+    fn replacing_both_kernel_binaries_does_not_disrupt_running_sessions() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let target = installed_binary(dir.path());
+        let tmux = dir.path().join(BUNDLED_TMUX_NAME);
+        let latchd = dir.path().join(BUNDLED_LATCHD_NAME);
+        write_live_kernel(&tmux, "tmux");
+        write_live_kernel(&latchd, "latchd");
+
+        let mut tmux_session = Command::new(&tmux)
+            .arg("session")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut latchd_session = Command::new(&latchd)
+            .arg("session")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        let source = release_with("0.2608101300.0", b"the new binary", false);
+        update_from(options_for(&target, "0.2608101202.0"), &source).expect("update");
+
+        tmux_session
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(b"continue\n")
+            .unwrap();
+        latchd_session
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(b"continue\n")
+            .unwrap();
+        let tmux_output = tmux_session.wait_with_output().unwrap();
+        let latchd_output = latchd_session.wait_with_output().unwrap();
+        assert!(String::from_utf8_lossy(&tmux_output.stdout).contains("tmux-old-done"));
+        assert!(String::from_utf8_lossy(&latchd_output.stdout).contains("latchd-old-done"));
+        assert_eq!(
+            String::from_utf8_lossy(&Command::new(&tmux).arg("session").output().unwrap().stdout)
+                .trim(),
+            "tmux-new"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(
+                &Command::new(&latchd)
+                    .arg("session")
+                    .output()
+                    .unwrap()
+                    .stdout
+            )
+            .trim(),
+            "new"
         );
     }
 
@@ -888,7 +1254,10 @@ mod tests {
             .filter_map(Result::ok)
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
             .filter(|name| {
-                name != "latch" && name != BUNDLED_TMUX_NAME && name != BUNDLED_REMOTE_NAME
+                name != "latch"
+                    && name != BUNDLED_TMUX_NAME
+                    && name != BUNDLED_REMOTE_NAME
+                    && name != BUNDLED_LATCHD_NAME
             })
             .collect();
         assert!(leftovers.is_empty(), "left behind {leftovers:?}");

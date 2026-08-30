@@ -341,23 +341,6 @@ pub struct DoctorOptions {
 /// Reports installation and state problems.
 pub fn doctor(options: DoctorOptions) -> anyhow::Result<DoctorReport> {
     let mut findings = Vec::new();
-    // On the daemon kernel there is no tmux to check; verify the daemon
-    // instead and report its version in the tmux_version slot the report
-    // already carries.
-    if engine::kernel() == engine::Kernel::Latchd {
-        let kernel_version = match engine::latchd_version() {
-            Ok(version) => Some(version),
-            Err(error) => {
-                findings.push(DoctorFinding {
-                    code: "kernel_missing".to_owned(),
-                    severity: "error".to_owned(),
-                    message: error.to_string(),
-                });
-                None
-            }
-        };
-        return doctor_common(options, findings, kernel_version);
-    }
     let tmux_version = match engine::tmux_version() {
         Ok(version) => {
             if version != format!("tmux {}", engine::TMUX_VERSION) {
@@ -381,13 +364,39 @@ pub fn doctor(options: DoctorOptions) -> anyhow::Result<DoctorReport> {
             None
         }
     };
-    doctor_common(options, findings, tmux_version)
+    let latchd_version = match engine::latchd_version() {
+        Ok(version) => {
+            let expected = format!(
+                "latchd {} protocol {}",
+                env!("CARGO_PKG_VERSION"),
+                latchd::protocol::PROTOCOL_VERSION
+            );
+            if version != expected {
+                findings.push(DoctorFinding {
+                    code: "latchd_version".to_owned(),
+                    severity: "error".to_owned(),
+                    message: format!("bundled latchd is {version}; expected {expected}"),
+                });
+            }
+            Some(version)
+        }
+        Err(error) => {
+            findings.push(DoctorFinding {
+                code: "latchd_missing".to_owned(),
+                severity: "error".to_owned(),
+                message: error.to_string(),
+            });
+            None
+        }
+    };
+    doctor_common(options, findings, tmux_version, latchd_version)
 }
 
 fn doctor_common(
     options: DoctorOptions,
     mut findings: Vec<DoctorFinding>,
-    kernel_version: Option<String>,
+    tmux_version: Option<String>,
+    latchd_version: Option<String>,
 ) -> anyhow::Result<DoctorReport> {
     if let Ok(executable) = std::env::current_exe().and_then(fs::canonicalize) {
         if let Some(parent) = executable.parent() {
@@ -412,7 +421,9 @@ fn doctor_common(
             message: format!("Latch home {} does not exist yet", root.display()),
         });
         return Ok(DoctorReport {
-            tmux_version: kernel_version,
+            kernel: engine::kernel().as_str().to_owned(),
+            tmux_version,
+            latchd_version,
             findings,
         });
     }
@@ -448,7 +459,9 @@ fn doctor_common(
         });
     }
     Ok(DoctorReport {
-        tmux_version: kernel_version,
+        kernel: engine::kernel().as_str().to_owned(),
+        tmux_version,
+        latchd_version,
         findings,
     })
 }
