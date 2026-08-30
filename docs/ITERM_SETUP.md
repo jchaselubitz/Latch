@@ -124,9 +124,10 @@ nested one.
 ## From a phone
 
 The same sessions are reachable from an iPhone by SSHing into this Mac over
-Tailscale and running `latch attach` — see [`SSH_SETUP.md`](SSH_SETUP.md). That
-is a development path rather than a shipped capability: it needs the Mac
-SSH-reachable, and M4 is what replaces it.
+Tailscale and running `latch attach` — see [`SSH_SETUP.md`](SSH_SETUP.md). This
+is a command-line fallback that requires the Mac to be SSH-reachable. For the
+supported paired-device flow, use Latch Desktop Remote Access; see
+[`DESKTOP.md`](DESKTOP.md).
 
 ## Undo
 

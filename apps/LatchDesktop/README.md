@@ -28,12 +28,12 @@ using; a Terminal tab may flash briefly so Command-T can run.
 Settings → Remote Access turns on a paired-phone gateway: the app spawns a
 helper that owns a loopback-only `latch serve` gateway and a WebRTC ICE
 responder, and lets a paired iPhone reach it either on the LAN or off it. Each
-paired device's row separates two decisions — a base Observe/Control picker
+paired device's row separates two decisions — a base Observe/Interact picker
 and an explicit "Allow terminal" switch mapped to the `control` permission —
 new pairings begin with both Control and terminal access enabled, and a change
 to either takes effect immediately, including on a connection that is already
 open. A "never relay" switch pairs with
-`latch remote-access relay disable` to keep TURN out of the offer entirely and
+`latch remote-access relay never` to keep TURN out of the offer entirely and
 restrict the Mac's published presence to host candidates, which is what makes
 a Tailscale/tailnet address a working path with the relay refused outright.
 

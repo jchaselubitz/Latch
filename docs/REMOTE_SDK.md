@@ -1,5 +1,9 @@
 # Latch TypeScript integration
 
+This is the repository-level TypeScript gateway guide. For the complete
+provider boundary, launch manifest, and Overlord example, start with
+[Integrations](INTEGRATIONS.md).
+
 Latch protocol major 2 deliberately has a small TypeScript surface:
 
 - `@latch/client` discovers sessions and opens a terminal WebSocket.

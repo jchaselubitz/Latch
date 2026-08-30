@@ -1,20 +1,16 @@
 # Reaching a Latch session from a phone, over SSH
 
-This is a **development path, not a shipped capability.** It works by putting a
-terminal on your phone and pointing it at your Mac: SSH in over Tailscale, run
-`latch attach`, and you are looking at the session your desk is looking at. No
-part of it is Latch networking. Reachability, authentication, and encryption are
-entirely SSH's, and every one of them stops working the moment the Mac is not
-SSH-reachable.
+This is the manual command-line fallback to Latch Desktop's paired Remote
+Access. Put a terminal client on your phone, SSH into the Mac over Tailscale,
+and run `latch attach`; you are looking at the same session the desk can show.
+Reachability, authentication, and encryption are SSH's, and the setup stops
+working whenever the Mac is not SSH-reachable.
 
-That is the point. M2's job is to find out whether reaching an agent from a
-phone matters *before* anything is built to serve it. **M4 replaces this
-wholesale** with a real transport — a relay, an app, no SSH — and when it lands,
-nothing in this document is how you do it.
-
-Do not hand this setup to anyone as a feature. It requires an always-on Mac, an
-SSH daemon exposed to a private network, and a key on the phone. Use it to learn
-whether the phone case is real.
+For the supported paired-device flow, use **Settings → Remote Access** in
+Latch Desktop. It provides pairing, device grants, encrypted transport, and
+the native mobile client without exposing SSH. This guide remains useful when
+you explicitly prefer a terminal client, need a minimal recovery path, or do
+not want to run the desktop app.
 
 ---
 
@@ -112,9 +108,9 @@ worth leaving alone:
   session reflows to the width of whatever controls it (see *Geometry* below),
   so the font you pick on the phone is the width your desk session takes while
   the phone holds control.
-- **Mosh off.** Mosh would paper over exactly the transport deaths this
-  milestone exists to observe. If you want the phone experience to be good, use
-  Mosh; if you want to know whether the kernel survives a hostile link, do not.
+- **Mosh off.** Mosh changes the connection model and is outside the setup
+  this guide describes. Use SSH when you want `latch attach`'s normal detach
+  and reattach behaviour.
 
 ---
 
@@ -160,7 +156,7 @@ not keeping up with output, `77` the session's program exited.
 ### What `--retry` does and does not cover
 
 `--retry` reconnects the *client to the worker* — the Unix socket inside the
-Mac. It backs off 250 ms, doubling to a 2 s ceiling, over 5 attempts, and then
+Mac. It backs off from 100 ms, doubling to a 1 s ceiling, over 5 attempts, and then
 **gives up and says so** rather than retrying forever. A client that retries
 forever is indistinguishable from a frozen one, which is the exact confusion
 this milestone exists to remove.
@@ -276,7 +272,5 @@ Turn off Remote Login, and remove the phone's key from
 - [`DECISION_SCROLLBACK.md`](DECISION_SCROLLBACK.md) — how much history an
   attach carries, and why reattach on a cell link is not a transfer you wait
   through.
-- [`M2_FIELD_REPORT.md`](M2_FIELD_REPORT.md) — the dogfooding protocol and its
-  results.
-- `planning/IMPLEMENTATION_PLAN.md` (M2) — why this milestone exists and what
-  replaces it.
+- [`DESKTOP.md`](DESKTOP.md) — the paired Remote Access alternative.
+- [`M2_FIELD_REPORT.md`](M2_FIELD_REPORT.md) — the historical SSH field report.

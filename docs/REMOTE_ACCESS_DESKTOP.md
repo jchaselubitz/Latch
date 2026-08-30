@@ -78,9 +78,11 @@ decisions rather than one severity dropdown: a base-access picker
 (Observe/Interact) and an explicit "Allow terminal" switch mapped to `control`.
 The switch remembers what the device held underneath it, so granting the
 terminal and taking it away again returns the device to Interact or Observe as
-it was, not to a default. New pairings still default to Interact. A grant
-writes the local device store first — that is what the helper enforces — and
-is mirrored to the control plane's pairing row afterward; a mirror failure is
+it was, not to a default. Desktop-approved pairings begin with terminal access
+allowed (`control`); a direct CLI `pair confirm` still defaults to `interact`
+unless its caller explicitly supplies `--permission control`. A grant writes
+the local device store first — that is what the helper enforces — and is
+mirrored to the control plane's pairing row afterward; a mirror failure is
 reported but never rolls the local grant back.
 
 ## Keeping the Mac reachable

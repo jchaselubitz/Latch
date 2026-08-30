@@ -1,9 +1,8 @@
 # Remote-access threat model
 
-This document covers the remote-access platform described in
+This document covers the paired-device remote-access platform described in
 [REMOTE_ACCESS_IMPLEMENTATION_PLAN.md](REMOTE_ACCESS_IMPLEMENTATION_PLAN.md).
-It is deliberately about the future paired-device transport as well as the
-current loopback gateway. `latch serve` is not a public remote server.
+`latch serve` is not a public remote server.
 
 ## Assets and classification
 
@@ -42,12 +41,14 @@ repository paths, or prompt answers.
 
 ## Authorization and recovery
 
-`observe` can list sessions and read events/terminal output. `interact` adds
-structured message and prompt resolution. `control` adds terminal bytes and
-resize. New devices never receive control by default. A revoked device is
-removed from the Mac allowlist, active streams close, and later handshakes are
-rejected. A gateway-token rotation affects new internal handshakes only; that
-token is never sent to a phone.
+`observe` can list sessions and read the available observation surfaces.
+`interact` adds structured message and prompt resolution. `control` adds
+terminal bytes and resize. A direct CLI `pair confirm` defaults to `interact`,
+while Latch Desktop's approved pairing flow grants `control` so its terminal
+switch begins enabled. A revoked device is removed from the Mac allowlist,
+active streams close, and later handshakes are rejected. A gateway-token
+rotation affects new internal handshakes only; that token is never sent to a
+phone.
 
 `control` is granted as a separate "Allow terminal" decision layered on top of
 the base `observe`/`interact` picker, not as the top notch of a single
@@ -57,7 +58,7 @@ rather than to a default. A grant is written to the local device store first —
 the store the helper actually enforces against — and then mirrored to the
 control-plane pairing row; a mirror failure is reported but never rolls the
 local grant back, because the Mac is the authority and the directory is a
-convenience for the phone's own UI. New pairings still default to Interact.
+convenience for the phone's own UI.
 
 Revocation and a permission *downgrade* are both enforced by the same 250 ms
 device-state check in `proxy_connection` (`crates/latch/src/cli/remote_access.rs`).
