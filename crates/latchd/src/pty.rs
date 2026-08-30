@@ -18,10 +18,42 @@ pub struct PtyChild {
     pub pid: i32,
 }
 
+/// Exit status the child reports when it cannot enter the requested cwd.
+///
+/// A program that ends up running somewhere other than where it was asked to
+/// is a hazard, not a convenience, so the launch fails instead of falling
+/// through to the daemon's own directory.
+pub const EXIT_BAD_CWD: i32 = 126;
+
+/// Signals whose disposition and mask the child resets before exec.
+///
+/// `SIG_IGN` and a blocked mask both survive `exec`, so whatever the daemon's
+/// ancestors left behind would otherwise reach the user's shell: a shell that
+/// cannot be interrupted, or a job that never sees `SIGCHLD`.
+const RESET_SIGNALS: [libc::c_int; 13] = [
+    libc::SIGHUP,
+    libc::SIGINT,
+    libc::SIGQUIT,
+    libc::SIGPIPE,
+    libc::SIGALRM,
+    libc::SIGTERM,
+    libc::SIGUSR1,
+    libc::SIGUSR2,
+    libc::SIGCHLD,
+    libc::SIGTSTP,
+    libc::SIGTTIN,
+    libc::SIGTTOU,
+    libc::SIGWINCH,
+];
+
 /// Spawns `argv` in a fresh PTY of the given size.
 ///
 /// `env` replaces the child's environment entirely when `Some`; `None`
-/// inherits the daemon's. `cwd` is entered before exec.
+/// inherits the daemon's. `cwd` is entered before exec; if it cannot be, the
+/// child exits with [`EXIT_BAD_CWD`] after saying so on the terminal.
+///
+/// Must be called while the daemon is single-threaded: the child runs
+/// between `fork` and `exec`, where only async-signal-safe calls are legal.
 pub fn spawn(
     argv: &[String],
     cwd: &Path,
@@ -95,9 +127,6 @@ pub fn spawn(
         // Child.
         unsafe {
             libc::setsid();
-            #[cfg(target_os = "macos")]
-            libc::ioctl(slave.as_raw_fd(), libc::TIOCSCTTY as _, 0);
-            #[cfg(not(target_os = "macos"))]
             libc::ioctl(slave.as_raw_fd(), libc::TIOCSCTTY as _, 0);
             libc::dup2(slave.as_raw_fd(), 0);
             libc::dup2(slave.as_raw_fd(), 1);
@@ -106,20 +135,27 @@ pub fn spawn(
                 libc::close(slave.as_raw_fd());
             }
             libc::close(master.as_raw_fd());
-            // Reset signal dispositions the daemon may have changed.
-            libc::signal(libc::SIGPIPE, libc::SIG_DFL);
-            libc::signal(libc::SIGINT, libc::SIG_DFL);
-            libc::signal(libc::SIGTERM, libc::SIG_DFL);
-            libc::signal(libc::SIGHUP, libc::SIG_DFL);
+            // Start the program with a clean signal slate: default
+            // dispositions and nothing blocked, whatever the daemon or its
+            // ancestors had.
+            for signal in RESET_SIGNALS {
+                libc::signal(signal, libc::SIG_DFL);
+            }
+            let mut mask: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut mask);
+            libc::sigprocmask(libc::SIG_SETMASK, &mask, std::ptr::null_mut());
             if libc::chdir(cwd.as_ptr()) != 0 {
-                let _ = libc::write(2, b"latchd: cannot enter cwd\n".as_ptr().cast(), 25);
+                const MESSAGE: &[u8] = b"latchd: cannot enter the session directory\r\n";
+                let _ = libc::write(2, MESSAGE.as_ptr().cast(), MESSAGE.len());
+                libc::_exit(EXIT_BAD_CWD);
             }
             if env_strings.is_some() {
                 libc::execve(program.as_ptr(), argv_ptrs.as_ptr(), env_ptrs.as_ptr());
             } else {
                 libc::execv(program.as_ptr(), argv_ptrs.as_ptr());
             }
-            let _ = libc::write(2, b"latchd: exec failed\n".as_ptr().cast(), 20);
+            const FAILED: &[u8] = b"latchd: exec failed\r\n";
+            let _ = libc::write(2, FAILED.as_ptr().cast(), FAILED.len());
             libc::_exit(127);
         }
     }
@@ -170,8 +206,24 @@ pub fn size_of(fd: RawFd) -> io::Result<(u16, u16)> {
 }
 
 /// Signals a process group, falling back to the process itself.
+///
+/// `pid` must be a child this daemon spawned and has not yet reaped: once a
+/// pid is reaped it can be reissued to an unrelated process of the same user,
+/// and `kill(-pid)` would then reach that process's whole group.
 pub fn signal_group(pid: i32, signal: i32) -> io::Result<()> {
-    // SAFETY: signalling a pid this daemon spawned.
+    if pid <= 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "refusing to signal a non-positive pid",
+        ));
+    }
+    if signal < 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "signal numbers are non-negative",
+        ));
+    }
+    // SAFETY: signalling a pid this daemon spawned and still owns.
     if unsafe { libc::kill(-pid, signal) } == 0 {
         return Ok(());
     }
@@ -181,8 +233,57 @@ pub fn signal_group(pid: i32, signal: i32) -> io::Result<()> {
     Err(io::Error::last_os_error())
 }
 
-/// Blocks until `pid` ends and returns `(status, signal)`.
-pub fn wait(pid: i32) -> (Option<i32>, Option<i32>) {
+/// How a child ended: `(exit status, terminating signal)`.
+pub type ExitStatus = (Option<i32>, Option<i32>);
+
+/// Blocks until `pid` has ended and reports how, **without reaping it**.
+///
+/// The child stays a zombie — its pid cannot be reissued — until [`reap`]
+/// runs, which lets the daemon record the exit before anything could confuse
+/// a recycled pid for the session. Falls back to a reaping wait where
+/// `waitid` is unavailable.
+pub fn wait_exit(pid: i32) -> ExitStatus {
+    loop {
+        // SAFETY: waitid writes a siginfo we own for a child this daemon spawned.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let rc = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOWAIT,
+            )
+        };
+        if rc == 0 {
+            let (code, status) = child_info(&info);
+            return match code {
+                libc::CLD_EXITED => (Some(status), None),
+                libc::CLD_KILLED | libc::CLD_DUMPED => (None, Some(status)),
+                _ => (None, None),
+            };
+        }
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::EINTR) {
+            continue;
+        }
+        return reap(pid);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn child_info(info: &libc::siginfo_t) -> (i32, i32) {
+    // SAFETY: si_status is valid for a CLD_* siginfo, which is what waitid
+    // with WEXITED produces.
+    (info.si_code, unsafe { info.si_status() })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn child_info(info: &libc::siginfo_t) -> (i32, i32) {
+    (info.si_code, info.si_status)
+}
+
+/// Reaps `pid` and returns `(status, signal)`; blocks if it is still running.
+pub fn reap(pid: i32) -> ExitStatus {
     let mut status: libc::c_int = 0;
     loop {
         // SAFETY: waiting on a child this daemon spawned.
@@ -204,6 +305,13 @@ pub fn wait(pid: i32) -> (Option<i32>, Option<i32>) {
     }
 }
 
+/// Blocks until `pid` ends, reaps it, and returns `(status, signal)`.
+pub fn wait(pid: i32) -> ExitStatus {
+    let exit = wait_exit(pid);
+    let _ = reap(pid);
+    exit
+}
+
 /// Wraps a raw master fd as a `File` for reading without taking ownership.
 ///
 /// The returned file must not outlive the owner; callers use it for one
@@ -216,4 +324,60 @@ pub fn dup_file(fd: RawFd) -> io::Result<File> {
     }
     set_cloexec(duplicate)?;
     Ok(unsafe { File::from_raw_fd(duplicate) })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wait_exit_reports_before_reaping() {
+        let child = spawn(
+            &["/bin/sh".into(), "-c".into(), "exit 7".into()],
+            Path::new("/"),
+            None,
+            10,
+            2,
+        )
+        .unwrap();
+        assert_eq!(wait_exit(child.pid), (Some(7), None));
+        // Still a zombie: signal 0 finds it, and a second look agrees.
+        // SAFETY: signal zero only asks whether the pid exists.
+        assert_eq!(unsafe { libc::kill(child.pid, 0) }, 0);
+        assert_eq!(wait_exit(child.pid), (Some(7), None));
+        assert_eq!(reap(child.pid), (Some(7), None));
+    }
+
+    #[test]
+    fn wait_exit_reports_a_signal() {
+        let child = spawn(
+            &["/bin/sh".into(), "-c".into(), "kill -TERM $$".into()],
+            Path::new("/"),
+            None,
+            10,
+            2,
+        )
+        .unwrap();
+        assert_eq!(wait(child.pid), (None, Some(libc::SIGTERM)));
+    }
+
+    #[test]
+    fn a_missing_cwd_fails_the_launch_instead_of_running_elsewhere() {
+        let child = spawn(
+            &["/bin/sh".into(), "-c".into(), "pwd".into()],
+            Path::new("/definitely/not/a/directory"),
+            None,
+            10,
+            2,
+        )
+        .unwrap();
+        assert_eq!(wait(child.pid), (Some(EXIT_BAD_CWD), None));
+    }
+
+    #[test]
+    fn signal_group_refuses_pids_that_could_be_anyone() {
+        assert!(signal_group(0, 0).is_err());
+        assert!(signal_group(-1, 0).is_err());
+        assert!(signal_group(std::process::id() as i32, -1).is_err());
+    }
 }

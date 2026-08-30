@@ -20,11 +20,12 @@
 //! ```
 
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::TcpStream;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
-use std::sync::Mutex;
+use std::sync::{mpsc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -32,6 +33,7 @@ use serde_json::{json, Value};
 
 const EXIT_STOLEN: i32 = 75;
 const EXIT_SESSION_EXITED: i32 = 77;
+const WS_CLOSE_STOLEN: u16 = 4409;
 
 static KERNEL_TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -83,10 +85,26 @@ impl Harness {
     }
 
     fn command(&self) -> Command {
+        self.command_with_kernel("latchd")
+    }
+
+    fn command_with_kernel(&self, kernel: &str) -> Command {
         let mut command = Command::new(&self.latch);
         command
             .env("LATCH_HOME", &self.home)
-            .env("LATCH_KERNEL", "latchd")
+            .env("LATCH_KERNEL", kernel)
+            .env("LATCH_LATCHD_BIN", &self.daemon)
+            .env("LATCHD_SOCKET_DIR", self.temp.path().join("s"))
+            .env_remove("LATCH_SESSION_ID")
+            .env_remove("TMUX");
+        command
+    }
+
+    fn command_with_default_kernel(&self) -> Command {
+        let mut command = Command::new(&self.latch);
+        command
+            .env("LATCH_HOME", &self.home)
+            .env_remove("LATCH_KERNEL")
             .env("LATCH_LATCHD_BIN", &self.daemon)
             .env("LATCHD_SOCKET_DIR", self.temp.path().join("s"))
             .env_remove("LATCH_SESSION_ID")
@@ -99,6 +117,14 @@ impl Harness {
     }
 
     fn create_sized(&self, shell: &str, cols: u16, rows: u16) -> String {
+        self.create_sized_with(self.command(), shell, cols, rows)
+    }
+
+    fn create_with_default_kernel(&self, shell: &str) -> String {
+        self.create_sized_with(self.command_with_default_kernel(), shell, 80, 24)
+    }
+
+    fn create_sized_with(&self, mut command: Command, shell: &str, cols: u16, rows: u16) -> String {
         let manifest = json!({
             "format_version": 1,
             "launch": {
@@ -110,8 +136,7 @@ impl Harness {
             },
             "display": {"name": "agent", "source": {"kind": "test"}}
         });
-        let mut child = self
-            .command()
+        let mut child = command
             .args(["create", "--manifest-file", "-", "--json"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -314,7 +339,7 @@ fn open_pty(cols: u16, rows: u16) -> (libc::c_int, libc::c_int) {
             &mut slave,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
-            &mut size,
+            std::ptr::addr_of_mut!(size),
         )
     };
     assert_eq!(opened, 0, "openpty: {}", std::io::Error::last_os_error());
@@ -361,6 +386,121 @@ fn wait_until(mut predicate: impl FnMut() -> bool, message: &str, within: Durati
         assert!(Instant::now() < deadline, "{message}");
         thread::sleep(Duration::from_millis(20));
     }
+}
+
+struct Gateway {
+    child: Child,
+    addr: String,
+    token: String,
+}
+
+impl Drop for Gateway {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn start_gateway(harness: &Harness) -> Gateway {
+    let token_output = harness
+        .command_with_kernel("tmux")
+        .args(["serve", "token"])
+        .output()
+        .expect("mint token");
+    assert_success(&token_output);
+    let token = String::from_utf8(token_output.stdout)
+        .unwrap()
+        .trim()
+        .to_owned();
+    let mut child = harness
+        .command_with_kernel("tmux")
+        .args(["serve", "--bind", "127.0.0.1:0"])
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn latch serve");
+    let stderr = child.stderr.take().expect("serve stderr");
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        for line in BufReader::new(stderr).lines() {
+            let Ok(line) = line else { break };
+            if let Some(addr) = line.strip_prefix("latch serve listening on ") {
+                let _ = tx.send(addr.to_owned());
+                break;
+            }
+        }
+    });
+    let addr = rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("serve bound an address");
+    Gateway { child, addr, token }
+}
+
+type Ws = tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<TcpStream>>;
+
+fn connect_terminal(gateway: &Gateway, session: &str, cols: u16, rows: u16) -> Ws {
+    let uri = format!(
+        "ws://{}/v2/sessions/{session}/terminal?cols={cols}&rows={rows}",
+        gateway.addr
+    );
+    let request = tungstenite::http::Request::builder()
+        .uri(&uri)
+        .header("Host", &gateway.addr)
+        .header("Authorization", format!("Bearer {}", gateway.token))
+        .header("Connection", "Upgrade")
+        .header("Upgrade", "websocket")
+        .header("Sec-WebSocket-Version", "13")
+        .header(
+            "Sec-WebSocket-Key",
+            tungstenite::handshake::client::generate_key(),
+        )
+        .body(())
+        .unwrap();
+    tungstenite::connect(request).expect("terminal websocket").0
+}
+
+fn read_ws_until(socket: &mut Ws, needle: &[u8], within: Duration) -> bool {
+    if let tungstenite::stream::MaybeTlsStream::Plain(stream) = socket.get_ref() {
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+    }
+    let deadline = Instant::now() + within;
+    let mut seen = Vec::new();
+    while Instant::now() < deadline {
+        match socket.read() {
+            Ok(tungstenite::Message::Binary(bytes)) => {
+                seen.extend_from_slice(&bytes);
+                if seen.windows(needle.len()).any(|window| window == needle) {
+                    return true;
+                }
+            }
+            Ok(_) => {}
+            Err(tungstenite::Error::Io(error))
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            Err(_) => return false,
+        }
+    }
+    false
+}
+
+fn read_ws_close(socket: &mut Ws, within: Duration) -> Option<(u16, String)> {
+    let deadline = Instant::now() + within;
+    while Instant::now() < deadline {
+        match socket.read() {
+            Ok(tungstenite::Message::Close(Some(frame))) => {
+                return Some((frame.code.into(), frame.reason.to_string()));
+            }
+            Ok(_) => {}
+            Err(tungstenite::Error::Io(error))
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            Err(_) => return None,
+        }
+    }
+    None
 }
 
 // ------------------------------------------------------------------ lifecycle
@@ -579,6 +719,34 @@ fn attaching_to_an_exited_session_paints_the_last_frame_and_releases() {
     });
 }
 
+#[test]
+fn network_gateway_and_local_surface_steal_across_caller_kernels() {
+    with_kernel("gateway-mixed-kernel", |h| {
+        let id = h.create("printf 'gateway prompt> '; while :; do sleep 3600; done");
+        h.wait_visible(&id, "gateway prompt>");
+        let gateway = start_gateway(h);
+
+        let mut desk = h.attach(&id, 100, 30);
+        assert!(desk.wait_for(b"gateway prompt>", Duration::from_secs(5)));
+        let mut remote = connect_terminal(&gateway, &id, 60, 20);
+        assert!(read_ws_until(
+            &mut remote,
+            b"gateway prompt>",
+            Duration::from_secs(10)
+        ));
+        assert_eq!(desk.release(Duration::from_secs(10)), Some(EXIT_STOLEN));
+
+        let mut desk_again = h.attach(&id, 100, 30);
+        assert!(desk_again.wait_for(b"gateway prompt>", Duration::from_secs(5)));
+        assert_eq!(
+            read_ws_close(&mut remote, Duration::from_secs(10)),
+            Some((WS_CLOSE_STOLEN, "stolen".to_owned()))
+        );
+        drop(desk_again);
+        h.remove(&id);
+    });
+}
+
 // -------------------------------------------------------------- control plane
 
 #[test]
@@ -615,5 +783,222 @@ fn the_engine_drives_the_pane_through_the_control_plane() {
             (80, 24, false)
         );
         h.remove(&id);
+    });
+}
+
+#[test]
+fn persistent_hub_control_reconnects_and_resynchronizes_from_events() {
+    with_kernel("hub-persistent-control", |h| {
+        let id = h.create(
+            r#"stty -echo; i=0; while [ $i -lt 40 ]; do echo history-$i; i=$((i+1)); done;
+             while read line; do
+               if [ "$line" = events ]; then
+                 printf '\033]0;hub-title\007'; sleep 0.1;
+                 printf '\033[?1049hEVENT-ALT'; sleep 0.1;
+                 printf '\033[?1049lEVENT-DONE\n';
+               elif [ "$line" = quit ]; then exit 0;
+               else printf 'line=[%s]\n' "$line"; fi;
+             done"#,
+        );
+        h.wait_visible(&id, "history-39");
+        let home = latch::session::paths::LatchHome::new(&h.home);
+        let session = latch::session::paths::SessionId::parse(&id).unwrap();
+        let mut control = latch::engine::ConversationControl::open(&home, &session).unwrap();
+        assert!(control.is_event_driven());
+        assert_eq!(
+            control
+                .wait_for_activity(Duration::from_millis(20), Duration::from_secs(2))
+                .unwrap(),
+            latch::engine::ConversationWake::Resynchronized
+        );
+
+        // The structured snapshot is a parser barrier and history is fetched
+        // over the same persistent control connection.
+        let first = control.snapshot(Duration::from_secs(2)).unwrap();
+        assert!(first.lines.iter().any(|line| line.contains("history-39")));
+        assert!(!first.history.is_empty());
+
+        control.submit("events", Duration::from_secs(2)).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut saw_title = false;
+        let mut saw_alt = false;
+        let mut saw_quiet = false;
+        while Instant::now() < deadline && !(saw_title && saw_alt && saw_quiet) {
+            match control
+                .wait_for_activity(Duration::from_millis(20), Duration::from_secs(1))
+                .unwrap()
+            {
+                latch::engine::ConversationWake::TitleChanged { title } => {
+                    saw_title |= title.as_deref() == Some("hub-title")
+                }
+                latch::engine::ConversationWake::AlternateScreen { active } => saw_alt |= active,
+                latch::engine::ConversationWake::OutputQuiet { .. } => saw_quiet = true,
+                _ => {}
+            }
+        }
+        assert!((saw_title && saw_alt && saw_quiet), "missing latchd event");
+        let barrier = control.snapshot(Duration::from_secs(2)).unwrap();
+        assert!(barrier.lines.iter().any(|line| line.contains("EVENT-DONE")));
+
+        // Losing the event/control object is recovered by a new subscription
+        // followed by a mandatory snapshot, not by replaying guessed events.
+        drop(control);
+        let mut reconnected = latch::engine::ConversationControl::open(&home, &session).unwrap();
+        assert_eq!(
+            reconnected
+                .wait_for_activity(Duration::from_millis(20), Duration::from_secs(2))
+                .unwrap(),
+            latch::engine::ConversationWake::Resynchronized
+        );
+        assert!(reconnected
+            .snapshot(Duration::from_secs(2))
+            .unwrap()
+            .lines
+            .iter()
+            .any(|line| line.contains("EVENT-DONE")));
+        reconnected
+            .key(&["y".into(), "Enter".into()], Duration::from_secs(2))
+            .unwrap();
+        h.wait_visible(&id, "line=[y]");
+        reconnected.submit("quit", Duration::from_secs(2)).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut exited = false;
+        while Instant::now() < deadline && !exited {
+            exited = matches!(
+                reconnected
+                    .wait_for_activity(Duration::from_millis(20), Duration::from_secs(1))
+                    .unwrap(),
+                latch::engine::ConversationWake::ChildExited
+            );
+        }
+        assert!(exited, "child-exited was not delivered");
+        h.remove(&id);
+    });
+}
+
+#[test]
+fn existing_sessions_route_by_record_not_caller_selector() {
+    with_kernel("mixed-kernel-routing", |h| {
+        let id = h.create("printf 'durable kernel identity\\n'; sleep 30");
+        h.wait_visible(&id, "durable kernel identity");
+
+        let inspect = h
+            .command_with_kernel("tmux")
+            .args(["inspect", &id, "--json"])
+            .output()
+            .expect("inspect from tmux-selected caller");
+        assert_success(&inspect);
+        let inspected: Value = serde_json::from_slice(&inspect.stdout).unwrap();
+        assert_eq!(inspected["state"], "running");
+
+        let list = h
+            .command_with_kernel("tmux")
+            .args(["list", "--json"])
+            .output()
+            .expect("list from tmux-selected caller");
+        assert_success(&list);
+        let listed: Value = serde_json::from_slice(&list.stdout).unwrap();
+        assert!(listed["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["id"] == id));
+
+        let remove = h
+            .command_with_kernel("tmux")
+            .args(["remove", &id, "--force"])
+            .output()
+            .expect("remove from tmux-selected caller");
+        assert_success(&remove);
+    });
+}
+
+#[test]
+fn default_cutover_and_tmux_rollback_preserve_live_sessions() {
+    with_kernel("default-latchd-with-tmux-rollback", |h| {
+        let id = h.create_with_default_kernel("printf 'default latchd session\\n'; sleep 30");
+        h.wait_visible(&id, "default latchd session");
+        assert_eq!(
+            latchd::paths::KernelRecord::read(&h.home.join("sessions").join(&id))
+                .unwrap()
+                .unwrap()
+                .kernel,
+            latchd::paths::KERNEL_NAME
+        );
+
+        let inspect = h
+            .command_with_kernel("tmux")
+            .args(["inspect", &id, "--json"])
+            .output()
+            .expect("inspect from rollback selector");
+        assert_success(&inspect);
+        let inspect: Value = serde_json::from_slice(&inspect.stdout).unwrap();
+        assert_eq!(inspect["kernel"], "latchd");
+        assert_eq!(inspect["state"], "running");
+
+        let doctor = h
+            .command_with_kernel("tmux")
+            .args(["doctor", "--json"])
+            .output()
+            .expect("doctor from rollback selector");
+        assert_success(&doctor);
+        let doctor: Value = serde_json::from_slice(&doctor.stdout).unwrap();
+        assert_eq!(doctor["kernel"], "tmux");
+
+        let mut surface = Surface::spawn(
+            h.command_with_kernel("tmux").args(["attach", &id]),
+            80,
+            24,
+            h.temp.path(),
+        );
+        assert!(surface.wait_for(b"default latchd session", Duration::from_secs(5)));
+        drop(surface);
+        h.remove(&id);
+    });
+}
+
+#[test]
+fn daemon_suspend_and_resume_preserves_the_session_and_snapshot() {
+    with_kernel("daemon-suspend-resume", |h| {
+        let id = h.create("printf 'before suspend\\n'; sleep 30");
+        h.wait_visible(&id, "before suspend");
+        let stat = latchd::client::stat(&h.socket(&id)).unwrap();
+        // SAFETY: the daemon pid came from its authenticated control socket.
+        assert_eq!(unsafe { libc::kill(stat.daemon_pid, libc::SIGSTOP) }, 0);
+        thread::sleep(Duration::from_millis(250));
+        // SAFETY: resume the same daemon captured immediately above.
+        assert_eq!(unsafe { libc::kill(stat.daemon_pid, libc::SIGCONT) }, 0);
+        wait_until(
+            || h.inspect(&id)["state"] == "running",
+            "session did not recover after daemon resume",
+            Duration::from_secs(5),
+        );
+        let mut surface = h.attach(&id, 80, 24);
+        assert!(surface.wait_for(b"before suspend", Duration::from_secs(5)));
+        drop(surface);
+        h.remove(&id);
+    });
+}
+
+#[test]
+fn abrupt_daemon_failure_is_reported_lost_and_remains_removable() {
+    with_kernel("daemon-failure", |h| {
+        let id = h.create("printf 'before daemon failure\\n'; sleep 30");
+        h.wait_visible(&id, "before daemon failure");
+        let stat = latchd::client::stat(&h.socket(&id)).unwrap();
+        // SAFETY: the daemon pid came from its authenticated control socket.
+        assert_eq!(unsafe { libc::kill(stat.daemon_pid, libc::SIGKILL) }, 0);
+        wait_until(
+            || h.inspect(&id)["state"] == "lost",
+            "daemon failure was not surfaced as lost",
+            Duration::from_secs(5),
+        );
+        let output = h
+            .command_with_kernel("tmux")
+            .args(["remove", &id, "--force"])
+            .output()
+            .expect("remove failed daemon session");
+        assert_success(&output);
+        assert!(!h.home.join("sessions").join(&id).exists());
     });
 }

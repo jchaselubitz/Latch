@@ -637,10 +637,11 @@ LATCH_KERNEL=latchd latch doctor            # checks the daemon, not tmux
 LATCH_KERNEL=latchd latch inspect <id>      # same shapes as the tmux kernel
 ```
 
-The selector is per process and per session-creating call. A session is owned
-by whichever kernel created it, so a daemon session must be addressed with
-the selector set for its whole life; there is no live migration and none is
-planned (coo:847.qaw3 preserves existing tmux sessions until they exit).
+The selector is per process and applies to session creation. A session is owned
+by whichever kernel created it; subsequent list, inspect, attach, drive, and
+lifecycle calls route from its protected `kernel.json` record (record absence
+means the legacy tmux kernel). There is no live migration and none is planned
+(coo:847.qaw3 preserves existing tmux sessions until they exit).
 
 Reproducing the gate locally:
 
@@ -782,3 +783,118 @@ terminate live sessions for the same reason a forward update does not. The
 operational escape hatch is cheaper: stop setting `LATCH_KERNEL=latchd`, or set
 `LATCH_KERNEL=tmux` explicitly; no default changed in Phase B and no live
 session migration is attempted.
+
+---
+
+## Part 10 — bounded latchd dogfood soak (coo:847.wff1)
+
+The bounded soak decision is **GO for default cutover**, retaining tmux as the
+escape hatch and preserving every existing session on its original kernel.
+The full matrix, measurements, defects, fixes, and residual risks are recorded
+in [`LATCHD_SOAK_REPORT.md`](LATCHD_SOAK_REPORT.md).
+
+Two soak blockers were fixed before reaching that decision. Existing sessions
+now route from durable kernel identity instead of the caller's environment,
+eliminating the Desktop/Overlord false-lost split while supporting a genuinely
+mixed home. Launch handoff is bounded: an abandoned FIFO or deleted session
+directory reaps the per-session daemon and its child instead of leaking them.
+
+The daemon `stat` response now exposes byte-flow, parser/surface backlog,
+attach/steal, eviction, and control-failure counters. The measured debug run
+delivered 2,000,000 post-boundary bytes exactly once (1.0000x) at 3.40 million
+ten-byte frames/s; its parser backlog peaked at 1,733,760 bytes and drained.
+Two hundred steals averaged 307 us (676 us max), five hundred snapshots
+averaged 737 us (1.364 ms max), and healthy control failures were zero. Three
+live Codex sessions remained visible from a tmux-selected caller with zero
+lost sessions, 0.0–0.1% sampled CPU, and 2.2–3.0 MiB RSS per daemon.
+
+---
+
+## Part 11 — latchd default cutover (coo:847.qaw3)
+
+Latchd is now the default for **new** sessions: an unset `LATCH_KERNEL` (and
+any value other than the explicit fallback `tmux`) selects the per-session
+daemon. `LATCH_KERNEL=tmux` remains documented for at least one release window.
+The selector is deliberately creation-only. Every existing session keeps the
+kernel recorded at creation—legacy records without `kernel.json` remain tmux—so
+this cutover neither migrates nor terminates live tmux sessions.
+
+Inspect now reports the owning `kernel` for the individual session, while
+doctor continues to report the caller's selected creation kernel and validates
+both bundled kernels. Desktop renders the inspect value and the gateway's
+existing inspect response carries it through to API clients.
+
+The real PTY cutover test creates a session with no selector, verifies the
+persisted latchd identity, then invokes inspect, doctor, and a raw terminal
+attach with `LATCH_KERNEL=tmux`. The running latchd session remains visible and
+attachable, proving the operational rollback changes only future creation and
+does not interrupt a live session. The existing four-binary updater test
+continues to prove that replacing either kernel on disk also leaves running
+tmux and latchd sessions intact.
+
+---
+
+## Part 12 — event-driven Conversation Hub (coo:847.5wdg)
+
+Phase C moves latchd-owned conversations off the tmux-shaped subprocess path.
+Each JSONL connector worker now owns a persistent kernel control connection;
+the observation worker also owns a persistent latchd event subscription. A
+session has one observation task regardless of subscriber count, and replacing
+the WebSocket that happened to start it no longer aborts observation for the
+remaining clients.
+
+The event stream is intentionally a wake-up channel, not an authoritative
+journal. `output-quiet`, `child-exited`, alternate-screen, title, and surface
+events trigger source catch-up and a structured snapshot. Establishing or
+re-establishing the subscription is itself a resynchronization event, so the
+Hub takes a fresh parser-barrier snapshot rather than guessing which events it
+missed. A five-second source-only safety catch-up covers transcript and hook
+writes with no corresponding terminal output; it does not reintroduce periodic
+screen capture. Primary-screen history is read through latchd's bounded history
+verb and combined with the structured current frame for input-safety checks.
+
+`send_message` uses latchd's atomic `submit` request over the persistent
+connection. Interactive choices use a structured snapshot followed by one
+`key` request. Query failures may reconnect and retry because they are
+side-effect-free; submit, paste, and key requests are never retried after
+dispatch. The existing Hub operation ledger returns a prior result for a
+duplicate operation id and marks an interrupted in-flight operation ambiguous,
+preventing duplicate submissions across WebSocket retries and process restart.
+
+Tmux-owned sessions keep the existing 250 ms connector poll plus bounded
+`capture-pane`, paste-buffer, and `send-keys` implementation for the fallback
+release window. Kernel identity comes from the durable session record, so one
+Hub can concurrently serve tmux and latchd conversations without depending on
+the gateway process's creation selector.
+
+Event fanout inside latchd is bounded. A subscriber that leaves 1,024 wake-up
+events unread is evicted and counted; reconnect plus snapshot is its recovery.
+This prevents a stalled chat observer from adding backpressure to the parser or
+PTY reader. The parser backlog is independently capped and signals the reader
+when it drains, while the raw surface retains its existing slow-client eviction
+contract.
+
+The Phase C gate adds or retains coverage for:
+
+- real latchd structured snapshot/history barriers, atomic submit and key,
+  output-quiet/title/alternate-screen/child-exited events, and reconnect resync;
+- bounded event-subscriber eviction and successful resubscription;
+- WebSocket resume after event loss, retained-mutation overflow recovery, and
+  observation continuity when the first socket disconnects;
+- duplicate operation-id suppression and ambiguous restart recovery;
+- real mixed-kernel routing plus the tmux conversation fallback suite.
+
+Reproduce the focused gate with:
+
+```text
+cargo build -p latchd
+cargo test -p latchd --all-targets -- --test-threads=1
+cargo test -p latch --lib conversation:: -- --test-threads=1
+cargo test -p latch --test latchd_kernel_e2e -- --test-threads=1
+cargo test -p latch --test tmux_kernel -- --test-threads=1
+```
+
+The tmux polling path remains deliberately present until the fallback window is
+closed by coo:847.adya. Removing it earlier would make existing tmux sessions
+observable through terminal attach only and would violate the no-live-migration
+cutover contract.

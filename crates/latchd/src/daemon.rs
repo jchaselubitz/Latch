@@ -26,6 +26,7 @@ use std::io::{self, ErrorKind, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
@@ -37,22 +38,37 @@ use anyhow::{Context, Result};
 use latch_term::{Screen, Size, Terminal, TerminalConfig};
 
 use crate::keys::{self, KeyModes};
-use crate::paths::{KernelRecord, EXIT_RECORD, KERNEL_NAME};
+use crate::paths::{self, KernelRecord, EXIT_RECORD, KERNEL_NAME, KERNEL_RECORD};
+use crate::peer;
 use crate::protocol::{
     self, Event, Exit, ReleaseReason, Reply, Request, Response, SnapshotFormat, Stat, State,
-    PROTOCOL_VERSION,
+    MAX_DIMENSION, PROTOCOL_VERSION,
 };
 use crate::pty::{self, PtyChild};
 use crate::render;
 
 /// Bytes a surface may fall behind before it is evicted.
 pub const SURFACE_QUEUE_CAP: usize = 4 * 1024 * 1024;
+/// Bytes the screen model may fall behind the child before the reader
+/// stops taking output.
+///
+/// The parser is off the live path, so a child that writes faster than the
+/// model can parse would otherwise grow this queue without limit and the
+/// daemon would be the process the OS kills. Past the cap the reader waits,
+/// the PTY buffer fills, and the child blocks on its own `write` — exactly
+/// what a slow physical terminal would do to it. Surfaces are unaffected:
+/// they are fed before the wait, and a slow one is evicted, never waited on.
+pub const PARSER_BACKLOG_CAP: u64 = 32 * 1024 * 1024;
+/// Events a subscriber may leave unread before it must reconnect and resync.
+pub const EVENT_QUEUE_CAP: usize = 1024;
 /// PTY read size.
 const READ_CHUNK: usize = 64 * 1024;
 /// Release reasons retained for late lookup.
 const RELEASE_HISTORY: usize = 64;
 /// Scrollback lines the screen model retains.
 const SCROLLBACK_LINES: usize = 50_000;
+/// Default ceiling for a creator to finish handing its launch manifest over.
+pub const DEFAULT_LAUNCH_TIMEOUT_MS: u64 = 15_000;
 
 /// What to run and where to listen.
 #[derive(Debug, Clone)]
@@ -63,6 +79,10 @@ pub struct Config {
     pub socket: PathBuf,
     /// Session directory for `kernel.json` and `exit.json`, if any.
     pub session_dir: Option<PathBuf>,
+    /// FIFO removed once the creator has completed launch handoff.
+    pub launch_marker: Option<PathBuf>,
+    /// Ceiling for [`Self::launch_marker`] to disappear.
+    pub launch_timeout_ms: u64,
     /// Program and arguments.
     pub argv: Vec<String>,
     /// Working directory.
@@ -81,6 +101,7 @@ pub struct Config {
 struct Queue {
     state: Mutex<QueueState>,
     ready: Condvar,
+    peak_bytes: AtomicU64,
 }
 
 struct QueueState {
@@ -99,6 +120,7 @@ impl Queue {
                 closed: false,
             }),
             ready: Condvar::new(),
+            peak_bytes: AtomicU64::new(0),
         }
     }
 
@@ -109,10 +131,16 @@ impl Queue {
             return false;
         }
         state.buf.extend(bytes);
+        self.peak_bytes
+            .fetch_max(state.buf.len() as u64, Ordering::Relaxed);
         let over = state.buf.len() > SURFACE_QUEUE_CAP;
         drop(state);
         self.ready.notify_one();
         over
+    }
+
+    fn len(&self) -> u64 {
+        self.state.lock().unwrap().buf.len() as u64
     }
 
     fn release_hold(&self) {
@@ -169,10 +197,23 @@ enum Item {
 struct Parser {
     queue: Mutex<VecDeque<Item>>,
     ready: Condvar,
+    /// Signalled after each output item is consumed, for [`Parser::wait_for_room`].
+    drained: Condvar,
+    backlog_bytes: AtomicU64,
+    peak_bytes: AtomicU64,
+    /// Times the reader paused on the cap, for observability.
+    stalls: AtomicU64,
 }
 
 impl Parser {
     fn push(&self, item: Item) {
+        if let Item::Output(bytes) = &item {
+            let backlog = self
+                .backlog_bytes
+                .fetch_add(bytes.len() as u64, Ordering::Relaxed)
+                + bytes.len() as u64;
+            self.peak_bytes.fetch_max(backlog, Ordering::Relaxed);
+        }
         self.queue.lock().unwrap().push_back(item);
         self.ready.notify_one();
     }
@@ -186,21 +227,50 @@ impl Parser {
             queue = self.ready.wait(queue).unwrap();
         }
     }
+
+    /// Records that `len` output bytes were consumed and wakes a waiting reader.
+    fn consumed(&self, len: u64) {
+        self.backlog_bytes.fetch_sub(len, Ordering::Relaxed);
+        let _queue = self.queue.lock().unwrap();
+        self.drained.notify_all();
+    }
+
+    /// Blocks until the output backlog is within [`PARSER_BACKLOG_CAP`].
+    /// Only the reader calls this, and never while holding the session lock:
+    /// blocking there would stall attaches and `stat` along with the child.
+    fn wait_for_room(&self) {
+        if self.backlog_bytes.load(Ordering::Relaxed) <= PARSER_BACKLOG_CAP {
+            return;
+        }
+        self.stalls.fetch_add(1, Ordering::Relaxed);
+        let mut queue = self.queue.lock().unwrap();
+        while self.backlog_bytes.load(Ordering::Relaxed) > PARSER_BACKLOG_CAP {
+            queue = self.drained.wait(queue).unwrap();
+        }
+    }
 }
 
 /// Event fan-out.
 struct Events {
-    subscribers: Mutex<Vec<mpsc::Sender<Event>>>,
+    subscribers: Mutex<Vec<mpsc::SyncSender<Event>>>,
+    evictions: AtomicU64,
 }
 
 impl Events {
     fn broadcast(&self, event: Event) {
         let mut subscribers = self.subscribers.lock().unwrap();
-        subscribers.retain(|sender| sender.send(event.clone()).is_ok());
+        subscribers.retain(|sender| match sender.try_send(event.clone()) {
+            Ok(()) => true,
+            Err(mpsc::TrySendError::Disconnected(_)) => false,
+            Err(mpsc::TrySendError::Full(_)) => {
+                self.evictions.fetch_add(1, Ordering::Relaxed);
+                false
+            }
+        });
     }
 
     fn subscribe(&self) -> mpsc::Receiver<Event> {
-        let (sender, receiver) = mpsc::channel();
+        let (sender, receiver) = mpsc::sync_channel(EVENT_QUEUE_CAP);
         self.subscribers.lock().unwrap().push(sender);
         receiver
     }
@@ -219,6 +289,14 @@ struct Shared {
     next_surface: AtomicU64,
     last_output: Mutex<Instant>,
     quiet_announced: AtomicBool,
+    bytes_from_child: AtomicU64,
+    bytes_to_surfaces: AtomicU64,
+    surface_queue_peak: AtomicU64,
+    surface_attaches: AtomicU64,
+    surface_steals: AtomicU64,
+    slow_client_evictions: AtomicU64,
+    control_failures: AtomicU64,
+    parser_resets: AtomicU64,
 }
 
 fn unix_now() -> u64 {
@@ -242,10 +320,8 @@ pub fn run(config: Config, ready: impl FnOnce()) -> Result<()> {
     // Listen and record before the child exists: the child (or its launch
     // shim) may look for the socket the moment it starts. Connections that
     // arrive before the accept loop simply wait in the backlog.
-    let _ = fs::remove_file(&config.socket);
-    let listener = UnixListener::bind(&config.socket)
-        .with_context(|| format!("cannot listen on {}", config.socket.display()))?;
-    fs::set_permissions(&config.socket, fs::Permissions::from_mode(0o600))?;
+    let listener = listen(&config.socket)?;
+    raise_open_file_limit();
     if let Some(dir) = &config.session_dir {
         KernelRecord {
             kernel: KERNEL_NAME.into(),
@@ -266,7 +342,7 @@ pub fn run(config: Config, ready: impl FnOnce()) -> Result<()> {
         Err(error) => {
             let _ = fs::remove_file(&config.socket);
             if let Some(dir) = &config.session_dir {
-                let _ = fs::remove_file(dir.join(crate::paths::KERNEL_RECORD));
+                let _ = fs::remove_file(dir.join(KERNEL_RECORD));
             }
             return Err(error).context("cannot spawn the session command");
         }
@@ -292,13 +368,26 @@ pub fn run(config: Config, ready: impl FnOnce()) -> Result<()> {
         parser: Parser {
             queue: Mutex::new(VecDeque::new()),
             ready: Condvar::new(),
+            drained: Condvar::new(),
+            backlog_bytes: AtomicU64::new(0),
+            peak_bytes: AtomicU64::new(0),
+            stalls: AtomicU64::new(0),
         },
         events: Events {
             subscribers: Mutex::new(Vec::new()),
+            evictions: AtomicU64::new(0),
         },
         next_surface: AtomicU64::new(1),
         last_output: Mutex::new(Instant::now()),
         quiet_announced: AtomicBool::new(true),
+        bytes_from_child: AtomicU64::new(0),
+        bytes_to_surfaces: AtomicU64::new(0),
+        surface_queue_peak: AtomicU64::new(0),
+        surface_attaches: AtomicU64::new(0),
+        surface_steals: AtomicU64::new(0),
+        slow_client_evictions: AtomicU64::new(0),
+        control_failures: AtomicU64::new(0),
+        parser_resets: AtomicU64::new(0),
         config,
     });
     install_signal_handlers(&shared);
@@ -321,15 +410,34 @@ pub fn run(config: Config, ready: impl FnOnce()) -> Result<()> {
             .name("quiet".into())
             .spawn(move || quiet_loop(&shared))?;
     }
+    {
+        let shared = Arc::clone(&shared);
+        thread::Builder::new()
+            .name("lifecycle".into())
+            .spawn(move || lifecycle_loop(&shared))?;
+    }
     ready();
 
     for connection in listener.incoming() {
         let stream = match connection {
             Ok(stream) => stream,
             Err(error) if error.kind() == ErrorKind::Interrupted => continue,
-            Err(error) => return Err(error).context("accept failed"),
+            Err(error) if accept_error_is_transient(&error) => {
+                // Descriptor or memory pressure, or a peer that vanished
+                // between connect and accept. Neither is a reason to exit
+                // and orphan the child behind a stale socket; wait for the
+                // pressure to pass and keep serving.
+                thread::sleep(Duration::from_millis(50));
+                continue;
+            }
+            Err(_) => {
+                // The listener itself is broken. End the session cleanly —
+                // child signalled, socket and record removed — rather than
+                // leave a child nobody can reach.
+                shutdown(&shared);
+            }
         };
-        if !peer_is_us(&stream) {
+        if !peer::is_same_user(&stream) {
             continue;
         }
         let shared = Arc::clone(&shared);
@@ -341,7 +449,66 @@ pub fn run(config: Config, ready: impl FnOnce()) -> Result<()> {
     Ok(())
 }
 
+/// Binds the session socket, owner-accessible only from the first instant.
+///
+/// A live daemon already on the path is left alone and this one refuses to
+/// start: replacing its socket would strand a running child behind a path
+/// nothing points at any more. Only a dead socket file is replaced. The
+/// socket is created under a `0077` umask so it is never briefly
+/// group- or world-connectable before a chmod; `run` is single-threaded
+/// here, which is what makes touching the process umask safe.
+fn listen(socket: &PathBuf) -> Result<UnixListener> {
+    if UnixStream::connect(socket).is_ok() {
+        anyhow::bail!(
+            "another session kernel is already listening on {}",
+            socket.display()
+        );
+    }
+    let _ = fs::remove_file(socket);
+    // SAFETY: umask has no preconditions; the previous mask is restored
+    // below so the child inherits the daemon's original.
+    let previous = unsafe { libc::umask(0o077) };
+    let listener = UnixListener::bind(socket);
+    unsafe {
+        libc::umask(previous);
+    }
+    let listener = listener.with_context(|| format!("cannot listen on {}", socket.display()))?;
+    fs::set_permissions(socket, fs::Permissions::from_mode(0o600))?;
+    Ok(listener)
+}
+
+/// Lifts the soft descriptor limit to the hard one. Every connection and
+/// surface holds descriptors, so the default soft limit of a login shell is
+/// the easiest way for a busy observer to push `accept` into `EMFILE`.
+fn raise_open_file_limit() {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: getrlimit/setrlimit read and write a struct we own.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {
+        return;
+    }
+    if limit.rlim_cur < limit.rlim_max {
+        limit.rlim_cur = limit.rlim_max;
+        unsafe {
+            libc::setrlimit(libc::RLIMIT_NOFILE, &limit);
+        }
+    }
+}
+
+fn accept_error_is_transient(error: &io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(libc::EMFILE | libc::ENFILE | libc::ENOBUFS | libc::ENOMEM | libc::ECONNABORTED)
+    ) || error.kind() == ErrorKind::WouldBlock
+}
+
 static SOCKET_TO_UNLINK: Mutex<Option<std::ffi::CString>> = Mutex::new(None);
+static RECORD_TO_UNLINK: Mutex<Option<std::ffi::CString>> = Mutex::new(None);
+/// The child's pid while it is alive and unreaped; zero afterwards, so a
+/// late signal handler never sends `SIGHUP` to whatever process the kernel
+/// reissued that pid to.
 static CHILD_TO_HUP: AtomicU64 = AtomicU64::new(0);
 
 extern "C" fn on_terminate(_signal: libc::c_int) {
@@ -353,10 +520,12 @@ extern "C" fn on_terminate(_signal: libc::c_int) {
             libc::kill(-pid, libc::SIGHUP);
         }
     }
-    if let Ok(guard) = SOCKET_TO_UNLINK.try_lock() {
-        if let Some(path) = guard.as_ref() {
-            unsafe {
-                libc::unlink(path.as_ptr());
+    for path in [&SOCKET_TO_UNLINK, &RECORD_TO_UNLINK] {
+        if let Ok(guard) = path.try_lock() {
+            if let Some(path) = guard.as_ref() {
+                unsafe {
+                    libc::unlink(path.as_ptr());
+                }
             }
         }
     }
@@ -368,54 +537,56 @@ fn install_signal_handlers(shared: &Shared) {
     if let Ok(path) = std::ffi::CString::new(shared.config.socket.as_os_str().as_encoded_bytes()) {
         *SOCKET_TO_UNLINK.lock().unwrap() = Some(path);
     }
+    if let Some(dir) = &shared.config.session_dir {
+        let record = dir.join(KERNEL_RECORD);
+        if let Ok(path) = std::ffi::CString::new(record.as_os_str().as_encoded_bytes()) {
+            *RECORD_TO_UNLINK.lock().unwrap() = Some(path);
+        }
+    }
     // SAFETY: installing handlers with plain function pointers.
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_IGN);
         libc::signal(libc::SIGHUP, libc::SIG_IGN);
         libc::signal(libc::SIGINT, libc::SIG_IGN);
-        libc::signal(
-            libc::SIGTERM,
-            on_terminate as extern "C" fn(libc::c_int) as libc::sighandler_t,
-        );
+        for signal in [libc::SIGTERM, libc::SIGQUIT] {
+            libc::signal(
+                signal,
+                on_terminate as extern "C" fn(libc::c_int) as libc::sighandler_t,
+            );
+        }
     }
 }
 
-#[cfg(any(
-    target_os = "macos",
-    target_os = "freebsd",
-    target_os = "openbsd",
-    target_os = "netbsd",
-    target_os = "dragonfly"
-))]
-fn peer_is_us(stream: &UnixStream) -> bool {
-    let fd = stream.as_raw_fd();
-    let mut uid: libc::uid_t = u32::MAX;
-    let mut gid: libc::gid_t = u32::MAX;
-    // SAFETY: getpeereid writes two ids we own.
-    let rc = unsafe { libc::getpeereid(fd, &mut uid, &mut gid) };
-    // SAFETY: getuid has no preconditions.
-    rc == 0 && uid == unsafe { libc::getuid() }
-}
+/// Reaps launches whose creator died between daemon readiness and manifest
+/// handoff, and daemons whose durable session directory was removed. Neither
+/// condition may leave a child or socket alive indefinitely.
+fn lifecycle_loop(shared: &Shared) {
+    if let Some(marker) = &shared.config.launch_marker {
+        let deadline =
+            Instant::now() + Duration::from_millis(shared.config.launch_timeout_ms.max(1));
+        while marker.exists() {
+            if shared
+                .config
+                .session_dir
+                .as_ref()
+                .is_some_and(|dir| !dir.exists())
+                || Instant::now() >= deadline
+            {
+                shutdown(shared);
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
 
-#[cfg(target_os = "linux")]
-fn peer_is_us(stream: &UnixStream) -> bool {
-    let fd = stream.as_raw_fd();
-    // SAFETY: getsockopt writes a ucred and its length into storage we own.
-    let mut credentials: libc::ucred = unsafe { std::mem::zeroed() };
-    let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
-    let rc = unsafe {
-        libc::getsockopt(
-            fd,
-            libc::SOL_SOCKET,
-            libc::SO_PEERCRED,
-            (&mut credentials as *mut libc::ucred).cast(),
-            &mut length,
-        )
+    let Some(dir) = &shared.config.session_dir else {
+        return;
     };
-    // SAFETY: getuid has no preconditions.
-    rc == 0
-        && length as usize == std::mem::size_of::<libc::ucred>()
-        && credentials.uid == unsafe { libc::getuid() }
+    loop {
+        if !dir.exists() {
+            shutdown(shared);
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -432,6 +603,9 @@ fn reader_loop(shared: &Arc<Shared>, mut output: File) {
             Err(_) => break,
         };
         let chunk = &buf[..n];
+        shared
+            .bytes_from_child
+            .fetch_add(n as u64, Ordering::Relaxed);
         *shared.last_output.lock().unwrap() = Instant::now();
         shared.quiet_announced.store(false, Ordering::Relaxed);
         let mut evict = None;
@@ -442,31 +616,41 @@ fn reader_loop(shared: &Arc<Shared>, mut output: File) {
                 if surface.queue.push(chunk) {
                     evict = Some(surface.id);
                 }
+                shared.surface_queue_peak.fetch_max(
+                    surface.queue.peak_bytes.load(Ordering::Relaxed),
+                    Ordering::Relaxed,
+                );
             }
             shared.parser.push(Item::Output(chunk.to_vec()));
         }
+        shared.parser.wait_for_room();
         if let Some(id) = evict {
+            shared.slow_client_evictions.fetch_add(1, Ordering::Relaxed);
             release_surface(shared, id, ReleaseReason::SlowClient);
         }
     }
-    // The slave closed: reap the child and record how it ended.
-    let (status, signal) = pty::wait(shared.child_pid);
+    // The slave closed. Learn how the child ended *before* reaping it: while
+    // it is a zombie its pid cannot be reissued, so recording the exit under
+    // the session lock and only then reaping means no `signal` or `kill`
+    // request can ever race a recycled pid. Anything that checks `exit`
+    // under the lock sees it set before the pid is free.
+    let (status, signal) = pty::wait_exit(shared.child_pid);
     let exit = Exit {
         status,
         signal,
         exited_at: unix_now(),
     };
-    if let Some(dir) = &shared.config.session_dir {
-        if let Ok(body) = serde_json::to_vec_pretty(&exit) {
-            let _ = fs::write(dir.join(EXIT_RECORD), body);
-        }
-    }
     let holder = {
         let mut session = shared.session.lock().unwrap();
         session.exit = Some(exit.clone());
         session.activity = exit.exited_at;
+        CHILD_TO_HUP.store(0, Ordering::Relaxed);
+        let _ = pty::reap(shared.child_pid);
         session.surface.as_ref().map(|surface| surface.id)
     };
+    if let Some(dir) = &shared.config.session_dir {
+        let _ = paths::write_json(dir, EXIT_RECORD, &exit);
+    }
     shared.changed.notify_all();
     // Let the parser reach the end of the stream before anyone looks at the
     // final frame, then release the holder: its last bytes are queued ahead
@@ -503,12 +687,25 @@ fn parser_loop(shared: &Arc<Shared>) {
         TerminalConfig::new(Size::new(shared.config.cols, shared.config.rows))
             .with_scrollback_limit(SCROLLBACK_LINES),
     );
+    let mut size = Size::new(shared.config.cols, shared.config.rows);
     let mut alternate = false;
     let mut title: Option<String> = None;
     loop {
         match shared.parser.pop() {
             Item::Output(bytes) => {
-                terminal.advance(&bytes);
+                let len = bytes.len() as u64;
+                // The screen model is off the live path, so a bug in it must
+                // never take the session down: a panic on hostile output
+                // costs the model, which is rebuilt empty at the current
+                // size, and nothing else. The surface keeps receiving raw
+                // bytes throughout.
+                if catch_unwind(AssertUnwindSafe(|| terminal.advance(&bytes))).is_err() {
+                    shared.parser_resets.fetch_add(1, Ordering::Relaxed);
+                    terminal = Terminal::new(
+                        TerminalConfig::new(size).with_scrollback_limit(SCROLLBACK_LINES),
+                    );
+                }
+                shared.parser.consumed(len);
                 let now_alternate = terminal.alternate_screen_active();
                 if now_alternate != alternate {
                     alternate = now_alternate;
@@ -516,7 +713,7 @@ fn parser_loop(shared: &Arc<Shared>) {
                         .events
                         .broadcast(Event::AltScreen { active: alternate });
                 }
-                let now_title = terminal.title();
+                let now_title = render::sanitize_title_opt(terminal.title());
                 if now_title != title {
                     title = now_title;
                     shared.events.broadcast(Event::TitleChanged {
@@ -524,27 +721,42 @@ fn parser_loop(shared: &Arc<Shared>) {
                     });
                 }
             }
-            Item::Resize(cols, rows) => terminal.resize(Size::new(cols, rows)),
-            Item::Query(query) => query(&mut terminal),
+            Item::Resize(cols, rows) => {
+                size = Size::new(cols, rows);
+                terminal.resize(size);
+            }
+            Item::Query(query) => {
+                if catch_unwind(AssertUnwindSafe(|| query(&mut terminal))).is_err() {
+                    shared.parser_resets.fetch_add(1, Ordering::Relaxed);
+                    terminal = Terminal::new(
+                        TerminalConfig::new(size).with_scrollback_limit(SCROLLBACK_LINES),
+                    );
+                }
+            }
         }
     }
 }
 
 /// Runs `query` on the parser thread at the current stream position and
 /// waits for its answer.
+///
+/// A query that panics (or a parser thread that is gone) is an error for
+/// this one request, not for the connection thread or the daemon.
 fn parser_query<T: Send + 'static>(
     shared: &Shared,
     query: impl FnOnce(&mut Terminal) -> T + Send + 'static,
-) -> T {
+) -> Result<T> {
     let (sender, receiver) = mpsc::channel();
     shared.parser.push(Item::Query(Box::new(move |terminal| {
         let _ = sender.send(query(terminal));
     })));
-    receiver.recv().expect("parser thread is alive")
+    receiver
+        .recv()
+        .map_err(|_| anyhow::anyhow!("the screen model could not answer"))
 }
 
 fn parser_barrier(shared: &Shared) {
-    parser_query(shared, |_| ());
+    let _ = parser_query(shared, |_| ());
 }
 
 // ---------------------------------------------------------------------------
@@ -584,6 +796,9 @@ fn surface_writer_loop(shared: &Arc<Shared>, id: u64, queue: Arc<Queue>, mut str
             release_surface(shared, id, ReleaseReason::Normal);
             return;
         }
+        shared
+            .bytes_to_surfaces
+            .fetch_add(batch.len() as u64, Ordering::Relaxed);
     }
 }
 
@@ -627,8 +842,10 @@ fn attach(shared: &Arc<Shared>, mut stream: UnixStream, cols: u16, rows: u16) {
         })));
         (previous, receiver, session.exit.is_some())
     };
+    shared.surface_attaches.fetch_add(1, Ordering::Relaxed);
     shared.changed.notify_all();
     if let Some(previous) = previous {
+        shared.surface_steals.fetch_add(1, Ordering::Relaxed);
         previous.queue.close();
         let _ = previous.stream.shutdown(std::net::Shutdown::Both);
         shared.events.broadcast(Event::SurfaceDetached {
@@ -699,7 +916,11 @@ fn connection_loop(shared: &Arc<Shared>, mut stream: UnixStream) {
     loop {
         let request: Request = match protocol::read_frame(&mut stream) {
             Ok(Some(request)) => request,
-            Ok(None) | Err(_) => return,
+            Ok(None) => return,
+            Err(_) => {
+                shared.control_failures.fetch_add(1, Ordering::Relaxed);
+                return;
+            }
         };
         match request {
             Request::Attach {
@@ -708,6 +929,7 @@ fn connection_loop(shared: &Arc<Shared>, mut stream: UnixStream) {
                 protocol,
             } => {
                 if protocol != PROTOCOL_VERSION {
+                    shared.control_failures.fetch_add(1, Ordering::Relaxed);
                     let _ = protocol::write_frame(
                         &mut stream,
                         &Response::err(format!(
@@ -716,7 +938,12 @@ fn connection_loop(shared: &Arc<Shared>, mut stream: UnixStream) {
                     );
                     return;
                 }
-                attach(shared, stream, cols.max(1), rows.max(1));
+                attach(
+                    shared,
+                    stream,
+                    cols.clamp(1, MAX_DIMENSION),
+                    rows.clamp(1, MAX_DIMENSION),
+                );
                 return;
             }
             Request::Subscribe => {
@@ -736,7 +963,10 @@ fn connection_loop(shared: &Arc<Shared>, mut stream: UnixStream) {
             other => {
                 let response = match handle(shared, other) {
                     Ok(reply) => Response::ok(reply),
-                    Err(error) => Response::err(error.to_string()),
+                    Err(error) => {
+                        shared.control_failures.fetch_add(1, Ordering::Relaxed);
+                        Response::err(error.to_string())
+                    }
                 };
                 if protocol::write_frame(&mut stream, &response).is_err() {
                     return;
@@ -747,18 +977,26 @@ fn connection_loop(shared: &Arc<Shared>, mut stream: UnixStream) {
 }
 
 fn shutdown(shared: &Shared) -> ! {
-    let running = shared.session.lock().unwrap().exit.is_none();
-    if running {
-        let _ = pty::signal_group(shared.child_pid, libc::SIGHUP);
+    {
+        // Check and signal under one lock: the reader records the exit and
+        // reaps under the same lock, so the pid signalled here is always
+        // still the child's.
+        let session = shared.session.lock().unwrap();
+        if session.exit.is_none() {
+            let _ = pty::signal_group(shared.child_pid, libc::SIGHUP);
+        }
     }
     let _ = fs::remove_file(&shared.config.socket);
+    if let Some(dir) = &shared.config.session_dir {
+        let _ = fs::remove_file(dir.join(KERNEL_RECORD));
+    }
     std::process::exit(0)
 }
 
 fn handle(shared: &Arc<Shared>, request: Request) -> Result<Reply> {
     Ok(match request {
         Request::Stat => Reply {
-            stat: Some(stat(shared)),
+            stat: Some(stat(shared)?),
             ..Reply::default()
         },
         Request::Write { bytes } => {
@@ -768,7 +1006,7 @@ fn handle(shared: &Arc<Shared>, request: Request) -> Result<Reply> {
         }
         Request::Key { keys } => {
             require_running(shared)?;
-            let modes = parser_query(shared, |terminal| terminal.modes());
+            let modes = parser_query(shared, |terminal| terminal.modes())?;
             let modes = KeyModes {
                 application_cursor_keys: modes.application_cursor_keys,
                 application_keypad: modes.application_keypad,
@@ -782,12 +1020,12 @@ fn handle(shared: &Arc<Shared>, request: Request) -> Result<Reply> {
         }
         Request::Paste { text } => {
             require_running(shared)?;
-            write_input(shared, &paste_bytes(shared, &text))?;
+            write_input(shared, &paste_bytes(shared, &text)?)?;
             Reply::default()
         }
         Request::Submit { text } => {
             require_running(shared)?;
-            let mut bytes = paste_bytes(shared, &text);
+            let mut bytes = paste_bytes(shared, &text)?;
             bytes.push(b'\r');
             write_input(shared, &bytes)?;
             Reply::default()
@@ -805,7 +1043,7 @@ fn handle(shared: &Arc<Shared>, request: Request) -> Result<Reply> {
                     .map(|row| render::row_text(&row))
                     .collect();
                 (lines, terminal.scrollback_dropped())
-            });
+            })?;
             Reply {
                 lines: Some(lines),
                 dropped: Some(dropped),
@@ -813,7 +1051,9 @@ fn handle(shared: &Arc<Shared>, request: Request) -> Result<Reply> {
             }
         }
         Request::Resize { cols, rows, pin } => {
-            let (cols, rows) = (cols.max(1), rows.max(1));
+            if !(1..=MAX_DIMENSION).contains(&cols) || !(1..=MAX_DIMENSION).contains(&rows) {
+                anyhow::bail!("cols and rows must be between 1 and {MAX_DIMENSION}");
+            }
             let mut session = shared.session.lock().unwrap();
             if session.exit.is_none() {
                 pty::resize(shared.master_fd, cols, rows).context("cannot resize the terminal")?;
@@ -825,7 +1065,12 @@ fn handle(shared: &Arc<Shared>, request: Request) -> Result<Reply> {
             Reply::default()
         }
         Request::Signal { signal } => {
-            require_running(shared)?;
+            // Held across the check and the kill so the pid cannot be
+            // reaped — and reissued — in between.
+            let session = shared.session.lock().unwrap();
+            if session.exit.is_some() {
+                anyhow::bail!("session has exited");
+            }
             pty::signal_group(shared.child_pid, signal).context("cannot signal the session")?;
             Reply::default()
         }
@@ -884,8 +1129,8 @@ fn require_running(shared: &Shared) -> Result<()> {
     Ok(())
 }
 
-fn paste_bytes(shared: &Shared, text: &str) -> Vec<u8> {
-    let bracketed = parser_query(shared, |terminal| terminal.modes().bracketed_paste);
+fn paste_bytes(shared: &Shared, text: &str) -> Result<Vec<u8>> {
+    let bracketed = parser_query(shared, |terminal| terminal.modes().bracketed_paste)?;
     let mut bytes = Vec::with_capacity(text.len() + 12);
     if bracketed {
         bytes.extend_from_slice(b"\x1b[200~");
@@ -894,15 +1139,22 @@ fn paste_bytes(shared: &Shared, text: &str) -> Vec<u8> {
     if bracketed {
         bytes.extend_from_slice(b"\x1b[201~");
     }
-    bytes
+    Ok(bytes)
 }
 
-fn stat(shared: &Shared) -> Stat {
+fn stat(shared: &Shared) -> Result<Stat> {
     let (alternate_screen, title) = parser_query(shared, |terminal| {
-        (terminal.alternate_screen_active(), terminal.title())
-    });
+        (
+            terminal.alternate_screen_active(),
+            render::sanitize_title_opt(terminal.title()),
+        )
+    })?;
     let session = shared.session.lock().unwrap();
-    Stat {
+    let surface_queue_bytes = session
+        .surface
+        .as_ref()
+        .map_or(0, |surface| surface.queue.len());
+    Ok(Stat {
         id: shared.config.id.clone(),
         protocol: PROTOCOL_VERSION,
         daemon_pid: std::process::id() as i32,
@@ -920,11 +1172,23 @@ fn stat(shared: &Shared) -> Stat {
         exit: session.exit.clone(),
         alternate_screen,
         title,
-    }
+        bytes_from_child: shared.bytes_from_child.load(Ordering::Relaxed),
+        bytes_to_surfaces: shared.bytes_to_surfaces.load(Ordering::Relaxed),
+        parser_backlog_bytes: shared.parser.backlog_bytes.load(Ordering::Relaxed),
+        parser_backlog_peak_bytes: shared.parser.peak_bytes.load(Ordering::Relaxed),
+        surface_queue_bytes,
+        surface_queue_peak_bytes: shared.surface_queue_peak.load(Ordering::Relaxed),
+        surface_attaches: shared.surface_attaches.load(Ordering::Relaxed),
+        surface_steals: shared.surface_steals.load(Ordering::Relaxed),
+        slow_client_evictions: shared.slow_client_evictions.load(Ordering::Relaxed),
+        control_failures: shared.control_failures.load(Ordering::Relaxed),
+        parser_resets: shared.parser_resets.load(Ordering::Relaxed),
+        subscriber_evictions: shared.events.evictions.load(Ordering::Relaxed),
+    })
 }
 
 fn snapshot(shared: &Shared, format: SnapshotFormat, scrollback_lines: u32) -> Result<Reply> {
-    Ok(parser_query(shared, move |terminal| {
+    parser_query(shared, move |terminal| {
         let model = terminal.model();
         let history = |styled: bool| -> String {
             if scrollback_lines == 0 || model.alternate_screen {
@@ -963,5 +1227,29 @@ fn snapshot(shared: &Shared, format: SnapshotFormat, scrollback_lines: u32) -> R
                 ..Reply::default()
             },
         }
-    }))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stalled_event_subscriber_is_evicted_and_can_resubscribe() {
+        let events = Events {
+            subscribers: Mutex::new(Vec::new()),
+            evictions: AtomicU64::new(0),
+        };
+        let stalled = events.subscribe();
+        for ms in 0..=EVENT_QUEUE_CAP {
+            events.broadcast(Event::OutputQuiet { ms: ms as u64 });
+        }
+        assert_eq!(events.evictions.load(Ordering::Relaxed), 1);
+        assert!(events.subscribers.lock().unwrap().is_empty());
+        drop(stalled);
+
+        let recovered = events.subscribe();
+        events.broadcast(Event::OutputQuiet { ms: 42 });
+        assert_eq!(recovered.recv().unwrap(), Event::OutputQuiet { ms: 42 });
+    }
 }

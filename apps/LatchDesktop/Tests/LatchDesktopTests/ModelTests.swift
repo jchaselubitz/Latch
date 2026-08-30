@@ -57,6 +57,18 @@ final class ModelTests: XCTestCase {
         XCTAssertThrowsError(try JSONDecoder().decode(ListReport.self, from: data))
     }
 
+    func testInspectDecodesPersistedKernelIdentity() throws {
+        let report = try JSONDecoder().decode(
+            InspectReport.self,
+            from: Data("""
+            {"id":"ses_1","name":"demo","state":"running","kernel":"latchd",\
+            "cwd":"/tmp","command_label":"zsh","created_at":"2026-08-10T00:00:00Z",\
+            "initial_size":{"cols":80,"rows":24}}
+            """.utf8)
+        )
+        XCTAssertEqual(report.kernel, "latchd")
+    }
+
     func testRemoveResponseDecodes() throws {
         let report = try JSONDecoder().decode(
             RemoveReport.self,
@@ -89,8 +101,9 @@ final class ModelTests: XCTestCase {
 
         let doctor = try decoder.decode(
             DoctorReport.self,
-            from: Data(#"{"tmuxVersion":"tmux 3.7b","findings":[]}"#.utf8)
+            from: Data(#"{"kernel":"latchd","tmuxVersion":"tmux 3.7b","findings":[]}"#.utf8)
         )
+        XCTAssertEqual(doctor.kernel, "latchd")
         XCTAssertEqual(doctor.tmuxVersion, "tmux 3.7b")
     }
 

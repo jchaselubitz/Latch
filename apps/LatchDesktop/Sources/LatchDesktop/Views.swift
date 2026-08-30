@@ -433,6 +433,9 @@ private struct SessionDetailView: View {
 
                 Grid(alignment: .leading, horizontalSpacing: 22, verticalSpacing: 10) {
                     DetailRow(label: "Command", value: session.commandLabel)
+                    if let kernel = session.kernel {
+                        DetailRow(label: "Kernel", value: kernel)
+                    }
                     DetailRow(label: "Directory", value: session.cwd)
                     DetailRow(label: "Created", value: session.createdAt)
                     if let summary = store.sessions.first(where: { $0.id == session.id }),
@@ -965,8 +968,8 @@ struct SettingsView: View {
                     }
                 }
                 if let doctor = store.cliDoctorReport {
-                    if let tmuxVersion = doctor.tmuxVersion {
-                        LabeledContent("Session kernel", value: tmuxVersion)
+                    if let kernel = doctor.kernel {
+                        LabeledContent("Selected kernel", value: kernel)
                     }
                     ForEach(doctor.findings) { finding in
                         Label(

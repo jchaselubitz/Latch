@@ -19,8 +19,8 @@ use std::process::ExitCode;
 
 use anyhow::{bail, Context, Result};
 use latchd::client;
-use latchd::daemon::{self, Config};
-use latchd::protocol::{Request, SnapshotFormat, PROTOCOL_VERSION};
+use latchd::daemon::{self, Config, DEFAULT_LAUNCH_TIMEOUT_MS};
+use latchd::protocol::{Request, SnapshotFormat, MAX_DIMENSION, PROTOCOL_VERSION};
 
 fn main() -> ExitCode {
     match run(std::env::args().skip(1).collect()) {
@@ -130,6 +130,8 @@ fn run_daemon(args: &[String]) -> Result<ExitCode> {
     let mut id = None;
     let mut socket = None;
     let mut session_dir = None;
+    let mut launch_marker = None;
+    let mut launch_timeout_ms = DEFAULT_LAUNCH_TIMEOUT_MS;
     let mut cwd = None;
     let mut cols = 80u16;
     let mut rows = 24u16;
@@ -147,6 +149,12 @@ fn run_daemon(args: &[String]) -> Result<ExitCode> {
             "--id" => id = Some(value("--id")?),
             "--socket" => socket = Some(PathBuf::from(value("--socket")?)),
             "--session-dir" => session_dir = Some(PathBuf::from(value("--session-dir")?)),
+            "--launch-marker" => launch_marker = Some(PathBuf::from(value("--launch-marker")?)),
+            "--launch-timeout-ms" => {
+                launch_timeout_ms = value("--launch-timeout-ms")?
+                    .parse()
+                    .context("--launch-timeout-ms must be a number")?
+            }
             "--cwd" => cwd = Some(PathBuf::from(value("--cwd")?)),
             "--cols" => {
                 cols = value("--cols")?
@@ -178,15 +186,24 @@ fn run_daemon(args: &[String]) -> Result<ExitCode> {
     if argv.is_empty() {
         bail!("a program to run is required after `--`");
     }
+    let id = id.context("--id is required")?;
+    latchd::paths::validate_session_id(&id)?;
+    for (name, value) in [("--cols", cols), ("--rows", rows)] {
+        if !(1..=MAX_DIMENSION).contains(&value) {
+            bail!("{name} must be between 1 and {MAX_DIMENSION}");
+        }
+    }
     let config = Config {
-        id: id.context("--id is required")?,
+        id,
         socket: socket.context("--socket is required")?,
         session_dir,
+        launch_marker,
+        launch_timeout_ms,
         argv,
         cwd: cwd.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| "/".into())),
         env,
-        cols: cols.max(1),
-        rows: rows.max(1),
+        cols,
+        rows,
         quiet_ms,
     };
 

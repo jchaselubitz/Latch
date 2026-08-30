@@ -73,6 +73,8 @@ pub struct InspectReport {
     pub title: Option<String>,
     /// Derived state.
     pub state: String,
+    /// Kernel that owns this session, independent of the caller's selector.
+    pub kernel: String,
     /// Working directory at spawn.
     pub cwd: PathBuf,
     /// Redacted command label.
@@ -244,7 +246,7 @@ pub struct DoctorFinding {
 /// Reports what is actually wrong, not a checklist of things that are fine.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DoctorReport {
-    /// Kernel selected for new CLI operations (`tmux` by default).
+    /// Kernel selected for new sessions (`latchd` by default).
     pub kernel: String,
     /// Version reported by the pinned bundled tmux, when runnable.
     #[serde(

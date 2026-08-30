@@ -104,6 +104,9 @@ pub fn inspect(options: InspectOptions) -> anyhow::Result<InspectReport> {
         name: metadata.name,
         title: metadata.title,
         state: state.as_wire().to_owned(),
+        kernel: engine::session_kernel(&options.home, &id)?
+            .as_str()
+            .to_owned(),
         cwd: metadata.cwd,
         command_label: metadata.command_label,
         created_at: metadata.created_at,

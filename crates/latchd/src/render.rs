@@ -8,6 +8,28 @@
 use latch_term::{CellAttrs, Color, Row, ScreenModel};
 use serde_json::{json, Value};
 
+use crate::protocol::MAX_TITLE_CHARS;
+
+/// A window title as the daemon is willing to report it.
+///
+/// The title is the one string a child writes that observers print verbatim
+/// — into a tab bar, a log line, a chat message — so it is display text only:
+/// control characters (C0, DEL, C1) are removed, which is what keeps an
+/// `OSC 0` payload from smuggling an escape sequence into whatever terminal
+/// or log shows the title, and it is cut at [`MAX_TITLE_CHARS`].
+pub fn sanitize_title(raw: &str) -> String {
+    raw.chars()
+        .filter(|c| !c.is_control())
+        .take(MAX_TITLE_CHARS)
+        .collect()
+}
+
+/// [`sanitize_title`] over an optional title; an empty result is no title.
+pub fn sanitize_title_opt(raw: Option<String>) -> Option<String> {
+    raw.map(|title| sanitize_title(&title))
+        .filter(|title| !title.is_empty())
+}
+
 /// Plain text, one line per row, trailing blanks trimmed.
 pub fn text(model: &ScreenModel) -> String {
     let mut out = String::new();
@@ -144,7 +166,7 @@ pub fn json(model: &ScreenModel) -> Value {
             "visible": model.cursor.visible,
         },
         "alternate_screen": model.alternate_screen,
-        "title": model.title,
+        "title": sanitize_title_opt(model.title.clone()),
         "modes": {
             "bracketed_paste": model.modes.bracketed_paste,
             "application_cursor_keys": model.modes.application_cursor_keys,
@@ -194,6 +216,24 @@ fn attrs_json(attrs: &CellAttrs) -> Value {
 mod tests {
     use super::*;
     use latch_term::{Screen, Size, Terminal};
+
+    #[test]
+    fn titles_are_display_text_only() {
+        assert_eq!(sanitize_title("plain title"), "plain title");
+        assert_eq!(
+            sanitize_title("bad\x1b]0;x\x07\r\ntitle\u{9b}31m\x7f"),
+            "bad]0;xtitle31m"
+        );
+        assert_eq!(
+            sanitize_title(&"x".repeat(5000)).chars().count(),
+            MAX_TITLE_CHARS
+        );
+        assert_eq!(sanitize_title_opt(Some("\x01\x02".into())), None);
+        assert_eq!(sanitize_title_opt(None), None);
+        let mut term = Terminal::with_size(Size::new(10, 2));
+        term.advance(b"\x1b]2;a\x01b\x07");
+        assert_eq!(json(&term.model())["title"], "ab");
+    }
 
     #[test]
     fn text_and_styled_render_the_screen() {

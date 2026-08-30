@@ -25,7 +25,7 @@ than code.
 Download the standalone CLI payload and the Apple Silicon macOS desktop app from the same
 [GitHub Release](https://github.com/jchaselubitz/Latch/releases/latest). The
 current desktop archive is
-[Latch-0.2608300548.0-macos.zip](https://github.com/jchaselubitz/Latch/releases/download/v0.2608300548.0/Latch-0.2608300548.0-macos.zip);
+[Latch-0.2608300822.0-macos.zip](https://github.com/jchaselubitz/Latch/releases/download/v0.2608300822.0/Latch-0.2608300822.0-macos.zip);
 it contains only `Latch.app`. Drag the app to Applications, then install the CLI
 independently with:
 
@@ -36,10 +36,11 @@ curl -fsSL https://raw.githubusercontent.com/jchaselubitz/Latch/main/scripts/ins
 The installer chooses the Apple Silicon or Intel archive, verifies it against
 the release's `checksums.txt`, verifies all four Developer ID signatures and
 the payload manifest, and installs `latch`, `latch-remote`, `latch-tmux`, and
-`latchd` in `~/.local/bin`. Tmux remains the default kernel; Latch invokes the
-sibling kernel by absolute path and never discovers or joins a tmux server the
-user runs. `LATCH_KERNEL=latchd` opts into the headless kernel, while
-`LATCH_KERNEL=tmux` is the explicit fallback.
+`latchd` in `~/.local/bin`. Latchd is the default kernel for new sessions;
+Latch invokes both sibling kernels by absolute path and never discovers or
+joins a tmux server the user runs. Existing sessions retain the kernel recorded
+when they were created. `LATCH_KERNEL=tmux` is the documented fallback for at
+least one release window.
 
 ## Updating
 
@@ -58,9 +59,12 @@ identity the installed app already has.
 
 ## Status
 
-The default session kernel is a private, pinned tmux server behind the Latch CLI.
-Multiple terminals can attach, closing a terminal does not stop the process,
-and session state is queried directly from tmux.
+The default session kernel is the per-session `latchd` daemon behind the Latch
+CLI. Multiple terminals can attach, closing a terminal does not stop the
+process, and the session's recorded kernel determines all later lifecycle and
+attachment operations. Set `LATCH_KERNEL=tmux` before creating a session to use
+the private, pinned tmux fallback; it does not migrate or terminate sessions
+that already exist.
 
 When Latch launches Claude Code directly, it adds an owner-only observation
 plugin for that process only. The plugin captures bounded raw source bindings

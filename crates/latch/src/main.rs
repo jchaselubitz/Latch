@@ -1150,6 +1150,7 @@ fn print_inspect_human(report: &latch::cli::json::InspectReport) {
         println!("title:\t\t{title}");
     }
     println!("state:\t\t{}", report.state);
+    println!("kernel:\t\t{}", report.kernel);
     println!("cwd:\t\t{}", report.cwd.display());
     println!("command:\t{}", report.command_label);
     println!("created:\t{}", report.created_at);

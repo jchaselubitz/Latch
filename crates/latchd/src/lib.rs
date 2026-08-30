@@ -15,6 +15,7 @@ pub mod client;
 pub mod daemon;
 pub mod keys;
 pub mod paths;
+pub mod peer;
 pub mod protocol;
 pub mod pty;
 pub mod render;

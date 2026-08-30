@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::cli::serve::routes::Grant;
-use crate::engine::{self, PasteMessageRequest};
+use crate::engine::{ConversationControl, ConversationWake};
 use crate::session::meta;
 use crate::session::paths::{LatchHome, SessionId};
 
@@ -129,6 +129,8 @@ pub struct JsonlConnector {
     screen_can_send: Option<bool>,
     live_screen: bool,
     last_screen_refresh: Option<Instant>,
+    control: Option<ConversationControl>,
+    refresh_screen: bool,
     #[cfg(test)]
     last_read_bytes: usize,
 }
@@ -142,6 +144,7 @@ impl JsonlConnector {
         let version = "1";
         let binding = read_binding(&home, &session, id);
         let source = binding.as_ref().map(|binding| binding.0.clone());
+        let control = ConversationControl::open(&home, &session).ok();
         Self {
             id,
             version,
@@ -161,6 +164,8 @@ impl JsonlConnector {
             screen_can_send: None,
             live_screen: true,
             last_screen_refresh: None,
+            control,
+            refresh_screen: true,
             #[cfg(test)]
             last_read_bytes: 0,
         }
@@ -188,6 +193,8 @@ impl JsonlConnector {
             screen_can_send: None,
             live_screen: false,
             last_screen_refresh: None,
+            control: None,
+            refresh_screen: false,
             #[cfg(test)]
             last_read_bytes: 0,
         }
@@ -216,6 +223,23 @@ impl JsonlConnector {
         self.tool_running = runtime.tool_running;
         self.last_state = runtime.last_state;
         self.screen_can_send = runtime.screen_can_send;
+    }
+
+    fn control(&mut self) -> Result<&mut ConversationControl> {
+        if self.control.is_none() {
+            self.control = Some(ConversationControl::open(&self.home, &self.session)?);
+        }
+        Ok(self.control.as_mut().expect("control installed"))
+    }
+
+    fn current_screen(&mut self, deadline: Duration) -> Result<String> {
+        let snapshot = self.control()?.snapshot(deadline)?;
+        Ok(snapshot
+            .history
+            .into_iter()
+            .chain(snapshot.lines)
+            .collect::<Vec<_>>()
+            .join("\n"))
     }
 
     fn refresh_binding(&mut self) -> bool {
@@ -785,6 +809,28 @@ impl Connector for JsonlConnector {
         Detection::Supported(self.identity())
     }
 
+    fn wait_for_activity(
+        &mut self,
+        fallback_poll: Duration,
+        event_timeout: Duration,
+    ) -> Result<()> {
+        if !self.live_screen {
+            std::thread::sleep(fallback_poll);
+            return Ok(());
+        }
+        let wake = self
+            .control()?
+            .wait_for_activity(fallback_poll, event_timeout)?;
+        // A timeout still performs bounded source catch-up, covering hooks or
+        // transcript writes that did not coincide with terminal output. It
+        // does not take a screen snapshot. Every actual event and every event
+        // stream reconnect does, which is the resynchronization boundary.
+        if !matches!(wake, ConversationWake::Timeout) {
+            self.refresh_screen = true;
+        }
+        Ok(())
+    }
+
     fn poll(&mut self, budget: PollBudget) -> Result<PollResult> {
         let binding_replaced = self.refresh_binding();
         let runtime_before = self.runtime_checkpoint();
@@ -954,22 +1000,26 @@ impl Connector for JsonlConnector {
                 });
             }
         }
+        let event_driven = self
+            .control
+            .as_ref()
+            .is_some_and(ConversationControl::is_event_driven);
         let refresh_screen = self.live_screen
             && self.source.is_some()
-            && (!delta.source_offsets.is_empty()
-                || self
-                    .last_screen_refresh
-                    .map(|last| last.elapsed() >= Duration::from_millis(1_500))
-                    .unwrap_or(true));
+            && if event_driven {
+                self.refresh_screen
+            } else {
+                !delta.source_offsets.is_empty()
+                    || self
+                        .last_screen_refresh
+                        .map(|last| last.elapsed() >= Duration::from_millis(1_500))
+                        .unwrap_or(true)
+            };
         if refresh_screen {
-            let screen = engine::capture_pane_with_timeout(
-                &self.home,
-                &self.session,
-                budget.deadline,
-                engine::CapturePaneOptions::default(),
-            )?;
+            let screen = self.current_screen(budget.deadline)?;
             mutations.extend(self.observe_screen(&screen));
             self.last_screen_refresh = Some(Instant::now());
+            self.refresh_screen = false;
         }
         let state = self.state();
         if self.last_state.as_ref() != Some(&state) {
@@ -1049,26 +1099,14 @@ impl Connector for JsonlConnector {
                 .filter(|remaining| !remaining.is_zero())
                 .ok_or_else(|| anyhow::anyhow!("connector action deadline exceeded"))
         };
-        let screen = engine::capture_pane_with_timeout(
-            &self.home,
-            &self.session,
-            remaining()?,
-            engine::CapturePaneOptions::default(),
-        )?;
+        let screen = self.current_screen(remaining()?)?;
         if action.id == ACTION_SEND_MESSAGE {
             if !screen.lines().any(|line| is_empty_composer(self.id, line)) {
                 return Ok(ApplyResult::Refused {
                     reason: format!("the {} composer is no longer empty", self.id),
                 });
             }
-            engine::paste_message_with_timeout(
-                PasteMessageRequest {
-                    home: &self.home,
-                    id: &self.session,
-                    message: text.as_bytes(),
-                },
-                remaining()?,
-            )?;
+            self.control()?.submit(text, remaining()?)?;
         } else {
             let request = self.pending_request.as_ref().expect("checked above");
             if !screen_contains_request(&screen, request) {
@@ -1082,14 +1120,7 @@ impl Connector for JsonlConnector {
                         .to_owned(),
                 });
             };
-            engine::send_keys_with_timeout(
-                engine::SendKeysRequest {
-                    home: &self.home,
-                    id: &self.session,
-                    keys: &[key],
-                },
-                remaining()?,
-            )?;
+            self.control()?.key(&[key], remaining()?)?;
             self.pending_request = None;
         }
         self.screen_can_send = Some(false);

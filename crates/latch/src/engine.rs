@@ -24,13 +24,13 @@ mod latchd_kernel;
 
 pub use latchd_kernel::{latchd_binary, latchd_version, BUNDLED_LATCHD_NAME};
 
-/// Which session kernel this process drives.
+/// Which session kernel creates new sessions for this process.
 ///
-/// The seam is this enum: every public verb below checks it first and hands
-/// the call to `latchd_kernel` when the daemon is selected, so nothing above
-/// `engine` knows which kernel is underneath. Selection is per process, from
-/// `LATCH_KERNEL`; the default stays `tmux` until the daemon has soaked
-/// (`planning/HEADLESS_KERNEL_PROPOSAL.md`, Phase B).
+/// `LATCH_KERNEL` selects creation only. Existing sessions route from their
+/// durable `kernel.json` record (no record means the legacy tmux kernel), so
+/// Desktop, gateway, and fresh shells can address a mixed-kernel home without
+/// inheriting the creator's environment. New sessions default to the daemon;
+/// `LATCH_KERNEL=tmux` remains the explicit fallback for one release window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kernel {
     /// The bundled patched tmux (`latch-tmux`).
@@ -39,7 +39,7 @@ pub enum Kernel {
     Latchd,
 }
 
-/// Environment variable selecting the kernel: `tmux` (default) or `latchd`.
+/// Environment variable selecting the kernel: `latchd` (default) or `tmux`.
 pub const KERNEL_ENV: &str = "LATCH_KERNEL";
 
 impl Kernel {
@@ -59,9 +59,25 @@ impl Kernel {
 /// The kernel selected for this process.
 pub fn kernel() -> Kernel {
     match std::env::var(KERNEL_ENV).as_deref() {
-        Ok("latchd") => Kernel::Latchd,
-        _ => Kernel::Tmux,
+        Ok("tmux") => Kernel::Tmux,
+        _ => Kernel::Latchd,
     }
+}
+
+/// Kernel that owns an existing session.
+pub fn session_kernel(home: &LatchHome, id: &SessionId) -> Result<Kernel> {
+    let paths = home.session(id);
+    let record = latchd::paths::KernelRecord::read(paths.dir())
+        .with_context(|| format!("cannot read the kernel identity for {id}"))?;
+    Ok(match record.as_ref().map(|record| record.kernel.as_str()) {
+        Some(latchd::paths::KERNEL_NAME) => Kernel::Latchd,
+        Some(other) => bail!("session {id} names unsupported kernel `{other}`"),
+        None => Kernel::Tmux,
+    })
+}
+
+fn session_uses_latchd(home: &LatchHome, id: &SessionId) -> bool {
+    session_kernel(home, id).is_ok_and(Kernel::is_latchd)
 }
 
 /// Public protocol contract version retained across the kernel swap.
@@ -512,7 +528,7 @@ impl SurfaceRelease {
 /// Returns why the surface was released. A failed preflight — the case that
 /// must leave the current surface live — is an error, not a release.
 pub fn attach_exclusive(home: &LatchHome, id: &SessionId) -> Result<SurfaceRelease> {
-    if kernel().is_latchd() {
+    if session_kernel(home, id)?.is_latchd() {
         return latchd_kernel::attach_exclusive(home, id);
     }
     ensure_config(home)?;
@@ -612,7 +628,7 @@ fn wait_for_first_viewer(manifest: &LaunchManifest) {
 /// being justified. Returns the reason the wait ended, which is recorded beside
 /// its duration so a slow launch can be attributed afterwards.
 fn await_first_viewer(home: &LatchHome, id: &SessionId, paths: &SessionPaths) -> &'static str {
-    if kernel().is_latchd() {
+    if session_uses_latchd(home, id) {
         return latchd_kernel::await_first_viewer(home, id, paths);
     }
     let Ok(mut waiter) = tmux(home).and_then(|mut command| {
@@ -662,7 +678,7 @@ fn stop_waiter(waiter: &mut std::process::Child) {
 }
 
 fn signal_first_viewer(home: &LatchHome, id: &SessionId) {
-    if kernel().is_latchd() {
+    if session_uses_latchd(home, id) {
         return;
     }
     let Ok(mut command) = tmux(home) else {
@@ -680,7 +696,7 @@ fn first_viewer_channel(id: &SessionId) -> String {
 /// server cannot answer. Used to confirm that a viewer really arrived rather
 /// than that a viewer command merely exited.
 pub fn attached_clients(home: &LatchHome, id: &SessionId) -> Option<usize> {
-    if kernel().is_latchd() {
+    if session_uses_latchd(home, id) {
         return latchd_kernel::inspect(home, id)
             .ok()
             .flatten()
@@ -711,7 +727,7 @@ pub fn attached_clients(home: &LatchHome, id: &SessionId) -> Option<usize> {
 /// [`raw_surface_acknowledged`] instead so an ordinary command client cannot
 /// release a launch gate.
 pub fn surface_attached(home: &LatchHome, id: &SessionId) -> bool {
-    if kernel().is_latchd() {
+    if session_uses_latchd(home, id) {
         return latchd_kernel::surface_attached(home, id);
     }
     raw_surface_acknowledged(home, id)
@@ -719,7 +735,7 @@ pub fn surface_attached(home: &LatchHome, id: &SessionId) -> bool {
 
 /// Returns whether tmux still owns a named session.
 pub fn has_session(home: &LatchHome, id: &SessionId) -> bool {
-    if kernel().is_latchd() {
+    if session_uses_latchd(home, id) {
         return latchd_kernel::has_session(home, id);
     }
     let Ok(mut command) = tmux(home) else {
@@ -741,9 +757,26 @@ pub fn has_session(home: &LatchHome, id: &SessionId) -> bool {
 /// for one poll; a row still half-expanded after the retries is dropped, and
 /// the caller reports that session from its own metadata.
 pub fn list(home: &LatchHome) -> Result<Vec<SessionInfo>> {
-    if kernel().is_latchd() {
-        return latchd_kernel::list(home);
+    let mut has_tmux = false;
+    let mut has_latchd = false;
+    for id in home.session_ids()? {
+        match session_kernel(home, &id)? {
+            Kernel::Tmux => has_tmux = true,
+            Kernel::Latchd => has_latchd = true,
+        }
     }
+    let mut sessions = if has_tmux {
+        list_tmux(home)?
+    } else {
+        Vec::new()
+    };
+    if has_latchd {
+        sessions.extend(latchd_kernel::list(home)?);
+    }
+    Ok(sessions)
+}
+
+fn list_tmux(home: &LatchHome) -> Result<Vec<SessionInfo>> {
     let mut described = Vec::new();
     for attempt in 0..SESSION_QUERY_ATTEMPTS {
         let (sessions, partial) = list_once(home)?;
@@ -809,7 +842,7 @@ enum SessionQuery {
 /// the session is reported as gone; a caller must not see a live session blink
 /// out because the query landed inside that window.
 pub fn inspect(home: &LatchHome, id: &SessionId) -> Result<Option<SessionInfo>> {
-    if kernel().is_latchd() {
+    if session_kernel(home, id)?.is_latchd() {
         return latchd_kernel::inspect(home, id);
     }
     for attempt in 0..SESSION_QUERY_ATTEMPTS {
@@ -881,6 +914,323 @@ pub struct PaneMetrics {
     pub alternate_screen: bool,
 }
 
+/// One structured, non-owning view of a session for the Conversation Hub.
+/// latchd supplies this directly from its parser; tmux fallback sessions are
+/// adapted from `capture-pane` until the compatibility window closes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConversationScreen {
+    /// Visible rows, top to bottom.
+    pub lines: Vec<String>,
+    /// Bounded primary-screen scrollback, oldest first.
+    pub history: Vec<String>,
+    /// Whether the visible rows belong to the alternate screen.
+    pub alternate_screen: bool,
+    /// Child-supplied terminal title.
+    pub title: Option<String>,
+}
+
+/// A latchd event that made the Hub observation loop run. `Resynchronized`
+/// means the event connection was newly established or replaced after loss;
+/// callers must take a fresh structured snapshot before trusting later events.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConversationWake {
+    /// No event arrived before the safety catch-up deadline.
+    Timeout,
+    /// The event stream was established again and needs a fresh snapshot.
+    Resynchronized,
+    /// Child output has been quiet for this many milliseconds.
+    OutputQuiet {
+        /// Quiet duration reported by latchd.
+        ms: u64,
+    },
+    /// The child process exited.
+    ChildExited,
+    /// The child entered or left its alternate screen.
+    AlternateScreen {
+        /// Current alternate-screen state.
+        active: bool,
+    },
+    /// The child changed its terminal title.
+    TitleChanged {
+        /// New title, or `None` when cleared.
+        title: Option<String>,
+    },
+    /// A human surface attached, detached, was stolen, or was evicted.
+    SurfaceChanged,
+}
+
+enum ConversationTransport {
+    Tmux,
+    Latchd {
+        socket: PathBuf,
+        control: Option<latchd::client::Client>,
+        events: Option<latchd::client::Subscription>,
+    },
+}
+
+/// Long-lived kernel connection owned by one Hub connector worker.
+///
+/// Queries may reconnect and retry because they are side-effect free. Actions
+/// are never retried after dispatch: a broken response is ambiguous, and the
+/// Hub's operation ledger prevents the caller from submitting the same
+/// operation id twice.
+pub struct ConversationControl {
+    home: LatchHome,
+    id: SessionId,
+    transport: ConversationTransport,
+}
+
+impl std::fmt::Debug for ConversationControl {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let kernel = if self.is_event_driven() {
+            "latchd"
+        } else {
+            "tmux"
+        };
+        formatter
+            .debug_struct("ConversationControl")
+            .field("id", &self.id)
+            .field("kernel", &kernel)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ConversationControl {
+    /// Opens the kernel-neutral Hub control path for an existing session.
+    pub fn open(home: &LatchHome, id: &SessionId) -> Result<Self> {
+        let transport = match session_kernel(home, id)? {
+            Kernel::Tmux => ConversationTransport::Tmux,
+            Kernel::Latchd => {
+                let record = latchd::paths::KernelRecord::read(home.session(id).dir())?
+                    .ok_or_else(|| anyhow!("session {id} has no latchd kernel record"))?;
+                ConversationTransport::Latchd {
+                    socket: record.socket,
+                    control: None,
+                    events: None,
+                }
+            }
+        };
+        Ok(Self {
+            home: home.clone(),
+            id: id.clone(),
+            transport,
+        })
+    }
+
+    /// Whether this control uses latchd events rather than fallback polling.
+    pub fn is_event_driven(&self) -> bool {
+        matches!(self.transport, ConversationTransport::Latchd { .. })
+    }
+
+    /// Waits on latchd's pushed event stream. Legacy tmux sessions retain the
+    /// bounded poll interval because tmux has no equivalent control stream.
+    pub fn wait_for_activity(
+        &mut self,
+        fallback_poll: Duration,
+        event_timeout: Duration,
+    ) -> Result<ConversationWake> {
+        let ConversationTransport::Latchd { socket, events, .. } = &mut self.transport else {
+            std::thread::sleep(fallback_poll);
+            return Ok(ConversationWake::Timeout);
+        };
+        if events.is_none() {
+            *events = Some(
+                latchd::client::Client::connect_with_timeout(socket, event_timeout)?.subscribe()?,
+            );
+            return Ok(ConversationWake::Resynchronized);
+        }
+        let event = match events
+            .as_mut()
+            .expect("subscription installed")
+            .recv_timeout(event_timeout)
+        {
+            Ok(Some(event)) => event,
+            Ok(None) => return Ok(ConversationWake::Timeout),
+            Err(_) => {
+                *events = None;
+                return Ok(ConversationWake::Resynchronized);
+            }
+        };
+        Ok(match event {
+            latchd::protocol::Event::OutputQuiet { ms } => ConversationWake::OutputQuiet { ms },
+            latchd::protocol::Event::ChildExited { .. } => ConversationWake::ChildExited,
+            latchd::protocol::Event::AltScreen { active } => {
+                ConversationWake::AlternateScreen { active }
+            }
+            latchd::protocol::Event::TitleChanged { title } => {
+                ConversationWake::TitleChanged { title }
+            }
+            latchd::protocol::Event::SurfaceAttached { .. }
+            | latchd::protocol::Event::SurfaceDetached { .. } => ConversationWake::SurfaceChanged,
+        })
+    }
+
+    /// Structured screen plus bounded primary-screen history. This is a parser
+    /// barrier in latchd; all bytes before the reply are reflected in it.
+    pub fn snapshot(&mut self, timeout: Duration) -> Result<ConversationScreen> {
+        if matches!(self.transport, ConversationTransport::Tmux) {
+            let text = capture_pane_with_timeout(
+                &self.home,
+                &self.id,
+                timeout,
+                CapturePaneOptions::default(),
+            )?;
+            return Ok(ConversationScreen {
+                lines: text.lines().map(str::to_owned).collect(),
+                history: Vec::new(),
+                alternate_screen: false,
+                title: None,
+            });
+        }
+        let reply = self.query(
+            &latchd::protocol::Request::Snapshot {
+                format: latchd::protocol::SnapshotFormat::Json,
+                scrollback_lines: 0,
+            },
+            timeout,
+        )?;
+        let screen = reply.screen.ok_or_else(|| {
+            anyhow!(
+                "kernel returned no structured screen for session {}",
+                self.id
+            )
+        })?;
+        let lines = screen["lines"]
+            .as_array()
+            .ok_or_else(|| anyhow!("kernel returned an invalid structured screen"))?
+            .iter()
+            .filter_map(|line| line.as_str().map(str::to_owned))
+            .collect();
+        let alternate_screen = screen["alternate_screen"].as_bool().unwrap_or(false);
+        let title = screen["title"].as_str().map(str::to_owned);
+        let history = if alternate_screen {
+            Vec::new()
+        } else {
+            self.query(&latchd::protocol::Request::History { max: 200 }, timeout)?
+                .lines
+                .unwrap_or_default()
+        };
+        Ok(ConversationScreen {
+            lines,
+            history,
+            alternate_screen,
+            title,
+        })
+    }
+
+    /// Atomically pastes text and submits it. Never automatically retried.
+    pub fn submit(&mut self, text: &str, timeout: Duration) -> Result<()> {
+        self.action(
+            &latchd::protocol::Request::Submit {
+                text: text.to_owned(),
+            },
+            timeout,
+        )
+    }
+
+    /// Pastes text without submitting it. Kept as an explicit primitive for
+    /// chat flows that must fill, but not accept, an interactive composer.
+    pub fn paste(&mut self, text: &str, timeout: Duration) -> Result<()> {
+        self.action(
+            &latchd::protocol::Request::Paste {
+                text: text.to_owned(),
+            },
+            timeout,
+        )
+    }
+
+    /// Sends named keys as one kernel request. Never automatically retried.
+    pub fn key(&mut self, keys: &[String], timeout: Duration) -> Result<()> {
+        self.action(
+            &latchd::protocol::Request::Key {
+                keys: keys.to_vec(),
+            },
+            timeout,
+        )
+    }
+
+    fn query(
+        &mut self,
+        request: &latchd::protocol::Request,
+        timeout: Duration,
+    ) -> Result<latchd::protocol::Reply> {
+        let ConversationTransport::Latchd {
+            socket, control, ..
+        } = &mut self.transport
+        else {
+            bail!("persistent queries are only available for latchd sessions");
+        };
+        let mut last = None;
+        for _ in 0..2 {
+            if control.is_none() {
+                *control = Some(latchd::client::Client::connect_with_timeout(
+                    socket, timeout,
+                )?);
+            }
+            let client = control.as_mut().expect("control installed");
+            client.set_timeout(timeout)?;
+            match client.call(request) {
+                Ok(reply) => return Ok(reply),
+                Err(error) => {
+                    last = Some(error);
+                    *control = None;
+                }
+            }
+        }
+        Err(last.expect("query attempted"))
+            .with_context(|| format!("persistent control query failed for session {}", self.id))
+    }
+
+    fn action(&mut self, request: &latchd::protocol::Request, timeout: Duration) -> Result<()> {
+        if matches!(self.transport, ConversationTransport::Tmux) {
+            return match request {
+                latchd::protocol::Request::Submit { text } => paste_message_with_timeout(
+                    PasteMessageRequest {
+                        home: &self.home,
+                        id: &self.id,
+                        message: text.as_bytes(),
+                    },
+                    timeout,
+                ),
+                latchd::protocol::Request::Paste { text } => {
+                    // The compatibility kernel has no safe fill-only public
+                    // primitive; this path is intentionally unavailable.
+                    bail!("paste without submit is unavailable for tmux sessions: {text}")
+                }
+                latchd::protocol::Request::Key { keys } => send_keys_with_timeout(
+                    SendKeysRequest {
+                        home: &self.home,
+                        id: &self.id,
+                        keys,
+                    },
+                    timeout,
+                ),
+                _ => bail!("unsupported conversation action"),
+            };
+        }
+        let ConversationTransport::Latchd {
+            socket, control, ..
+        } = &mut self.transport
+        else {
+            unreachable!();
+        };
+        if control.is_none() {
+            *control = Some(latchd::client::Client::connect_with_timeout(
+                socket, timeout,
+            )?);
+        }
+        let client = control.as_mut().expect("control installed");
+        client.set_timeout(timeout)?;
+        let result = client.call(request);
+        if result.is_err() {
+            *control = None;
+        }
+        result
+            .map(|_| ())
+            .with_context(|| format!("persistent control action failed for session {}", self.id))
+    }
+}
+
 const PANE_METRICS_FORMAT: &str = "#{pane_width}\u{1f}#{pane_height}\u{1f}#{alternate_on}";
 
 /// Reads one pane's geometry and screen mode.
@@ -892,7 +1242,7 @@ pub fn pane_metrics_with_timeout(
     id: &SessionId,
     timeout: Duration,
 ) -> Result<PaneMetrics> {
-    if kernel().is_latchd() {
+    if session_kernel(home, id)?.is_latchd() {
         return latchd_kernel::pane_metrics(home, id);
     }
     ensure_config(home)?;
@@ -943,7 +1293,7 @@ pub fn capture_pane_with_timeout(
     timeout: Duration,
     options: CapturePaneOptions,
 ) -> Result<String> {
-    if kernel().is_latchd() {
+    if session_kernel(home, id)?.is_latchd() {
         return latchd_kernel::capture_pane(home, id, timeout, options);
     }
     ensure_config(home)?;
@@ -977,7 +1327,7 @@ pub fn paste_message_with_timeout(
     request: PasteMessageRequest<'_>,
     timeout: Duration,
 ) -> Result<()> {
-    if kernel().is_latchd() {
+    if session_kernel(request.home, request.id)?.is_latchd() {
         return latchd_kernel::paste_message(request, timeout);
     }
     let started = Instant::now();
@@ -1039,7 +1389,7 @@ pub fn send_keys(request: SendKeysRequest<'_>) -> Result<()> {
 
 /// Deadline-bounded form used by Conversation Hub action workers.
 pub fn send_keys_with_timeout(request: SendKeysRequest<'_>, timeout: Duration) -> Result<()> {
-    if kernel().is_latchd() {
+    if session_kernel(request.home, request.id)?.is_latchd() {
         return latchd_kernel::send_keys(request, timeout);
     }
     if request.keys.is_empty() {
@@ -1054,7 +1404,7 @@ pub fn send_keys_with_timeout(request: SendKeysRequest<'_>, timeout: Duration) -
 
 /// Resizes a session and optionally pins manual geometry.
 pub fn resize(request: ResizeRequest<'_>) -> Result<()> {
-    if kernel().is_latchd() {
+    if session_kernel(request.home, request.id)?.is_latchd() {
         return latchd_kernel::resize(request);
     }
     let mut command = tmux(request.home)?;
@@ -1145,8 +1495,10 @@ pub(crate) fn tmux_server_is_absent(home: &LatchHome) -> bool {
 
 /// True when `--retry` should try attach again after `error`.
 pub(crate) fn attach_is_retryable(home: &LatchHome, id: &SessionId) -> bool {
+    let latchd = session_uses_latchd(home, id);
     match inspect(home, id) {
         Ok(Some(info)) => info.state == SessionState::Running,
+        Ok(None) | Err(_) if latchd => false,
         Ok(None) | Err(_) => tmux_server_is_absent(home),
     }
 }
@@ -1166,7 +1518,7 @@ fn signal_pane(info: &SessionInfo, signal: i32) -> std::io::Result<()> {
 
 /// Removes a tmux session, including its retained dead pane.
 pub fn kill_session(home: &LatchHome, id: &SessionId) -> Result<()> {
-    if kernel().is_latchd() {
+    if session_kernel(home, id)?.is_latchd() {
         return latchd_kernel::kill_session(home, id);
     }
     let mut command = tmux(home)?;

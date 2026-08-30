@@ -82,6 +82,17 @@ pub enum ApplyResult {
 /// is its sole action-I/O entry point; callers run both outside the state actor.
 pub trait Connector: Send {
     fn detect(&self) -> Detection;
+    /// Blocks until observation is likely to produce a change. Event-capable
+    /// connectors use `event_timeout`; fallback connectors sleep only for the
+    /// shorter polling interval. The subsequent `poll` remains authoritative.
+    fn wait_for_activity(
+        &mut self,
+        fallback_poll: Duration,
+        _event_timeout: Duration,
+    ) -> Result<()> {
+        std::thread::sleep(fallback_poll);
+        Ok(())
+    }
     fn poll(&mut self, budget: PollBudget) -> Result<PollResult>;
     fn actions(&self) -> Vec<ActionDescriptor>;
     fn apply(&mut self, action: ConnectorAction, deadline: Duration) -> Result<ApplyResult>;
