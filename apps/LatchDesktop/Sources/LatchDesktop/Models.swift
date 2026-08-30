@@ -83,6 +83,7 @@ struct InspectReport: Codable, Identifiable, Equatable, Sendable {
     let name: String
     let title: String?
     let state: SessionState
+    let kernel: String?
     let cwd: String
     let commandLabel: String
     let createdAt: String
@@ -92,7 +93,7 @@ struct InspectReport: Codable, Identifiable, Equatable, Sendable {
     let attached: UInt?
 
     enum CodingKeys: String, CodingKey {
-        case id, name, title, state, cwd, size, exit, attached
+        case id, name, title, state, kernel, cwd, size, exit, attached
         case commandLabel = "command_label"
         case createdAt = "created_at"
         case initialSize = "initial_size"
@@ -165,6 +166,11 @@ struct CapabilityFlags: Codable, Equatable, Sendable {
 }
 
 struct DoctorReport: Codable, Sendable {
+    /// Kernel selected by this invocation of the Latch CLI.
+    ///
+    /// Optional so Desktop can still diagnose CLIs released before the
+    /// dual-kernel doctor contract.
+    let kernel: String?
     let tmuxVersion: String?
     let findings: [DoctorFinding]
 }

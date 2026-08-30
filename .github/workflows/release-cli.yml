@@ -72,6 +72,9 @@ jobs:
       - name: Package signed CLI
         run: scripts/release-cli.sh ${{ matrix.target }}
 
+      - name: Verify four-binary archive
+        run: scripts/test-release-archive.sh dist/latch-*-${{ matrix.target }}.zip ${{ matrix.target }}
+
       - name: Attest release archive
         uses: actions/attest@v4
         with:

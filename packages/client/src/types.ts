@@ -26,6 +26,8 @@ export type SessionSummary = {
   name: string;
   title?: string;
   state: string;
+  /** Kernel that owns this session, independent of the caller's selector. */
+  kernel: string;
   cwd: string;
   command_label: string;
   created_at: string;

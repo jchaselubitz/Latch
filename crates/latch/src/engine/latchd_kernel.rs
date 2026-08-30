@@ -145,6 +145,8 @@ pub(super) fn create(request: CreateRequest) -> Result<CreateResult> {
         .arg(&socket_path)
         .arg("--session-dir")
         .arg(paths.dir())
+        .arg("--launch-marker")
+        .arg(&fifo)
         .arg("--cwd")
         .arg(&manifest.launch.cwd)
         .args([

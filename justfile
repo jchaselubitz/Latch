@@ -20,6 +20,12 @@ build-release:
 test:
     cargo test --workspace
 
+# The kernel's adversarial suite plus lints: run before merging anything
+# under crates/latchd. See docs/LATCHD_SECURITY.md.
+security-latchd:
+    cargo clippy -p latchd --all-targets -- -D warnings
+    cargo test -p latchd
+
 check:
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings

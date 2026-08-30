@@ -25,6 +25,17 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// Largest control frame either side accepts.
 pub const MAX_FRAME: usize = 16 * 1024 * 1024;
 
+/// Largest column or row count a surface or resize may ask for.
+///
+/// The screen model keeps every row at full width, and scrollback keeps
+/// thousands of rows, so a dimension is a memory multiplier: a client is
+/// clamped (attach) or refused (resize) rather than allowed to size the
+/// session into the gigabytes.
+pub const MAX_DIMENSION: u16 = 2048;
+
+/// Longest window title the daemon reports, in characters.
+pub const MAX_TITLE_CHARS: usize = 512;
+
 /// Why a surface was released, as the daemon records it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -185,6 +196,42 @@ pub struct Stat {
     pub alternate_screen: bool,
     /// Window title set by the child, if any.
     pub title: Option<String>,
+    /// Bytes read from the child PTY since daemon start.
+    #[serde(default)]
+    pub bytes_from_child: u64,
+    /// Live bytes successfully written to attached surfaces (snapshots excluded).
+    #[serde(default)]
+    pub bytes_to_surfaces: u64,
+    /// Bytes waiting for the off-path parser now.
+    #[serde(default)]
+    pub parser_backlog_bytes: u64,
+    /// Largest observed parser backlog in bytes.
+    #[serde(default)]
+    pub parser_backlog_peak_bytes: u64,
+    /// Bytes queued for the current surface now.
+    #[serde(default)]
+    pub surface_queue_bytes: u64,
+    /// Largest observed queue for any surface.
+    #[serde(default)]
+    pub surface_queue_peak_bytes: u64,
+    /// Successful surface attachments since daemon start.
+    #[serde(default)]
+    pub surface_attaches: u64,
+    /// Surface attachments that stole an existing holder.
+    #[serde(default)]
+    pub surface_steals: u64,
+    /// Surfaces evicted for exceeding the queue bound.
+    #[serde(default)]
+    pub slow_client_evictions: u64,
+    /// Rejected or malformed control-plane requests.
+    #[serde(default)]
+    pub control_failures: u64,
+    /// Times the screen model panicked on child output and was rebuilt.
+    #[serde(default)]
+    pub parser_resets: u64,
+    /// Event subscribers dropped for not draining their stream.
+    #[serde(default)]
+    pub subscriber_evictions: u64,
 }
 
 /// A control response: `ok` plus either an `error` or the reply fields.
@@ -378,6 +425,31 @@ mod tests {
         assert!(!second.ok);
         let end: Option<Request> = read_frame(&mut cursor).unwrap();
         assert!(end.is_none());
+    }
+
+    #[test]
+    fn oversized_frames_are_refused_before_allocation() {
+        let mut header = ((MAX_FRAME as u32) + 1).to_be_bytes().to_vec();
+        header.extend_from_slice(b"{}");
+        let mut cursor = std::io::Cursor::new(header);
+        let error = read_frame::<Request>(&mut cursor).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+
+        let huge = Request::Submit {
+            text: "x".repeat(MAX_FRAME + 1),
+        };
+        let error = write_frame(&mut Vec::new(), &huge).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn malformed_json_is_an_error_not_a_panic() {
+        let body = b"{\"op\":\"nope\"}";
+        let mut framed = (body.len() as u32).to_be_bytes().to_vec();
+        framed.extend_from_slice(body);
+        let mut cursor = std::io::Cursor::new(framed);
+        let error = read_frame::<Request>(&mut cursor).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]

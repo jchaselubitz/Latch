@@ -148,6 +148,84 @@ fn rand_suffix() -> String {
     )
 }
 
+fn guarded_daemon(with_launch_marker: bool) -> (tempfile::TempDir, PathBuf, PathBuf, Child) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let session_dir = dir.path().join("session");
+    std::fs::create_dir(&session_dir).unwrap();
+    let socket = dir.path().join(format!("{}.sock", rand_suffix()));
+    let marker = session_dir.join("launch.pipe");
+    if with_launch_marker {
+        std::fs::write(&marker, b"").unwrap();
+    }
+    let mut command = Command::new(env!("CARGO_BIN_EXE_latchd"));
+    command
+        .args(["run", "--id", "ses_guarded", "--socket"])
+        .arg(&socket)
+        .arg("--session-dir")
+        .arg(&session_dir);
+    if with_launch_marker {
+        command
+            .arg("--launch-marker")
+            .arg(&marker)
+            .args(["--launch-timeout-ms", "200"]);
+    }
+    let mut child = command
+        .args(["--cwd", "/", "--", "/bin/sh", "-c", "sleep 30"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("spawn guarded latchd");
+    let mut ready = String::new();
+    BufReader::new(child.stdout.take().unwrap())
+        .read_line(&mut ready)
+        .unwrap();
+    assert_eq!(ready.trim(), "ready");
+    (dir, socket, session_dir, child)
+}
+
+fn wait_for_daemon_exit(child: &mut Child) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if child.try_wait().unwrap().is_some() {
+            return;
+        }
+        assert!(Instant::now() < deadline, "daemon did not reap itself");
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn wait_for_pid_gone(pid: i32) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        // SAFETY: signal zero only asks whether the captured child pid exists.
+        if unsafe { libc::kill(pid, 0) } == -1 {
+            return;
+        }
+        assert!(Instant::now() < deadline, "child {pid} was not reaped");
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn abandoned_launch_handoff_reaps_daemon_and_child() {
+    let (_dir, socket, session_dir, mut child) = guarded_daemon(true);
+    let child_pid = client::stat(&socket).unwrap().child_pid;
+    wait_for_daemon_exit(&mut child);
+    assert!(!socket.exists());
+    assert!(!session_dir.join("kernel.json").exists());
+    wait_for_pid_gone(child_pid);
+}
+
+#[test]
+fn removing_session_record_reaps_daemon_and_child() {
+    let (_dir, socket, session_dir, mut child) = guarded_daemon(false);
+    let child_pid = client::stat(&socket).unwrap().child_pid;
+    std::fs::remove_dir_all(&session_dir).unwrap();
+    wait_for_daemon_exit(&mut child);
+    assert!(!socket.exists());
+    wait_for_pid_gone(child_pid);
+}
+
 /// Reads from a surface until `needle` appears or the stream ends.
 fn read_until(stream: &mut impl Read, needle: &[u8]) -> Vec<u8> {
     let mut seen = Vec::new();
@@ -408,7 +486,11 @@ fn a_slow_surface_is_evicted_and_the_child_keeps_running() {
         }
     }
     daemon.wait_text("DONE");
-    assert_eq!(client::stat(&daemon.socket).unwrap().state, State::Running);
+    let stat = client::stat(&daemon.socket).unwrap();
+    assert_eq!(stat.state, State::Running);
+    assert_eq!(stat.slow_client_evictions, 1);
+    assert!(stat.surface_queue_peak_bytes > latchd::daemon::SURFACE_QUEUE_CAP as u64);
+    assert_eq!(stat.surface_queue_bytes, 0);
     drop(surface);
 }
 
@@ -449,7 +531,78 @@ fn live_surface_is_byte_exact_at_the_phase_a_throughput_gate() {
         frames_per_second >= MIN_FRAMES_PER_SECOND,
         "raw surface delivered only {frames_per_second:.0} frames/s; Phase A requires at least {MIN_FRAMES_PER_SECOND:.0}"
     );
-    assert_eq!(client::stat(&daemon.socket).unwrap().state, State::Running);
+    let stat = client::stat(&daemon.socket).unwrap();
+    assert_eq!(stat.state, State::Running);
+    assert_eq!(stat.bytes_to_surfaces, payload.len() as u64);
+    assert!(stat.bytes_from_child >= payload.len() as u64);
+    assert!(stat.parser_backlog_peak_bytes > 0);
+    assert_eq!(stat.slow_client_evictions, 0);
+    eprintln!(
+        "measure: bytes_from_child={} bytes_to_surfaces={} parser_backlog_peak_bytes={} surface_queue_peak_bytes={} control_failures={}",
+        stat.bytes_from_child,
+        stat.bytes_to_surfaces,
+        stat.parser_backlog_peak_bytes,
+        stat.surface_queue_peak_bytes,
+        stat.control_failures
+    );
+}
+
+#[test]
+fn bounded_surface_and_control_soak_has_stable_latency_and_counters() {
+    const STEALS: u64 = 200;
+    const SNAPSHOTS: u32 = 500;
+    let daemon = Daemon::spawn("printf '\\033[?1049h\\033[2J\\033[1;1Hsoak-tui'; sleep 30");
+    daemon.wait_text("soak-tui");
+
+    let mut current = client::attach(&daemon.socket, 80, 24).unwrap();
+    let steal_started = Instant::now();
+    let mut max_steal_latency = Duration::ZERO;
+    for index in 0..STEALS {
+        let started = Instant::now();
+        let next = client::attach(
+            &daemon.socket,
+            80 + (index % 7) as u16,
+            24 + (index % 5) as u16,
+        )
+        .unwrap();
+        max_steal_latency = max_steal_latency.max(started.elapsed());
+        assert_eq!(
+            client::release_reason(&daemon.socket, current.id).unwrap(),
+            ReleaseReason::Stolen
+        );
+        current = next;
+    }
+    let steal_elapsed = steal_started.elapsed();
+
+    let snapshot_started = Instant::now();
+    let mut max_snapshot_latency = Duration::ZERO;
+    for _ in 0..SNAPSHOTS {
+        let started = Instant::now();
+        let reply = daemon.client().snapshot(SnapshotFormat::Text, 0).unwrap();
+        max_snapshot_latency = max_snapshot_latency.max(started.elapsed());
+        assert!(reply.text.unwrap().contains("soak-tui"));
+    }
+    let snapshot_elapsed = snapshot_started.elapsed();
+    let stat = client::stat(&daemon.socket).unwrap();
+    assert_eq!(stat.surface_attaches, STEALS + 1);
+    assert_eq!(stat.surface_steals, STEALS);
+    assert_eq!(stat.slow_client_evictions, 0);
+    assert_eq!(stat.control_failures, 0);
+    assert_eq!(stat.parser_backlog_bytes, 0);
+    assert!(stat.alternate_screen);
+    assert_eq!((stat.cols, stat.rows), (83, 28));
+    assert!(max_steal_latency < Duration::from_millis(100));
+    assert!(max_snapshot_latency < Duration::from_millis(100));
+    eprintln!(
+        "measure: steals={STEALS} steal_mean_us={} steal_max_us={} snapshots={SNAPSHOTS} snapshot_mean_us={} snapshot_max_us={} parser_backlog_peak_bytes={} control_failures={}",
+        steal_elapsed.as_micros() / u128::from(STEALS),
+        max_steal_latency.as_micros(),
+        snapshot_elapsed.as_micros() / u128::from(SNAPSHOTS),
+        max_snapshot_latency.as_micros(),
+        stat.parser_backlog_peak_bytes,
+        stat.control_failures
+    );
+    drop(current);
 }
 
 #[test]

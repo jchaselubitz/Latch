@@ -73,6 +73,8 @@ pub struct InspectReport {
     pub title: Option<String>,
     /// Derived state.
     pub state: String,
+    /// Kernel that owns this session, independent of the caller's selector.
+    pub kernel: String,
     /// Working directory at spawn.
     pub cwd: PathBuf,
     /// Redacted command label.
@@ -244,6 +246,8 @@ pub struct DoctorFinding {
 /// Reports what is actually wrong, not a checklist of things that are fine.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DoctorReport {
+    /// Kernel selected for new sessions (`latchd` by default).
+    pub kernel: String,
     /// Version reported by the pinned bundled tmux, when runnable.
     #[serde(
         rename = "tmuxVersion",
@@ -251,6 +255,13 @@ pub struct DoctorReport {
         skip_serializing_if = "Option::is_none"
     )]
     pub tmux_version: Option<String>,
+    /// Version and protocol reported by the bundled headless kernel.
+    #[serde(
+        rename = "latchdVersion",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub latchd_version: Option<String>,
     /// Findings. Empty means the installation looks sound.
     pub findings: Vec<DoctorFinding>,
 }

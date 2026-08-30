@@ -650,6 +650,13 @@ mod tests {
                 panic!("the test gateway binds IPv4 loopback");
             };
             let sockaddr = libc::sockaddr_in {
+                #[cfg(any(
+                    target_os = "macos",
+                    target_os = "freebsd",
+                    target_os = "openbsd",
+                    target_os = "netbsd",
+                    target_os = "dragonfly"
+                ))]
                 sin_len: std::mem::size_of::<libc::sockaddr_in>() as u8,
                 sin_family: libc::AF_INET as libc::sa_family_t,
                 sin_port: v4.port().to_be(),

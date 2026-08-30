@@ -226,8 +226,9 @@ enum Command {
     },
     /// Update the CLI and bundled payload.
     ///
-    /// The complete archive is verified before `latch`, `latch-remote`, or
-    /// `latch-tmux` is replaced, and package-manager-owned copies are refused.
+    /// The complete archive is verified before `latch`, `latch-remote`,
+    /// `latch-tmux`, or `latchd` is replaced, and package-manager-owned copies
+    /// are refused.
     Update {
         /// Report what is available without installing it.
         #[arg(long)]
@@ -712,8 +713,12 @@ fn dispatch(command: Option<Command>) -> Result<()> {
             if json {
                 println!("{}", serde_json::to_string(&report)?);
             } else {
+                println!("selected kernel: {}", report.kernel);
                 if let Some(version) = &report.tmux_version {
-                    println!("session kernel: {version}");
+                    println!("tmux kernel: {version}");
+                }
+                if let Some(version) = &report.latchd_version {
+                    println!("headless kernel: {version}");
                 }
                 if report.findings.is_empty() {
                     println!("no problems found");
@@ -1145,6 +1150,7 @@ fn print_inspect_human(report: &latch::cli::json::InspectReport) {
         println!("title:\t\t{title}");
     }
     println!("state:\t\t{}", report.state);
+    println!("kernel:\t\t{}", report.kernel);
     println!("cwd:\t\t{}", report.cwd.display());
     println!("command:\t{}", report.command_label);
     println!("created:\t{}", report.created_at);

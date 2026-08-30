@@ -42,6 +42,9 @@ const MAX_HISTORY_LIMIT: u16 = 100;
 const FLUSH_INTERVAL: Duration = Duration::from_millis(50);
 /// How often the session's single observation loop asks its connector for work.
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
+/// Safety resync for event-driven kernels. This catches authoritative JSONL or
+/// hook writes that produced no terminal event; it does not capture a screen.
+const EVENT_IDLE_RESYNC: Duration = Duration::from_secs(5);
 const POLL_BUDGET: PollBudget = PollBudget {
     max_records: 512,
     deadline: Duration::from_secs(5),
@@ -133,7 +136,10 @@ pub async fn run(mut socket: WebSocket, connect: ConversationConnect) {
         }
     }
 
-    let observation = spawn_observation(hub.clone(), id.clone());
+    // The observation task belongs to the session actor, not this socket.
+    // Dropping one subscriber must not stop updates for another subscriber
+    // that reconnected or was already attached.
+    let _observation = spawn_observation(hub.clone(), id.clone());
     let (results, mut result_rx) = mpsc::channel::<ConversationServerMessage>(64);
     let mut flush = tokio::time::interval(FLUSH_INTERVAL);
     flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -207,7 +213,6 @@ pub async fn run(mut socket: WebSocket, connect: ConversationConnect) {
     }
 
     hub.unsubscribe(&id, subscriber);
-    observation.abort();
 }
 
 /// Runs the session's single observation loop, shared by every subscriber.
@@ -219,14 +224,18 @@ fn spawn_observation(hub: ConversationHub, id: ConversationId) -> tokio::task::J
         if !hub.claim_observation(&id) {
             return;
         }
-        let mut ticker = tokio::time::interval(POLL_INTERVAL);
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            ticker.tick().await;
             if !hub.has_subscribers(&id) {
                 break;
             }
             if hub.poll_once(id.clone(), POLL_BUDGET).await.is_err() {
+                break;
+            }
+            if hub
+                .wait_for_activity_once(id.clone(), POLL_INTERVAL, EVENT_IDLE_RESYNC)
+                .await
+                .is_err()
+            {
                 break;
             }
         }
@@ -638,6 +647,7 @@ async fn send(socket: &mut WebSocket, message: ConversationServerMessage) -> Res
 mod tests {
     use std::collections::VecDeque;
     use std::net::{SocketAddr, TcpStream};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     use anyhow::Result;
@@ -661,6 +671,7 @@ mod tests {
     /// the socket can be exercised before any real agent adapter exists.
     struct ScriptedConnector {
         pending: Arc<Mutex<VecDeque<ConnectorMutation>>>,
+        applies: Arc<AtomicUsize>,
         enabled: bool,
     }
     impl Connector for ScriptedConnector {
@@ -698,6 +709,7 @@ mod tests {
                 .collect()
         }
         fn apply(&mut self, _action: ConnectorAction, _deadline: Duration) -> Result<ApplyResult> {
+            self.applies.fetch_add(1, Ordering::SeqCst);
             Ok(ApplyResult::Accepted {
                 correlation: Some(ConversationItemId::native("submitted-1")),
             })
@@ -731,6 +743,7 @@ mod tests {
         address: SocketAddr,
         session: String,
         script: Arc<Mutex<VecDeque<ConnectorMutation>>>,
+        applies: Arc<AtomicUsize>,
     }
 
     /// Boots the production router (token and grant middleware included) on a
@@ -766,11 +779,14 @@ mod tests {
 
         let script = Arc::new(Mutex::new(VecDeque::new()));
         let factory_script = script.clone();
+        let applies = Arc::new(AtomicUsize::new(0));
+        let factory_applies = applies.clone();
         let hub = crate::conversation::ConversationHub::with_connector_factory(
             dir.path().join("hub"),
             Arc::new(move |_| {
                 Box::new(ScriptedConnector {
                     pending: factory_script.clone(),
+                    applies: factory_applies.clone(),
                     enabled: connector_enabled,
                 })
             }),
@@ -798,6 +814,7 @@ mod tests {
             address,
             session: id.as_str().to_owned(),
             script,
+            applies,
         }
     }
 
@@ -998,6 +1015,7 @@ mod tests {
             }));
             let replayed = client.next_of("operation_result");
             assert_eq!(replayed["status"], "accepted");
+            assert_eq!(harness.applies.load(Ordering::SeqCst), 1);
 
             // A stale epoch is refused without touching the connector.
             client.send(json!({
@@ -1130,6 +1148,31 @@ mod tests {
             assert_eq!(first["type"], "snapshot");
             assert_eq!(first["reason"], "operation_epoch");
             assert_eq!(first["generation"], generation.as_str());
+        })
+        .await
+        .expect("client");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn disconnecting_the_first_socket_does_not_stop_the_shared_observer() {
+        let harness = harness(true).await;
+        tokio::task::spawn_blocking(move || {
+            let mut first = Client::open(&harness, "", "control");
+            assert_eq!(first.next()["type"], "snapshot");
+            let mut replacement = Client::open(&harness, "", "control");
+            assert_eq!(replacement.next()["type"], "snapshot");
+
+            // `first` owns the original observation task. The task belongs to
+            // the session, though, and must survive while `replacement` is a
+            // subscriber.
+            drop(first);
+            harness
+                .script
+                .lock()
+                .expect("script")
+                .push_back(message("after-reconnect"));
+            let update = replacement.next_of("items_upserted");
+            assert_eq!(update["items"][0]["id"], "after-reconnect");
         })
         .await
         .expect("client");

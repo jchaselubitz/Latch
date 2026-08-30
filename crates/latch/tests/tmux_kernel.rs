@@ -36,6 +36,9 @@ impl Harness {
         let mut command = Command::new(&self.latch);
         command
             .env("LATCH_HOME", &self.home)
+            // This suite is also the release-window escape-hatch proof: an
+            // explicit selector must keep exercising the complete tmux path.
+            .env("LATCH_KERNEL", "tmux")
             .env("LATCH_TMUX_BIN", &self.tmux)
             .env("LATCH_INHERITED", "fresh-client-environment")
             .env_remove("LATCH_SESSION_ID");

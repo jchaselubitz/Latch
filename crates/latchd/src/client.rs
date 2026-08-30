@@ -14,10 +14,21 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::peer;
 use crate::protocol::{
-    self, Event, ReleaseReason, Reply, Request, Response, SnapshotFormat, Stat, PROTOCOL_VERSION,
+    self, Event, ReleaseReason, Reply, Request, Response, SnapshotFormat, Stat, MAX_DIMENSION,
+    PROTOCOL_VERSION,
 };
 use crate::pty;
+
+/// Connects to `socket` and refuses to proceed unless the daemon on the other
+/// end runs as this user. A socket planted at a trusted path by anyone else
+/// therefore never receives a keystroke or paints a byte.
+fn connect_same_user(socket: &Path) -> Result<UnixStream, ClientError> {
+    let stream = UnixStream::connect(socket).map_err(ClientError::Connect)?;
+    peer::require_same_user(&stream).map_err(ClientError::Connect)?;
+    Ok(stream)
+}
 
 /// A client-side failure.
 #[derive(Debug, thiserror::Error)]
@@ -44,16 +55,25 @@ pub struct Client {
 impl Client {
     /// Connects to a session socket.
     pub fn connect(socket: &Path) -> Result<Self, ClientError> {
-        let stream = UnixStream::connect(socket).map_err(ClientError::Connect)?;
-        Ok(Self { stream })
+        Ok(Self {
+            stream: connect_same_user(socket)?,
+        })
     }
 
     /// Connects with a deadline on every later exchange.
     pub fn connect_with_timeout(socket: &Path, timeout: Duration) -> Result<Self, ClientError> {
         let client = Self::connect(socket)?;
-        client.stream.set_read_timeout(Some(timeout))?;
-        client.stream.set_write_timeout(Some(timeout))?;
+        client.set_timeout(timeout)?;
         Ok(client)
+    }
+
+    /// Changes the deadline used by subsequent exchanges on this persistent
+    /// connection.  The Conversation Hub keeps one control connection open,
+    /// but each action still owns its own deadline.
+    pub fn set_timeout(&self, timeout: Duration) -> Result<(), ClientError> {
+        self.stream.set_read_timeout(Some(timeout))?;
+        self.stream.set_write_timeout(Some(timeout))?;
+        Ok(())
     }
 
     /// Sends one request and reads its response.
@@ -102,6 +122,21 @@ impl Subscription {
     pub fn recv(&mut self) -> Result<Option<Event>, ClientError> {
         Ok(protocol::read_frame(&mut self.stream)?)
     }
+
+    /// Waits for one event without turning an idle session into an error.
+    /// A clean EOF remains distinguishable from a timeout so callers can
+    /// reconnect and take a fresh snapshot after event loss.
+    pub fn recv_timeout(&mut self, timeout: Duration) -> Result<Option<Event>, ClientError> {
+        self.stream.set_read_timeout(Some(timeout))?;
+        match protocol::read_frame(&mut self.stream) {
+            Ok(Some(event)) => Ok(Some(event)),
+            Ok(None) => Err(ClientError::Closed),
+            Err(error) if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+                Ok(None)
+            }
+            Err(error) => Err(ClientError::Io(error)),
+        }
+    }
 }
 
 /// One-shot control call.
@@ -142,12 +177,12 @@ pub struct Surface {
 
 /// Takes the surface at the given size.
 pub fn attach(socket: &Path, cols: u16, rows: u16) -> Result<Surface, ClientError> {
-    let mut stream = UnixStream::connect(socket).map_err(ClientError::Connect)?;
+    let mut stream = connect_same_user(socket)?;
     protocol::write_frame(
         &mut stream,
         &Request::Attach {
-            cols,
-            rows,
+            cols: cols.clamp(1, MAX_DIMENSION),
+            rows: rows.clamp(1, MAX_DIMENSION),
             protocol: PROTOCOL_VERSION,
         },
     )?;

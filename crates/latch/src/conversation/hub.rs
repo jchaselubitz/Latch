@@ -595,6 +595,35 @@ impl ConversationHub {
             Err(_) => self.degrade(&id, "observation deadline exceeded".into()),
         }
     }
+    /// Waits outside the Hub lock until the connector has likely changed.
+    /// latchd connectors block on their persistent event subscription; tmux
+    /// fallback connectors retain the short bounded polling interval.
+    pub async fn wait_for_activity_once(
+        &self,
+        id: ConversationId,
+        fallback_poll: Duration,
+        event_timeout: Duration,
+    ) -> Result<()> {
+        let connector = {
+            let hub = self.inner.lock().expect("hub poisoned");
+            hub.sessions
+                .get(&id)
+                .ok_or_else(|| anyhow::anyhow!("unknown conversation"))?
+                .observation_connector
+                .clone()
+        };
+        let task = tokio::task::spawn_blocking(move || {
+            connector
+                .lock()
+                .map_err(|_| anyhow::anyhow!("connector worker poisoned"))?
+                .wait_for_activity(fallback_poll, event_timeout)
+        });
+        match tokio::time::timeout(event_timeout + Duration::from_secs(1), task).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => anyhow::bail!("observation wait worker stopped"),
+            Err(_) => anyhow::bail!("observation wait deadline exceeded"),
+        }
+    }
     /// Runs an authorized action on the one serialized connector worker.  A
     /// deadline after dispatch is deliberately ambiguous, never auto-retried.
     pub async fn dispatch_action(
