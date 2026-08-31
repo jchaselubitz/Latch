@@ -1,4 +1,4 @@
-//! Session management backed by direct tmux queries.
+//! Session management backed by authenticated latchd queries.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, OpenOptions};
@@ -32,7 +32,7 @@ pub struct ListOptions {
     pub home: LatchHome,
 }
 
-/// Lists metadata enriched with live tmux state.
+/// Lists metadata enriched with live kernel state.
 pub fn list(options: ListOptions) -> anyhow::Result<ListReport> {
     let live = engine::list(&options.home)?
         .into_iter()
@@ -114,7 +114,7 @@ pub fn inspect(options: InspectOptions) -> anyhow::Result<InspectReport> {
         size: info.as_ref().map(|value| value.size),
         exit: info.as_ref().and_then(engine::exit_record),
         // The kernel invariant is one raw human surface. Do not expose the
-        // tmux client count: administrative commands are clients too.
+        // Surface count is authoritative only while the daemon is reachable.
         surface_attached: info
             .as_ref()
             .map(|_| engine::surface_attached(&options.home, &id)),
@@ -177,7 +177,7 @@ pub struct RemoveRequest {
     pub force: bool,
 }
 
-/// Removes the tmux session and metadata sidecar.
+/// Removes the latchd session and metadata sidecar.
 pub fn remove(request: RemoveRequest) -> anyhow::Result<RemoveReport> {
     let id = resolve_existing(&request.home, &request.session)?;
     if let Some(info) = engine::inspect(&request.home, &id)? {
@@ -211,7 +211,7 @@ pub struct RenameRequest {
     pub name: String,
 }
 
-/// Renames only the metadata sidecar; tmux ids remain opaque.
+/// Renames only the metadata sidecar; kernel ids remain opaque.
 pub fn rename(request: RenameRequest) -> anyhow::Result<RenameReport> {
     let id = resolve_existing(&request.home, &request.session)?;
     let paths = request.home.session(&id);
@@ -247,11 +247,11 @@ pub struct ResizeRequest {
     pub cols: u16,
     /// Rows.
     pub rows: u16,
-    /// Switch tmux's window-size policy to manual.
+    /// Pin the session to this manual geometry.
     pub pin: bool,
 }
 
-/// Resizes a tmux window.
+/// Resizes a session PTY.
 pub fn resize(request: ResizeRequest) -> anyhow::Result<ResizeReport> {
     let id = resolve_existing(&request.home, &request.session)?;
     if !engine::has_session(&request.home, &id) {
@@ -344,29 +344,6 @@ pub struct DoctorOptions {
 /// Reports installation and state problems.
 pub fn doctor(options: DoctorOptions) -> anyhow::Result<DoctorReport> {
     let mut findings = Vec::new();
-    let tmux_version = match engine::tmux_version() {
-        Ok(version) => {
-            if version != format!("tmux {}", engine::TMUX_VERSION) {
-                findings.push(DoctorFinding {
-                    code: "tmux_version".to_owned(),
-                    severity: "error".to_owned(),
-                    message: format!(
-                        "bundled tmux is {version}; expected tmux {}",
-                        engine::TMUX_VERSION
-                    ),
-                });
-            }
-            Some(version)
-        }
-        Err(error) => {
-            findings.push(DoctorFinding {
-                code: "tmux_missing".to_owned(),
-                severity: "error".to_owned(),
-                message: error.to_string(),
-            });
-            None
-        }
-    };
     let latchd_version = match engine::latchd_version() {
         Ok(version) => {
             let expected = format!(
@@ -392,13 +369,12 @@ pub fn doctor(options: DoctorOptions) -> anyhow::Result<DoctorReport> {
             None
         }
     };
-    doctor_common(options, findings, tmux_version, latchd_version)
+    doctor_common(options, findings, latchd_version)
 }
 
 fn doctor_common(
     options: DoctorOptions,
     mut findings: Vec<DoctorFinding>,
-    tmux_version: Option<String>,
     latchd_version: Option<String>,
 ) -> anyhow::Result<DoctorReport> {
     if let Ok(executable) = std::env::current_exe().and_then(fs::canonicalize) {
@@ -425,7 +401,6 @@ fn doctor_common(
         });
         return Ok(DoctorReport {
             kernel: engine::kernel().as_str().to_owned(),
-            tmux_version,
             latchd_version,
             findings,
         });
@@ -463,7 +438,6 @@ fn doctor_common(
     }
     Ok(DoctorReport {
         kernel: engine::kernel().as_str().to_owned(),
-        tmux_version,
         latchd_version,
         findings,
     })

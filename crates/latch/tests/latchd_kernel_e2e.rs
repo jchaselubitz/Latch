@@ -1,9 +1,9 @@
 //! Exclusive attach and session lifecycle, on the `latchd` kernel.
 //!
 //! The parity gate for `planning/HEADLESS_KERNEL_PROPOSAL.md` Phase A: the
-//! real `latch` binary, with `LATCH_KERNEL=latchd`, driving real `latchd`
-//! daemons through real PTYs, exercising the paths `exclusive_attach_e2e.rs`
-//! proves on the patched tmux — first attach paints the current frame, typed
+//! real `latch` binary driving real `latchd`
+//! daemons through real PTYs, exercising the exclusive-attach paths at the
+//! kernel boundary — first attach paints the current frame, typed
 //! bytes reach the pane untranslated, steal releases the loser with exit 75,
 //! a pane exit releases with 77, geometry follows the surface, and the
 //! lifecycle verbs (`list`, `inspect`, `stop`, `remove`) work unchanged.
@@ -74,7 +74,13 @@ struct Harness {
 
 impl Harness {
     fn new(daemon: PathBuf) -> Self {
-        let temp = tempfile::tempdir().expect("temp dir");
+        // Unix-domain socket paths are short. Keep the parity root out of a
+        // potentially deep runner-specific TMPDIR so the real daemon is
+        // exercised instead of failing at bind time.
+        let temp = tempfile::Builder::new()
+            .prefix("latchd-e2e-")
+            .tempdir_in("/tmp")
+            .expect("temp dir");
         let home = temp.path().join("home");
         Self {
             temp,
@@ -85,26 +91,9 @@ impl Harness {
     }
 
     fn command(&self) -> Command {
-        self.command_with_kernel("latchd")
-    }
-
-    fn command_with_kernel(&self, kernel: &str) -> Command {
         let mut command = Command::new(&self.latch);
         command
             .env("LATCH_HOME", &self.home)
-            .env("LATCH_KERNEL", kernel)
-            .env("LATCH_LATCHD_BIN", &self.daemon)
-            .env("LATCHD_SOCKET_DIR", self.temp.path().join("s"))
-            .env_remove("LATCH_SESSION_ID")
-            .env_remove("TMUX");
-        command
-    }
-
-    fn command_with_default_kernel(&self) -> Command {
-        let mut command = Command::new(&self.latch);
-        command
-            .env("LATCH_HOME", &self.home)
-            .env_remove("LATCH_KERNEL")
             .env("LATCH_LATCHD_BIN", &self.daemon)
             .env("LATCHD_SOCKET_DIR", self.temp.path().join("s"))
             .env_remove("LATCH_SESSION_ID")
@@ -118,10 +107,6 @@ impl Harness {
 
     fn create_sized(&self, shell: &str, cols: u16, rows: u16) -> String {
         self.create_sized_with(self.command(), shell, cols, rows)
-    }
-
-    fn create_with_default_kernel(&self, shell: &str) -> String {
-        self.create_sized_with(self.command_with_default_kernel(), shell, 80, 24)
     }
 
     fn create_sized_with(&self, mut command: Command, shell: &str, cols: u16, rows: u16) -> String {
@@ -403,7 +388,7 @@ impl Drop for Gateway {
 
 fn start_gateway(harness: &Harness) -> Gateway {
     let token_output = harness
-        .command_with_kernel("tmux")
+        .command()
         .args(["serve", "token"])
         .output()
         .expect("mint token");
@@ -413,7 +398,7 @@ fn start_gateway(harness: &Harness) -> Gateway {
         .trim()
         .to_owned();
     let mut child = harness
-        .command_with_kernel("tmux")
+        .command()
         .args(["serve", "--bind", "127.0.0.1:0"])
         .stderr(Stdio::piped())
         .spawn()
@@ -720,8 +705,8 @@ fn attaching_to_an_exited_session_paints_the_last_frame_and_releases() {
 }
 
 #[test]
-fn network_gateway_and_local_surface_steal_across_caller_kernels() {
-    with_kernel("gateway-mixed-kernel", |h| {
+fn network_gateway_and_local_surface_steal_work_on_latchd() {
+    with_kernel("gateway-latchd", |h| {
         let id = h.create("printf 'gateway prompt> '; while :; do sleep 3600; done");
         h.wait_visible(&id, "gateway prompt>");
         let gateway = start_gateway(h);
@@ -756,7 +741,6 @@ fn the_engine_drives_the_pane_through_the_control_plane() {
         thread::sleep(Duration::from_millis(300));
         // The library path the Conversation Hub uses, on this kernel.
         std::env::set_var("LATCH_HOME", &h.home);
-        std::env::set_var("LATCH_KERNEL", "latchd");
         let home = latch::session::paths::LatchHome::new(&h.home);
         let session = latch::session::paths::SessionId::parse(&id).unwrap();
         latch::engine::paste_message(latch::engine::PasteMessageRequest {
@@ -877,87 +861,6 @@ fn persistent_hub_control_reconnects_and_resynchronizes_from_events() {
 }
 
 #[test]
-fn existing_sessions_route_by_record_not_caller_selector() {
-    with_kernel("mixed-kernel-routing", |h| {
-        let id = h.create("printf 'durable kernel identity\\n'; sleep 30");
-        h.wait_visible(&id, "durable kernel identity");
-
-        let inspect = h
-            .command_with_kernel("tmux")
-            .args(["inspect", &id, "--json"])
-            .output()
-            .expect("inspect from tmux-selected caller");
-        assert_success(&inspect);
-        let inspected: Value = serde_json::from_slice(&inspect.stdout).unwrap();
-        assert_eq!(inspected["state"], "running");
-
-        let list = h
-            .command_with_kernel("tmux")
-            .args(["list", "--json"])
-            .output()
-            .expect("list from tmux-selected caller");
-        assert_success(&list);
-        let listed: Value = serde_json::from_slice(&list.stdout).unwrap();
-        assert!(listed["sessions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|row| row["id"] == id));
-
-        let remove = h
-            .command_with_kernel("tmux")
-            .args(["remove", &id, "--force"])
-            .output()
-            .expect("remove from tmux-selected caller");
-        assert_success(&remove);
-    });
-}
-
-#[test]
-fn default_cutover_and_tmux_rollback_preserve_live_sessions() {
-    with_kernel("default-latchd-with-tmux-rollback", |h| {
-        let id = h.create_with_default_kernel("printf 'default latchd session\\n'; sleep 30");
-        h.wait_visible(&id, "default latchd session");
-        assert_eq!(
-            latchd::paths::KernelRecord::read(&h.home.join("sessions").join(&id))
-                .unwrap()
-                .unwrap()
-                .kernel,
-            latchd::paths::KERNEL_NAME
-        );
-
-        let inspect = h
-            .command_with_kernel("tmux")
-            .args(["inspect", &id, "--json"])
-            .output()
-            .expect("inspect from rollback selector");
-        assert_success(&inspect);
-        let inspect: Value = serde_json::from_slice(&inspect.stdout).unwrap();
-        assert_eq!(inspect["kernel"], "latchd");
-        assert_eq!(inspect["state"], "running");
-
-        let doctor = h
-            .command_with_kernel("tmux")
-            .args(["doctor", "--json"])
-            .output()
-            .expect("doctor from rollback selector");
-        assert_success(&doctor);
-        let doctor: Value = serde_json::from_slice(&doctor.stdout).unwrap();
-        assert_eq!(doctor["kernel"], "tmux");
-
-        let mut surface = Surface::spawn(
-            h.command_with_kernel("tmux").args(["attach", &id]),
-            80,
-            24,
-            h.temp.path(),
-        );
-        assert!(surface.wait_for(b"default latchd session", Duration::from_secs(5)));
-        drop(surface);
-        h.remove(&id);
-    });
-}
-
-#[test]
 fn daemon_suspend_and_resume_preserves_the_session_and_snapshot() {
     with_kernel("daemon-suspend-resume", |h| {
         let id = h.create("printf 'before suspend\\n'; sleep 30");
@@ -994,7 +897,7 @@ fn abrupt_daemon_failure_is_reported_lost_and_remains_removable() {
             Duration::from_secs(5),
         );
         let output = h
-            .command_with_kernel("tmux")
+            .command()
             .args(["remove", &id, "--force"])
             .output()
             .expect("remove failed daemon session");

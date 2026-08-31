@@ -1,9 +1,7 @@
 //! The `latchd` kernel behind the engine seam.
 //!
-//! Every public verb in `engine.rs` dispatches here when `LATCH_KERNEL=latchd`
-//! is selected. The shapes returned are the tmux-era ones (`SessionInfo`,
-//! `SurfaceRelease`) so nothing above the seam changes; the mechanism is a
-//! per-session daemon spoken to over its socket instead of tmux subprocesses.
+//! Every public verb in `engine.rs` dispatches here. The mechanism is a
+//! per-session daemon spoken to over its authenticated Unix socket.
 
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};

@@ -8,7 +8,7 @@ or CI.
 
 ```text
 crates/
-  latch/                   # CLI, metadata sidecar, tmux engine
+  latch/                   # CLI, metadata sidecar, latchd engine
 apps/LatchDesktop/         # native macOS client
 packages/                  # TypeScript presentation clients
 services/control-plane/    # cloud control plane (independent deployable)
@@ -22,30 +22,14 @@ registry, screen-model, or resize-authority modules in the active workspace.
 
 ## The session kernel is private and pinned
 
-Latch invokes the bundled `latch-tmux` executable by absolute path with both
-`-S ~/.latch/server` and `-f ~/.latch/tmux.conf`. It must never discover the
-user's tmux executable, configuration, socket, or sessions.
+Latch invokes the bundled `latchd` executable by absolute path. One daemon
+owns one session PTY and authenticates clients on an owner-only Unix socket.
+There is no system-kernel discovery, shared server, window, tab, or pane model.
 
-`latch-tmux` is not stock tmux. It is the pinned tmux source plus
-[`patches/tmux/`](../patches/tmux/), which adds the exclusive raw-attach
-primitive Latch depends on. It is a required part of the Latch payload, never
-an optional system dependency, and an unpatched or partially patched kernel is
-rejected before a session is created or an existing surface is touched.
-
-Two separate things are checked, because they can differ. The **binary** is
-probed with the raw-attach flag, which upstream tmux rejects as an unknown
-option. The **running server** is asked for `#{latch_raw_kernel}`, which
-upstream resolves to nothing — installing the payload does not restart a tmux
-server that is already up, and an upstream server would otherwise accept an
-ordinary attach and ignore the raw-attach identify flag, giving tmux's own
-renderer with no steal and no warning. A server that answers wrong is refused
-with an instruction to stop its sessions so the next command starts the
-patched kernel. There is no fallback in either case.
-
-The generated configuration has no status bar, prefix, or copy-mode keys. It
-sets `remain-on-exit on` and a deliberate `default-terminal`. The child
-environment removes `TMUX`; nesting is detected only through
-`LATCH_SESSION_ID`.
+The coordinated payload pins the daemon version and protocol to the CLI.
+Doctor, installer, and updater reject a missing or mixed-version daemon before
+creating a session. The child receives a deliberate terminal type; nesting is
+detected only through `LATCH_SESSION_ID`.
 
 ## A session has at most one human surface
 
@@ -58,11 +42,11 @@ is painted. After that frame the tty receives the pane's own bytes.
 
 A failed preflight leaves the current surface live and untouched. There is no
 mirrored attach, no watch mode, no read-only live terminal, and no ordinary
-user-facing `tmux attach-session`. Someone who only wants to observe uses
+second live attach. Someone who only wants to observe uses
 Conversation Hub or `latch inspect`.
 
 `GET /v2/sessions/{id}/preview` does not contradict that rule. It is a
-`capture-pane` query — the same one-shot grid read the Conversation Hub already
+structured snapshot query — the same one-shot grid read the Conversation Hub already
 performs to observe a pane's screen — returning the cells as they stood at one
 instant, with the time they were read. It does not enter the exclusive attach,
 does not paint continuously, does not follow the session, and cannot carry
@@ -118,14 +102,14 @@ settings.
 ## Session state is queried, never stored
 
 ```text
-tmux has a live pane       -> running
-tmux has a dead pane       -> exited
-metadata without a session -> lost
+latchd reports a live child -> running
+latchd retains child exit   -> exited
+metadata without a daemon   -> lost
 ```
 
-Do not add a stored status field or process id. `has-session`,
-`list-sessions`, and pane formats are authoritative. A process id may be
-queried from tmux for an immediate signal operation but is never persisted.
+Do not add a stored status field or process id. The authenticated daemon stat
+reply is authoritative. A child process id may be queried for an immediate
+signal operation but is never persisted.
 
 ## Launch secrets never reach disk
 
@@ -141,7 +125,7 @@ bounded printable text before they are stored or rendered.
 
 ## Distribution is one signed payload
 
-Every release archive contains `latch`, `latch-remote`, and pinned `latch-tmux`. All three
+Every release archive contains `latch`, `latch-remote`, and pinned `latchd`. All three
 binaries carry the same Developer ID and are covered by the notarized archive. The
 updater verifies the archive checksum and all signatures, stages every file,
 and rolls back the siblings if replacing the CLI fails.

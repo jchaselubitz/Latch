@@ -2,8 +2,7 @@
 //!
 //! Unix socket paths are limited to ~104 bytes on macOS, which a session
 //! directory under a temp-dir `LATCH_HOME` exceeds. The socket therefore lives
-//! in a short per-user directory — the same convention as tmux's
-//! `/tmp/tmux-<uid>/` — and the session directory carries a small record
+//! in a short per-user directory, and the session directory carries a small record
 //! pointing at it.
 //!
 //! Everything here touches paths other users can reach (`/tmp`) or files a

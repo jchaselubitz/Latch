@@ -1,4 +1,4 @@
-//! Attach a terminal to a session through tmux.
+//! Attach a terminal to a latchd session.
 
 use std::time::Duration;
 
@@ -58,7 +58,7 @@ pub fn attach(options: AttachOptions) -> anyhow::Result<SurfaceRelease> {
 
 /// Attaches, retrying only transient failures (server not yet up, or a still-
 /// running session whose attach client dropped). Permanent errors — missing
-/// session, exited pane, missing tmux binary — fail immediately with the last
+/// session, exited child, missing daemon — fail immediately with the last
 /// error.
 pub fn attach_with_retry(
     options: AttachOptions,
@@ -97,9 +97,6 @@ fn attach_session(
 fn attach_once(home: &LatchHome, id: &SessionId) -> anyhow::Result<SurfaceRelease> {
     match engine::inspect(home, id)? {
         Some(_) => engine::attach_exclusive(home, id),
-        None if engine::tmux_server_is_absent(home) => {
-            bail!("no Latch tmux server is running")
-        }
         None => bail!(SessionLookupError::NotInServer {
             session: id.to_string(),
         }),
@@ -127,7 +124,7 @@ pub enum SessionLookupError {
         /// Display name that matched multiple sessions.
         session: String,
     },
-    /// Metadata exists but the private tmux server does not have the session.
+    /// Metadata exists but latchd does not have the session.
     #[error("session {session} is not available in the Latch server")]
     NotInServer {
         /// Session id.

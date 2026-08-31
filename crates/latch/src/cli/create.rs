@@ -1,4 +1,4 @@
-//! Session creation on the private tmux kernel.
+//! Session creation on the private latchd kernel.
 //!
 //! Bare `latch`, `latch shell`, and `latch run -- <cmd>` all land here. So does
 //! `latch create --manifest-file -`, which is the path M3's Overlord provider
@@ -53,7 +53,7 @@ pub struct ManifestOptions {
 }
 
 /// Creates a session: id, directory at `0700`, `meta.json` via temp+rename,
-/// detached tmux session, optional attach.
+/// detached latchd session, optional attach.
 ///
 /// Display fields on the manifest are sanitized at this boundary — the single
 /// place externally supplied names and titles arrive — before anything is

@@ -1039,7 +1039,7 @@ impl Connector for JsonlConnector {
     fn actions(&self) -> Vec<ActionDescriptor> {
         // Descriptors remain static because the Hub caches them when it creates
         // the actor. `apply` repeats the live validation immediately before
-        // touching tmux; pushed `ConversationState` is the UI availability.
+        // touching the kernel; pushed `ConversationState` is the UI availability.
         vec![
             ActionDescriptor {
                 id: ACTION_SEND_MESSAGE.to_owned(),
@@ -1091,7 +1091,7 @@ impl Connector for JsonlConnector {
             });
         };
         // Pushed state can become stale while the operation is in flight, so
-        // validate the live pane immediately before affecting tmux.
+        // validate the live session immediately before affecting the kernel.
         let started = Instant::now();
         let remaining = || {
             deadline

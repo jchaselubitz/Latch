@@ -24,18 +24,25 @@ struct Daemon {
     child: Child,
 }
 
+fn short_tempdir() -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix("latchd-session-")
+        .tempdir_in("/tmp")
+        .expect("tempdir")
+}
+
 impl Daemon {
     fn spawn(script: &str) -> Self {
         Self::spawn_sized(script, 40, 10)
     }
 
     fn spawn_sized(script: &str, cols: u16, rows: u16) -> Self {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = short_tempdir();
         Self::spawn_in(dir, script, cols, rows)
     }
 
     fn spawn_with_payload(payload: &[u8]) -> Self {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = short_tempdir();
         let payload_path = dir.path().join("payload.bin");
         std::fs::write(&payload_path, payload).expect("write performance payload");
         let quoted = format!(
@@ -149,7 +156,7 @@ fn rand_suffix() -> String {
 }
 
 fn guarded_daemon(with_launch_marker: bool) -> (tempfile::TempDir, PathBuf, PathBuf, Child) {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = short_tempdir();
     let session_dir = dir.path().join("session");
     std::fs::create_dir(&session_dir).unwrap();
     let socket = dir.path().join(format!("{}.sock", rand_suffix()));

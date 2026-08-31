@@ -46,7 +46,7 @@ pub struct LaunchSpec {
     pub inherit_env: bool,
     /// Initial terminal size.
     pub size: TerminalSize,
-    /// Requested terminal type. Latch normalizes this to tmux's pinned value.
+    /// Requested terminal type. Latch normalizes this to its pinned value.
     #[serde(default = "default_term")]
     pub term: String,
 }

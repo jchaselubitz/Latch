@@ -166,12 +166,8 @@ struct CapabilityFlags: Codable, Equatable, Sendable {
 }
 
 struct DoctorReport: Codable, Sendable {
-    /// Kernel selected by this invocation of the Latch CLI.
-    ///
-    /// Optional so Desktop can still diagnose CLIs released before the
-    /// dual-kernel doctor contract.
+    /// Kernel used by the selected Latch CLI.
     let kernel: String?
-    let tmuxVersion: String?
     let findings: [DoctorFinding]
 }
 struct DoctorFinding: Codable, Identifiable, Sendable {

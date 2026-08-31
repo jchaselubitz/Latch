@@ -568,7 +568,7 @@ private struct ResizeSessionView: View {
                 TextField("Columns", value: $request.cols, format: .number)
                 TextField("Rows", value: $request.rows, format: .number)
                 Toggle("Pin this size", isOn: $request.pin)
-                Text("Without pinning, an attached terminal can change the session size later. Pinning switches the tmux window to manual sizing.")
+                Text("Without pinning, an attached terminal can change the session size later. Pinning keeps the requested session geometry.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -900,7 +900,7 @@ struct SettingsView: View {
                 SettingsSectionHeader("Executable")
             } footer: {
                 SettingsFootnote(
-                    "Latch Desktop uses the independently installed CLI selected here. CLI updates replace the command, the remote-access helper, and the pinned tmux payload."
+                    "Latch Desktop uses the independently installed CLI selected here. CLI updates replace the command, the remote-access helper, and the pinned latchd payload."
                 )
             }
 

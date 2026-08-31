@@ -31,29 +31,15 @@ if [[ ! -s "$work_dir/archive.sha256" ]]; then
 fi
 (cd "$work_dir" && shasum -a 256 -c archive.sha256)
 ditto -x -k "$work_dir/$archive" "$work_dir/extracted"
-/usr/bin/python3 -c 'import json,sys; p=json.load(open(sys.argv[1])); expected=["latch","latch-remote","latch-tmux","latchd"]; assert p == {"formatVersion":1,"version":sys.argv[2],"target":sys.argv[3],"binaries":expected}' \
+/usr/bin/python3 -c 'import json,sys; p=json.load(open(sys.argv[1])); expected=["latch","latch-remote","latchd"]; assert p == {"formatVersion":1,"version":sys.argv[2],"target":sys.argv[3],"binaries":expected}' \
     "$work_dir/extracted/latch-payload.json" "$version" "$target"
 codesign --verify --strict "$work_dir/extracted/latch"
-codesign --verify --strict "$work_dir/extracted/latch-tmux"
 codesign --verify --strict "$work_dir/extracted/latch-remote"
 codesign --verify --strict "$work_dir/extracted/latchd"
 "$work_dir/extracted/latch" --version | grep -F " $version"
 "$work_dir/extracted/latch-remote" --version | grep -F " $version"
 "$work_dir/extracted/latchd" version | grep -Fx "latchd $version protocol 1"
-"$work_dir/extracted/latch-tmux" -V | grep -Fx "tmux 3.7b"
-# latch-tmux is a Latch-patched kernel, not stock tmux. Verify the capability
-# itself rather than only the filename and upstream version: `-R` is the
-# raw-attach flag the patched kernel accepts during client identification and
-# upstream tmux rejects as an unknown option. Installing an unpatched payload
-# would leave every attach failing at runtime instead of here.
-if ! "$work_dir/extracted/latch-tmux" -R -V >/dev/null 2>&1; then
-    echo "The downloaded latch-tmux is not a Latch-patched kernel (missing latch-raw-attach-v1)." >&2
-    echo "Refusing to install an incomplete payload." >&2
-    exit 1
-fi
-
 mkdir -p "$HOME/.local/bin"
-install -m 0755 "$work_dir/extracted/latch-tmux" "$HOME/.local/bin/latch-tmux"
 install -m 0755 "$work_dir/extracted/latch-remote" "$HOME/.local/bin/latch-remote"
 install -m 0755 "$work_dir/extracted/latchd" "$HOME/.local/bin/latchd"
 install -m 0755 "$work_dir/extracted/latch" "$HOME/.local/bin/latch"

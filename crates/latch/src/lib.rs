@@ -1,4 +1,4 @@
-//! Latch's CLI, private tmux engine, and durable metadata contracts.
+//! Latch's CLI, latchd engine, and durable metadata contracts.
 
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]

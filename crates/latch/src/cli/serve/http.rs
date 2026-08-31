@@ -132,7 +132,7 @@ fn router(state: AppState) -> Router {
 ///
 /// `latch_bin` is what the terminal route spawns as its attach client, so a
 /// test can substitute a stub that behaves like one — including exiting with
-/// the kernel's release codes — without standing up a tmux server.
+/// the kernel's release codes — without starting a real daemon.
 #[cfg(test)]
 pub(crate) fn test_router(
     home: LatchHome,
@@ -338,7 +338,7 @@ async fn inspect_session(
 /// history nothing is being decided, and the payload is not free.
 const PREVIEW_SCROLLBACK_CAP: u32 = 200;
 
-/// A preview is a screen-open convenience. If tmux cannot answer inside this,
+/// A preview is a screen-open convenience. If latchd cannot answer inside this,
 /// the phone says so and offers Attach rather than holding a spinner for the
 /// 30 seconds the engine helper defaults to.
 const PREVIEW_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
@@ -408,7 +408,7 @@ async fn preview_session(
                 scrollback_lines,
             },
         )?;
-        // tmux ends a capture with a newline after the last row. Fed into an
+        // Text snapshots end with a newline after the last row. Fed into an
         // emulator whose grid is exactly `rows` tall, that newline scrolls the
         // whole still up one line and the top row is lost. Measured against
         // every `fixtures/vt` case: with the trailing newline the replayed

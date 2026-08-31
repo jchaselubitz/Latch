@@ -46,7 +46,7 @@ impl Daemon {
     }
 
     fn launch(launch: Launch<'_>) -> Self {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = short_tempdir();
         let session_dir = dir.path().join("session");
         std::fs::create_dir(&session_dir).unwrap();
         let socket = dir.path().join(format!("{}.sock", suffix()));
@@ -105,6 +105,13 @@ impl Daemon {
     }
 }
 
+fn short_tempdir() -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix("latchd-sec-")
+        .tempdir_in("/tmp")
+        .expect("tempdir")
+}
+
 impl Drop for Daemon {
     fn drop(&mut self) {
         let _ = client::call(&self.socket, &Request::Kill);
@@ -160,7 +167,7 @@ fn mode_of(path: &Path) -> u32 {
 /// Runs `latchd run` with the given extra arguments and returns its exit
 /// status and stderr, for command-line validation.
 fn run_latchd_expect_failure(args: &[&str]) -> String {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = short_tempdir();
     let socket = dir.path().join("s.sock");
     let output = Command::new(env!("CARGO_BIN_EXE_latchd"))
         .arg("run")

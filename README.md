@@ -12,7 +12,7 @@ latch run -- claude         # a persistent agent session
 latch list                  # what is running
 latch attach auth-refactor  # from anywhere, including a phone over SSH
 latch remove old-session    # remove one exited/lost session
-latch update                # replace the CLI, remote helper, and tmux payload
+latch update                # replace the CLI, remote helper, and latchd payload
 ```
 
 Point your terminal profile's command at `latch` and every window you open is
@@ -32,14 +32,14 @@ curl -fsSL https://raw.githubusercontent.com/jchaselubitz/Latch/main/scripts/ins
 ```
 
 The installer chooses the Apple Silicon or Intel archive, verifies it against
-the release's `checksums.txt`, verifies all four Developer ID signatures and
-the payload manifest, and installs `latch`, `latch-remote`, `latch-tmux`, and
-`latchd` in `~/.local/bin`. See the [getting-started guide](docs/GETTING_STARTED.md)
+the release's `checksums.txt`, verifies all three Developer ID signatures and
+the payload manifest, and installs `latch`, `latch-remote`, and `latchd` in
+`~/.local/bin`. See the [getting-started guide](docs/GETTING_STARTED.md)
 for setup and first use.
 
 ## Updating
 
-`latch update` replaces the complete four-binary payload with the newest release published
+`latch update` replaces the complete three-binary payload with the newest release published
 at [Latch releases](https://github.com/jchaselubitz/Latch/releases). It
 verifies the archive against the checksums that release publishes, and — when
 the installed binary is Developer ID signed — refuses a download signed by
@@ -54,12 +54,12 @@ identity the installed app already has.
 
 ## Status
 
-The default session kernel is the per-session `latchd` daemon behind the Latch
+The session kernel is the per-session `latchd` daemon behind the Latch
 CLI. A session has one live terminal surface, so a new attach moves it rather
 than sharing it; closing that terminal does not stop the process. The session's
-recorded kernel determines all later lifecycle and attachment operations. Set
-`LATCH_KERNEL=tmux` before creating a session to use the private, pinned tmux
-fallback; it does not migrate or terminate existing sessions.
+recorded kernel determines all later lifecycle and attachment operations. The
+former tmux fallback is no longer shipped; a pre-cutover release is the
+rollback boundary for legacy tmux-hosted sessions.
 
 When Latch launches Claude Code directly, it adds an owner-only observation
 plugin for that process only. The plugin captures bounded raw source bindings
@@ -71,7 +71,7 @@ Conversation Hub consumes those sources behind an agent-neutral boundary.
 
 ```text
 crates/
-  latch/                   # CLI, metadata, and private tmux engine
+  latch/                   # CLI, metadata, and latchd engine
 apps/LatchDesktop/         # native macOS session manager + menu-bar extra
 packages/                  # protocol-major-2 TypeScript contracts and terminal client
 schemas/remote-access/v2/  # canonical gateway and conversation schemas

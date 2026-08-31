@@ -1,7 +1,7 @@
 //! Per-session launch phase timings.
 //!
 //! Launch latency is split across three processes — `latch create`, `latch
-//! open`, and the internal launcher under tmux — so no single exit status or
+//! open`, and the internal launcher under latchd — so no single exit status or
 //! log line explains a slow start. Each process appends the phases it owns to
 //! one JSONL sidecar in the session directory, which `latch inspect --json`
 //! reads back. Appends are single small writes to an `O_APPEND` file, so the
@@ -23,7 +23,7 @@ use crate::session::paths::{SessionPaths, FILE_MODE};
 /// One measured launch phase.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LaunchPhase {
-    /// Dotted phase name, e.g. `create.tmux_new_session`, `open.viewer`.
+    /// Dotted phase name, e.g. `create.kernel_start`, `open.viewer`.
     pub phase: String,
     /// How long the phase took, in milliseconds.
     pub ms: u64,

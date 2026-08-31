@@ -226,8 +226,8 @@ enum Command {
     },
     /// Update the CLI and bundled payload.
     ///
-    /// The complete archive is verified before `latch`, `latch-remote`,
-    /// `latch-tmux`, or `latchd` is replaced, and package-manager-owned copies
+    /// The complete archive is verified before `latch`, `latch-remote`, or
+    /// `latchd` is replaced, and package-manager-owned copies
     /// are refused.
     Update {
         /// Report what is available without installing it.
@@ -714,9 +714,6 @@ fn dispatch(command: Option<Command>) -> Result<()> {
                 println!("{}", serde_json::to_string(&report)?);
             } else {
                 println!("selected kernel: {}", report.kernel);
-                if let Some(version) = &report.tmux_version {
-                    println!("tmux kernel: {version}");
-                }
                 if let Some(version) = &report.latchd_version {
                     println!("headless kernel: {version}");
                 }

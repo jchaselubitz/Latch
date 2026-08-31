@@ -101,10 +101,9 @@ final class ModelTests: XCTestCase {
 
         let doctor = try decoder.decode(
             DoctorReport.self,
-            from: Data(#"{"kernel":"latchd","tmuxVersion":"tmux 3.7b","findings":[]}"#.utf8)
+            from: Data(#"{"kernel":"latchd","latchdVersion":"latchd 1 protocol 1","findings":[]}"#.utf8)
         )
         XCTAssertEqual(doctor.kernel, "latchd")
-        XCTAssertEqual(doctor.tmuxVersion, "tmux 3.7b")
     }
 
     func testCapabilitiesDecodeCurrentFeatureMetadata() throws {

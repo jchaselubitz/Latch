@@ -9,10 +9,8 @@ and pushed events, any number concurrent). No central server; no window, tab,
 or pane model — presentation belongs to whoever attaches.
 
 See `planning/HEADLESS_KERNEL_PROPOSAL.md` for the architecture and the
-decision to build it by default for newly created sessions; `LATCH_KERNEL=tmux`
-selects the patched tmux fallback. Existing sessions always route from their
-persisted kernel identity, so changing the selector does not migrate or
-interrupt them.
+decision to use it for every session. The former tmux compatibility kernel is
+archival and is no longer shipped or selected by current Latch releases.
 
 ```text
 latchd run --id ID --socket PATH [--session-dir DIR] --cwd DIR \

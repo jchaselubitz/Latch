@@ -1,4 +1,4 @@
-//! Small metadata sidecar for fields tmux does not own.
+//! Small metadata sidecar for display and launch fields the kernel does not own.
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -41,12 +41,12 @@ pub struct SessionMeta {
     pub source: SourceInfo,
 }
 
-/// Exit information derived from tmux's dead pane.
+/// Exit information derived from latchd's retained child status.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExitRecord {
     /// Shell-compatible exit status, including `128 + signal`.
     pub code: Option<i32>,
-    /// Signal is not separately reported by tmux.
+    /// Signal reported by the session kernel.
     pub signal: Option<String>,
     /// Best available RFC 3339 exit observation time.
     pub exited_at: String,

@@ -1,6 +1,6 @@
 [package]
 name = "latch"
-description = "Persistent terminal sessions on a private tmux kernel."
+description = "Persistent terminal sessions on the latchd headless kernel."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -16,7 +16,7 @@ path = "src/main.rs"
 name = "latch"
 path = "src/lib.rs"
 
-# One authored binary drives one pinned, bundled tmux binary.
+# The CLI drives the bundled per-session latchd kernel.
 #
 # Dependencies here are held to what CLI startup can afford: with an iTerm
 # profile pointed at `latch`, every terminal window pays this cost.

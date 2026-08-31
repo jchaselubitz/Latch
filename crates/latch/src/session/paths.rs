@@ -130,16 +130,6 @@ impl LatchHome {
         self.root.join("sessions")
     }
 
-    /// Generated tmux configuration.
-    pub fn tmux_config(&self) -> PathBuf {
-        self.root.join("tmux.conf")
-    }
-
-    /// Private tmux server socket.
-    pub fn server_socket(&self) -> PathBuf {
-        self.root.join("server")
-    }
-
     /// User preferences.
     pub fn config_file(&self) -> PathBuf {
         self.root.join("config.toml")

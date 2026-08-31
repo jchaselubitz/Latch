@@ -490,7 +490,7 @@ mod tests {
     /// Boots the production router on loopback with `body` standing in for the
     /// attach client. The stub is a real process on a real PTY, so everything
     /// under test — spawn, byte relay, exit-code translation, reaping — is the
-    /// production path; only tmux is absent.
+    /// production path; only the real daemon is absent.
     async fn harness(body: &str) -> Harness {
         harness_with(body, 0).await
     }

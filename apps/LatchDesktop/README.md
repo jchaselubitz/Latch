@@ -54,7 +54,7 @@ macOS 13 or newer. On first launch the app asks the user's login shell to run
 user chooses. When no CLI is found, the setup flow presents the standalone CLI
 install command and can run it in Terminal. The same discovery, selection, and
 installation controls remain available in Settings. Settings also shows the
-selected CLI and private tmux versions, reports `latch doctor` findings, and can
+selected CLI and latchd versions, reports `latch doctor` findings, and can
 check for or install a CLI update when that installation advertises
 `selfUpdate` support.
 
@@ -144,9 +144,9 @@ architecture-specific CLI ZIPs, and `checksums.txt`. The CLI still ships Intel
 and Apple Silicon archives; the desktop app does not. The CLI is installed
 independently. The app validates protocol version 1 and requires CLI version
 `0.2608132217.0` or newer before its first refresh; this is the first release
-whose tmux-backed list/inspect contracts match the desktop models. A self-update
+whose list/inspect contracts match the desktop models. A self-update
 initiated in Settings delegates to `latch update`, which atomically replaces
-the CLI, the remote-access helper, and its pinned tmux payload.
+the CLI, the remote-access helper, and its pinned latchd payload.
 
 The Swift package tests cover the current list, stop, resize, doctor,
 capabilities, and update JSON contracts; manifest wire names; terminal command

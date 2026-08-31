@@ -2,7 +2,7 @@
 //!
 //! The child is a session leader with the PTY slave as its controlling
 //! terminal, in its own process group, so signalling `-pid` reaches the whole
-//! job the way tmux's `pane_pid` does.
+//! job for lifecycle and signal operations.
 
 use std::ffi::CString;
 use std::fs::File;

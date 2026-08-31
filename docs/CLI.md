@@ -82,7 +82,8 @@ latch update
 latch update --force
 ```
 
-An update replaces and verifies the entire four-binary payload. If the binary
+An update replaces and verifies the entire three-binary payload (`latch`,
+`latch-remote`, and `latchd`). If the binary
 belongs to a package manager, Latch refuses to replace it; update it through
 that package manager instead.
 

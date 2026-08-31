@@ -203,7 +203,7 @@ public final class ConversationStore {
     }
 
     /// An explicit retry is always a new operation. In particular, ambiguous
-    /// operations may already have reached tmux and must never be replayed.
+    /// operations may already have reached the kernel and must never be replayed.
     public func retry(_ operationID: String) {
         guard let operation = operations.first(where: { $0.id == operationID }) else { return }
         send(text: operation.text)
@@ -409,7 +409,7 @@ public final class ConversationStore {
         let IDs = Set(upserts.map(\.id))
         var completed = operations.filter { $0.itemId.map(IDs.contains) == true }
 
-        // The agent chooses the authoritative transcript id only after tmux
+        // The agent chooses the authoritative transcript id only after the kernel
         // accepts input, so an accepted result may have no correlation id.
         // Reconcile those submissions in order by exact normalized content
         // within the advertised retry window, as the architecture requires.

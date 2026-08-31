@@ -40,7 +40,7 @@ final class EmulatorFixtureTests: XCTestCase {
         var options = TerminalOptions.default
         options.cols = startSize["cols"]!
         options.rows = startSize["rows"]!
-        // The Mac's tmux config keeps 50000 lines; the fixtures only need
+        // The Mac kernel keeps bounded history; the fixtures only need
         // enough for `high-rate-output` to have dropped its head.
         options.scrollback = 5000
         let terminal = Terminal(delegate: recorder, options: options)

@@ -13,7 +13,7 @@ actor LatchClient {
     private let decoder = JSONDecoder()
     private let encoder = JSONEncoder()
 
-    /// A management command competes with every other tmux client for the
+    /// A management command competes with other local clients for the
     /// server, so a busy Mac can push a routine read past a tight deadline.
     /// The budget is generous because it exists to break a hang, not to pace
     /// a healthy call.

@@ -15,8 +15,8 @@ curl -fsSL https://raw.githubusercontent.com/jchaselubitz/Latch/main/scripts/ins
 ```
 
 The installer downloads the matching release, verifies its checksum and
-Developer ID signatures, then installs `latch`, `latchd`, `latch-remote`, and
-`latch-tmux` in `~/.local/bin`. Add that directory to your `PATH` if needed:
+Developer ID signatures, then installs `latch`, `latchd`, and `latch-remote`
+in `~/.local/bin`. Add that directory to your `PATH` if needed:
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
@@ -29,9 +29,8 @@ latch --version
 latch doctor
 ```
 
-The default kernel is `latchd`, Latch's per-session daemon. `LATCH_KERNEL=tmux`
-selects the private, pinned tmux fallback only for *new* sessions; it does not
-move or change existing sessions.
+The kernel is `latchd`, Latch's per-session daemon. The compatibility release
+window has closed and current releases no longer ship a second kernel.
 
 ## Create and resume a session
 

@@ -83,7 +83,7 @@ pub struct InspectReport {
     pub created_at: String,
     /// Size at spawn.
     pub initial_size: TerminalSize,
-    /// Current size, when tmux reported it.
+    /// Current size, when the kernel reported it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<TerminalSize>,
     /// Exit record, when the session has exited.
@@ -246,15 +246,8 @@ pub struct DoctorFinding {
 /// Reports what is actually wrong, not a checklist of things that are fine.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DoctorReport {
-    /// Kernel selected for new sessions (`latchd` by default).
+    /// Session kernel (`latchd`).
     pub kernel: String,
-    /// Version reported by the pinned bundled tmux, when runnable.
-    #[serde(
-        rename = "tmuxVersion",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub tmux_version: Option<String>,
     /// Version and protocol reported by the bundled headless kernel.
     #[serde(
         rename = "latchdVersion",

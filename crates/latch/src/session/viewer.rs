@@ -1,7 +1,7 @@
 //! The in-flight marker a viewer open leaves for the session launcher.
 //!
 //! Overlord creates a session and opens its viewer as two separate commands,
-//! so the launcher inside tmux cannot see that a terminal is on its way — it
+//! so the launcher inside latchd cannot see that a terminal is on its way — it
 //! can only see that none has attached yet. `latch open` stamps this marker
 //! before it asks the operating system for a window; the launcher reads it to
 //! tell "a viewer is starting, keep holding" apart from "nobody is coming,

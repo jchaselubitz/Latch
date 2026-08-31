@@ -27,7 +27,7 @@ use crate::session::{timing, viewer};
 /// reported as pending rather than waited out.
 #[cfg(target_os = "macos")]
 const VIEWER_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(8);
-/// Gap between checks for an attached viewer. Each check spawns a tmux query,
+/// Gap between checks for an attached viewer. Each check queries latchd,
 /// so this trades a little latency for far fewer processes.
 #[cfg(target_os = "macos")]
 const VIEWER_POLL_INTERVAL: Duration = Duration::from_millis(250);

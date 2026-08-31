@@ -1,5 +1,10 @@
 # Proposal: a Latch-native headless session kernel
 
+> Final state (2026-08-31): the migration is complete and latchd is the sole
+> shipped kernel. See [LATCHD_FINAL_MIGRATION.md](LATCHD_FINAL_MIGRATION.md) for
+> the retired surface, verification gate, and rollback boundary. Earlier parts
+> below are retained as staged decision history.
+
 **Status:** proposal, coo:847. Decision at the end.
 **Question:** if we replaced the private patched tmux (`latch-tmux`) with a
 kernel built for Latch, what would it look like — and should we build it?

@@ -596,7 +596,7 @@ impl ConversationHub {
         }
     }
     /// Waits outside the Hub lock until the connector has likely changed.
-    /// latchd connectors block on their persistent event subscription; tmux
+    /// latchd connectors block on their persistent event subscription;
     /// fallback connectors retain the short bounded polling interval.
     pub async fn wait_for_activity_once(
         &self,
