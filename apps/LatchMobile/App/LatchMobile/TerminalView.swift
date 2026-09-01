@@ -87,6 +87,10 @@ struct TerminalView: View {
         .onDisappear {
             pump?.cancel()
             pump = nil
+            // Input goes with the connection, like the key bar does: bytes
+            // typed after this screen is gone must not reach a session that
+            // was given back.
+            surface.onInput = { _ in }
             model.discardTerminal(for: session)
             terminal = nil
         }
@@ -355,6 +359,12 @@ struct TerminalView: View {
         }
         unlockRefusal = nil
         guard let terminal = terminalSession() else { return }
+        // The input half of the seam. Everything the surface produces — typed
+        // characters, key-bar presses, a paste — converges on `onInput`, and
+        // a terminal has no local echo: a keystroke is visible only after the
+        // pty echoes it back through the output pump. Left unwired, typing
+        // reaches nothing and shows nothing.
+        surface.onInput = { [weak terminal] bytes in terminal?.send(bytes) }
         let grid = grid
         // A full reset between the still and the first live byte. The kernel
         // repaints the pane's current frame on attach, and letting that land on
