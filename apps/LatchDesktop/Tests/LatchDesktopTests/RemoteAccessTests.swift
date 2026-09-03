@@ -20,6 +20,38 @@ final class RemoteAccessTests: XCTestCase {
         XCTAssertFalse(arguments.contains { $0.contains("127.0.0.1") })
     }
 
+    func testHelperReceivesStunServersAndNeverARelay() throws {
+        let arguments = try RemoteAccessSupervisor.arguments(
+            bind: RemoteAccessSupervisor.defaultBind,
+            iceServers: ["stun:stun.cloudflare.com:3478", "stuns:stun.example:5349"]
+        )
+        XCTAssertEqual(
+            arguments,
+            [
+                "--bind", "0.0.0.0:0", "--latch-bin", "/usr/local/bin/latch",
+                "--ice-server", "stun:stun.cloudflare.com:3478",
+                "--ice-server", "stuns:stun.example:5349",
+            ]
+        )
+        // A relay allocation is the phone's decision under the phone's
+        // credentials. The helper refuses a TURN URL; the app refuses it
+        // first so that contract cannot be loosened by a control-plane reply.
+        XCTAssertThrowsError(
+            try RemoteAccessSupervisor.arguments(
+                bind: RemoteAccessSupervisor.defaultBind,
+                iceServers: ["turn:turn.cloudflare.com:3478?transport=udp"]
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? RemoteAccessSupervisorError,
+                .relayServerRefused("turn:turn.cloudflare.com:3478?transport=udp")
+            )
+        }
+        XCTAssertTrue(ControlPlaneIceServer.isStun("STUN:stun.example:3478"))
+        XCTAssertFalse(ControlPlaneIceServer.isStun("turns:relay.example:443"))
+        XCTAssertFalse(ControlPlaneIceServer.isStun("stun.example:3478"))
+    }
+
     func testMissingHelperIsNamedInsteadOfARawLaunchError() {
         let url = URL(fileURLWithPath: "/tmp/missing-latch-remote")
         XCTAssertEqual(
@@ -124,9 +156,12 @@ final class RemoteAccessTests: XCTestCase {
         // makes a tailnet reachable without any special path.
         XCTAssertEqual(ice.candidates[0].address, "100.64.0.7:52000")
 
-        // Republished unchanged: rewriting a priority or foundation here would
-        // make the phone's pair ordering disagree with the Mac's.
-        let published = ice.candidates[1].published
+        // Republished unchanged apart from the lifetime: rewriting a priority
+        // or foundation here would make the phone's pair ordering disagree
+        // with the Mac's, while the helper's stamp (99, long past) is replaced
+        // by this refresh's so an idle agent's presence keeps being accepted.
+        let published = ice.candidates[1].published(expiresAt: 1_800_000_000)
+        XCTAssertEqual(published.expiresAt, 1_800_000_000)
         XCTAssertEqual(published.type, "srflx")
         XCTAssertEqual(published.priority, 1_694_498_815)
         XCTAssertEqual(published.foundation, "f2")

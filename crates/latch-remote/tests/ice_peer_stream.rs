@@ -174,3 +174,36 @@ fn transport_candidate(candidate: &IceCandidateRecord) -> TransportCandidate {
         tcp_type: candidate.tcp_type.clone(),
     }
 }
+
+#[tokio::test]
+async fn an_idle_agent_is_gathered_again_before_its_addresses_go_stale() {
+    let network = Arc::new(TestNetwork::new(Some(Default::default())));
+    let mac = IceCredentials {
+        ufrag: "macufrag".into(),
+        password: "mac-password-with-more-than-128-bits".into(),
+    };
+    let responder = IceResponder::for_test_regathering_after(
+        mac.clone(),
+        Arc::clone(&network),
+        Duration::from_millis(200),
+    );
+    let published = responder.start().await.expect("the agent gathers");
+
+    // No offer arrives. The agent is still replaced, on the same credentials,
+    // so presence keeps describing ports something is listening on.
+    let refreshed = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(description) = responder.local_description().await {
+                if description.candidates != published.candidates {
+                    return description;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("the idle agent re-gathers on its own");
+    assert_eq!(refreshed.ufrag, mac.ufrag);
+    assert_eq!(refreshed.password, mac.password);
+    assert!(!refreshed.candidates.is_empty());
+}

@@ -116,6 +116,39 @@ nobody is at the keyboard, and one hard constraint neither of them removes.
   own) but does not eliminate it: a lid close, a manual sleep, a reboot, or
   quitting the app all still take the Mac offline for remote access.
 
+## Presence and offers
+
+Three things have to hold for a phone that is not on this Mac's network to get
+through, and each is this app's job rather than the helper's or the phone's.
+
+- **The helper gathers against STUN.** On every launch the app asks the
+  configured control plane for its STUN servers (`GET /v1/ice-servers`,
+  enrolling this Mac if it has not been yet) and passes them to the helper as
+  `--ice-server` flags. Without them the agent gathers host candidates only —
+  the LAN and the tailnet — and publishes no address a phone off both can use.
+  A relay URL is refused by the app and by the helper: a TURN allocation is
+  the phone's decision under the phone's credentials. Saving a different
+  control-plane address relaunches the helper so it gathers for the directory
+  it now publishes to. A control plane that cannot be reached at launch is not
+  a failure to start; the helper runs host-only and the reason is shown in
+  Settings.
+- **Presence carries this refresh's lifetime, not the gather's.** The helper
+  stamps its candidates when it gathers, and an idle agent keeps answering on
+  the same ports long after that stamp has passed. The app republishes every
+  candidate with a fresh 90-second lifetime, so presence is accepted for as
+  long as the helper runs. The helper, for its part, gathers a fresh agent
+  whenever the idle one is two minutes old — the replacement is gathered
+  before the old one is released — so a Mac that changed networks stops
+  advertising the addresses it left behind without a restart.
+- **Offers are collected the moment they land.** A phone that has posted a
+  rendezvous offer is already running connectivity checks and gives up in
+  seconds. Collection therefore runs on its own loop, separate from the
+  presence refresh, holding one `GET /v1/rendezvous?wait=20` open at a time
+  and handing each approved offer to the helper as soon as the service
+  answers. Against a control plane that predates the wait, the same call
+  answers immediately and the loop backs off two seconds between polls, which
+  stays well inside the per-device rate limit.
+
 ## Pairing
 
 Settings renders the CLI's pairing material in the CLI's own camelCase JSON,

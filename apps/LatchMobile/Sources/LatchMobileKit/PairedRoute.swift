@@ -298,6 +298,13 @@ public enum PairedGatewayRoute {
 /// be answering on an interface this phone cannot route to. Falling through
 /// costs one failed TCP connect and turns those cases into a working session
 /// instead of an error.
+///
+/// The transport opens one channel per loopback request, so the order above is
+/// walked in full only until something answers. After that the route that
+/// answered is dialled alone: a phone on cellular that reached its Mac through
+/// ICE must not pay a LAN connect timeout and four dead interface addresses in
+/// front of every request that follows. A failure forgets the route, and the
+/// next channel walks the order again from the top.
 final class FallbackChannelProvider: RemoteNoiseChannelProvider, @unchecked Sendable {
     private let lan: (any RemoteNoiseChannelProvider)?
     private let remote: any RemoteNoiseChannelProvider
@@ -321,14 +328,37 @@ final class FallbackChannelProvider: RemoteNoiseChannelProvider, @unchecked Send
     }
 
     func openChannel() async throws -> any RemoteNoiseChannel {
-        if let lan {
-            do {
-                let channel = try await lan.openChannel()
+        var lanAlreadyTried = false
+        switch await reachability.remembered() {
+        case .lan?:
+            if let lan, let channel = try? await lan.openChannel() {
                 pathReporter.report(.local)
                 return channel
-            } catch {
-                // Fall through. The remote path reports its own selection.
             }
+            lanAlreadyTried = true
+            await reachability.lost()
+        case .direct(let target)?:
+            if let channel = try? await LANRemoteNoiseChannelProvider(target: target).openChannel() {
+                pathReporter.report(.direct)
+                return channel
+            }
+            await reachability.lost()
+        case .remote?:
+            do {
+                return try await remote.openChannel()
+            } catch {
+                await reachability.lost()
+                pathReporter.reportFailure()
+                throw error
+            }
+        case nil:
+            break
+        }
+
+        if !lanAlreadyTried, let lan, let channel = try? await lan.openChannel() {
+            pathReporter.report(.local)
+            await reachability.reached(.lan)
+            return channel
         }
         // Presence is read before gathering rather than after: a Mac that is
         // asleep or not running Latch has no ICE agent to answer connectivity
@@ -339,11 +369,9 @@ final class FallbackChannelProvider: RemoteNoiseChannelProvider, @unchecked Send
         // which is the whole tailnet story: a Tailscale address is one of them,
         // and dialling it is an ordinary TCP connect. No ICE, no rendezvous,
         // and no relay can be involved in a path that never leaves the tailnet.
-        let direct: [NoiseTunnelTarget]
+        let presence: PeerPresence
         do {
-            direct = try await reachability.confirm {
-                try await signaling.macPresence(for: record)
-            }
+            presence = try await signaling.macPresence(for: record)
         } catch {
             // A Mac that is asleep is a failed attempt like any other. Leaving
             // it out would let a phone that never reached its Mac at all show
@@ -351,16 +379,18 @@ final class FallbackChannelProvider: RemoteNoiseChannelProvider, @unchecked Send
             pathReporter.reportFailure()
             throw error
         }
-        for target in direct {
-            guard let channel = try? await LANRemoteNoiseChannelProvider(target: target)
-                .openChannel() else { continue }
+        guard presence.online else {
+            pathReporter.reportFailure()
+            throw ControlPlaneError.macOffline
+        }
+        if let dialled = await Self.dialFirst(PairedGatewayRoute.directTargets(in: presence)) {
             pathReporter.report(.direct)
-            await reachability.reached()
-            return channel
+            await reachability.reached(.direct(dialled.target))
+            return dialled.channel
         }
         do {
             let channel = try await remote.openChannel()
-            await reachability.reached()
+            await reachability.reached(.remote)
             return channel
         } catch {
             await reachability.lost()
@@ -368,41 +398,102 @@ final class FallbackChannelProvider: RemoteNoiseChannelProvider, @unchecked Send
             throw error
         }
     }
+
+    /// Dials every published address at once and keeps the first that answers.
+    ///
+    /// A Mac publishes one address per interface — LAN, tailnet, whatever
+    /// else it has — and a phone can usually route to one of them or to none.
+    /// Dialling them in turn charged a full connect timeout per address the
+    /// phone could not reach before ICE could even start; dialling them
+    /// together costs one timeout in the worst case and, when one answers,
+    /// only as long as that one takes. Any later answer is closed unused.
+    static func dialFirst(
+        _ targets: [NoiseTunnelTarget]
+    ) async -> (target: NoiseTunnelTarget, channel: any RemoteNoiseChannel)? {
+        guard !targets.isEmpty else { return nil }
+        let race = DirectDialRace(count: targets.count)
+        for target in targets {
+            Task {
+                let channel = try? await LANRemoteNoiseChannelProvider(target: target).openChannel()
+                await race.report(target: target, channel: channel)
+            }
+        }
+        return await race.wait()
+    }
 }
 
-/// Remembers that the Mac answered, so the presence read stays a diagnostic
-/// for the first attempt rather than a round trip on every request.
+/// Collects the outcomes of concurrent dials and settles on the first success.
 ///
-/// The transport opens one channel per loopback request, so an unconditional
-/// check would put a control-plane call in front of each of them. A failure
-/// re-arms it: that is exactly when "is the Mac even there?" is worth asking
-/// again.
-actor RemoteReachabilityGate {
-    private var reachedOnce = false
-    /// The Mac's own interface addresses, from the last presence read. Kept so
-    /// the second and later channels of a route dial the tailnet directly
-    /// without another control-plane round trip.
-    private var directTargets: [NoiseTunnelTarget] = []
+/// The dials are unstructured on purpose: a structured group would wait for
+/// every loser to time out before handing back the winner, which is exactly
+/// the delay dialling together is meant to remove.
+actor DirectDialRace {
+    typealias Outcome = (target: NoiseTunnelTarget, channel: any RemoteNoiseChannel)
 
-    /// Confirms the Mac is present and reports the addresses it can be dialled
-    /// at directly. Inside the gate this answers from the last read.
-    func confirm(_ read: () async throws -> PeerPresence) async throws -> [NoiseTunnelTarget] {
-        guard !reachedOnce else { return directTargets }
-        let presence = try await read()
-        guard presence.online else { throw ControlPlaneError.macOffline }
-        directTargets = PairedGatewayRoute.directTargets(in: presence)
-        return directTargets
+    private var remaining: Int
+    private var winner: Outcome?
+    private var waiter: CheckedContinuation<Outcome?, Never>?
+
+    init(count: Int) {
+        remaining = count
     }
 
-    func reached() {
-        reachedOnce = true
+    /// Resolves with the first successful dial, or nil once every dial failed.
+    func wait() async -> Outcome? {
+        if let winner { return winner }
+        if remaining == 0 { return nil }
+        return await withCheckedContinuation { waiter = $0 }
+    }
+
+    func report(target: NoiseTunnelTarget, channel: (any RemoteNoiseChannel)?) async {
+        remaining -= 1
+        guard let channel else {
+            if remaining == 0, let waiter {
+                self.waiter = nil
+                waiter.resume(returning: winner)
+            }
+            return
+        }
+        guard winner == nil else {
+            // Answered after another address already had. The route keeps
+            // one channel per request; this one is surplus.
+            await channel.close()
+            return
+        }
+        winner = (target, channel)
+        if let waiter {
+            self.waiter = nil
+            waiter.resume(returning: winner)
+        }
+    }
+}
+
+/// Remembers which route answered, so the presence read stays a diagnostic
+/// for the first attempt rather than a round trip on every request — and so
+/// the routes that did not answer are not retried in front of every request
+/// either.
+///
+/// A failure re-arms the full walk: that is exactly when "is the Mac even
+/// there, and where?" is worth asking again.
+actor RemoteReachabilityGate {
+    enum Route {
+        case lan
+        case direct(NoiseTunnelTarget)
+        case remote
+    }
+
+    private var route: Route?
+
+    func remembered() -> Route? {
+        route
+    }
+
+    func reached(_ route: Route) {
+        self.route = route
     }
 
     func lost() {
-        reachedOnce = false
-        // The addresses came with the presence record that just proved wrong.
-        // A Mac that moved networks publishes new ones on the next read.
-        directTargets = []
+        route = nil
     }
 }
 

@@ -317,3 +317,23 @@ export function expiresAt(
   }
   return value;
 }
+
+/**
+ * A long-poll wait in whole seconds, from a query value. Absent means "answer
+ * now"; anything that is not a small non-negative integer is refused rather
+ * than clamped, so a client cannot mistake a silently shortened wait for the
+ * one it asked for.
+ */
+export function waitSeconds(value: string | null, maxSeconds: number): number {
+  if (value === null || value === '') {
+    return 0;
+  }
+  if (!/^\d{1,3}$/.test(value)) {
+    throw new ValidationError('wait', 'wait must be a whole number of seconds');
+  }
+  const seconds = Number(value);
+  if (seconds > maxSeconds) {
+    throw new ValidationError('wait', `wait must be at most ${maxSeconds} seconds`);
+  }
+  return seconds;
+}

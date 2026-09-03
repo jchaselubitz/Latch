@@ -37,6 +37,12 @@ export interface ApiDependencies {
   /** Names of applied migrations, for readiness reporting. */
   readonly readiness: () => Promise<{ migrations: string[] }>;
   readonly turn: TurnProvider | null;
+  /**
+   * Waits `ms` of wall-clock time. Separate from `now`, which is the expiry
+   * clock tests drive by hand: a long poll has to sleep for real, and a test
+   * that wants it to return sooner substitutes this instead of the clock.
+   */
+  readonly sleep?: (ms: number) => Promise<void>;
 }
 
 const unauthorized = (): HttpError =>
@@ -49,6 +55,16 @@ const MAX_PENDING_PAIRINGS = 8;
 const PAIRING_TTL_SECONDS = 5 * 60;
 /** Confirmation words shown on both screens. Not a credential. */
 const PHRASE = /^[a-z]+(?:[ -][a-z]+){1,5}$/;
+/**
+ * How long `GET /v1/rendezvous` may hold a request open waiting for an offer.
+ * A phone abandons its ICE attempt in well under a minute, so the host has to
+ * learn about an offer in seconds, not on the next presence refresh; holding
+ * the request is what makes that possible without a push channel. The cap
+ * keeps every held request comfortably inside the proxy and server timeouts.
+ */
+const MAX_RENDEZVOUS_WAIT_SECONDS = 25;
+/** How often a held request re-checks the queue. */
+const RENDEZVOUS_WAIT_POLL_MS = 400;
 
 function unixSeconds(now: () => number): number {
   return Math.floor(now() / 1000);
@@ -70,6 +86,8 @@ function deviceView(device: Device, permission: Permission | null): Record<strin
 
 export function createRouter(dependencies: ApiDependencies): Router {
   const { config, store, now, turn } = dependencies;
+  const sleep =
+    dependencies.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const limiter = new RateLimiter(config.rateLimitPerMinute, 60_000, now);
 
   /** Authenticates an account credential (`Authorization: Bearer <token>`). */
@@ -687,27 +705,46 @@ export function createRouter(dependencies: ApiDependencies): Router {
     };
   });
 
-  /** Collects and consumes the offers addressed to the calling device. */
+  /**
+   * Collects and consumes the offers addressed to the calling device.
+   *
+   * With `?wait=<seconds>` the request is held until at least one offer is
+   * queued or the wait elapses, whichever is first. Without it the call
+   * answers immediately, which is what a client that predates the wait gets.
+   * Authentication and the rate limit are charged once per request, not per
+   * re-check, so a host holding one request at a time costs a few requests a
+   * minute.
+   */
   router.get('/v1/rendezvous', async (context) => {
     const caller = await requireDevice(context);
-    const offers = await store.takeOffers(caller.id, unixSeconds(now));
-    const results = [];
-    for (const offer of offers) {
-      const requester = await store.getDevice(offer.requesterDeviceId);
-      if (!requester || requester.revokedAt !== null) {
-        continue;
+    const wait = validate.waitSeconds(context.query.get('wait'), MAX_RENDEZVOUS_WAIT_SECONDS);
+    const collect = async () => {
+      const offers = await store.takeOffers(caller.id, unixSeconds(now));
+      const results = [];
+      for (const offer of offers) {
+        const requester = await store.getDevice(offer.requesterDeviceId);
+        if (!requester || requester.revokedAt !== null) {
+          continue;
+        }
+        if (!(await pairingBetween(caller, requester))) {
+          continue;
+        }
+        results.push({
+          requestId: offer.requestId,
+          peerDeviceId: requester.id,
+          peerIdentityKey: requester.publicKey,
+          candidates: offer.candidates,
+          ...(offer.iceUfrag ? { iceUfrag: offer.iceUfrag, icePwd: offer.icePwd } : {}),
+          expiresAt: offer.expiresAt,
+        });
       }
-      if (!(await pairingBetween(caller, requester))) {
-        continue;
-      }
-      results.push({
-        requestId: offer.requestId,
-        peerDeviceId: requester.id,
-        peerIdentityKey: requester.publicKey,
-        candidates: offer.candidates,
-        ...(offer.iceUfrag ? { iceUfrag: offer.iceUfrag, icePwd: offer.icePwd } : {}),
-        expiresAt: offer.expiresAt,
-      });
+      return results;
+    };
+    const deadline = Date.now() + wait * 1000;
+    let results = await collect();
+    while (results.length === 0 && Date.now() < deadline) {
+      await sleep(Math.min(RENDEZVOUS_WAIT_POLL_MS, Math.max(0, deadline - Date.now())));
+      results = await collect();
     }
     return { status: 200, body: { offers: results } };
   });

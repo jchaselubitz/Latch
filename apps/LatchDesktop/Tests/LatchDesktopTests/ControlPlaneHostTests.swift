@@ -38,6 +38,11 @@ private final class StubControlPlaneHostAPI: ControlPlaneHostAPI, @unchecked Sen
     private var recorded = Recorded()
     var devices: [ControlPlaneDevice] = []
     var offers: [ControlPlaneRendezvousOffer] = []
+    var iceServers: [ControlPlaneIceServer] = [
+        ControlPlaneIceServer(urls: ["stun:stun.cloudflare.com:3478"]),
+    ]
+    /// The waits each collection asked for, so the long poll is observable.
+    var offerWaits: [UInt64] = []
     var failure: ControlPlaneHostError?
     /// Refused once, then cleared, so a recovery path can be driven without
     /// leaving the stub permanently broken.
@@ -152,9 +157,17 @@ private final class StubControlPlaneHostAPI: ControlPlaneHostAPI, @unchecked Sen
         if let failure { throw failure }
     }
 
-    func rendezvousOffers(deviceToken: String) async throws -> [ControlPlaneRendezvousOffer] {
+    func rendezvousOffers(deviceToken: String, wait: UInt64) async throws -> [ControlPlaneRendezvousOffer] {
+        lock.lock()
+        offerWaits.append(wait)
+        lock.unlock()
         if let failure { throw failure }
         return offers
+    }
+
+    func iceServers(deviceToken: String) async throws -> [ControlPlaneIceServer] {
+        if let failure { throw failure }
+        return iceServers
     }
 
     func setRelayEnabled(accountToken: String, enabled: Bool) async throws {
@@ -666,6 +679,46 @@ final class ControlPlaneHostTests: XCTestCase {
         XCTAssertEqual(collected, api.offers)
         try await host.setRelayEnabled(false)
         XCTAssertEqual(api.log.relaySettings, [false])
+    }
+
+    func testOfferCollectionHoldsForAtMostTheServiceCap() async throws {
+        let api = StubControlPlaneHostAPI()
+        let host = makeHost(api: api)
+        try host.setAddress("https://control.example")
+        _ = try await host.enrollment(publicKey: macKey, name: "Studio Mac")
+
+        _ = try await host.rendezvousOffers(wait: 20)
+        _ = try await host.rendezvousOffers(wait: 600)
+        _ = try await host.rendezvousOffers()
+        XCTAssertEqual(api.offerWaits, [20, ControlPlaneHost.maxRendezvousWait, 0])
+    }
+
+    func testStunServersAreEnrolledForFilteredAndDeduplicated() async throws {
+        let api = StubControlPlaneHostAPI()
+        api.iceServers = [
+            ControlPlaneIceServer(urls: ["stun:stun.cloudflare.com:3478"]),
+            // Cloudflare repeats its STUN URL inside the TURN entry, and a relay
+            // is never handed to the helper whatever the service returns.
+            ControlPlaneIceServer(
+                urls: ["stun:stun.cloudflare.com:3478", "turn:turn.cloudflare.com:3478?transport=udp"],
+                username: "u",
+                credential: "c"
+            ),
+        ]
+        let host = makeHost(api: api)
+        try host.setAddress("https://control.example")
+
+        let servers = try await host.stunServerURLs(publicKey: macKey, macName: "Studio Mac")
+        XCTAssertEqual(servers, ["stun:stun.cloudflare.com:3478"])
+        // Asked before any phone paired, so this is what enrolls the Mac.
+        XCTAssertEqual(api.log.enrollments.count, 1)
+    }
+
+    func testStunServersAreUnavailableWithoutAControlPlane() async {
+        let host = makeHost(api: StubControlPlaneHostAPI())
+        await XCTAssertThrowsErrorAsync {
+            _ = try await host.stunServerURLs(publicKey: self.macKey, macName: "Studio Mac")
+        }
     }
 }
 

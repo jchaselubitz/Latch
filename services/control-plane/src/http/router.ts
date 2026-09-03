@@ -29,6 +29,8 @@ export interface RequestContext {
   readonly method: string;
   readonly path: string;
   readonly params: Record<string, string>;
+  /** The query string, parsed. Empty for a request without one. */
+  readonly query: URLSearchParams;
   readonly headers: IncomingMessage['headers'];
   /** Parsed JSON body, or `null` for bodyless requests. */
   readonly body: unknown;
@@ -161,7 +163,9 @@ export function createListener(
   return (request, response) => {
     const startedAt = process.hrtime.bigint();
     const method = request.method ?? 'GET';
-    const path = (request.url ?? '/').split('?')[0] ?? '/';
+    const [rawPath, rawQuery] = (request.url ?? '/').split('?', 2);
+    const path = rawPath || '/';
+    const query = new URLSearchParams(rawQuery ?? '');
 
     const send = (status: number, body: unknown): void => {
       const payload = body === null ? '' : JSON.stringify(body);
@@ -192,6 +196,7 @@ export function createListener(
           method,
           path,
           params: matched.params,
+          query,
           headers: request.headers,
           body,
         });

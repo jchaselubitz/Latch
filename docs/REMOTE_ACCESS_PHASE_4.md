@@ -116,6 +116,7 @@ in [REMOTE_ACCESS_FIELD_VERIFICATION.md](REMOTE_ACCESS_FIELD_VERIFICATION.md).
 | Parser, timeout, quota, symlink, and interrupted-write failures | Rust hardening tests | Pass |
 | Same-LAN path on the CI host | Authenticated listener Noise round trip, post-handshake lifetime, and revocation-close test | Pass |
 | Symmetric NAT forces the relay; a cone NAT does not | Virtual WAN, two LANs behind configurable NATs, and a real in-process TURN server: cone/cone nominates a reflexive pair, symmetric/symmetric nominates a relayed one, records round-trip on both | Pass against simulated NATs; no carrier or venue network involved |
+| Off-LAN prerequisites: the helper gathers against STUN, presence outlives the first candidate window, and an offer reaches the helper inside the phone's ICE budget | Desktop `RemoteAccessTests`/`ControlPlaneHostTests` (STUN flags, relay refusal, lifetime re-stamp, bounded wait); `latch-remote` idle re-gather test; control-plane long-poll tests; phone `PairedRouteTests` (concurrent dial, remembered route, fast refusal) | Pass |
 | Home IPv4 NAT, IPv6, cellular-to-home, double/CGNAT | No physical run: no phone paired to a Mac running an ICE-capable helper during this objective | Not yet run — see below |
 | Hotel/corporate Wi-Fi with UDP blocked (TURN over TLS 443) | No physical run; the relay path is exercised only against the simulated NATs above | Not yet run — see below |
 | Wi-Fi to cellular migration mid-terminal, Mac sleep/wake, phone background/foreground | No physical run; reconnect and the sleeping-Mac message are covered by phone-side unit tests only | Not yet run — see below |
@@ -144,6 +145,25 @@ knowing before someone attempts it:
 - The helper reads the Mac identity from the Keychain, which prompts, so it
   cannot be launched from a headless shell. The relaunch has to happen in a
   desktop session.
+
+Before mission `coo:897` a physical run could not have passed even with the
+current helper installed, and it is worth recording why, because each of the
+three defects looked like a network result from the phone:
+
+- The app launched the helper with no `--ice-server`, so the Mac gathered
+  private host candidates only and never published a reflexive address a phone
+  off its network could pair with.
+- The helper stamped its candidates with a 90-second lifetime once, at
+  launch, and the app republished that stamp verbatim; from the second window
+  on the control plane refused every presence refresh, and the phone read the
+  Mac as offline.
+- The app collected rendezvous offers as a side effect of the presence
+  refresh, every 30 seconds, while the phone abandoned its ICE attempt after
+  six. The offer reached the helper after the phone had already given up.
+
+All three are fixed in the app, the helper, and the control plane, with the
+phone's ICE budget raised to fifteen seconds and offers now collected by a
+long-polled loop. The physical rows remain to be run.
 
 Once a run happens, `scripts/field-run.sh` records it into `docs/field-runs/`
 and `scripts/field-run.sh matrix` regenerates the table from what was actually

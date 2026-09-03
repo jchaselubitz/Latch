@@ -70,6 +70,23 @@ optional and cannot be scripted around: the helper reads the Mac identity from
 the Keychain, which prompts, and the prompt needs a session with a window
 server — launching it from a headless shell blocks forever.
 
+Then check that the desktop app launched the helper for the internet and not
+just the LAN, and that the control plane is still accepting its presence:
+
+```
+ps -o args= -p "$(pgrep -x latch-remote)"        # must include --ice-server stun:…
+latch remote-access status --json | grep -c srflx # at least one reflexive candidate
+```
+
+A helper with no `--ice-server` was launched by a desktop build that predates
+mission `coo:897`, or with no control plane configured; a helper with the flag
+but no `srflx` candidate could not reach the STUN server from this network.
+The Remote Access settings pane shows the last presence error, if any, at the
+bottom; "expiresAt must be within 90 seconds" there means the desktop build
+predates the lifetime fix. The control plane should be running a build with
+the long-polled `GET /v1/rendezvous?wait=` — an older one still works, with
+offers reaching the Mac up to two seconds later.
+
 Also confirm, on the Mac's Remote Access settings, that the phone being tested
 has **Allow terminal** switched on. Without it the phone resolves no terminal
 route at all, which is a permission result rather than a transport one.

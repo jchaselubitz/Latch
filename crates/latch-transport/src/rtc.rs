@@ -35,17 +35,22 @@ const DATA_CHANNEL_LABEL: &str = "latch-noise-v1";
 /// How long the phone waits for a nominated pair.
 ///
 /// This is the interactive end: a person is holding the phone watching a
-/// spinner. Relay candidates are now in the first attempt, so the wait no
-/// longer has to cover a direct-only attempt plus a relayed retry, and the
-/// budget can be the one a person will actually sit through.
-const INITIATOR_CONNECT_TIMEOUT: Duration = Duration::from_secs(6);
+/// spinner. Relay candidates are in the first attempt, so the wait does not
+/// have to cover a direct-only attempt plus a relayed retry. What it does have
+/// to cover is the other end learning that the attempt exists at all: the
+/// phone's checks go nowhere until the Mac has collected the offer from the
+/// control plane, handed it to its agent, and started answering. That is a
+/// long-polled collection plus a helper drain, normally a second or two, but
+/// on a slow cellular link with a TURN allocation in front of it the old
+/// six-second budget was the difference between connected and failed.
+const INITIATOR_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// How long the Mac helper waits for the same pair.
 ///
 /// The helper is answering in the background with nobody watching it, and
 /// giving up before the phone does would turn a slow network into a failure
 /// the phone reports as the Mac's.
-const RESPONDER_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const RESPONDER_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The in-memory network used by round-trip tests. See
 /// [`RtcEndpoint::gather_on_test_network`].
@@ -365,6 +370,15 @@ impl RtcEndpoint {
                 candidates,
             },
         ))
+    }
+
+    /// Releases the agent and its sockets without ever having connected.
+    ///
+    /// An endpoint that is replaced before an offer reaches it — the helper
+    /// re-gathers so presence stays current — must close rather than drop:
+    /// the agent owns sockets and a gathering task that only `close` ends.
+    pub async fn close(self) -> Result<(), RtcError> {
+        self.agent.close().await.map_err(stack)
     }
 
     /// Establishes ICE, DTLS, SCTP, and one reliable ordered data channel.

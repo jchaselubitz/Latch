@@ -7,6 +7,7 @@
 //! only thing that decides who the peer is and what it may do.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context};
 use async_trait::async_trait;
@@ -26,6 +27,20 @@ use tokio::sync::{mpsc, Mutex};
 /// them. `serve_lan` accepts continuously, so this only absorbs the gap between
 /// a data channel opening and the accept loop's next turn.
 const ACCEPT_BACKLOG: usize = 4;
+
+/// How old an unused agent may get before it is gathered again.
+///
+/// An agent gathered at launch describes the network the Mac was on at
+/// launch. A laptop that has since moved between Wi-Fi networks, joined or
+/// left a tailnet, or had its NAT mapping expire would otherwise keep
+/// publishing addresses that reach nothing until the helper is restarted,
+/// and a phone dials each of those before it falls through to ICE. Two
+/// minutes keeps presence honest without churning ports under a phone that
+/// read them a moment ago.
+const REGATHER_AFTER: Duration = Duration::from_secs(120);
+
+/// How often the age of the idle agent is checked.
+const REGATHER_CHECK_INTERVAL: Duration = Duration::from_secs(15);
 
 /// One ICE agent answering offers on behalf of this Mac.
 ///
@@ -48,13 +63,21 @@ struct Responder {
     /// The gathered, unused agent. `None` while one is being answered or
     /// re-gathered, which is what makes a second concurrent offer a clean
     /// refusal rather than a silent drop.
-    idle: Mutex<Option<RtcEndpoint>>,
+    idle: Mutex<Option<IdleAgent>>,
+    /// See [`REGATHER_AFTER`]; overridable so a test need not wait minutes.
+    regather_after: Duration,
     description: Mutex<Option<IceReadiness>>,
     accepted: mpsc::Sender<PeerStream>,
     incoming: Mutex<mpsc::Receiver<PeerStream>>,
     /// Set only by [`IceResponder::for_test`]. Real gathering excludes loopback
     /// on purpose, so a round-trip test needs an in-memory network instead.
     test_network: Option<Arc<TestNetwork>>,
+}
+
+/// A gathered agent waiting for an offer, and when it gathered.
+struct IdleAgent {
+    endpoint: RtcEndpoint,
+    gathered_at: Instant,
 }
 
 impl IceResponder {
@@ -70,13 +93,24 @@ impl IceResponder {
             IceCredentials { ufrag, password },
             servers,
             None,
+            REGATHER_AFTER,
         ))
     }
 
     /// Test-support constructor gathering on an in-memory network.
     #[doc(hidden)]
     pub fn for_test(credentials: IceCredentials, network: Arc<TestNetwork>) -> Self {
-        Self::with_credentials(None, credentials, Vec::new(), Some(network))
+        Self::with_credentials(None, credentials, Vec::new(), Some(network), REGATHER_AFTER)
+    }
+
+    /// Test-support constructor that re-gathers an idle agent after `after`.
+    #[doc(hidden)]
+    pub fn for_test_regathering_after(
+        credentials: IceCredentials,
+        network: Arc<TestNetwork>,
+        after: Duration,
+    ) -> Self {
+        Self::with_credentials(None, credentials, Vec::new(), Some(network), after)
     }
 
     fn with_credentials(
@@ -84,6 +118,7 @@ impl IceResponder {
         credentials: IceCredentials,
         servers: Vec<IceServer>,
         test_network: Option<Arc<TestNetwork>>,
+        regather_after: Duration,
     ) -> Self {
         let (accepted, incoming) = mpsc::channel(ACCEPT_BACKLOG);
         Self {
@@ -92,12 +127,37 @@ impl IceResponder {
                 credentials,
                 servers,
                 idle: Mutex::new(None),
+                regather_after,
                 description: Mutex::new(None),
                 accepted,
                 incoming: Mutex::new(incoming),
                 test_network,
             }),
         }
+    }
+
+    /// Keeps the idle agent no older than the re-gather threshold.
+    ///
+    /// The replacement is gathered before the old agent is released, so an
+    /// offer that arrives mid-refresh still finds an agent to answer it rather
+    /// than a gap. The loop ends with the responder: it holds the only other
+    /// reference, and a helper that is shutting down has nothing to refresh.
+    fn spawn_refresh(&self) {
+        let inner = Arc::clone(&self.inner);
+        let interval = REGATHER_CHECK_INTERVAL
+            .min(inner.regather_after / 2)
+            .max(Duration::from_millis(50));
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(interval).await;
+                if Arc::strong_count(&inner) == 1 {
+                    return;
+                }
+                if inner.idle_is_stale().await {
+                    let _ = inner.gather().await;
+                }
+            }
+        });
     }
 }
 
@@ -118,11 +178,33 @@ impl Responder {
         .context("ICE candidate gathering failed")?;
         let readiness = self.readiness(&local);
         if readiness.candidates.is_empty() {
+            let _ = endpoint.close().await;
             bail!("the ICE agent gathered no publishable candidate");
         }
-        *self.idle.lock().await = Some(endpoint);
+        let replaced = self.idle.lock().await.replace(IdleAgent {
+            endpoint,
+            gathered_at: Instant::now(),
+        });
         *self.description.lock().await = Some(readiness.clone());
+        if let Some(previous) = replaced {
+            // Its ports are no longer what presence advertises. A phone that
+            // read them a moment ago still connects: the fresh agent answers
+            // with the same credentials from new ports, which the phone
+            // learns as peer-reflexive candidates from its checks.
+            let _ = previous.endpoint.close().await;
+        }
         Ok(readiness)
+    }
+
+    /// Whether the unused agent has outlived the re-gather threshold. An
+    /// answering or re-gathering responder has no idle agent and is never
+    /// stale: its replacement is already on the way.
+    async fn idle_is_stale(&self) -> bool {
+        self.idle
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|idle| idle.gathered_at.elapsed() >= self.regather_after)
     }
 
     /// Converts a gathered description into the published shape, dropping
@@ -148,7 +230,9 @@ impl Responder {
 #[async_trait]
 impl PeerTransport for IceResponder {
     async fn start(&self) -> anyhow::Result<IceReadiness> {
-        self.inner.gather().await
+        let readiness = self.inner.gather().await?;
+        self.spawn_refresh();
+        Ok(readiness)
     }
 
     async fn offer(&self, offer: RemoteOffer) -> anyhow::Result<()> {
@@ -159,7 +243,8 @@ impl PeerTransport for IceResponder {
             .lock()
             .await
             .take()
-            .ok_or_else(|| anyhow!("the ICE agent is already answering an offer"))?;
+            .ok_or_else(|| anyhow!("the ICE agent is already answering an offer"))?
+            .endpoint;
         let accepted = self.inner.accepted.clone();
         let home = self.inner.home.clone();
         // Connecting waits on the peer's connectivity checks, and gathering the

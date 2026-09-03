@@ -5,8 +5,13 @@
 test, the Mac publishes real ICE presence and answers rendezvous offers, the
 phone's route tries Bonjour, then presence-plus-ICE, and relay credentials are
 requested from the first attempt rather than after a recorded direct failure.
-What remains open is not implementation but the release gates restated in
-`REMOTE_ACCESS_PHASE_4.md` — independent security review, notarized helper,
+Mission `coo:897` then closed the three gaps that stopped this working off
+the LAN in practice — the desktop never handed the helper a STUN server,
+presence expired after one candidate window, and offers reached the helper
+after the phone's ICE budget had run out; see the note in
+`REMOTE_ACCESS_PHASE_4.md` and the presence section of
+`REMOTE_ACCESS_DESKTOP.md`. What remains open is not implementation but the
+release gates restated in `REMOTE_ACCESS_PHASE_4.md` — independent security review, notarized helper,
 and a soaked relay deployment — plus the physical-network verification tracked
 in `docs/field-runs/`. The rest of this document is kept as the design record
 for how the phone transport was built; treat the table immediately below as

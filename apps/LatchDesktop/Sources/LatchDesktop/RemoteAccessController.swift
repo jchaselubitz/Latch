@@ -55,6 +55,20 @@ final class RemoteAccessController: ObservableObject {
     /// gateway. It is separate from supervision because a healthy helper can
     /// temporarily have no listener to advertise.
     private var presenceTask: Task<Void, Never>?
+    /// Collects rendezvous offers on its own clock, separate from presence.
+    ///
+    /// A phone that has posted an offer is already running connectivity
+    /// checks and gives up in seconds, so the offer has to reach the helper in
+    /// seconds too. Presence refreshes at a third of a 90-second window, which
+    /// is far too slow; this loop holds one long-polled request open instead
+    /// and answers the moment an offer lands.
+    private var offerTask: Task<Void, Never>?
+    /// How long each offer collection is held open on the control plane.
+    private static let offerWaitSeconds: UInt64 = 20
+    /// The floor between collections. A service that predates the wait answers
+    /// immediately and empty, and a failing one answers immediately with an
+    /// error; without a floor either would spin this loop.
+    private static let offerPollFloor: Duration = .seconds(2)
     /// Offers that passed a fresh local device-state check. They are kept only
     /// in memory for the transport layer that will consume them; a control
     /// plane offer is never enough to authorize the local gateway.
@@ -176,7 +190,17 @@ final class RemoteAccessController: ObservableObject {
                 // A restarted helper is a new agent with new credentials. It
                 // mints them itself and reports them through readiness, so
                 // there is nothing to reset here.
-                let supervisor = RemoteAccessSupervisor(executableURL: executableURL)
+                //
+                // The STUN servers are asked for on every launch rather than
+                // once: a control plane configured after remote access was
+                // turned on, or one that was unreachable the first time, is
+                // picked up by the next helper instead of never.
+                let iceServers = await self?.stunServers() ?? []
+                if Task.isCancelled { return }
+                let supervisor = RemoteAccessSupervisor(
+                    executableURL: executableURL,
+                    iceServers: iceServers
+                )
                 RemoteAccessController.supervisorRegistry.register(supervisor)
                 defer { RemoteAccessController.supervisorRegistry.remove(supervisor) }
                 do {
@@ -193,6 +217,32 @@ final class RemoteAccessController: ObservableObject {
                 try? await Task.sleep(nanoseconds: delay * 1_000_000_000)
             }
         }
+    }
+
+    /// The STUN servers the next helper should gather against.
+    ///
+    /// Without them the helper publishes host candidates only, which is a LAN
+    /// or a tailnet and nothing beyond either. Failing to get them is not a
+    /// failure to start: the helper still runs, and the phone still has the
+    /// local network, the tailnet, and its own relay. It is recorded so the
+    /// person can see why a phone off those networks is not getting through.
+    private func stunServers() async -> [String] {
+        guard controlPlane.isConfigured, let publicKey = status.publicKey else { return [] }
+        do {
+            return try await controlPlane.stunServerURLs(publicKey: publicKey, macName: Self.macName)
+        } catch {
+            errorMessage = error.localizedDescription
+            return []
+        }
+    }
+
+    /// Relaunches the helper so it picks up a changed control plane.
+    private func restartSupervision() {
+        guard supervision != nil else { return }
+        stopPresence(clear: false)
+        stopSupervision()
+        startSupervision()
+        Task { await waitForListener() }
     }
 
     private func stopSupervision() {
@@ -256,14 +306,29 @@ final class RemoteAccessController: ObservableObject {
     /// that window rather than baking an environment-specific lifetime into
     /// the desktop app.
     private func startPresence() {
-        guard presenceTask == nil, status.enabled, status.listenerAddress != nil,
-              controlPlane.isConfigured else { return }
-        presenceTask = Task { [weak self] in
-            while !Task.isCancelled {
-                guard let self else { return }
-                let ttl = await self.publishPresenceAndCollectOffers()
-                let delay = max(1, (ttl ?? 15) / 3)
-                try? await Task.sleep(nanoseconds: delay * 1_000_000_000)
+        guard status.enabled, status.listenerAddress != nil, controlPlane.isConfigured else { return }
+        if presenceTask == nil {
+            presenceTask = Task { [weak self] in
+                while !Task.isCancelled {
+                    guard let self else { return }
+                    let ttl = await self.publishPresence()
+                    let delay = max(1, (ttl ?? 15) / 3)
+                    try? await Task.sleep(nanoseconds: delay * 1_000_000_000)
+                }
+            }
+        }
+        if offerTask == nil {
+            offerTask = Task { [weak self] in
+                while !Task.isCancelled {
+                    guard let self else { return }
+                    let started = ContinuousClock.now
+                    let collected = await self.collectOffers()
+                    if Task.isCancelled { return }
+                    let elapsed = ContinuousClock.now - started
+                    if !collected || elapsed < Self.offerPollFloor {
+                        try? await Task.sleep(for: Self.offerPollFloor)
+                    }
+                }
             }
         }
     }
@@ -271,18 +336,16 @@ final class RemoteAccessController: ObservableObject {
     private func stopPresence(clear: Bool) {
         presenceTask?.cancel()
         presenceTask = nil
+        offerTask?.cancel()
+        offerTask = nil
         approvedRendezvousOffers = []
         deliveredOffers = []
         guard clear else { return }
         Task { [controlPlane] in await controlPlane.clearPresence() }
     }
 
-    /// Publishing and collection are deliberately adjacent: an offer reaches
-    /// the future transport only after a fresh local device-state check. That
-    /// avoids treating a still-valid control-plane offer as authorization after
-    /// this Mac revoked the phone; established streams retain the CLI's 250ms
-    /// device-state check.
-    private func publishPresenceAndCollectOffers() async -> UInt64? {
+    /// Publishes this Mac's presence and returns the window the service gave it.
+    private func publishPresence() async -> UInt64? {
         guard status.enabled, let listener = status.listenerAddress,
               let publicKey = status.publicKey, controlPlane.isConfigured else {
             return nil
@@ -292,10 +355,15 @@ final class RemoteAccessController: ObservableObject {
         // rather than only the LAN listener, which no phone off this network
         // can reach. A helper without an agent publishes no ICE at all instead
         // of credentials nothing will answer.
+        //
+        // The lifetime is this refresh's, not the gather's. The agent answers
+        // on the same ports for as long as it lives, and a stamp copied from
+        // when it gathered would expire the whole record after one window.
         let ice = iceCredentials
         let gathered = status.ice?.candidates ?? []
+        let expiresAt = UInt64(Date().timeIntervalSince1970) + ControlPlaneHost.presenceLifetime
         let agentCandidates = Self.presenceCandidates(from: gathered, neverRelay: status.neverRelay)
-            .map(\.published)
+            .map { $0.published(expiresAt: expiresAt) }
         do {
             let presence = try await controlPlane.publishPresence(
                 publicKey: publicKey,
@@ -305,10 +373,6 @@ final class RemoteAccessController: ObservableObject {
                 ice: ice,
                 agentCandidates: agentCandidates
             )
-            let locallyAuthorized = Set(devices.filter { !$0.revoked }.map(\.deviceID))
-            let offers = try await controlPlane.rendezvousOffers()
-            approvedRendezvousOffers = offers.filter { locallyAuthorized.contains($0.peerDeviceID) }
-            deliverApprovedOffers()
             return presence.ttlSeconds
         } catch {
             // Presence expiry is safe-fail: the Mac becomes unavailable rather
@@ -316,6 +380,31 @@ final class RemoteAccessController: ObservableObject {
             // retry on a short bounded cadence.
             errorMessage = error.localizedDescription
             return nil
+        }
+    }
+
+    /// Collects one round of offers, holding the request open until one lands.
+    ///
+    /// An offer reaches the transport only after a fresh local device-state
+    /// check. That avoids treating a still-valid control-plane offer as
+    /// authorization after this Mac revoked the phone; established streams
+    /// retain the CLI's 250ms device-state check.
+    ///
+    /// Returns whether the collection completed, so the loop can back off
+    /// when it did not.
+    private func collectOffers() async -> Bool {
+        guard status.enabled, status.listenerAddress != nil, controlPlane.isConfigured else {
+            return false
+        }
+        do {
+            let offers = try await controlPlane.rendezvousOffers(wait: Self.offerWaitSeconds)
+            let locallyAuthorized = Set(devices.filter { !$0.revoked }.map(\.deviceID))
+            approvedRendezvousOffers = offers.filter { locallyAuthorized.contains($0.peerDeviceID) }
+            deliverApprovedOffers()
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            return false
         }
     }
 
@@ -493,6 +582,12 @@ final class RemoteAccessController: ObservableObject {
             let current = controlPlane.address?.absoluteString
             if current != previous {
                 try controlPlane.forgetEnrollment()
+                // The helper gathers against the STUN servers of whichever
+                // control plane it was launched under. A different one — or
+                // one where there was none — means a relaunch, so the phone
+                // is not left with a Mac that publishes to the new directory
+                // but gathered for the old.
+                restartSupervision()
             }
             controlPlaneAddress = current ?? ""
             errorMessage = nil

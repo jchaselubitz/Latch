@@ -387,6 +387,86 @@ final class PairedRouteTests: XCTestCase {
         XCTAssertEqual(opens, 1)
     }
 
+    /// Every published address is dialled at once. An address this phone
+    /// cannot route to costs a full connect timeout, and a Mac publishes one
+    /// per interface; paying those in turn kept ICE waiting behind them.
+    func testPublishedAddressesAreDialledTogetherNotInTurn() async throws {
+        let listener = try TCPProbeListener()
+        defer { listener.stop() }
+        let signaling = RouteSignalingStub(
+            presence: .online,
+            candidates: [
+                // A blackhole first: a connect that neither answers nor
+                // refuses, so it can only end by timing out.
+                candidate("10.255.255.1:9", type: "host", proto: "tcp"),
+                candidate("127.0.0.1:\(listener.port)", type: "host", proto: "tcp"),
+            ]
+        )
+        let reporter = RemotePathReporter(metrics: EphemeralRemotePathMetricsStore())
+        let provider = FallbackChannelProvider(
+            lan: nil,
+            remote: RecordingChannelProvider(),
+            record: record(),
+            signaling: signaling,
+            pathReporter: reporter
+        )
+
+        let started = ContinuousClock.now
+        _ = try await provider.openChannel()
+        let elapsed = ContinuousClock.now - started
+
+        XCTAssertEqual(reporter.path, .direct)
+        XCTAssertLessThan(
+            elapsed,
+            LANRemoteNoiseChannelProvider.defaultConnectTimeout,
+            "the answering address must not wait for the unreachable one to time out"
+        )
+    }
+
+    /// Once ICE has answered, the next channel goes straight to it: neither
+    /// the LAN target nor the published addresses are dialled again in front
+    /// of every request.
+    func testTheRouteThatAnsweredIsDialledAloneNextTime() async throws {
+        let lan = RecordingChannelProvider(failure: NoiseTunnelError.macNotReachable)
+        let remote = RecordingChannelProvider()
+        let signaling = RouteSignalingStub(
+            presence: .online,
+            candidates: [candidate("127.0.0.1:9", type: "host", proto: "tcp")]
+        )
+        let provider = FallbackChannelProvider(
+            lan: lan,
+            remote: remote,
+            record: record(),
+            signaling: signaling,
+            pathReporter: RemotePathReporter(metrics: EphemeralRemotePathMetricsStore())
+        )
+
+        _ = try await provider.openChannel()
+        _ = try await provider.openChannel()
+
+        let lanOpens = await lan.opens
+        XCTAssertEqual(lanOpens, 1, "a LAN target that failed is not retried in front of a route that works")
+        let remoteOpens = await remote.opens
+        XCTAssertEqual(remoteOpens, 2)
+        let presenceReads = await signaling.presenceReads
+        XCTAssertEqual(presenceReads, 1)
+    }
+
+    /// A refused connect is an answer, not a wait: the host is there and
+    /// nothing listens on that port. It must fail at once rather than hold
+    /// the route for the whole connect timeout.
+    func testARefusedConnectFailsWithoutWaitingForTheTimeout() async throws {
+        let provider = LANRemoteNoiseChannelProvider(
+            target: try NoiseTunnelTarget(host: "127.0.0.1", port: 9)
+        )
+        let started = ContinuousClock.now
+        do {
+            _ = try await provider.openChannel()
+            XCTFail("nothing listens on port 9")
+        } catch {}
+        XCTAssertLessThan(ContinuousClock.now - started, .seconds(2))
+    }
+
     /// The provider must not hand back a channel whose connect is still in
     /// flight. A caller with another target to try needs the failure here,
     /// while there is still somewhere to fall through to.

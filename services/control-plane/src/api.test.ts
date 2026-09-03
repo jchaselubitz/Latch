@@ -193,6 +193,62 @@ describe('presence and rendezvous', () => {
     assert.deepEqual(again.body.offers, []);
   });
 
+  it('holds a rendezvous collection open until an offer arrives', async () => {
+    const harness = await startHarness();
+    after(() => harness.close());
+    const { host, client } = await enrollPair(harness);
+    await harness.request('POST', '/v1/presence', {
+      token: host.token,
+      body: { candidates: [iceCandidate(harness, '198.51.100.4:52111')], iceUfrag: 'hostUfrag_123', icePwd: 'hostPassword_1234567890' },
+    });
+
+    const startedAt = Date.now();
+    const waiting = harness.request('GET', '/v1/rendezvous?wait=10', { token: host.token });
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const offered = await harness.request('POST', '/v1/rendezvous', {
+      token: client.token,
+      body: {
+        targetDeviceId: host.deviceId,
+        requestId: 'request-0002',
+        candidates: [iceCandidate(harness, '203.0.113.9:41999')],
+        iceUfrag: 'clientUfrag_123',
+        icePwd: 'clientPassword_12345678',
+      },
+    });
+    assert.equal(offered.status, 200);
+    const collected = await waiting;
+    assert.equal(collected.status, 200);
+    assert.equal(collected.body.offers.length, 1);
+    assert.equal(collected.body.offers[0].requestId, 'request-0002');
+    // Returned as soon as the offer landed, not when the wait ran out.
+    assert.equal(Date.now() - startedAt < 5_000, true);
+  });
+
+  it('answers an empty collection once the wait elapses', async () => {
+    const harness = await startHarness();
+    after(() => harness.close());
+    const { host } = await enrollPair(harness);
+    const startedAt = Date.now();
+    const collected = await harness.request('GET', '/v1/rendezvous?wait=1', { token: host.token });
+    assert.equal(collected.status, 200);
+    assert.deepEqual(collected.body.offers, []);
+    assert.equal(Date.now() - startedAt >= 900, true);
+  });
+
+  it('refuses a wait it will not honour rather than shortening it', async () => {
+    const harness = await startHarness();
+    after(() => harness.close());
+    const { host } = await enrollPair(harness);
+    const tooLong = await harness.request('GET', '/v1/rendezvous?wait=120', { token: host.token });
+    assert.equal(tooLong.status, 400);
+    assert.equal(tooLong.body.field, 'wait');
+    const nonsense = await harness.request('GET', '/v1/rendezvous?wait=soon', { token: host.token });
+    assert.equal(nonsense.status, 400);
+    const immediate = await harness.request('GET', '/v1/rendezvous', { token: host.token });
+    assert.equal(immediate.status, 200);
+    assert.deepEqual(immediate.body.offers, []);
+  });
+
   it('expires presence after its short lifetime', async () => {
     const harness = await startHarness();
     after(() => harness.close());

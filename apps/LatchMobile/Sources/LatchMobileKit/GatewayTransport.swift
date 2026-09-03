@@ -162,6 +162,18 @@ public struct LANRemoteNoiseChannelProvider: RemoteNoiseChannelProvider, @unchec
                         case .cancelled:
                             guard completion.markCompleted() else { return }
                             continuation.resume(throwing: NoiseTunnelError.macNotReachable)
+                        case .waiting(let error):
+                            // Network.framework keeps retrying a refused
+                            // connect until something changes, and reports it
+                            // here rather than as a failure. Nothing is going
+                            // to change: the host answered, and nothing is
+                            // listening on that port. Waiting out the timeout
+                            // would only hold ICE behind a dead address. Other
+                            // waits — no route yet, a tunnel still coming up —
+                            // are left to the timeout, because those do change.
+                            guard case .posix(let code) = error, code == .ECONNREFUSED,
+                                  completion.markCompleted() else { return }
+                            continuation.resume(throwing: NoiseError.transport(error.localizedDescription))
                         default:
                             break
                         }

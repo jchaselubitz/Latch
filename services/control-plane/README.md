@@ -68,7 +68,7 @@ only a SHA-256 digest is stored.
 | `DELETE` | `/v1/presence` | device | Withdraw presence. |
 | `GET` | `/v1/presence/:id` | device | Read a paired peer's presence. |
 | `POST` | `/v1/rendezvous` | device | Offer candidates to a present peer. |
-| `GET` | `/v1/rendezvous` | device | Collect and consume inbound offers. |
+| `GET` | `/v1/rendezvous` | device | Collect and consume inbound offers. `?wait=<0-25>` holds the request until an offer arrives or the wait elapses. |
 | `GET` | `/v1/ice-servers` | device | Get STUN-only ICE servers for direct candidate gathering. |
 | `POST` | `/v1/turn-credentials` | device | Issue short-lived Cloudflare ICE servers for an active paired peer. |
 

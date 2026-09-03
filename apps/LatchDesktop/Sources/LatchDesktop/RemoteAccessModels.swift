@@ -137,10 +137,14 @@ struct RemoteIceCandidate: Codable, Equatable, Sendable {
     let tcpType: String?
     let expiresAt: UInt64
 
-    /// The presence representation. The candidate is republished exactly as the
-    /// agent gathered it: rewriting a priority or a foundation here would make
-    /// the phone's pair ordering disagree with the Mac's.
-    var published: ControlPlaneCandidate {
+    /// The presence representation. The candidate's transport fields are
+    /// republished exactly as the agent gathered them: rewriting a priority or
+    /// a foundation here would make the phone's pair ordering disagree with
+    /// the Mac's. Only the lifetime is the publisher's: the helper stamped one
+    /// when it gathered, and an agent that has been idle longer than that
+    /// still answers on the same ports. Copying the stale stamp would have the
+    /// control plane refuse every refresh after the first window.
+    func published(expiresAt: UInt64) -> ControlPlaneCandidate {
         ControlPlaneCandidate(
             address: address,
             expiresAt: expiresAt,

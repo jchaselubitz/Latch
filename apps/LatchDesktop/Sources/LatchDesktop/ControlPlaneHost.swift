@@ -449,6 +449,28 @@ struct ControlPlanePresence: Decodable, Equatable, Sendable {
     let ttlSeconds: UInt64
 }
 
+/// One entry of the control plane's ICE server list, in the WebRTC
+/// `RTCIceServer` shape it returns from `GET /v1/ice-servers` and
+/// `POST /v1/turn-credentials`. Only the STUN entries reach the helper: TURN
+/// allocation is the phone's decision, made under its own credentials.
+struct ControlPlaneIceServer: Decodable, Equatable, Sendable {
+    let urls: [String]
+    let username: String?
+    let credential: String?
+
+    init(urls: [String], username: String? = nil, credential: String? = nil) {
+        self.urls = urls
+        self.username = username
+        self.credential = credential
+    }
+
+    /// Whether a URL names a STUN server rather than a relay.
+    static func isStun(_ url: String) -> Bool {
+        let scheme = url.split(separator: ":", maxSplits: 1).first.map(String.init)?.lowercased()
+        return scheme == "stun" || scheme == "stuns"
+    }
+}
+
 /// The host-side calls, behind a protocol so pairing is testable without a
 /// deployed control plane.
 protocol ControlPlaneHostAPI: Sendable {
@@ -477,7 +499,11 @@ protocol ControlPlaneHostAPI: Sendable {
         ice: ControlPlaneIceCredentials?
     ) async throws -> ControlPlanePresence
     func clearPresence(deviceToken: String) async throws
-    func rendezvousOffers(deviceToken: String) async throws -> [ControlPlaneRendezvousOffer]
+    /// Collects offers, holding the request for up to `wait` seconds when
+    /// none is queued. Zero answers immediately.
+    func rendezvousOffers(deviceToken: String, wait: UInt64) async throws -> [ControlPlaneRendezvousOffer]
+    /// The STUN servers a device may gather reflexive candidates against.
+    func iceServers(deviceToken: String) async throws -> [ControlPlaneIceServer]
     func setRelayEnabled(accountToken: String, enabled: Bool) async throws
 }
 
@@ -618,18 +644,29 @@ actor HTTPControlPlaneHostAPI: ControlPlaneHostAPI {
         )
     }
 
-    func rendezvousOffers(deviceToken: String) async throws -> [ControlPlaneRendezvousOffer] {
+    func rendezvousOffers(deviceToken: String, wait: UInt64) async throws -> [ControlPlaneRendezvousOffer] {
         struct Response: Decodable { let offers: [ControlPlaneRendezvousOffer] }
         // Annotated rather than inferred through the member access: the
         // inference chain through the generic `send` is what the type checker
         // gives up on here.
         let response: Response = try await send(
-            path: "/v1/rendezvous",
+            path: wait > 0 ? "/v1/rendezvous?wait=\(wait)" : "/v1/rendezvous",
             method: "GET",
             token: deviceToken,
             body: nil
         )
         return response.offers
+    }
+
+    func iceServers(deviceToken: String) async throws -> [ControlPlaneIceServer] {
+        struct Response: Decodable { let iceServers: [ControlPlaneIceServer] }
+        let response: Response = try await send(
+            path: "/v1/ice-servers",
+            method: "GET",
+            token: deviceToken,
+            body: nil
+        )
+        return response.iceServers
     }
 
     func setRelayEnabled(accountToken: String, enabled: Bool) async throws {
@@ -949,6 +986,13 @@ final class ControlPlaneHost {
     /// before the request rather than after.
     static let maxCandidates = 8
 
+    /// The lifetime every candidate is published with, matching the service's
+    /// default presence window. A candidate the helper gathered a minute or an
+    /// hour ago is still the same address: its lifetime is a property of the
+    /// presence record carrying it, so it is stamped at publication rather
+    /// than copied from when the agent happened to gather.
+    static let presenceLifetime: UInt64 = 90
+
     /// Best-effort deletion is used for lifecycle cleanup. A missed delete is
     /// still bounded by the service TTL, while the local incident switch has
     /// already stopped the listener before this network request is made.
@@ -962,12 +1006,38 @@ final class ControlPlaneHost {
     /// still re-check every peer against the local device store before handing
     /// an offer to a transport; the service cannot authorize this Mac's local
     /// gateway on its own.
-    func rendezvousOffers() async throws -> [ControlPlaneRendezvousOffer] {
+    func rendezvousOffers(wait: UInt64 = 0) async throws -> [ControlPlaneRendezvousOffer] {
         guard let address, let credentials = try store.load(),
               credentials.address == address.absoluteString else {
             throw ControlPlaneHostError.notConfigured
         }
-        return try await apiFactory(address).rendezvousOffers(deviceToken: credentials.deviceToken)
+        return try await apiFactory(address).rendezvousOffers(
+            deviceToken: credentials.deviceToken,
+            wait: min(wait, Self.maxRendezvousWait)
+        )
+    }
+
+    /// The longest hold the service honours on one offer collection. Asking
+    /// for more is a 400, so the cap is applied here rather than discovered.
+    static let maxRendezvousWait: UInt64 = 25
+
+    /// The STUN servers the helper should gather against, as URLs.
+    ///
+    /// Enrolls this Mac on demand, the same as opening a pairing code does:
+    /// the helper is launched when remote access is turned on, which can be
+    /// before any phone has paired, and a Mac with a control plane configured
+    /// has already decided to appear in that directory. Relay entries are
+    /// dropped here as well as refused by the helper — a TURN allocation is
+    /// the phone's decision under its own credentials, never the Mac's.
+    func stunServerURLs(publicKey: String, macName: String) async throws -> [String] {
+        guard let address else { throw ControlPlaneHostError.notConfigured }
+        let credentials = try await enrollment(publicKey: publicKey, name: macName)
+        let servers = try await apiFactory(address).iceServers(deviceToken: credentials.deviceToken)
+        var seen: Set<String> = []
+        return servers
+            .flatMap(\.urls)
+            .filter(ControlPlaneIceServer.isStun)
+            .filter { seen.insert($0).inserted }
     }
 
     /// Mirrors the local relay switch to the account-level relay issuer. This

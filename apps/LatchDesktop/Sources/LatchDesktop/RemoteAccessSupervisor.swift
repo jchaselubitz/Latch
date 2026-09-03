@@ -4,6 +4,7 @@ import Foundation
 enum RemoteAccessSupervisorError: LocalizedError, Equatable {
     case unsafeBind(String)
     case forbiddenArgument(String)
+    case relayServerRefused(String)
     case helperMissing(URL)
     case readinessTimeout
     case exited(status: Int32, diagnostic: String)
@@ -14,6 +15,8 @@ enum RemoteAccessSupervisorError: LocalizedError, Equatable {
             return "Refusing to start remote access: \(bind) is not a usable listener address for the authenticated transport."
         case .forbiddenArgument(let argument):
             return "Refusing to start remote access: `\(argument)` would expose the plaintext gateway."
+        case .relayServerRefused(let url):
+            return "Refusing to start remote access: `\(url)` is a relay, and the helper gathers against STUN servers only."
         case .helperMissing(let url):
             return "The remote-access helper is missing or not executable at \(url.path). It is installed next to the Latch CLI; run `latch update` or the installer in Settings → Latch CLI to repair the complete payload."
         case .readinessTimeout:
@@ -48,25 +51,49 @@ final class RemoteAccessSupervisor: @unchecked Sendable {
     private let executableURL: URL
     private let latchExecutableURL: URL
     private let bind: String
+    private let iceServers: [String]
     private let lock = NSLock()
     private var process: Process?
     private var stoppedIntentionally = false
 
-    init(executableURL: URL, bind: String = RemoteAccessSupervisor.defaultBind) {
+    /// - Parameter iceServers: STUN URLs for the helper's agent to gather
+    ///   server-reflexive candidates against. Empty gathers host candidates
+    ///   only, which reaches a LAN or a tailnet and nothing beyond either.
+    init(
+        executableURL: URL,
+        bind: String = RemoteAccessSupervisor.defaultBind,
+        iceServers: [String] = []
+    ) {
         latchExecutableURL = executableURL
         self.executableURL = executableURL
             .deletingLastPathComponent()
             .appendingPathComponent("latch-remote")
         self.bind = bind
+        self.iceServers = iceServers
     }
 
     /// The argument vector used to launch the helper.
     ///
     /// Exposed for tests: the guarantee that the desktop app never publishes
     /// `latch serve` is only as good as what it actually execs.
-    static func arguments(bind: String, latchExecutable: String = "/usr/local/bin/latch") throws -> [String] {
+    ///
+    /// A relay URL is refused here, before the helper refuses it too. The
+    /// helper's flag is STUN-only by contract, and the app must not be the
+    /// place that contract quietly stops holding: a TURN allocation is made
+    /// by the phone under credentials issued to the phone, never by this Mac.
+    static func arguments(
+        bind: String,
+        latchExecutable: String = "/usr/local/bin/latch",
+        iceServers: [String] = []
+    ) throws -> [String] {
         try validate(bind: bind)
-        let arguments = ["--bind", bind, "--latch-bin", latchExecutable]
+        var arguments = ["--bind", bind, "--latch-bin", latchExecutable]
+        for server in iceServers {
+            guard ControlPlaneIceServer.isStun(server) else {
+                throw RemoteAccessSupervisorError.relayServerRefused(server)
+            }
+            arguments += ["--ice-server", server]
+        }
         if let forbidden = arguments.first(where: { forbiddenArguments.contains($0) }) {
             throw RemoteAccessSupervisorError.forbiddenArgument(forbidden)
         }
@@ -109,7 +136,11 @@ final class RemoteAccessSupervisor: @unchecked Sendable {
     /// Starts the helper and resolves when it exits. Throws immediately if the
     /// launch itself is unsafe or fails.
     func run() async throws {
-        let arguments = try Self.arguments(bind: bind, latchExecutable: latchExecutableURL.path)
+        let arguments = try Self.arguments(
+            bind: bind,
+            latchExecutable: latchExecutableURL.path,
+            iceServers: iceServers
+        )
         guard FileManager.default.isExecutableFile(atPath: executableURL.path) else {
             throw RemoteAccessSupervisorError.helperMissing(executableURL)
         }
