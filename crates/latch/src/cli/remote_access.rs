@@ -64,6 +64,10 @@ pub const PROXY_IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const PATH_SELECTED_EVENT: &str = "path_selected";
 /// Audit event naming the outcome of one ICE answer by the helper.
 const ICE_ANSWER_EVENT: &str = "ice_answer";
+/// Audit event for an approved offer the local bounds check refused before it
+/// reached the helper. Zero `ice_answer` events after a phone reported an ICE
+/// timeout is otherwise indistinguishable from an offer that never arrived.
+const OFFER_REJECTED_EVENT: &str = "rendezvous_offer";
 const MAX_AUDIT_EVENTS: usize = 1_024;
 const MAX_AUDIT_BYTES: usize = 512 * 1024;
 #[cfg(all(target_os = "macos", not(test)))]
@@ -1192,6 +1196,13 @@ pub fn candidate_lifetime_from_now() -> u64 {
 /// It carries transport parameters only. Reaching the agent authorizes nothing:
 /// the Noise handshake still pins the paired identity and the local device
 /// store still decides what that identity may do.
+///
+/// Both identifiers are the control plane's, not this store's: `request_id`
+/// is whatever the phone minted for its rendezvous request (`rdv-<UUID>`
+/// today), and `peer_device_id` names the phone's directory row
+/// (`dev_<32 hex>`), which is the identifier the desktop app checked against
+/// the local pairing before approving the offer. The local Noise device id is
+/// a different namespace and never appears in an offer.
 #[allow(missing_docs)] // The enclosing type and serialized field names are the contract docs.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -1207,8 +1218,11 @@ pub struct RemoteOffer {
 impl RemoteOffer {
     /// Bounds everything the helper will act on before it reaches an ICE agent.
     pub fn validate(&self, now: u64) -> anyhow::Result<()> {
-        if !valid_opaque_id(&self.request_id) || !valid_opaque_id(&self.peer_device_id) {
-            bail!("rendezvous offer contains an invalid opaque identifier");
+        if !valid_request_id(&self.request_id) {
+            bail!("rendezvous offer contains an invalid request identifier");
+        }
+        if !valid_directory_id(&self.peer_device_id) && !valid_opaque_id(&self.peer_device_id) {
+            bail!("rendezvous offer contains an invalid peer device identifier");
         }
         if !valid_ice_credential(&self.ice_ufrag) || !valid_ice_credential(&self.ice_pwd) {
             bail!("rendezvous offer contains invalid ICE credentials");
@@ -2061,6 +2075,33 @@ fn valid_opaque_id(value: &str) -> bool {
     value.len() == 32 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+/// A control-plane directory identifier: a lowercase prefix naming the row's
+/// kind, an underscore, and 32 hex characters (`dev_…`, `rdv_…`). Mirrors the
+/// service's `OPAQUE_ID` rule so an identifier it issued is never refused here.
+fn valid_directory_id(value: &str) -> bool {
+    let Some((prefix, hex)) = value.split_once('_') else {
+        return false;
+    };
+    !prefix.is_empty()
+        && prefix.bytes().all(|byte| byte.is_ascii_lowercase())
+        && hex.len() == 32
+        && hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// A rendezvous request identifier as the control plane accepts it: 8 to 128
+/// characters of `[A-Za-z0-9._:-]`. The phone mints these, so the bound is the
+/// service's rather than a local shape. The alphabet carries no path
+/// separator and no NUL, which is what lets the id name a file in the private
+/// offers directory without further sanitizing.
+fn valid_request_id(value: &str) -> bool {
+    (8..=128).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte))
+}
+
 fn routable_candidate_ip(ip: IpAddr) -> bool {
     !ip.is_unspecified() && !ip.is_loopback() && !ip.is_multicast()
 }
@@ -2171,7 +2212,15 @@ impl Drop for ConnectionGauge {
 pub fn record_offer(home: &LatchHome, offer: &RemoteOffer) -> anyhow::Result<()> {
     let paths = Paths::new(home);
     ensure_enabled(&paths)?;
-    offer.validate(unix_time())?;
+    if let Err(error) = offer.validate(unix_time()) {
+        // An offer the desktop app approved but this check refuses is a
+        // phone that will time out with nothing on this Mac to show for it.
+        // The refusal is audited so diagnostics and the Settings audit list
+        // can say where the attempt ended, instead of only an error string
+        // the app may have already replaced.
+        let _ = audit(&paths, OFFER_REJECTED_EVENT, None, "rejected");
+        return Err(error);
+    }
     ensure_private_directory(&paths.runtime())?;
     ensure_private_directory(&paths.offers())?;
     // `request_id` is checked as an opaque identifier above, so it cannot
@@ -3003,10 +3052,16 @@ mod tests {
         let now = unix_time();
         assert!(offer(&"a".repeat(32)).validate(now).is_ok());
 
-        // A request id names a file in the private runtime directory, so a
-        // non-opaque one is refused rather than sanitized.
+        // A request id names a file in the private runtime directory, so one
+        // outside the control plane's alphabet is refused rather than
+        // sanitized. The alphabet has no separator, so nothing it accepts
+        // can leave the directory.
         assert!(offer("../../etc/passwd").validate(now).is_err());
-        assert!(offer(&"a".repeat(31)).validate(now).is_err());
+        assert!(offer("rdv/../../etc/passwd").validate(now).is_err());
+        assert!(offer("rdv-a").validate(now).is_err());
+        assert!(offer(&"a".repeat(129)).validate(now).is_err());
+        assert!(offer("rdv-\0hidden").validate(now).is_err());
+        assert!(offer("rdv-with space").validate(now).is_err());
 
         let mut loopback = offer(&"a".repeat(32));
         loopback.candidates = vec![offer_candidate("127.0.0.1:51234")];
@@ -3048,6 +3103,112 @@ mod tests {
             ..offer_candidate("192.168.1.30:51234")
         }];
         assert!(tcp_only.validate(now).is_err());
+    }
+
+    /// The identifiers in an offer are the control plane's, and the desktop
+    /// app forwards them verbatim: the phone's `rdv-<UUID>` request id and
+    /// the phone's `dev_<hex>` directory row. Insisting on this store's own
+    /// 32-hex device id shape here refused every real offer after the app
+    /// had approved it, and the phone timed out on connectivity checks the
+    /// Mac never started.
+    #[test]
+    fn an_offer_carries_control_plane_identifiers_not_local_device_ids() {
+        let now = unix_time();
+        let mut real = offer("rdv-6F9619FF-8B86-D011-B42D-00C04FC964FF");
+        real.peer_device_id = "dev_018604a4dfb054788c2051ee6a97f27a".into();
+        assert!(real.validate(now).is_ok());
+
+        // The directory id is a lowercase kind prefix plus 32 hex, exactly as
+        // the service issues it; anything looser is not one of its ids.
+        for bad in [
+            "dev_",
+            "dev_018604a4dfb054788c2051ee6a97f27",
+            "DEV_018604a4dfb054788c2051ee6a97f27a",
+            "dev_018604A4DFB054788C2051EE6A97F27A",
+            "_018604a4dfb054788c2051ee6a97f27a",
+            "dev-018604a4dfb054788c2051ee6a97f27a",
+            "../018604a4dfb054788c2051ee6a97f27a",
+        ] {
+            let mut forged = real.clone();
+            forged.peer_device_id = bad.into();
+            assert!(forged.validate(now).is_err(), "{bad} was accepted");
+        }
+    }
+
+    /// End to end through the hand-off: the document the desktop app encodes
+    /// (`RemoteRendezvousOfferDocument`, camelCase) is recorded and drained
+    /// under the request id the phone chose.
+    #[test]
+    fn the_desktop_apps_offer_document_reaches_the_helper_drain() {
+        let (_dir, home) = home();
+        set_enabled(&home, true).unwrap();
+        let paths = Paths::new(&home);
+        let expires_at = unix_time() + 60;
+        let document = serde_json::json!({
+            "requestId": "rdv-6F9619FF-8B86-D011-B42D-00C04FC964FF",
+            "peerDeviceId": "dev_018604a4dfb054788c2051ee6a97f27a",
+            "iceUfrag": "3f1c9a2b7d4e6f80",
+            "icePwd": "0f8e7d6c5b4a39281706f5e4d3c2b1a00f8e7d6c5b4a39281706f5e4d3c2b1a0",
+            "candidates": [
+                {
+                    "type": "relay",
+                    "priority": 16_777_215,
+                    "foundation": "3",
+                    "component": 1,
+                    "protocol": "udp",
+                    "address": "203.0.113.5:50000",
+                    "relatedAddress": "198.51.100.7",
+                    "relatedPort": 60001,
+                    "tcpType": null,
+                    "expiresAt": expires_at
+                },
+                {
+                    "type": "srflx",
+                    "priority": 1_694_498_815,
+                    "foundation": "2",
+                    "component": 1,
+                    "protocol": "udp",
+                    "address": "[2001:db8:1234::1]:60002",
+                    "relatedAddress": "2001:db8:1234::1",
+                    "relatedPort": 60002,
+                    "tcpType": null,
+                    "expiresAt": expires_at
+                }
+            ],
+            "expiresAt": expires_at
+        });
+        let offer: RemoteOffer = serde_json::from_value(document).unwrap();
+        record_offer(&home, &offer).unwrap();
+
+        let drained = drain_offers(&paths);
+        assert_eq!(drained, vec![offer]);
+        assert!(!read_audit(&home)
+            .unwrap()
+            .iter()
+            .any(|event| event["event"] == OFFER_REJECTED_EVENT));
+    }
+
+    #[test]
+    fn a_refused_offer_is_audited_so_the_timeout_has_a_local_trace() {
+        let (_dir, home) = home();
+        set_enabled(&home, true).unwrap();
+        let paths = Paths::new(&home);
+
+        let mut refused = offer("rdv-6F9619FF-8B86-D011-B42D-00C04FC964FF");
+        refused.candidates = vec![offer_candidate("127.0.0.1:51234")];
+        assert!(record_offer(&home, &refused).is_err());
+        assert!(fs::read_dir(paths.offers())
+            .map(|mut entries| entries.next().is_none())
+            .unwrap_or(true));
+
+        let events = read_audit(&home).unwrap();
+        let rejected = events
+            .iter()
+            .filter(|event| event["event"] == OFFER_REJECTED_EVENT)
+            .collect::<Vec<_>>();
+        assert_eq!(rejected.len(), 1);
+        assert_eq!(rejected[0]["result"], "rejected");
+        assert!(rejected[0]["deviceId"].is_null());
     }
 
     #[test]

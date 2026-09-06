@@ -63,6 +63,19 @@ final class RemoteAccessController: ObservableObject {
     /// is far too slow; this loop holds one long-polled request open instead
     /// and answers the moment an offer lands.
     private var offerTask: Task<Void, Never>?
+    /// Watches the helper swap agents after an offer is handed to it.
+    ///
+    /// Answering consumes the gathered agent and the helper gathers a
+    /// replacement straight away, so from that moment presence describes
+    /// ports that belong to a session in progress. A phone that offers again
+    /// before presence catches up — the ordinary case, since every loopback
+    /// request opens its own channel — runs its checks against an agent that
+    /// ignores them and times out. The presence loop's cadence is a third of
+    /// the service window, far too slow, so this polls status quickly until
+    /// the agent changes and republishes the moment it has.
+    private var replacementWatch: Task<Void, Never>?
+    private static let replacementPollInterval: Duration = .milliseconds(250)
+    private static let replacementPollAttempts = 24
     /// How long each offer collection is held open on the control plane.
     private static let offerWaitSeconds: UInt64 = 20
     /// The floor between collections. A service that predates the wait answers
@@ -334,13 +347,19 @@ final class RemoteAccessController: ObservableObject {
     }
 
     private func stopPresence(clear: Bool) {
+        let wasPublishing = presenceTask != nil
         presenceTask?.cancel()
         presenceTask = nil
         offerTask?.cancel()
         offerTask = nil
+        replacementWatch?.cancel()
+        replacementWatch = nil
         approvedRendezvousOffers = []
         deliveredOffers = []
-        guard clear else { return }
+        // Withdrawn once per stop, not once per poll: the readiness loop calls
+        // this every quarter second while a helper starts, and a Mac that has
+        // not published since the last stop has nothing left to withdraw.
+        guard clear, wasPublishing else { return }
         Task { [controlPlane] in await controlPlane.clearPresence() }
     }
 
@@ -501,9 +520,33 @@ final class RemoteAccessController: ObservableObject {
             Task { [client] in
                 do {
                     try await client.recordRendezvousOffer(document)
+                    await MainActor.run { self.watchForAgentReplacement() }
                 } catch {
                     await MainActor.run { self.errorMessage = error.localizedDescription }
                 }
+            }
+        }
+    }
+
+    /// Republishes presence as soon as the helper reports a different agent
+    /// from the one that just took an offer. Gives up quietly after the
+    /// bounded number of polls: the presence loop republishes on its own
+    /// cadence regardless, and a helper that has not replaced its agent by
+    /// then is one that could not gather, which its own status reports.
+    private func watchForAgentReplacement() {
+        replacementWatch?.cancel()
+        let consumed = status.ice
+        replacementWatch = Task { [weak self] in
+            for _ in 0..<Self.replacementPollAttempts {
+                try? await Task.sleep(for: Self.replacementPollInterval)
+                guard let self, !Task.isCancelled else { return }
+                guard let next = try? await self.client.remoteAccessStatus() else { continue }
+                guard next.ice != consumed else { continue }
+                if self.status != next {
+                    self.status = next
+                }
+                _ = await self.publishPresence()
+                return
             }
         }
     }
@@ -539,6 +582,7 @@ final class RemoteAccessController: ObservableObject {
     func refresh() async {
         do {
             let nextStatus = try await client.remoteAccessStatus()
+            let agentChanged = nextStatus.ice != status.ice
             if status != nextStatus {
                 status = nextStatus
             }
@@ -558,7 +602,14 @@ final class RemoteAccessController: ObservableObject {
                 stopPresence(clear: true)
             } else if let listener = status.listenerAddress {
                 assignPhase(.online(listener: listener))
+                let wasPublishing = presenceTask != nil
                 startPresence()
+                // A poll that catches the helper on a new agent — a re-gather
+                // after a network change, or a replacement the watch above
+                // missed — republishes now rather than at the loop's next turn.
+                if wasPublishing, agentChanged {
+                    _ = await publishPresence()
+                }
             } else if case .failed = phase {
                 // Keep the failure visible rather than downgrading it.
                 stopPresence(clear: true)

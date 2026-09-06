@@ -16,12 +16,25 @@ import LatchMobileKit
 /// Choosing between this and the local network is not this type's job: the
 /// route in `PairedGatewayRoute` tries Bonjour first and only reaches here on
 /// a miss or a failed LAN connect.
+///
+/// Channels are opened one at a time, and never against a Mac agent this
+/// phone already used: the Mac answers with one pre-gathered agent and its
+/// presence lags the swap, so an offer posted in that window is checked
+/// against ports that belong to another session. See `RendezvousSequencer`.
+/// A connectivity failure is retried once with a fresh agent and a fresh
+/// offer, after the same wait, because the Mac's replacement agent is the
+/// usual cure for one.
 public final class NativeRemoteChannelProvider: RemoteNoiseChannelProvider, @unchecked Sendable {
+    /// One retry, not a loop: a second timeout is a network that is not
+    /// going to carry the path, and the person is waiting on the spinner.
+    private static let connectAttempts = 2
+
     private let record: PairedDeviceRecord
     private let signaling: any SignalingClient
     private let pathReporter: RemotePathReporter
     private let policy = RemoteTransportPolicy()
     private let iceConfiguration = IceConfiguration()
+    private let sequencer = RendezvousSequencer()
     private var pathChangeHandler: (@Sendable () async -> Void)?
 
     public convenience init(context: RemoteChannelContext) {
@@ -46,6 +59,12 @@ public final class NativeRemoteChannelProvider: RemoteNoiseChannelProvider, @unc
     }
 
     public func openChannel() async throws -> any RemoteNoiseChannel {
+        try await sequencer.serialized { [self] in
+            try await self.openNextChannel()
+        }
+    }
+
+    private func openNextChannel() async throws -> any RemoteNoiseChannel {
         async let stunTask = iceConfiguration.stun {
             try await self.signaling.iceServers(for: self.record)
         }
@@ -54,6 +73,33 @@ public final class NativeRemoteChannelProvider: RemoteNoiseChannelProvider, @unc
         }
         let stun = try await stunTask
         let relay = await relayTask
+        var lastFailure: ConnectivityFailure?
+        for attempt in 1...Self.connectAttempts {
+            do {
+                return try await attemptChannel(stun: stun, relay: relay)
+            } catch let failure as ConnectivityFailure {
+                lastFailure = failure
+                // Only a timeout on the checks themselves is worth a second
+                // agent. Anything else — a refused offer, a Mac that went
+                // offline — would fail the same way again.
+                guard attempt < Self.connectAttempts, failure.retryable else { break }
+            }
+        }
+        guard let lastFailure else {
+            throw ControlPlaneError.malformedResponse("The remote transport gave up without a cause.")
+        }
+        throw lastFailure.underlying
+    }
+
+    /// One gathering pass and one offer, with the relay retry that covers a
+    /// first attempt that ran direct-only because credential issuance was
+    /// unavailable. A refusal is not retried — the control plane has already
+    /// said no, and asking again just spends a round trip on a path that is
+    /// already failing.
+    private func attemptChannel(
+        stun: [LatchMobileKit.IceServer],
+        relay: (servers: [LatchMobileKit.IceServer], refused: Bool)
+    ) async throws -> NativeRemoteNoiseChannel {
         let transport = try await RemoteTransport.gather(
             credentials: Self.credentials(),
             servers: Self.nativeServers(stun + relay.servers)
@@ -61,27 +107,30 @@ public final class NativeRemoteChannelProvider: RemoteNoiseChannelProvider, @unc
         do {
             return try await connect(transport: transport, local: transport.localDescription())
         } catch let failure as ConnectivityFailure {
-            // The only retry left is the one relay was meant to cover: the
-            // first attempt ran direct-only because credential issuance was
-            // unavailable. A refusal is not retried — the control plane has
-            // already said no, and asking again just spends a round trip on a
-            // path that is already failing.
-            guard relay.servers.isEmpty, !relay.refused, transport.connectivityFailed() else {
-                throw failure.underlying
+            guard relay.servers.isEmpty, !relay.refused, failure.retryable else {
+                try? await transport.close()
+                throw failure
             }
             let retry = await iceConfiguration.relay {
                 try await self.signaling.turnCredentials(for: self.record)
             }
-            guard !retry.servers.isEmpty else { throw failure.underlying }
-            try await policy.authorizeRelayAttempt(servers: retry.servers)
-            let local = try await transport.retryWithRelay(
-                servers: Self.nativeServers(stun + retry.servers)
-            )
-            do {
-                return try await connect(transport: transport, local: local)
-            } catch let failure as ConnectivityFailure {
-                throw failure.underlying
+            guard !retry.servers.isEmpty else {
+                try? await transport.close()
+                throw failure
             }
+            do {
+                try await policy.authorizeRelayAttempt(servers: retry.servers)
+                let local = try await transport.retryWithRelay(
+                    servers: Self.nativeServers(stun + retry.servers)
+                )
+                return try await connect(transport: transport, local: local)
+            } catch {
+                try? await transport.close()
+                throw error
+            }
+        } catch {
+            try? await transport.close()
+            throw error
         }
     }
 
@@ -92,12 +141,20 @@ public final class NativeRemoteChannelProvider: RemoteNoiseChannelProvider, @unc
         let candidates = LatchMobileKit.TransportCandidate.preferredForPublication(
             local.candidates.map(Self.signalingCandidate)
         )
+        // Not against the agent the last offer consumed: its ports now belong
+        // to a session in progress, and checks against them go unanswered.
+        await sequencer.awaitReplacement {
+            try await self.signaling.macPresence(for: self.record)
+        }
         let answer = try await signaling.offerRendezvous(
             for: record,
             candidates: candidates,
             iceUfrag: local.credentials.ufrag,
             icePwd: local.credentials.password
         )
+        await sequencer.recordAnswer(answer.iceUfrag.map { ufrag in
+            RendezvousSequencer.AnsweredAgent(iceUfrag: ufrag, candidates: answer.candidates)
+        })
         guard let remoteUfrag = answer.iceUfrag, let remotePassword = answer.icePwd else {
             throw ControlPlaneError.malformedResponse("The Mac did not return ICE credentials.")
         }
@@ -111,7 +168,10 @@ public final class NativeRemoteChannelProvider: RemoteNoiseChannelProvider, @unc
                 role: .initiator
             )
         } catch {
-            throw ConnectivityFailure(underlying: error)
+            throw ConnectivityFailure(
+                underlying: error,
+                retryable: transport.connectivityFailed()
+            )
         }
         // Whichever pair ICE nominated is the answer: relay is a legitimate
         // outcome of the first attempt now, and the same pinned Noise session
@@ -203,6 +263,9 @@ public final class NativeRemoteChannelProvider: RemoteNoiseChannelProvider, @unc
 
 private struct ConnectivityFailure: Error {
     let underlying: any Error
+    /// Whether the transport reports the checks themselves as what failed,
+    /// which is the only failure a fresh agent and offer can cure.
+    let retryable: Bool
 }
 
 private final class NativeRemoteNoiseChannel: RemoteNoiseChannel, @unchecked Sendable {

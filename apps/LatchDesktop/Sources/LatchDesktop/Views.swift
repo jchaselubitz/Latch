@@ -771,12 +771,20 @@ struct MenuBarSessionsView: View {
 
     var body: some View {
         ForEach(store.sessions.prefix(12)) { session in
-            Button {
-                Task { await store.open(session.id) }
+            Menu {
+                Text(MenuTextWrapper.wrap(session.displaySubtitle))
+                Divider()
+                Button("Open") {
+                    Task { await store.open(session.id) }
+                }
+                .disabled(!session.state.isAttachable || !store.canAttachSessions)
+                Button("Stop", role: .destructive) {
+                    Task { await store.stop(session.id, force: false) }
+                }
+                .disabled(!session.state.isLive)
             } label: {
                 Label(session.name, systemImage: session.state == .running ? "circle.fill" : "circle")
             }
-            .disabled(!session.state.isAttachable || !store.canAttachSessions)
         }
         if store.sessions.isEmpty { Text("No sessions") }
         Button("Stop All Sessions", role: .destructive) {

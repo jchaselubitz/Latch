@@ -392,6 +392,25 @@ final class TerminalLauncherTests: XCTestCase {
         XCTAssertNil(SessionSummary.displayIdleLabel(for: nil))
     }
 
+    func testMenuTextWrapperBreaksLinesAtTheWidthCap() {
+        // Ten points per character keeps the expectation independent of fonts.
+        let measure: (String) -> CGFloat = { CGFloat($0.count) * 10 }
+        XCTAssertEqual(
+            MenuTextWrapper.wrap("one two three four", maxWidth: 70, measure: measure),
+            "one two\nthree\nfour"
+        )
+        XCTAssertEqual(MenuTextWrapper.wrap("short", maxWidth: 70, measure: measure), "short")
+        XCTAssertEqual(MenuTextWrapper.wrap("   ", maxWidth: 70, measure: measure), "")
+    }
+
+    func testMenuTextWrapperSplitsWordsWiderThanTheCap() {
+        let measure: (String) -> CGFloat = { CGFloat($0.count) * 10 }
+        XCTAssertEqual(
+            MenuTextWrapper.wrap("~/Development/Cooperativ", maxWidth: 50, measure: measure),
+            "~/Dev\nelopm\nent/C\nooper\nativ"
+        )
+    }
+
     func testSessionDisplayEqualityIgnoresRawIdleChurnInsideOneBucket() throws {
         let base = try JSONDecoder().decode(
             SessionSummary.self,
