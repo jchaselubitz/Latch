@@ -1,5 +1,5 @@
 // Generated from schemas/remote-access/v2/*.schema.json; do not edit by hand.
-// Canonical schema set SHA-256: 8deeeadf29c02a04f94411b5ac446a81512085e0619372d035e139acc5d70c23
+// Canonical schema set SHA-256: 1959ddbd129ee68dd25683c44cafde0bd935016be357eee163603cb7b66eddb5
 
 
 export type TerminalCloseReason =

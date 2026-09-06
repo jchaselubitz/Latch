@@ -53,6 +53,8 @@ impl Grant {
 pub(crate) enum RouteId {
     Capabilities,
     Sessions,
+    CreateSession,
+    Directories,
     Session,
     Preview,
     Terminal,
@@ -80,6 +82,18 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
         pattern: "/v2/sessions",
         method: "GET",
         required_grant: Grant::Observe,
+    },
+    RouteSpec {
+        id: RouteId::CreateSession,
+        pattern: "/v2/sessions",
+        method: "POST",
+        required_grant: Grant::Control,
+    },
+    RouteSpec {
+        id: RouteId::Directories,
+        pattern: "/v2/directories",
+        method: "GET",
+        required_grant: Grant::Control,
     },
     RouteSpec {
         id: RouteId::Session,
@@ -147,6 +161,8 @@ mod tests {
         let cases = [
             ("/v2/capabilities", Grant::Observe),
             ("/v2/sessions", Grant::Observe),
+            ("/v2/directories", Grant::Control),
+            ("/v2/directories?path=%2FUsers%2Fperson", Grant::Control),
             ("/v2/sessions/ses_1", Grant::Observe),
             ("/v2/sessions/ses_1/preview", Grant::Observe),
             (
@@ -168,6 +184,10 @@ mod tests {
                 Some(expected)
             );
         }
+        assert_eq!(
+            route_for("POST", "/v2/sessions").map(|(_, grant)| grant),
+            Some(Grant::Control)
+        );
         assert!(route_for("POST", "/v2/sessions/ses_1/conversation").is_none());
     }
 }

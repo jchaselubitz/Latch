@@ -118,6 +118,26 @@ final class SessionRouteTests: XCTestCase {
         XCTAssertFalse(notOffered.restricted(to: .control).terminalAdvertised)
     }
 
+    func testCurrentDiscoveryAdvertisesBothSessionCreationRoutes() {
+        let current = capabilities(terminal: true)
+        XCTAssertTrue(current.endpoints.isEnabled(.browseDirectories))
+        XCTAssertTrue(current.endpoints.isEnabled(.createSession))
+    }
+
+    func testPreFeatureDiscoveryDecodesNewRoutesAsDisabled() throws {
+        let json = """
+        {"protocolVersion":2,"productVersion":"2.0.0",
+         "capabilities":{"create":true,"openViewer":true,"localAttach":true,
+          "cloudAttach":false,"selfUpdate":true,"extensions":[]},
+         "endpoints":{"sessions":true,"terminal":true,"conversation":true},
+         "features":{"exclusiveTerminal":true},"gatewayInstanceId":"gw-a-b",
+         "operationRetentionSeconds":600}
+        """
+        let legacy = try JSONDecoder().decode(GatewayCapabilities.self, from: Data(json.utf8))
+        XCTAssertFalse(legacy.endpoints.isEnabled(.browseDirectories))
+        XCTAssertFalse(legacy.endpoints.isEnabled(.createSession))
+    }
+
     // MARK: - Storage
 
     func testThePreferenceDefaultsToTerminalAndSurvivesASave() {
@@ -147,7 +167,8 @@ final class SessionRouteTests: XCTestCase {
         {"protocolVersion":\(LatchContract.protocolVersion),"productVersion":"2.0.0",
          "capabilities":{"create":true,"openViewer":true,"localAttach":true,
           "cloudAttach":false,"selfUpdate":true,"extensions":[]},
-         "endpoints":{"sessions":true,"preview":true,"terminal":\(terminal),"conversation":true},
+         "endpoints":{"sessions":true,"preview":true,"terminal":\(terminal),"conversation":true,
+          "browseDirectories":true,"createSession":true},
          "features":{"exclusiveTerminal":true},"gatewayInstanceId":"gw-a-b",
          "operationRetentionSeconds":600}
         """

@@ -19,9 +19,12 @@ SCHEMAS = ROOT / "schemas/remote-access/v2"
 RUST = ROOT / "crates/latch/src/cli/serve/contract.rs"
 TYPESCRIPT = ROOT / "packages/client/src/generated.ts"
 SCHEMA_NAMES = (
+    "create-session-request.schema.json",
+    "create-session-response.schema.json",
     "conversation-item.schema.json",
     "conversation-state.schema.json",
     "conversation-protocol.schema.json",
+    "directory-page.schema.json",
     "gateway-capabilities.schema.json",
     "gateway-readiness.schema.json",
     "terminal-connection.schema.json",
@@ -50,6 +53,28 @@ use serde::{Deserialize, Serialize};
 
 pub const REMOTE_ACCESS_SCHEMA_VERSION: u8 = 2;
 pub const OPERATION_RETENTION_SECONDS: u64 = 10 * 60;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DirectoryEntry {
+    pub name: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectoryPage {
+    pub path: String,
+    pub parent: Option<String>,
+    pub entries: Vec<DirectoryEntry>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateSessionRequest {
+    pub request_id: String,
+    pub cwd: String,
+}
 
 /// Reason carried in a terminal WebSocket close frame. `Detached` is a clean
 /// end; every other value says why the single exclusive surface was taken away.

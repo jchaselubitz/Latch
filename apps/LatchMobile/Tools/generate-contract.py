@@ -15,10 +15,13 @@ MANIFEST = APP / "Contract/manifest.json"
 SWIFT = APP / "Sources/LatchMobileKit/Generated/LatchContract.swift"
 DEFAULT_UPSTREAM = APP.parent.parent
 NAMES = (
+    "create-session-request.schema.json",
+    "create-session-response.schema.json",
     "conversation-item.schema.json",
     "conversation-state.schema.json",
     "conversation-protocol.schema.json",
     "gateway-capabilities.schema.json",
+    "directory-page.schema.json",
     "terminal-connection.schema.json",
 )
 SOURCES = {
@@ -97,17 +100,23 @@ public struct GatewayEndpoints: Codable, Equatable, Sendable {
     public var preview: Bool
     public var terminal: Bool
     public var conversation: Bool
+    public var browseDirectories: Bool
+    public var createSession: Bool
 
     public init(
         sessions: Bool = false,
         preview: Bool = false,
         terminal: Bool = false,
-        conversation: Bool = false
+        conversation: Bool = false,
+        browseDirectories: Bool = false,
+        createSession: Bool = false
     ) {
         self.sessions = sessions
         self.preview = preview
         self.terminal = terminal
         self.conversation = conversation
+        self.browseDirectories = browseDirectories
+        self.createSession = createSession
     }
 
     // Hand-written so an older Mac, whose document has no `preview` key at
@@ -120,6 +129,8 @@ public struct GatewayEndpoints: Codable, Equatable, Sendable {
         preview = try container.decodeIfPresent(Bool.self, forKey: .preview) ?? false
         terminal = try container.decode(Bool.self, forKey: .terminal)
         conversation = try container.decode(Bool.self, forKey: .conversation)
+        browseDirectories = try container.decodeIfPresent(Bool.self, forKey: .browseDirectories) ?? false
+        createSession = try container.decodeIfPresent(Bool.self, forKey: .createSession) ?? false
     }
 }
 
@@ -128,6 +139,8 @@ public enum GatewayEndpointsName: String, CaseIterable, Sendable {
     case preview
     case terminal
     case conversation
+    case browseDirectories
+    case createSession
 }
 
 public extension GatewayEndpoints {
@@ -137,8 +150,44 @@ public extension GatewayEndpoints {
         case .preview: return preview
         case .terminal: return terminal
         case .conversation: return conversation
+        case .browseDirectories: return browseDirectories
+        case .createSession: return createSession
         }
     }
+}
+
+public struct DirectoryEntry: Codable, Equatable, Sendable {
+    public var name: String
+    public var path: String
+}
+
+public struct DirectoryPage: Codable, Equatable, Sendable {
+    public var path: String
+    public var parent: String?
+    public var entries: [DirectoryEntry]
+    public var nextCursor: String?
+}
+
+public struct CreateSessionRequest: Codable, Equatable, Sendable {
+    public var requestId: UUID
+    public var cwd: String
+
+    public init(requestId: UUID, cwd: String) {
+        self.requestId = requestId
+        self.cwd = cwd
+    }
+}
+
+public struct CreateReport: Codable, Equatable, Sendable {
+    public var protocolVersion: Int
+    public var session: CreatedSession
+}
+
+public struct CreatedSession: Codable, Equatable, Sendable {
+    public var id: String
+    public var name: String
+    public var state: String
+    public var createdAt: String
 }
 
 public struct GatewayFeatures: Codable, Equatable, Sendable {

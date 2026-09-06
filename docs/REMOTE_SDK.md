@@ -18,7 +18,8 @@ client, which speaks the canonical v2 conversation socket directly.
 
 Use `GET /v2/capabilities` before opening a gateway connection. It reports
 protocol major 2, the gateway instance ID, operation retention, and the
-available `sessions`, `terminal`, `preview`, and `conversation` endpoints. A consumer must
+available `sessions`, `terminal`, `preview`, `conversation`,
+`browseDirectories`, and `createSession` endpoints. A consumer must
 require `protocolVersion: 2`; v1 has been removed and is not negotiated,
 probed, or adapted.
 
@@ -88,6 +89,40 @@ a snapshot or retained mutations. It supports history pages and correlated
 device grant for every action. Its canonical schema is
 [`schemas/remote-access/v2/`](../schemas/remote-access/v2/), not a published
 TypeScript package API.
+
+`GET /v2/directories` and `POST /v2/sessions` are the folder browser and the
+remote-creation route. Both require the `control` grant, and both are
+advertised separately — `endpoints.browseDirectories` and
+`endpoints.createSession` — so a gateway can describe exactly what it serves
+and a client never probes an undiscovered route. A gateway that predates them
+omits both keys, which decode as absent.
+
+The directory route answers with a page of **folders only**: the canonical
+`path` it resolved to, a nullable `parent`, `entries` of `{ name, path }`, and
+a nullable `nextCursor`. Omitting `path` asks for the Mac user's home
+directory. Symlinks are resolved before anything is returned, entries are
+ordered case-insensitively, and a page holds at most 200 of them. The route
+returns no file names, no file contents, no metadata, and no search. Every
+path failure — missing, unreadable, not a directory, outside what the gateway
+will serve — is one stable error, so the route cannot be used to probe the
+filesystem.
+
+Creation takes only two fields:
+
+```json
+{ "requestId": "8cba5d78-79a0-4a55-9047-f77e57e463c7", "cwd": "/Users/jake/src" }
+```
+
+`requestId` is a canonical hyphenated UUID and is the idempotency key. The Mac
+holds a creation lock across the lookup and the durable metadata write, so
+repeating one request id returns the session it already created rather than a
+second one; the same id against a different `cwd` is refused as
+`request_id_conflict`. Only the working directory crosses the boundary. The
+gateway builds the same interactive login shell `latch shell` does, at the
+standard initial geometry, with no command, agent, name, environment, or shell
+path supplied by the caller, and does not attach — the new session appears in
+`GET /v2/sessions` with no surface taken from anyone. The response is the
+existing `CreateReport`.
 
 There is no `@latch/chat-react`, `@latch/harness-schema`, remote React SDK
 example, event cursor, transcript reducer, HTTP send endpoint, compatibility

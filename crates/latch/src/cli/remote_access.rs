@@ -4039,6 +4039,51 @@ mod tests {
         assert!(authorize_and_inject(request, DevicePermission::Observe, "secret").is_err());
     }
 
+    #[test]
+    fn proxy_forwards_new_control_routes_only_at_control() {
+        let browse = b"GET /v2/directories?path=%2Ftmp HTTP/1.1\r\nHost: example\r\n\r\n".to_vec();
+        let create = b"POST /v2/sessions HTTP/1.1\r\nHost: example\r\nContent-Length: 27\r\nContent-Type: application/json\r\n\r\n{\"requestId\":\"x\",\"cwd\":\"/\"}".to_vec();
+        for permission in [DevicePermission::Observe, DevicePermission::Interact] {
+            assert!(authorize_and_inject(browse.clone(), permission, "secret").is_err());
+            assert!(authorize_and_inject(create.clone(), permission, "secret").is_err());
+        }
+        assert_eq!(
+            authorize_and_inject(browse, DevicePermission::Control, "secret")
+                .unwrap()
+                .1,
+            DevicePermission::Control
+        );
+        assert_eq!(
+            authorize_and_inject(create, DevicePermission::Control, "secret")
+                .unwrap()
+                .1,
+            DevicePermission::Control
+        );
+    }
+
+    /// A creation request is the only bounded body the tunnel forwards. The
+    /// injected credential must not disturb it: a stray CRLF or a truncated
+    /// body would reach the gateway as a malformed request, not a create.
+    #[test]
+    fn proxy_forwards_a_creation_body_unchanged() {
+        let body = "{\"requestId\":\"8cba5d78-79a0-4a55-9047-f77e57e463c7\",\"cwd\":\"/tmp\"}";
+        let request = format!(
+            "POST /v2/sessions HTTP/1.1\r\nHost: example\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes();
+        let (authorized, required) =
+            authorize_and_inject(request, DevicePermission::Control, "secret").unwrap();
+        assert_eq!(required, DevicePermission::Control);
+        let text = String::from_utf8(authorized).unwrap();
+        let (headers, forwarded) = text.split_once("\r\n\r\n").expect("header terminator");
+        assert_eq!(forwarded, body);
+        assert!(headers.contains("Authorization: Bearer secret"));
+        assert!(headers.contains("x-latch-device-grant: control"));
+        assert!(headers.contains("Connection: close"));
+        assert!(!headers.contains("\r\n\r\n"));
+    }
+
     /// The grant a live stream has to keep holding is the route's, not the
     /// one the device happened to have at handshake. A terminal admitted
     /// under `control` reports `control`, which is what the periodic device
@@ -4074,6 +4119,11 @@ mod tests {
         assert!(authorize_and_inject(smuggled, DevicePermission::Interact, "secret").is_err());
         let transfer = b"GET /v2/sessions/ses_1/conversation HTTP/1.1\r\nHost: example\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n".to_vec();
         assert!(authorize_and_inject(transfer, DevicePermission::Interact, "secret").is_err());
+        let oversized = format!(
+            "POST /v2/sessions HTTP/1.1\r\nHost: example\r\nContent-Length: {MAX_INITIAL_REQUEST}\r\n\r\n"
+        )
+        .into_bytes();
+        assert!(authorize_and_inject(oversized, DevicePermission::Control, "secret").is_err());
         let ordinary = b"GET /v2/sessions HTTP/1.1\r\nHost: example\r\n\r\n".to_vec();
         let (authorized, required) =
             authorize_and_inject(ordinary, DevicePermission::Observe, "secret").unwrap();

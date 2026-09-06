@@ -25,6 +25,7 @@ public struct GatewayLink: Equatable, Sendable, Codable {
 
 /// Protocol-major-2 gateway discovery and session client.
 public actor LatchGateway {
+    private static let maximumJSONResponseBytes = 512 * 1024
     private let link: GatewayLink
     private let transport: any GatewayTransport
     private let session: URLSession
@@ -74,6 +75,37 @@ public actor LatchGateway {
         return report.sessions
     }
 
+    /// Lists one bounded page of directories on the Mac. Query construction
+    /// belongs here so canonical paths containing spaces, Unicode, `#`, or
+    /// `?` never become hand-built URL syntax.
+    public func browseDirectories(
+        path: String? = nil,
+        cursor: String? = nil
+    ) async throws -> DirectoryPage {
+        try await require(.browseDirectories)
+        return try await request(
+            method: "GET",
+            path: "/v2/directories",
+            queryItems: [
+                path.map { URLQueryItem(name: "path", value: $0) },
+                cursor.map { URLQueryItem(name: "cursor", value: $0) }
+            ].compactMap { $0 }
+        )
+    }
+
+    /// Creates the gateway's standard login shell. The request ID is supplied
+    /// by the caller because it must survive a lost response and its retry.
+    public func createSession(requestID: UUID, cwd: String) async throws -> CreateReport {
+        try await require(.createSession)
+        let body: Data
+        do {
+            body = try JSONEncoder().encode(CreateSessionRequest(requestId: requestID, cwd: cwd))
+        } catch {
+            throw LatchError.malformedResponse(String(describing: error))
+        }
+        return try await request(method: "POST", path: "/v2/sessions", body: body)
+    }
+
     /// Reads the session's live pane once, without attaching.
     ///
     /// This is the only terminal-shaped call an observing device may make. It
@@ -90,11 +122,11 @@ public actor LatchGateway {
         scrollbackLines: Int = 0
     ) async throws -> SessionPreview {
         try await require(.preview)
-        var path = "/v2/sessions/\(sessionID)/preview"
-        if scrollbackLines > 0 {
-            path += "?scrollbackLines=\(scrollbackLines)"
-        }
-        return try await get(path: path)
+        let path = "/v2/sessions/\(sessionID)/preview"
+        let queryItems = scrollbackLines > 0
+            ? [URLQueryItem(name: "scrollbackLines", value: String(scrollbackLines))]
+            : []
+        return try await request(method: "GET", path: path, queryItems: queryItems)
     }
 
     /// Takes the session's terminal surface at the declared grid.
@@ -160,15 +192,36 @@ public actor LatchGateway {
     }
 
     private func get<T: Decodable>(path: String) async throws -> T {
-        guard let url = URL(string: link.url.absoluteString + path) else {
+        try await request(method: "GET", path: path)
+    }
+
+    /// One bounded JSON request path for both manual HTTPS links and paired
+    /// loopback links. Discovery, authorization, and error mapping therefore
+    /// remain identical for reads and creation.
+    private func request<T: Decodable>(
+        method: String,
+        path: String,
+        queryItems: [URLQueryItem] = [],
+        body: Data? = nil
+    ) async throws -> T {
+        guard var components = URLComponents(url: link.url, resolvingAgainstBaseURL: false) else {
+            throw LatchError.invalidURL(link.url.absoluteString)
+        }
+        components.path = path
+        components.queryItems = queryItems.isEmpty ? nil : queryItems
+        guard let url = components.url else {
             throw LatchError.invalidURL(link.url.absoluteString + path)
         }
         var request = URLRequest(url: url)
-        request.httpMethod = "GET"
+        request.httpMethod = method
+        request.httpBody = body
         if !link.token.isEmpty {
             request.setValue("Bearer \(link.token)", forHTTPHeaderField: "Authorization")
         }
         request.setValue("application/json", forHTTPHeaderField: "Accept")
+        if body != nil {
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        }
         let data: Data
         let response: URLResponse
         do {
@@ -181,6 +234,9 @@ public actor LatchGateway {
         }
         guard (200..<300).contains(http.statusCode) else {
             throw Self.error(status: http.statusCode, path: path, data: data)
+        }
+        guard data.count <= Self.maximumJSONResponseBytes else {
+            throw LatchError.malformedResponse("response exceeded the JSON size limit")
         }
         do {
             return try decoder.decode(T.self, from: data)
@@ -201,7 +257,9 @@ public actor LatchGateway {
             code: code,
             reason: reason
         ) { return .notAGateway }
-        if status == 401 || status == 403 { return .unauthorized }
+        if status == 401 || (status == 403 && code != "unreadable_directory") {
+            return .unauthorized
+        }
         // The paired tunnel could not reach the Mac at all. That is a local
         // transport failure wearing an HTTP status, and the reason it carries
         // is already a sentence — a status line in front of it would only

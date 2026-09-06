@@ -238,8 +238,8 @@ struct RemoteDevice: Codable, Identifiable, Equatable, Sendable {
     let permission: DevicePermission
     let revoked: Bool
     /// The phone's row in the control-plane directory, recorded when it
-    /// enrolled. Absent for devices paired before the CLI recorded it, which
-    /// only means a grant change here cannot be mirrored there.
+    /// enrolled. Required to authorize directory rendezvous offers and mirror
+    /// grant changes. Older pairings without it can still connect locally.
     let controlPlaneDeviceID: String?
 
     enum CodingKeys: String, CodingKey {

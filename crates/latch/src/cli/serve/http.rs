@@ -13,7 +13,7 @@ use axum::extract::{ConnectInfo, Extension, Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, Method, Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Serialize;
 use tokio::net::TcpListener;
@@ -22,14 +22,17 @@ use super::auth::{
     load_token, origin_allowed, presented_token, selected_subprotocol, token_matches,
 };
 use super::contract::{
-    GatewayFeatures, GatewayReadiness, OPERATION_RETENTION_SECONDS, REMOTE_ACCESS_SCHEMA_VERSION,
+    CreateSessionRequest, GatewayFeatures, GatewayReadiness, OPERATION_RETENTION_SECONDS,
+    REMOTE_ACCESS_SCHEMA_VERSION,
 };
 use super::conversation::{self, ConversationConnect, ConversationQuery};
+use super::directory::{self, BrowseError};
 use super::routes::{route_for, Grant, RouteId, RouteSpec, DEVICE_GRANT_HEADER, ROUTES};
 use super::terminal::{self, TerminalConnect, TerminalQuery};
 use super::ServeOptions;
 use crate::cli::attach::SessionLookupError;
-use crate::cli::json::CapabilitiesReport;
+use crate::cli::create::{self, RemoteShellError, RemoteShellRequest};
+use crate::cli::json::{CapabilitiesReport, CreateReport, CreatedSession};
 use crate::cli::manage::{self, InspectOptions, ListOptions};
 use crate::conversation::ConversationHub;
 use crate::session::paths::{LatchHome, DIR_MODE, FILE_MODE};
@@ -48,6 +51,7 @@ struct AppState {
 #[derive(Debug)]
 struct ApiError {
     status: StatusCode,
+    code: &'static str,
     message: String,
 }
 
@@ -55,6 +59,15 @@ impl ApiError {
     fn new(status: StatusCode, message: impl Into<String>) -> Self {
         Self {
             status,
+            code: "request_failed",
+            message: message.into(),
+        }
+    }
+
+    fn coded(status: StatusCode, code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            status,
+            code,
             message: message.into(),
         }
     }
@@ -64,7 +77,7 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         (
             self.status,
-            Json(serde_json::json!({ "error": self.message })),
+            Json(serde_json::json!({ "error": self.code, "reason": self.message })),
         )
             .into_response()
     }
@@ -154,6 +167,8 @@ fn register(router: Router<AppState>, spec: RouteSpec) -> Router<AppState> {
     match spec.id {
         RouteId::Capabilities => router.route(spec.pattern, get(gateway_capabilities)),
         RouteId::Sessions => router.route(spec.pattern, get(list_sessions)),
+        RouteId::CreateSession => router.route(spec.pattern, post(create_session)),
+        RouteId::Directories => router.route(spec.pattern, get(browse_directories)),
         RouteId::Session => router.route(spec.pattern, get(inspect_session)),
         RouteId::Preview => router.route(spec.pattern, get(preview_session)),
         RouteId::Terminal => router.route(spec.pattern, get(terminal_ws)),
@@ -205,7 +220,7 @@ fn apply_cors(headers: &mut HeaderMap, origin: Option<&HeaderValue>) {
     );
     headers.insert(
         header::ACCESS_CONTROL_ALLOW_METHODS,
-        HeaderValue::from_static("GET, OPTIONS"),
+        HeaderValue::from_static("GET, POST, OPTIONS"),
     );
 }
 
@@ -286,11 +301,14 @@ struct GatewayCapabilities {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct GatewayEndpoints {
     sessions: bool,
     preview: bool,
     terminal: bool,
     conversation: bool,
+    browse_directories: bool,
+    create_session: bool,
 }
 
 async fn gateway_capabilities(State(state): State<AppState>) -> Response {
@@ -301,6 +319,8 @@ async fn gateway_capabilities(State(state): State<AppState>) -> Response {
             preview: true,
             terminal: true,
             conversation: true,
+            browse_directories: true,
+            create_session: true,
         },
         features: GatewayFeatures {
             exclusive_terminal: true,
@@ -318,6 +338,141 @@ async fn list_sessions(State(state): State<AppState>) -> Result<Response, ApiErr
         .map_err(|_| internal("list sessions"))?
         .map_err(map_engine_error)?;
     Ok(Json(report).into_response())
+}
+
+#[derive(serde::Deserialize)]
+struct DirectoryQuery {
+    path: Option<String>,
+    cursor: Option<String>,
+}
+
+async fn browse_directories(Query(query): Query<DirectoryQuery>) -> Result<Response, ApiError> {
+    let page = tokio::task::spawn_blocking(move || {
+        directory::browse(query.path.as_deref(), query.cursor.as_deref())
+    })
+    .await
+    .map_err(|_| internal("browse directories"))?
+    .map_err(map_browse_error)?;
+    Ok(Json(page).into_response())
+}
+
+/// Upper bound on a creation body. The request carries two short strings; the
+/// paired proxy already refuses a larger initial request, and this is the same
+/// refusal for the manual HTTPS route.
+const MAX_CREATE_BODY_BYTES: usize = 1024;
+
+/// Starts exactly one standard login shell in a validated directory.
+///
+/// Nothing else about the session is caller-controlled: no argv, environment,
+/// shell, display metadata, or terminal type crosses this boundary, and no
+/// attach is spawned.
+async fn create_session(
+    State(state): State<AppState>,
+    body: axum::body::Bytes,
+) -> Result<Response, ApiError> {
+    if body.len() > MAX_CREATE_BODY_BYTES {
+        return Err(ApiError::coded(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "invalid_request",
+            "creation request is too large",
+        ));
+    }
+    let request: CreateSessionRequest = serde_json::from_slice(&body).map_err(|_| {
+        ApiError::coded(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "creation request is malformed",
+        )
+    })?;
+    if !is_request_id(&request.request_id) {
+        return Err(ApiError::coded(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "requestId must be a UUID",
+        ));
+    }
+    let cwd = directory::canonical_directory_from_str(&request.cwd).map_err(map_browse_error)?;
+
+    let home = state.home.clone();
+    let outcome = tokio::task::spawn_blocking(move || {
+        create::create_remote_shell(RemoteShellRequest {
+            home,
+            request_id: request.request_id,
+            cwd,
+        })
+    })
+    .await
+    .map_err(|_| internal("create session"))?
+    .map_err(map_remote_shell_error)?;
+
+    Ok(Json(CreateReport {
+        protocol_version: crate::engine::PROTOCOL_VERSION,
+        session: CreatedSession {
+            id: outcome.id,
+            name: outcome.name,
+            state: "running".to_owned(),
+            created_at: outcome.created_at,
+        },
+    })
+    .into_response())
+}
+
+/// Accepts only a canonical hyphenated UUID, the one shape the contract
+/// promises and the only shape the phone generates.
+fn is_request_id(value: &str) -> bool {
+    let groups = [8, 4, 4, 4, 12];
+    let mut parts = value.split('-');
+    for expected in groups {
+        let Some(part) = parts.next() else {
+            return false;
+        };
+        if part.len() != expected || !part.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return false;
+        }
+    }
+    parts.next().is_none()
+}
+
+fn map_remote_shell_error(error: RemoteShellError) -> ApiError {
+    match error {
+        RemoteShellError::RequestIdConflict => ApiError::coded(
+            StatusCode::CONFLICT,
+            "request_id_conflict",
+            "this request id already created a session in another directory",
+        ),
+        // The engine's failure detail can name paths, binaries, and kernel
+        // state. The phone gets the stable code instead.
+        RemoteShellError::Failed(_) => ApiError::coded(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "session_creation_failed",
+            "the session could not be created",
+        ),
+    }
+}
+
+fn map_browse_error(error: BrowseError) -> ApiError {
+    match error {
+        BrowseError::InvalidPath => ApiError::coded(
+            StatusCode::BAD_REQUEST,
+            "invalid_path",
+            "path must be an accessible absolute directory path",
+        ),
+        BrowseError::UnavailablePath => ApiError::coded(
+            StatusCode::NOT_FOUND,
+            "unavailable_path",
+            "directory is unavailable",
+        ),
+        BrowseError::UnreadableDirectory => ApiError::coded(
+            StatusCode::FORBIDDEN,
+            "unreadable_directory",
+            "directory cannot be read",
+        ),
+        BrowseError::StaleCursor => ApiError::coded(
+            StatusCode::CONFLICT,
+            "stale_cursor",
+            "directory contents changed; reload the first page",
+        ),
+    }
 }
 
 async fn inspect_session(
@@ -548,7 +703,7 @@ mod tests {
 
     #[test]
     fn every_registered_handler_comes_from_the_shared_route_table() {
-        assert_eq!(ROUTES.len(), 6);
+        assert_eq!(ROUTES.len(), 8);
         let mut ids = ROUTES.iter().map(|route| route.id).collect::<Vec<_>>();
         ids.sort_by_key(|id| *id as u8);
         ids.dedup();
@@ -566,5 +721,213 @@ mod tests {
         assert_eq!(mapped.status, StatusCode::NOT_FOUND);
         assert_eq!(mapped.message, "session not found");
         assert!(!mapped.message.contains("secret-name"));
+    }
+
+    #[test]
+    fn current_capabilities_advertise_browsing_and_creation() {
+        let value = serde_json::to_value(GatewayEndpoints {
+            sessions: true,
+            preview: true,
+            terminal: true,
+            conversation: true,
+            browse_directories: true,
+            create_session: true,
+        })
+        .unwrap();
+        assert_eq!(value["browseDirectories"], true);
+        assert_eq!(value["createSession"], true);
+    }
+
+    #[test]
+    fn cors_allows_the_bounded_post_route() {
+        let mut headers = HeaderMap::new();
+        apply_cors(&mut headers, None);
+        assert_eq!(
+            headers[header::ACCESS_CONTROL_ALLOW_METHODS],
+            "GET, POST, OPTIONS"
+        );
+    }
+
+    struct Harness {
+        _dir: tempfile::TempDir,
+        address: SocketAddr,
+        home: LatchHome,
+        work: std::path::PathBuf,
+    }
+
+    /// The production router on a real socket, so creation requests travel the
+    /// same token, grant, and route-table path a phone's do.
+    async fn harness() -> Harness {
+        let dir = tempfile::tempdir().expect("temp");
+        let home = LatchHome::new(dir.path().join("latch"));
+        home.ensure().expect("home");
+        let work = dir.path().join("work");
+        std::fs::create_dir(&work).expect("work");
+        let token_file = dir.path().join("serve.token");
+        std::fs::write(&token_file, "gateway-token").expect("token");
+        let hub = crate::conversation::ConversationHub::new(dir.path().join("hub")).expect("hub");
+        let app = test_router(home.clone(), token_file, hub, dir.path().join("stub-latch"));
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let address = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await;
+        });
+        Harness {
+            _dir: dir,
+            address,
+            home,
+            work,
+        }
+    }
+
+    async fn post_create(
+        harness: &Harness,
+        grant: Option<&str>,
+        body: &str,
+    ) -> (u16, serde_json::Value) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let grant = grant.map_or_else(String::new, |grant| {
+            format!("{DEVICE_GRANT_HEADER}: {grant}\r\n")
+        });
+        let request = format!(
+            "POST /v2/sessions HTTP/1.1\r\nHost: gateway\r\nAuthorization: Bearer gateway-token\r\nContent-Type: application/json\r\nConnection: close\r\n{grant}Content-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let mut stream = tokio::net::TcpStream::connect(harness.address)
+            .await
+            .expect("connect");
+        stream
+            .write_all(request.as_bytes())
+            .await
+            .expect("write request");
+        let mut response = Vec::new();
+        stream
+            .read_to_end(&mut response)
+            .await
+            .expect("read response");
+        let text = String::from_utf8_lossy(&response).into_owned();
+        let status = text
+            .split_whitespace()
+            .nth(1)
+            .and_then(|code| code.parse::<u16>().ok())
+            .expect("status line");
+        let payload = text
+            .split_once("\r\n\r\n")
+            .map(|(_, body)| body)
+            .unwrap_or_default();
+        let payload = serde_json::from_str(payload).unwrap_or(serde_json::Value::Null);
+        (status, payload)
+    }
+
+    fn create_body(cwd: &str) -> String {
+        serde_json::json!({
+            "requestId": "8cba5d78-79a0-4a55-9047-f77e57e463c7",
+            "cwd": cwd,
+        })
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn creation_refuses_malformed_requests_before_touching_the_engine() {
+        let harness = harness().await;
+        let work = harness.work.to_str().unwrap().to_owned();
+        let cases = [
+            ("not json", 400, "invalid_request"),
+            (r#"{"cwd":"/tmp"}"#, 400, "invalid_request"),
+            (
+                &serde_json::json!({"requestId": "not-a-uuid", "cwd": work}).to_string(),
+                400,
+                "invalid_request",
+            ),
+            (&create_body("relative/path"), 400, "invalid_path"),
+            (
+                &create_body(harness._dir.path().join("missing").to_str().unwrap()),
+                404,
+                "unavailable_path",
+            ),
+            (
+                &create_body(harness._dir.path().join("serve.token").to_str().unwrap()),
+                400,
+                "invalid_path",
+            ),
+        ];
+        for (body, status, code) in cases {
+            let (observed, payload) = post_create(&harness, None, body).await;
+            assert_eq!(observed, status, "{body}");
+            assert_eq!(payload["error"], code, "{body}");
+        }
+        // A refused request is a refused request: nothing was created.
+        assert!(harness.home.session_ids().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn creation_is_refused_below_control_and_oversized_bodies_are_bounded() {
+        let harness = harness().await;
+        let work = harness.work.to_str().unwrap();
+        for grant in ["observe", "interact"] {
+            let (status, _) = post_create(&harness, Some(grant), &create_body(work)).await;
+            assert_eq!(status, 403, "{grant} must not create sessions");
+        }
+        let oversized = serde_json::json!({
+            "requestId": "8cba5d78-79a0-4a55-9047-f77e57e463c7",
+            "cwd": "/".to_owned() + &"a".repeat(MAX_CREATE_BODY_BYTES),
+        })
+        .to_string();
+        let (status, payload) = post_create(&harness, Some("control"), &oversized).await;
+        assert_eq!(status, 413);
+        assert_eq!(payload["error"], "invalid_request");
+        assert!(harness.home.session_ids().unwrap().is_empty());
+    }
+
+    #[test]
+    fn only_a_canonical_uuid_is_accepted_as_a_request_id() {
+        assert!(is_request_id("8cba5d78-79a0-4a55-9047-f77e57e463c7"));
+        assert!(is_request_id("8CBA5D78-79A0-4A55-9047-F77E57E463C7"));
+        for rejected in [
+            "",
+            "8cba5d78",
+            "8cba5d78-79a0-4a55-9047-f77e57e463c",
+            "8cba5d78-79a0-4a55-9047-f77e57e463c7-extra",
+            "8cba5d78-79a0-4a55-9047-f77e57e463cg",
+            "8cba5d7879a04a559047f77e57e463c7",
+            "../../etc/passwd",
+        ] {
+            assert!(!is_request_id(rejected), "{rejected} must be refused");
+        }
+    }
+
+    #[test]
+    fn creation_failures_have_stable_codes_without_engine_detail() {
+        let conflict = map_remote_shell_error(RemoteShellError::RequestIdConflict);
+        assert_eq!(conflict.status, StatusCode::CONFLICT);
+        assert_eq!(conflict.code, "request_id_conflict");
+
+        let failed = map_remote_shell_error(RemoteShellError::Failed(anyhow::anyhow!(
+            "cannot spawn /opt/homebrew/bin/latchd for /Users/person/secret"
+        )));
+        assert_eq!(failed.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(failed.code, "session_creation_failed");
+        assert!(!failed.message.contains("/Users/"));
+        assert!(!failed.message.contains("latchd"));
+    }
+
+    #[test]
+    fn directory_failures_have_stable_codes_without_path_detail() {
+        let cases = [
+            (BrowseError::InvalidPath, "invalid_path"),
+            (BrowseError::UnavailablePath, "unavailable_path"),
+            (BrowseError::UnreadableDirectory, "unreadable_directory"),
+            (BrowseError::StaleCursor, "stale_cursor"),
+        ];
+        for (error, code) in cases {
+            let mapped = map_browse_error(error);
+            assert_eq!(mapped.code, code);
+            assert!(!mapped.message.contains("/Users/"));
+        }
     }
 }

@@ -40,6 +40,9 @@ public final class AppModel {
     public private(set) var remotePathTally = RemotePathTally()
     public private(set) var sessionsError: String?
     public private(set) var isLoadingSessions = false
+    /// The session most recently created from the folder browser. The view may
+    /// highlight it without treating creation as permission to open or attach.
+    public private(set) var highlightedSessionID: String?
     /// Session stores are retained here rather than by a navigation view, so a
     /// pushed chat can reconnect from its cached revision instead of replaying
     /// the conversation after every back-navigation.
@@ -84,6 +87,7 @@ public final class AppModel {
     private let terminalUnlock: TerminalUnlock
     private let presentationStore: any SessionPresentationStoring
     private let terminalSizeStore: any TerminalSizeStoring
+    private let newSessionFolderStore: any NewSessionFolderStoring
     private let storage: LinkStorage
     /// Where the transport writes the path it selected, so Settings can say
     /// whether this session is on the local network, direct, or relayed.
@@ -103,6 +107,7 @@ public final class AppModel {
         pathReporter: RemotePathReporter = RemotePathReporter(),
         presentationStore: any SessionPresentationStoring = UserDefaultsSessionPresentationStore(),
         terminalSizeStore: any TerminalSizeStoring = UserDefaultsTerminalSizeStore(),
+        newSessionFolderStore: any NewSessionFolderStoring = UserDefaultsNewSessionFolderStore(),
         terminalConnector: TerminalConnecting? = nil,
         terminalUnlock: TerminalUnlock? = nil
     ) {
@@ -111,6 +116,8 @@ public final class AppModel {
         self.terminalConnector = terminalConnector
         self.presentationStore = presentationStore
         self.terminalSizeStore = terminalSizeStore
+        self.newSessionFolderStore = newSessionFolderStore
+        self.defaultNewSessionFolder = newSessionFolderStore.load()
         self.sessionPresentation = presentationStore.load()
         self.terminalSize = terminalSizeStore.load()
         self.storage = storage
@@ -155,6 +162,61 @@ public final class AppModel {
         return capabilities.productVersion.isEmpty ? nil : capabilities.productVersion
     }
 
+    /// Directory data and process creation are control-granted operations.
+    /// A manual loopback link has the gateway's existing effective control
+    /// grant; only a paired record narrows this locally.
+    private var hasNewSessionControlGrant: Bool {
+        linkSource != .paired || pairedDevice?.permission.permits(.control) == true
+    }
+
+    public var canBrowseNewSessionFolders: Bool {
+        guard case .linked(let capabilities) = linkState else { return false }
+        return hasNewSessionControlGrant
+            && GatewayCompatibility.supports(endpoint: .browseDirectories, capabilities: capabilities)
+    }
+
+    public var canCreateNewSession: Bool {
+        guard case .linked(let capabilities) = linkState else { return false }
+        return canBrowseNewSessionFolders
+            && GatewayCompatibility.supports(endpoint: .createSession, capabilities: capabilities)
+    }
+
+    /// Whether the linked Mac serves both new-session routes, independent of
+    /// this phone's grant. The control is shown but disabled when the Mac can
+    /// serve the flow and this phone may not use it, so the reason can be
+    /// said rather than left as a missing button.
+    public var advertisesNewSessionCreation: Bool {
+        guard case .linked(let capabilities) = linkState else { return false }
+        return GatewayCompatibility.supports(endpoint: .browseDirectories, capabilities: capabilities)
+            && GatewayCompatibility.supports(endpoint: .createSession, capabilities: capabilities)
+    }
+
+    /// Why the advertised new-session flow cannot be used right now, or nil
+    /// when it can. Only a grant can hold it back once the routes exist.
+    public var newSessionUnavailableExplanation: String? {
+        guard advertisesNewSessionCreation, !canCreateNewSession else { return nil }
+        return """
+        This phone does not currently have control of this Mac. Open Latch on your Mac, find \
+        this phone under Remote Access, and set it to Control.
+        """
+    }
+
+    /// The saved default folder, observed so Settings updates the moment one
+    /// is chosen. The store remains the source of truth; this mirrors it.
+    public private(set) var defaultNewSessionFolder: String?
+
+    /// Re-reads the store after the browser saved a selection.
+    public func reloadDefaultNewSessionFolder() {
+        defaultNewSessionFolder = newSessionFolderStore.load()
+    }
+
+    /// Forgets the saved default so the next picker opens at the Mac's home
+    /// directory.
+    public func clearDefaultNewSessionFolder() {
+        newSessionFolderStore.save(nil)
+        defaultNewSessionFolder = nil
+    }
+
     /// Restores a saved link at launch and connects to it.
     public func restore() async {
         guard link == nil, let saved = try? storage.load() else { return }
@@ -194,6 +256,7 @@ public final class AppModel {
         pairedConnectionGeneration &+= 1
         sessions = []
         sessionsError = nil
+        highlightedSessionID = nil
         conversationStores.values.forEach { $0.stop() }
         conversationStores = [:]
         detachAllTerminals()
@@ -227,6 +290,9 @@ public final class AppModel {
     /// something worth saying. A cancelled prompt leaves this nil.
     public var terminalUnlockFailure: String? { terminalUnlock.failure }
 
+    /// Why the shared owner check could not authorize a protected action.
+    public var ownerAuthenticationFailure: String? { terminalUnlock.failure }
+
     /// Asks the device owner to confirm before a terminal is opened.
     ///
     /// Called by the terminal screen ahead of `terminalSession(for:)`. Inside
@@ -235,9 +301,61 @@ public final class AppModel {
     @discardableResult
     public func unlockTerminal() async -> Bool {
         guard surface.terminal else { return false }
-        return await terminalUnlock.unlock(
+        return await unlockRemoteAccess(
             reason: "Open a terminal on your Mac and run commands on it."
         )
+    }
+
+    /// One owner-authentication grace window covers terminal access, revealing
+    /// remote folder names, and creating a process. Capability and grant checks
+    /// still run independently for every operation.
+    @discardableResult
+    public func unlockRemoteAccess(reason: String) async -> Bool {
+        await terminalUnlock.unlock(reason: reason)
+    }
+
+    /// Authenticates before constructing the browser so no directory state is
+    /// fetched or exposed to someone who has not passed the owner check.
+    public func newSessionFolderBrowser(
+        mode: FolderBrowserMode
+    ) async -> FolderBrowserModel? {
+        let available = mode == .create ? canCreateNewSession : canBrowseNewSessionFolders
+        guard available, let gateway else { return nil }
+        let reason = mode == .create
+            ? "Browse folders and start a new session on your Mac."
+            : "Browse folders on your Mac and choose a default."
+        guard await unlockRemoteAccess(reason: reason) else { return nil }
+
+        let browser = FolderBrowserModel(
+            mode: mode,
+            initialPath: newSessionFolderStore.load(),
+            folderStore: newSessionFolderStore,
+            browse: { path, cursor in
+                guard self.canBrowseNewSessionFolders else {
+                    throw NewSessionAccessError.unavailable
+                }
+                return try await gateway.browseDirectories(path: path, cursor: cursor)
+            },
+            create: { requestID, cwd in
+                guard self.canCreateNewSession else {
+                    throw NewSessionAccessError.unavailable
+                }
+                return try await gateway.createSession(requestID: requestID, cwd: cwd)
+            },
+            hasAccess: {
+                mode == .create ? self.canCreateNewSession : self.canBrowseNewSessionFolders
+            },
+            didCreate: { sessionID in
+                await self.refreshSessions()
+                self.highlightedSessionID = sessionID
+            }
+        )
+        await browser.load()
+        return browser
+    }
+
+    public func clearNewSessionHighlight() {
+        highlightedSessionID = nil
     }
 
     /// Returns the one terminal connection for this session, or nil when this
@@ -567,6 +685,7 @@ public final class AppModel {
         linkSource = nil
         sessions = []
         sessionsError = nil
+        highlightedSessionID = nil
         // The path belongs to the torn-down route. Leaving it on screen would
         // report a live connection the phone no longer has.
         pathReporter.clear()

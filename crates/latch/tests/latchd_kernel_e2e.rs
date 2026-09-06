@@ -420,6 +420,38 @@ fn start_gateway(harness: &Harness) -> Gateway {
     Gateway { child, addr, token }
 }
 
+/// One bounded HTTP request against the running gateway.
+///
+/// The gateway's creation route is ordinary HTTP with a small JSON body, so a
+/// hand-written request is enough and keeps the parity suite free of a client
+/// dependency.
+fn gateway_post(gateway: &Gateway, target: &str, body: &str) -> (u16, Value) {
+    let request = format!(
+        "POST {target} HTTP/1.1\r\nHost: {host}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {len}\r\n\r\n{body}",
+        host = gateway.addr,
+        token = gateway.token,
+        len = body.len(),
+    );
+    let mut stream = TcpStream::connect(&gateway.addr).expect("connect to the gateway");
+    stream
+        .write_all(request.as_bytes())
+        .expect("write gateway request");
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .expect("read gateway response");
+    let status = response
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse::<u16>().ok())
+        .unwrap_or_else(|| panic!("no status line in {response:?}"));
+    let payload = response
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body)
+        .unwrap_or_default();
+    (status, serde_json::from_str(payload).unwrap_or(Value::Null))
+}
+
 type Ws = tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<TcpStream>>;
 
 fn connect_terminal(gateway: &Gateway, session: &str, cols: u16, rows: u16) -> Ws {
@@ -728,6 +760,79 @@ fn network_gateway_and_local_surface_steal_work_on_latchd() {
             Some((WS_CLOSE_STOLEN, "stolen".to_owned()))
         );
         drop(desk_again);
+        h.remove(&id);
+    });
+}
+
+/// The phone's whole creation contract on the real kernel: one request starts
+/// one unattached login shell in the directory it named, a retry of the same
+/// request id returns that same session instead of a second one, and reusing
+/// the id elsewhere is refused.
+#[test]
+fn a_gateway_creation_starts_one_unattached_shell_and_is_idempotent() {
+    with_kernel("gateway-create", |h| {
+        let gateway = start_gateway(h);
+        let work = h.temp.path().join("work");
+        fs::create_dir(&work).expect("work directory");
+        let canonical = fs::canonicalize(&work).expect("canonical work directory");
+        let elsewhere = h.temp.path().join("elsewhere");
+        fs::create_dir(&elsewhere).expect("second directory");
+        let request_id = "8cba5d78-79a0-4a55-9047-f77e57e463c7";
+        let body = json!({"requestId": request_id, "cwd": canonical}).to_string();
+
+        let (status, created) = gateway_post(&gateway, "/v2/sessions", &body);
+        assert_eq!(status, 200, "{created}");
+        let id = created["session"]["id"]
+            .as_str()
+            .expect("session id")
+            .to_owned();
+        assert_eq!(created["protocolVersion"], 2);
+
+        wait_until(
+            || h.inspect(&id)["state"] == "running",
+            "the created shell never reached running",
+            Duration::from_secs(10),
+        );
+        let inspect = h.inspect(&id);
+        assert_eq!(inspect["cwd"], json!(canonical));
+        assert_eq!(inspect["initial_size"], json!({"cols": 80, "rows": 24}));
+        // Creation starts a shell and nothing else: no attach client was
+        // spawned, so the session's one surface is still free.
+        assert!(!h.surface_attached(&id));
+        assert_eq!(
+            h.json(&["list", "--json"])["sessions"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // The response the phone never received, asked for again.
+        let (status, retried) = gateway_post(&gateway, "/v2/sessions", &body);
+        assert_eq!(status, 200, "{retried}");
+        assert_eq!(retried["session"]["id"], json!(id));
+        assert_eq!(
+            h.json(&["list", "--json"])["sessions"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let conflicting =
+            json!({"requestId": request_id, "cwd": fs::canonicalize(&elsewhere).unwrap()})
+                .to_string();
+        let (status, refused) = gateway_post(&gateway, "/v2/sessions", &conflicting);
+        assert_eq!(status, 409, "{refused}");
+        assert_eq!(refused["error"], "request_id_conflict");
+        assert_eq!(
+            h.json(&["list", "--json"])["sessions"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+
         h.remove(&id);
     });
 }

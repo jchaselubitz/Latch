@@ -85,6 +85,30 @@ the local device store first — that is what the helper enforces — and is
 mirrored to the control plane's pairing row afterward; a mirror failure is
 reported but never rolls the local grant back.
 
+### Starting a session from the phone
+
+The `control` grant also covers two operations that are not about an existing
+session: browsing this Mac's folders, and starting a new shell in one of them.
+The phone's **New session** control appears only when this Mac advertises both
+routes and the device holds `control`, and it disappears the moment the grant
+is downgraded — a phone on Observe or Interact can neither read a folder name
+nor create anything.
+
+What the phone can start is deliberately narrow: one interactive login shell,
+in one directory the person picked, at Latch's standard initial geometry. The
+phone supplies the working directory and nothing else — no command, agent,
+session name, environment variable, or shell path — and creation never
+attaches, so no window or pane on this Mac changes hands. The new session
+simply appears in the list, and the person opens it and types whatever they
+came to run.
+
+Folder names and paths travel inside the same end-to-end encrypted paired
+tunnel as everything else; the control plane and relay never see them. The
+phone also asks for Face ID, Touch ID, or the device passcode before it shows
+a folder or starts a process, so a borrowed unlocked phone is not a shell on
+this Mac. The full behavior is in
+[`FEATURE_MOBILE_SESSION_CREATION.md`](FEATURE_MOBILE_SESSION_CREATION.md).
+
 ## Keeping the Mac reachable
 
 Two things this app does are specifically about the Mac being reachable while

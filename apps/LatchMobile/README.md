@@ -14,6 +14,12 @@ repository without leaving a dependency on the Latch checkout behind.
 - **Settings** links the phone to one `latch serve` gateway and shows what that
   gateway reports it can do, and holds **Remote access**: pairing this phone
   with a Mac's own identity by scanning the code it shows.
+- **New session** on the Sessions toolbar browses the linked Mac's folders and
+  starts a plain login shell in the one chosen. It appears only when the Mac
+  advertises both the folder browser and session creation, needs the `control`
+  grant and a device-owner check, and never opens or attaches to what it
+  created. Settings → **New sessions → Default folder** saves where the picker
+  begins.
 - Tapping a session opens either its **terminal** or its **chat**, decided by
   the *Session view* setting and by what the session and the grant actually
   allow. Chat, composer, and interaction controls appear only after a host
@@ -35,6 +41,8 @@ Sources/LatchMobileKit/
   LatchGateway.swift              protocol-v2 discovery and sessions client
   GatewayCompatibility.swift      protocol-major-2 discovery rules
   LinkStore.swift                 keychain storage for the address and token
+  NewSessionFolder.swift          the saved default folder and the UI-free
+                                  folder-browser and creation state machine
   AppModel.swift                  observable session-list model
   SessionPresentation.swift       the Session view and Terminal size settings,
                                   and the pure tap-routing table
@@ -49,6 +57,8 @@ App/LatchMobile/SessionTerminalSurface.swift the renderer seam, and a stub
 App/LatchMobile/SwiftTermSurface.swift the only file that names SwiftTerm
 App/LatchMobile/TerminalKeyBar.swift the key row above the keyboard
 App/LatchMobile/TerminalView.swift  the terminal screen and its states
+App/LatchMobile/FolderPickerView.swift the remote folder browser, in both its
+                                  New session and Default folder modes
 Contract/                         vendored schemas and their digests
 Tools/generate-contract.py        the contract generator and drift gate
 ```

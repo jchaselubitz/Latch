@@ -398,14 +398,25 @@ final class RemoteAccessController: ObservableObject {
         }
         do {
             let offers = try await controlPlane.rendezvousOffers(wait: Self.offerWaitSeconds)
-            let locallyAuthorized = Set(devices.filter { !$0.revoked }.map(\.deviceID))
-            approvedRendezvousOffers = offers.filter { locallyAuthorized.contains($0.peerDeviceID) }
+            approvedRendezvousOffers = Self.authorizedOffers(offers, devices: devices)
             deliverApprovedOffers()
             return true
         } catch {
             errorMessage = error.localizedDescription
             return false
         }
+    }
+
+    /// Offers name the directory row, not the local Noise identity's device ID.
+    /// Only an explicit, non-revoked local pairing may admit that directory row.
+    static func authorizedOffers(
+        _ offers: [ControlPlaneRendezvousOffer],
+        devices: [RemoteDevice]
+    ) -> [ControlPlaneRendezvousOffer] {
+        let locallyAuthorized = Set(
+            devices.filter { !$0.revoked }.compactMap(\.controlPlaneDeviceID)
+        )
+        return offers.filter { locallyAuthorized.contains($0.peerDeviceID) }
     }
 
     /// Chooses which gathered candidates presence carries.

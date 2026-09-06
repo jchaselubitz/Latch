@@ -20,6 +20,7 @@
 		ABCDEF0123456789ABCD0033 /* TerminalKeyBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD0031 /* TerminalKeyBar.swift */; };
 		ABCDEF0123456789ABCD0035 /* SwiftTermSurface.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD0034 /* SwiftTermSurface.swift */; };
 		ABCDEF0123456789ABCD0041 /* TerminalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD0040 /* TerminalView.swift */; };
+		ABCDEF0123456789ABCD0051 /* FolderPickerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD0050 /* FolderPickerView.swift */; };
 		ABCDEF0123456789ABCD0038 /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = ABCDEF0123456789ABCD0037 /* SwiftTerm */; };
 /* End PBXBuildFile section */
 
@@ -37,6 +38,7 @@
 		ABCDEF0123456789ABCD0031 /* TerminalKeyBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalKeyBar.swift; sourceTree = "<group>"; };
 		ABCDEF0123456789ABCD0034 /* SwiftTermSurface.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SwiftTermSurface.swift; sourceTree = "<group>"; };
 		ABCDEF0123456789ABCD0040 /* TerminalView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalView.swift; sourceTree = "<group>"; };
+		ABCDEF0123456789ABCD0050 /* FolderPickerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FolderPickerView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -74,6 +76,7 @@
 				ABCDEF0123456789ABCD0031 /* TerminalKeyBar.swift */,
 				ABCDEF0123456789ABCD0034 /* SwiftTermSurface.swift */,
 				ABCDEF0123456789ABCD0040 /* TerminalView.swift */,
+				ABCDEF0123456789ABCD0050 /* FolderPickerView.swift */,
 				ABCDEF0123456789ABCD001C /* Assets.xcassets */,
 				ABCDEF0123456789ABCD0014 /* Info.plist */,
 			);
@@ -174,6 +177,7 @@
 				ABCDEF0123456789ABCD0033 /* TerminalKeyBar.swift in Sources */,
 				ABCDEF0123456789ABCD0035 /* SwiftTermSurface.swift in Sources */,
 				ABCDEF0123456789ABCD0041 /* TerminalView.swift in Sources */,
+				ABCDEF0123456789ABCD0051 /* FolderPickerView.swift in Sources */,
 				ABCDEF0123456789ABCD0021 /* PairingView.swift in Sources */,
 				ABCDEF0123456789ABCD0022 /* QRScannerView.swift in Sources */,
 			);

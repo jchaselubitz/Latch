@@ -248,6 +248,29 @@ final class RemoteAccessTests: XCTestCase {
     }
 
     @MainActor
+    func testOffersUseDirectoryIDsAndRequireAnActiveLocalPairing() {
+        let incoming = offer(candidates: [], ufrag: "phoneufr", pwd: "phone-password")
+        func device(localID: String, directoryID: String?, revoked: Bool = false) -> RemoteDevice {
+            RemoteDevice(
+                deviceID: localID, name: "iPhone", permission: .control,
+                revoked: revoked, controlPlaneDeviceID: directoryID
+            )
+        }
+        func admitted(_ devices: [RemoteDevice]) -> [String] {
+            RemoteAccessController.authorizedOffers([incoming], devices: devices).map(\.requestID)
+        }
+
+        // Local IDs are identity-derived; rendezvous uses the directory row ID.
+        XCTAssertEqual(admitted([device(localID: "local-noise-id", directoryID: "d1")]), ["r1"])
+        XCTAssertTrue(admitted([device(localID: "local-noise-id", directoryID: "d1", revoked: true)]).isEmpty)
+        XCTAssertTrue(admitted([device(localID: "local-noise-id", directoryID: "another-row")]).isEmpty)
+        XCTAssertTrue(admitted([]).isEmpty)
+        // Never fall back to a matching local ID, including legacy pairings.
+        XCTAssertTrue(admitted([device(localID: "d1", directoryID: nil)]).isEmpty)
+        XCTAssertTrue(admitted([device(localID: "d1", directoryID: "another-row")]).isEmpty)
+    }
+
+    @MainActor
     func testPresenceKeepsReflexiveCandidatesWhenAMacHasMoreInterfacesThanPresenceCarries() {
         let reflexive = gathered(type: "srflx", priority: 1_694_498_815, address: "203.0.113.9:1")
         let hosts = (0..<9).map { index in

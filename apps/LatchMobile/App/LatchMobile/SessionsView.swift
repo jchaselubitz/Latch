@@ -5,6 +5,8 @@ import SwiftUI
 struct SessionsView: View {
     @Environment(AppModel.self) private var model
     @Environment(PairingModel.self) private var pairing
+    @State private var creatingSession = false
+    @State private var explainingGrant = false
 
     var body: some View {
         NavigationStack {
@@ -31,8 +33,49 @@ struct SessionsView: View {
                 }
             }
             .navigationTitle("Sessions")
+            .toolbar { newSessionButton }
+            .sheet(isPresented: $creatingSession) {
+                FolderPickerView(mode: .create)
+            }
+            .alert(
+                "This phone can't start a session",
+                isPresented: $explainingGrant
+            ) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(model.newSessionUnavailableExplanation ?? "")
+            }
         }
         .task { await refreshPermission() }
+    }
+
+    /// Shown whenever the Mac serves both new-session routes, and disabled
+    /// when this phone's grant does not reach them — a control that explains
+    /// itself is more use than one that quietly disappears.
+    @ToolbarContentBuilder
+    private var newSessionButton: some ToolbarContent {
+        ToolbarItem(placement: .primaryAction) {
+            if model.advertisesNewSessionCreation {
+                Button {
+                    if model.canCreateNewSession {
+                        creatingSession = true
+                    } else {
+                        explainingGrant = true
+                    }
+                } label: {
+                    Label("New session", systemImage: "plus")
+                }
+                .accessibilityLabel("New session")
+                .accessibilityHint(
+                    model.canCreateNewSession
+                        ? "Choose a folder on your Mac and start a shell there"
+                        : "Unavailable until this phone has control of your Mac"
+                )
+                // Left tappable when the grant is missing so the alert can say
+                // what to change on the Mac.
+                .opacity(model.canCreateNewSession ? 1 : 0.4)
+            }
+        }
     }
 
     /// The paired Mac's name, when this phone has finished pairing.
@@ -55,12 +98,35 @@ struct SessionsView: View {
                 await model.refreshSessions()
             }
         } else {
-            List(model.sessions) { session in
-                let route = model.route(for: session)
-                NavigationLink {
-                    destination(for: session, route: route)
-                } label: {
-                    SessionRow(session: session, route: route)
+            ScrollViewReader { proxy in
+                List(model.sessions) { session in
+                    let route = model.route(for: session)
+                    NavigationLink {
+                        destination(for: session, route: route)
+                    } label: {
+                        SessionRow(
+                            session: session,
+                            route: route,
+                            isHighlighted: session.id == model.highlightedSessionID
+                        )
+                    }
+                    .id(session.id)
+                    .listRowBackground(
+                        session.id == model.highlightedSessionID
+                            ? Color.accentColor.opacity(0.15)
+                            : nil
+                    )
+                }
+                // A created session is pointed at, not opened. Attaching would
+                // take the surface from the Mac, and creation never asked for
+                // that.
+                .onChange(of: model.highlightedSessionID) { _, created in
+                    guard let created else { return }
+                    withAnimation { proxy.scrollTo(created, anchor: .top) }
+                    Task {
+                        try? await Task.sleep(for: .seconds(4))
+                        model.clearNewSessionHighlight()
+                    }
                 }
             }
             .refreshable {
@@ -163,6 +229,8 @@ private struct SessionRow: View {
     /// Shown as a trailing glyph. On a build where the tap can be destructive,
     /// telling the user where it goes is not decoration.
     let route: SessionRoute
+    /// True for the session this phone just created, briefly after creation.
+    var isHighlighted = false
 
     var body: some View {
         HStack(spacing: 12) {
@@ -200,6 +268,8 @@ private struct SessionRow: View {
                 .accessibilityLabel(destinationLabel)
         }
         .padding(.vertical, 2)
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(isHighlighted ? [.isSelected] : [])
     }
 
     private var destinationGlyph: String {

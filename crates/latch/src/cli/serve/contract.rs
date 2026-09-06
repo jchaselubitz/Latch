@@ -1,10 +1,32 @@
 //! Generated from `schemas/remote-access/v2/*.schema.json`; do not edit by hand.
-//! Canonical schema set SHA-256: 8deeeadf29c02a04f94411b5ac446a81512085e0619372d035e139acc5d70c23
+//! Canonical schema set SHA-256: 1959ddbd129ee68dd25683c44cafde0bd935016be357eee163603cb7b66eddb5
 
 use serde::{Deserialize, Serialize};
 
 pub const REMOTE_ACCESS_SCHEMA_VERSION: u8 = 2;
 pub const OPERATION_RETENTION_SECONDS: u64 = 10 * 60;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DirectoryEntry {
+    pub name: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectoryPage {
+    pub path: String,
+    pub parent: Option<String>,
+    pub entries: Vec<DirectoryEntry>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateSessionRequest {
+    pub request_id: String,
+    pub cwd: String,
+}
 
 /// Reason carried in a terminal WebSocket close frame. `Detached` is a clean
 /// end; every other value says why the single exclusive surface was taken away.

@@ -8,11 +8,13 @@ struct SettingsView: View {
     @State private var address = ""
     @State private var token = ""
     @State private var confirmingUnlink = false
+    @State private var choosingDefaultFolder = false
 
     var body: some View {
         NavigationStack {
             Form {
                 sessionViewSection
+                newSessionSection
                 remoteAccessSection
 
                 switch model.linkState {
@@ -63,6 +65,57 @@ struct SettingsView: View {
             the text to it.
             """)
         }
+    }
+
+    // MARK: - New sessions
+
+    /// Only shown when the linked Mac serves the folder browser. A saved path
+    /// is a preference, not a credential: it names a folder on the Mac and
+    /// grants nothing on its own.
+    @ViewBuilder
+    private var newSessionSection: some View {
+        if model.advertisesNewSessionCreation {
+            Section {
+                Button {
+                    choosingDefaultFolder = true
+                } label: {
+                    LabeledContent("Default folder", value: defaultFolderSummary)
+                }
+                .disabled(!model.canBrowseNewSessionFolders)
+                .accessibilityHint(
+                    model.canBrowseNewSessionFolders
+                        ? "Browse your Mac and choose where new sessions start"
+                        : "Unavailable until this phone has control of your Mac"
+                )
+                if model.defaultNewSessionFolder != nil {
+                    Button("Use my Mac home folder", role: .destructive) {
+                        model.clearDefaultNewSessionFolder()
+                    }
+                }
+            } header: {
+                Text("New sessions")
+            } footer: {
+                Text(newSessionFooter)
+            }
+            .sheet(isPresented: $choosingDefaultFolder) {
+                FolderPickerView(mode: .chooseDefault)
+            }
+        }
+    }
+
+    private var defaultFolderSummary: String {
+        model.defaultNewSessionFolder ?? "Mac home folder"
+    }
+
+    private var newSessionFooter: String {
+        if let explanation = model.newSessionUnavailableExplanation {
+            return explanation
+        }
+        return """
+        Where the folder picker starts. Choosing somewhere else for one session does not \
+        change it. Starting a session creates a plain shell on your Mac — it does not open \
+        the session or run an agent.
+        """
     }
 
     // MARK: - Remote access
@@ -289,6 +342,8 @@ struct SettingsView: View {
         case .preview: return "Screen preview"
         case .terminal: return "Terminal"
         case .conversation: return "Conversation"
+        case .browseDirectories: return "Folder browser"
+        case .createSession: return "Session creation"
         }
     }
 
