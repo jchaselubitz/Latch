@@ -62,15 +62,21 @@ struct SessionsView: View {
                     }
                     .keyboardShortcut("n")
                     .disabled(!store.canCreateSessions)
-                    Button("Stop Selected…", role: .destructive) {
-                        pendingStop = PendingStopRequest(sessionIDs: store.selectedLiveSessionIDs)
-                    }
-                    .disabled(!store.hasSelectedLiveSessions)
-                    Button("Stop All…", role: .destructive) {
-                        showingStopAll = true
-                    }
-                    .disabled(!store.sessions.contains(where: { $0.state.isLive }))
                 }
+            }
+            // Fixed footer: bulk actions live here instead of the toolbar so they stay
+            // reachable regardless of list length or sidebar width.
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                SidebarFooter(
+                    canStopAll: store.sessions.contains(where: { $0.state.isLive }),
+                    stopAll: { showingStopAll = true },
+                    prune: {
+                        Task {
+                            await store.previewPrune()
+                            showingPrune = store.prunePreview != nil
+                        }
+                    }
+                )
             }
         } detail: {
             if store.selection.count > 1 {
@@ -96,12 +102,6 @@ struct SessionsView: View {
                     Label("Refresh", systemImage: "arrow.clockwise")
                 }
                 .disabled(store.isRefreshing)
-                Button("Prune…") {
-                    Task {
-                        await store.previewPrune()
-                        showingPrune = store.prunePreview != nil
-                    }
-                }
             }
         }
         // Without this the toolbar's sidebar section stops short of the split divider, so
@@ -220,6 +220,28 @@ struct SessionsView: View {
                 showingPrune = store.prunePreview != nil
             }
         }
+    }
+}
+
+private struct SidebarFooter: View {
+    let canStopAll: Bool
+    let stopAll: () -> Void
+    let prune: () -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Divider()
+            HStack(spacing: 8) {
+                Button("Stop All…", role: .destructive, action: stopAll)
+                    .disabled(!canStopAll)
+                Button("Prune…", action: prune)
+                Spacer(minLength: 0)
+            }
+            .controlSize(.small)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+        }
+        .background(.bar)
     }
 }
 
@@ -369,7 +391,7 @@ private struct SessionRow: View {
                 .accessibilityLabel(session.state.rawValue)
             VStack(alignment: .leading, spacing: 2) {
                 Text(session.name).fontWeight(.medium).lineLimit(1)
-                Text(session.title ?? "\(session.commandLabel) — \(session.cwd)")
+                Text(session.displaySubtitle)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -748,7 +770,7 @@ struct MenuBarSessionsView: View {
     let checkForUpdates: () -> Void
 
     var body: some View {
-        ForEach(store.sessions.prefix(6)) { session in
+        ForEach(store.sessions.prefix(12)) { session in
             Button {
                 Task { await store.open(session.id) }
             } label: {
@@ -757,6 +779,10 @@ struct MenuBarSessionsView: View {
             .disabled(!session.state.isAttachable || !store.canAttachSessions)
         }
         if store.sessions.isEmpty { Text("No sessions") }
+        Button("Stop All Sessions", role: .destructive) {
+            Task { await store.stopAll() }
+        }
+        .disabled(!store.sessions.contains(where: { $0.state.isLive }))
         if let update = updates.pendingUpdate {
             Button("Update to Latch \(update.version.description)…") { checkForUpdates() }
         }

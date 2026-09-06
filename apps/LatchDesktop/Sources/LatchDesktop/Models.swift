@@ -28,6 +28,24 @@ struct SessionSummary: Codable, Identifiable, Hashable, Sendable {
         case idleMs = "idle_ms"
     }
 
+    /// Sidebar subtitle. Titles arrive as `<id> — <description>`; the id repeats
+    /// what the row already shows, so only the description survives.
+    var displaySubtitle: String {
+        guard let title else { return "\(commandLabel) — \(cwd)" }
+        return Self.displaySubtitle(fromTitle: title)
+    }
+
+    static func displaySubtitle(fromTitle title: String) -> String {
+        let trimmed = title.trimmingCharacters(in: .whitespaces)
+        for separator in [" — ", " – ", " - "] {
+            if let range = trimmed.range(of: separator) {
+                let rest = trimmed[range.upperBound...].trimmingCharacters(in: .whitespaces)
+                return rest.isEmpty ? trimmed : rest
+            }
+        }
+        return trimmed
+    }
+
     /// Coarse idle label matching the sidebar row (`3m idle`, `2h idle`, …).
     var displayIdleLabel: String? {
         Self.displayIdleLabel(for: idleMs)

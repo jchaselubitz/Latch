@@ -381,6 +381,10 @@ final class TerminalLauncherTests: XCTestCase {
     }
 
     func testDisplayIdleLabelMatchesSidebarBuckets() {
+        XCTAssertEqual(SessionSummary.displaySubtitle(fromTitle: "coo:942.xyc3 — Refine Sidebar"), "Refine Sidebar")
+        XCTAssertEqual(SessionSummary.displaySubtitle(fromTitle: "coo:942 - Plain dash"), "Plain dash")
+        XCTAssertEqual(SessionSummary.displaySubtitle(fromTitle: "No separator"), "No separator")
+        XCTAssertEqual(SessionSummary.displaySubtitle(fromTitle: "coo:942 — "), "coo:942 —")
         XCTAssertEqual(SessionSummary.displayIdleLabel(for: 12_000), "12s idle")
         XCTAssertEqual(SessionSummary.displayIdleLabel(for: 180_000), "3m idle")
         XCTAssertEqual(SessionSummary.displayIdleLabel(for: 7_200_000), "2h idle")
