@@ -140,7 +140,7 @@ public struct RemoteChannelContext: Sendable {
     public let signaling: any SignalingClient
     public let pathReporter: RemotePathReporter
     /// Called when the selected path changes underneath a live channel.
-    /// Capabilities are re-read before application traffic resumes.
+    /// Cached capabilities are invalidated; the next discovery re-reads them.
     public let onPathChange: @Sendable () async -> Void
 
     public init(
@@ -497,10 +497,11 @@ actor RemoteReachabilityGate {
     }
 }
 
-/// Re-reads capabilities when the selected path changes underneath a live
-/// gateway, before the provider releases the triggering channel to traffic.
+/// Invalidates capabilities when the selected path changes. Fetching here would
+/// open a socket behind the serialized channel whose callback we are servicing,
+/// so it would wait for itself. The next discovery performs the refresh.
 actor GatewayRediscovery {
-    private var gateway: LatchGateway?
+    private weak var gateway: LatchGateway?
 
     func install(_ gateway: LatchGateway) {
         self.gateway = gateway
@@ -509,6 +510,5 @@ actor GatewayRediscovery {
     func run() async {
         guard let gateway else { return }
         await gateway.invalidateDiscovery()
-        _ = try? await gateway.discover()
     }
 }

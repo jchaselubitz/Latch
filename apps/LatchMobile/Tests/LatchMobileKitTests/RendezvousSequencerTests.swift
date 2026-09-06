@@ -63,6 +63,32 @@ final class RendezvousSequencerTests: XCTestCase {
         XCTAssertEqual(notes, ["first started", "first finished", "second started"])
     }
 
+    func testCancellingAQueuedOpenNeverPostsItsOffer() async throws {
+        let sequencer = RendezvousSequencer()
+        let order = Recorder()
+        let firstMayFinish = Gate()
+        let first = Task {
+            try await sequencer.serialized {
+                await order.note("first")
+                await firstMayFinish.wait()
+            }
+        }
+        await order.waitUntil(count: 1)
+        let cancelled = Task {
+            try await sequencer.serialized { await order.note("cancelled offer") }
+        }
+        cancelled.cancel()
+        await firstMayFinish.open()
+        try await first.value
+        do {
+            try await cancelled.value
+            XCTFail("cancelled opening ran")
+        } catch is CancellationError {}
+        try await sequencer.serialized { await order.note("next") }
+        let observed = await order.notes
+        XCTAssertEqual(observed, ["first", "next"])
+    }
+
     func testAFailedOfferStillReleasesTheNextOne() async throws {
         struct Failed: Error {}
         let sequencer = RendezvousSequencer()

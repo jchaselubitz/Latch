@@ -22,6 +22,7 @@ struct LatchMobileApp: App {
                 .environment(model)
                 .environment(pairing)
                 .task {
+                    try? NativeTransportDiagnostics.restore()
                     await pairing.restore()
                     // The Mac may have changed this grant while the phone was
                     // closed. Read it before the paired route snapshots the

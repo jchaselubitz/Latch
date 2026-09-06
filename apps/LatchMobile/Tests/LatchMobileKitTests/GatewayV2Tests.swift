@@ -90,6 +90,42 @@ final class GatewayV2Tests: XCTestCase {
         XCTAssertEqual(StubProtocol.requests.map(\.path), ["/v2/capabilities", "/v2/sessions"])
     }
 
+    func testPathChangeInvalidatesWithoutReenteringSerializedOpening() async throws {
+        // Populate capabilities through the real gateway, then deliver a path
+        // callback from within the channel-opening queue. No network request
+        // can run until that callback returns.
+        try await testDiscoveryAndSessionsUseOnlyV2Routes()
+        let gateway = LatchGateway(
+            link: try GatewayLink(address: "http://127.0.0.1:8787", token: "token"),
+            session: StubProtocol.session()
+        )
+        _ = try await gateway.discover()
+        let rediscovery = GatewayRediscovery()
+        await rediscovery.install(gateway)
+        let requestsBefore = StubProtocol.requests.count
+        let sequencer = RendezvousSequencer()
+        try await sequencer.serialized { await rediscovery.run() }
+        let cached = await gateway.discovered
+        XCTAssertNil(cached)
+        XCTAssertEqual(StubProtocol.requests.count, requestsBefore,
+                       "path callback opened a socket behind itself")
+        _ = try await gateway.listSessions()
+        XCTAssertEqual(Array(StubProtocol.requests.suffix(2).map(\.path)),
+                       ["/v2/capabilities", "/v2/sessions"])
+    }
+
+    func testRediscoveryDoesNotKeepAnAbandonedGatewayAlive() async throws {
+        let rediscovery = GatewayRediscovery()
+        var gateway: LatchGateway? = LatchGateway(
+            link: try GatewayLink(address: "http://127.0.0.1:8787", token: "token"),
+            session: StubProtocol.session()
+        )
+        weak var released = gateway
+        await rediscovery.install(gateway!)
+        gateway = nil
+        XCTAssertNil(released)
+    }
+
     func testUnknownMessageStatusFallsBackToComplete() throws {
         let status = try JSONDecoder().decode(MessageStatus.self, from: Data(#""future""#.utf8))
         XCTAssertEqual(status, .complete)

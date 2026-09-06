@@ -73,10 +73,15 @@ public actor RendezvousSequencer {
         let previous = tail
         let task = Task<T, any Error> {
             await previous?.value
+            try Task.checkCancellation()
             return try await operation()
         }
         tail = Task { _ = try? await task.value }
-        return try await task.value
+        return try await withTaskCancellationHandler {
+            try await task.value
+        } onCancel: {
+            task.cancel()
+        }
     }
 
     /// Records what the Mac answered the latest offer with. `nil` when the

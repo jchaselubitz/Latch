@@ -22,6 +22,11 @@ let targets: [Target] = [
         dependencies: ["LatchMobileKit", "LatchTransportFFI"],
         path: "Sources/LatchTransportNative"
     ),
+    .testTarget(
+        name: "LatchTransportNativeTests",
+        dependencies: ["LatchTransportNative"],
+        path: "Tests/LatchTransportNativeTests"
+    ),
     .target(
         name: "LatchMobileKit",
         path: "Sources/LatchMobileKit"

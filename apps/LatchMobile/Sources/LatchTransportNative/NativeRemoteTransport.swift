@@ -100,11 +100,13 @@ public final class NativeRemoteChannelProvider: RemoteNoiseChannelProvider, @unc
         stun: [LatchMobileKit.IceServer],
         relay: (servers: [LatchMobileKit.IceServer], refused: Bool)
     ) async throws -> NativeRemoteNoiseChannel {
+        try Task.checkCancellation()
         let transport = try await RemoteTransport.gather(
             credentials: Self.credentials(),
             servers: Self.nativeServers(stun + relay.servers)
         )
         do {
+            try Task.checkCancellation()
             return try await connect(transport: transport, local: transport.localDescription())
         } catch let failure as ConnectivityFailure {
             guard relay.servers.isEmpty, !relay.refused, failure.retryable else {
@@ -146,6 +148,7 @@ public final class NativeRemoteChannelProvider: RemoteNoiseChannelProvider, @unc
         await sequencer.awaitReplacement {
             try await self.signaling.macPresence(for: self.record)
         }
+        try Task.checkCancellation()
         let answer = try await signaling.offerRendezvous(
             for: record,
             candidates: candidates,
@@ -176,6 +179,7 @@ public final class NativeRemoteChannelProvider: RemoteNoiseChannelProvider, @unc
         // Whichever pair ICE nominated is the answer: relay is a legitimate
         // outcome of the first attempt now, and the same pinned Noise session
         // runs over it either way. The path is reported, not judged.
+        try Task.checkCancellation()
         await record(path: selected)
         return NativeRemoteNoiseChannel(
             transport: transport,

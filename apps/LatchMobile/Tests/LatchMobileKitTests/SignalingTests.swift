@@ -409,6 +409,22 @@ final class SignalingTests: XCTestCase {
         )
     }
 
+    func testPublicationKeepsIPv4AndIPv6ReflexiveRoutesAheadOfExtraHosts() {
+        func candidate(_ address: String, _ type: String, _ priority: UInt32) -> TransportCandidate {
+            TransportCandidate(address: address, expiresAt: 100, type: type,
+                priority: priority, foundation: "1", component: 1, protocol: "udp")
+        }
+        let hosts = (1...9).map { candidate("192.168.1.\($0):5000", "host", 2000) }
+        let reflexive6 = candidate("[2001:db8::1]:5000", "srflx", 1000)
+        let reflexive4 = candidate("203.0.113.1:5000", "srflx", 999)
+        let relay = candidate("203.0.113.2:5000", "relay", 1)
+        let selected = TransportCandidate.preferredForPublication(hosts + [reflexive6, reflexive4, relay])
+        XCTAssertEqual(selected.count, SignalingWindows.maxCandidates)
+        XCTAssertTrue(selected.contains(reflexive4))
+        XCTAssertTrue(selected.contains(reflexive6))
+        XCTAssertTrue(selected.contains(relay))
+    }
+
     func testPublicationSelectionBoundsGatheredCandidatesWithoutLosingRouteTypes() {
         func gathered(
             _ index: Int,

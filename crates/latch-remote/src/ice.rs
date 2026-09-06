@@ -262,6 +262,8 @@ impl PeerTransport for IceResponder {
 
     async fn offer(&self, offer: RemoteOffer) -> anyhow::Result<()> {
         let remote = remote_description(&offer);
+        let attempt = latch_transport::diagnostics::fingerprint(&offer.ice_ufrag);
+        log::info!(target: "latch_remote", "request={} attempt={attempt} offer received", offer.request_id);
         let endpoint = self
             .inner
             .idle
@@ -281,10 +283,12 @@ impl PeerTransport for IceResponder {
             match &connection {
                 Ok(connection) => log::info!(
                     target: "latch_remote",
-                    "answered an offer: connected, route {:?}",
+                    "attempt={attempt} answered an offer: connected, route {:?}",
                     connection.selected_route()
                 ),
-                Err(error) => log::warn!(target: "latch_remote", "answered an offer: {error}"),
+                Err(error) => {
+                    log::warn!(target: "latch_remote", "attempt={attempt} answered an offer: {error}")
+                }
             }
             if let Some(home) = home {
                 // A failed answer is the denominator of the connect rate, so

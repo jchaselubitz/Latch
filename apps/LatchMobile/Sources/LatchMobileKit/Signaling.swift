@@ -176,7 +176,7 @@ public struct TransportCandidate: Codable, Equatable, Sendable {
     /// Candidate priority supplies the normal ICE ordering, but taking only a
     /// priority-sorted prefix can discard every lower-priority reflexive or
     /// relay route when a device has many host interfaces. Reserve the best
-    /// candidate of each type first, then each type/transport combination,
+    /// candidate of each type first, then each type/transport/address-family combination,
     /// before filling remaining slots by priority. The subsequent `prepare`
     /// call remains the authority for validation and rejecting other callers
     /// that fail to bound their own payloads.
@@ -211,11 +211,12 @@ public struct TransportCandidate: Codable, Equatable, Sendable {
             }
         }
 
-        var typeTransports = Set(
-            selected.map { "\($0.type ?? "unknown")|\($0.protocol ?? "unknown")" }
-        )
+        func routeKey(_ candidate: TransportCandidate) -> String {
+            "\(candidate.type ?? "unknown")|\(candidate.protocol ?? "unknown")|\(candidate.address.hasPrefix("[") ? "v6" : "v4")"
+        }
+        var typeTransports = Set(selected.map(routeKey))
         for entry in ranked where selected.count < maxCount {
-            let key = "\(entry.element.type ?? "unknown")|\(entry.element.protocol ?? "unknown")"
+            let key = routeKey(entry.element)
             if typeTransports.insert(key).inserted {
                 append(entry)
             }

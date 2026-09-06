@@ -115,6 +115,8 @@ pub struct RemoteTransport {
     local: RwLock<LocalDescription>,
     credentials: IceCredentials,
     connectivity_failure: AtomicBool,
+    operation: Mutex<()>,
+    closed: tokio::sync::watch::Sender<bool>,
 }
 
 #[uniffi::export(async_runtime = "tokio")]
@@ -143,6 +145,8 @@ impl RemoteTransport {
             local: RwLock::new(local.into()),
             credentials,
             connectivity_failure: AtomicBool::new(false),
+            operation: Mutex::new(()),
+            closed: tokio::sync::watch::channel(false).0,
         }))
     }
 
@@ -168,15 +172,24 @@ impl RemoteTransport {
         &self,
         servers: Vec<IceServer>,
     ) -> Result<LocalDescription, TransportError> {
+        let _operation = self.operation.lock().await;
+        let mut closed = self.closed.subscribe();
+        if *closed.borrow_and_update() || self.connection.lock().await.is_some() {
+            return Err(TransportError::InvalidState);
+        }
         require_turn(&servers)?;
-        let (endpoint, local) = RtcEndpoint::gather(
-            self.credentials.clone().into(),
-            &servers.into_iter().map(Into::into).collect::<Vec<_>>(),
-        )
-        .await
-        .map_err(failure)?;
+        let servers = servers.into_iter().map(Into::into).collect::<Vec<_>>();
+        let (endpoint, local) = tokio::select! {
+            biased;
+            _ = closed.changed() => return Err(TransportError::InvalidState),
+            result = RtcEndpoint::gather(self.credentials.clone().into(), &servers) =>
+                result.map_err(failure)?,
+        };
         let local: LocalDescription = local.into();
-        *self.endpoint.lock().await = Some(endpoint);
+        if let Some(previous) = self.endpoint.lock().await.replace(endpoint) {
+            previous.close().await.map_err(failure)?;
+        }
+        self.connectivity_failure.store(false, Ordering::Release);
         *self.local.write().expect("local description lock poisoned") = local.clone();
         Ok(local)
     }
@@ -187,16 +200,28 @@ impl RemoteTransport {
         remote: RemoteDescription,
         role: TransportRole,
     ) -> Result<SelectedPath, TransportError> {
+        let _operation = self.operation.lock().await;
+        let mut closed = self.closed.subscribe();
+        if *closed.borrow_and_update() {
+            return Err(TransportError::InvalidState);
+        }
+        self.connectivity_failure.store(false, Ordering::Release);
         let endpoint = self
             .endpoint
             .lock()
             .await
             .take()
             .ok_or(TransportError::InvalidState)?;
-        let connection = match endpoint.connect(remote.into(), role.into()).await {
+        let result = tokio::select! {
+            biased;
+            _ = closed.changed() => return Err(TransportError::InvalidState),
+            result = endpoint.connect(remote.into(), role.into()) => result,
+        };
+        let connection = match result {
             Ok(connection) => connection,
             Err(error) => {
-                if matches!(&error, RtcError::Stack(_)) {
+                if matches!(&error, RtcError::Stack(message) if message == "ICE connectivity checks timed out")
+                {
                     self.connectivity_failure.store(true, Ordering::Release);
                 }
                 return Err(failure(error));
@@ -242,11 +267,21 @@ impl RemoteTransport {
 
     /// Closes the channel and ICE agent.
     pub async fn close(&self) -> Result<(), TransportError> {
+        self.closed.send_replace(true);
+        let _operation = self.operation.lock().await;
+        let endpoint = self.endpoint.lock().await.take();
         let connection = self.connection.lock().await.take();
-        if let Some(connection) = connection {
-            connection.close().await.map_err(failure)?;
-        }
-        Ok(())
+        let endpoint_result = if let Some(endpoint) = endpoint {
+            endpoint.close().await.map_err(failure)
+        } else {
+            Ok(())
+        };
+        let connection_result = if let Some(connection) = connection {
+            connection.close().await.map_err(failure)
+        } else {
+            Ok(())
+        };
+        endpoint_result.and(connection_result)
     }
 }
 
@@ -380,6 +415,77 @@ mod tests {
         assert!(!transport.connectivity_failed());
     }
 
+    async fn test_transport() -> Arc<RemoteTransport> {
+        RemoteTransport::gather(
+            IceCredentials {
+                ufrag: "ffi-cleanup".into(),
+                password: "ffi-cleanup-password-with-more-than-128-bits".into(),
+            },
+            vec![],
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn close_releases_a_gathered_endpoint_and_is_terminal() {
+        let transport = test_transport().await;
+        transport.close().await.unwrap();
+        assert!(transport.endpoint.lock().await.is_none());
+        assert!(matches!(
+            transport
+                .connect(
+                    RemoteDescription {
+                        credentials: IceCredentials {
+                            ufrag: "peer".into(),
+                            password: "unused-password".into()
+                        },
+                        candidates: vec![],
+                    },
+                    TransportRole::Initiator
+                )
+                .await,
+            Err(TransportError::InvalidState)
+        ));
+        transport.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn close_interrupts_an_in_progress_connect() {
+        let transport = test_transport().await;
+        let pending = tokio::spawn({
+            let transport = Arc::clone(&transport);
+            async move {
+                transport
+                    .connect(
+                        RemoteDescription {
+                            credentials: IceCredentials {
+                                ufrag: "missing-peer".into(),
+                                password: "missing-password-with-more-than-128-bits".into(),
+                            },
+                            candidates: vec![],
+                        },
+                        TransportRole::Initiator,
+                    )
+                    .await
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while transport.endpoint.lock().await.is_some() {
+                tokio::task::yield_now().await;
+            }
+            transport.close().await.unwrap();
+            assert!(matches!(
+                pending.await.unwrap(),
+                Err(TransportError::InvalidState)
+            ));
+        })
+        .await
+        .expect("close waited for the entire ICE timeout");
+        assert!(!transport.connectivity_failed());
+        assert!(transport.connection.lock().await.is_none());
+    }
+
     #[test]
     fn a_relay_attempt_without_a_turn_server_is_refused_at_the_boundary() {
         let error = require_turn(&[IceServer {
@@ -399,4 +505,11 @@ mod tests {
         }])
         .is_ok());
     }
+}
+
+/// Enables bounded, credential-filtered local ICE diagnostics, or disables them.
+#[uniffi::export]
+pub fn configure_ice_diagnostics(path: Option<String>) -> Result<(), TransportError> {
+    latch_transport::diagnostics::configure(path.as_deref().map(std::path::Path::new))
+        .map_err(failure)
 }

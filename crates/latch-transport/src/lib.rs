@@ -7,6 +7,8 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 
+pub mod diagnostics;
+
 /// Direct-first connection policy and transport-neutral byte-channel contract.
 pub mod policy;
 /// webrtc-rs ICE/DTLS/SCTP/data-channel implementation.

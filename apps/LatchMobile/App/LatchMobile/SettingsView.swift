@@ -1,10 +1,13 @@
 import LatchMobileKit
+import LatchTransportNative
 import SwiftUI
 
 /// The settings tab: linking this phone to a computer, and what that link can do.
 struct SettingsView: View {
     @Environment(AppModel.self) private var model
     @Environment(PairingModel.self) private var pairing
+    @AppStorage(NativeTransportDiagnostics.preferenceKey) private var iceDiagnosticsEnabled = false
+    @State private var diagnosticsError: String?
     @State private var address = ""
     @State private var token = ""
     @State private var confirmingUnlink = false
@@ -16,6 +19,7 @@ struct SettingsView: View {
                 sessionViewSection
                 newSessionSection
                 remoteAccessSection
+                diagnosticsSection
 
                 switch model.linkState {
                 case .linked:
@@ -25,6 +29,29 @@ struct SettingsView: View {
                 }
             }
             .navigationTitle("Settings")
+        }
+    }
+
+    private var diagnosticsSection: some View {
+        Section {
+            Toggle("Record connection diagnostics", isOn: Binding(
+                get: { iceDiagnosticsEnabled },
+                set: { enabled in
+                    do {
+                        try NativeTransportDiagnostics.setEnabled(enabled)
+                        iceDiagnosticsEnabled = enabled
+                        diagnosticsError = nil
+                    } catch { diagnosticsError = error.localizedDescription }
+                }
+            ))
+            if FileManager.default.fileExists(atPath: NativeTransportDiagnostics.logURL.path) {
+                ShareLink("Share connection log", item: NativeTransportDiagnostics.logURL)
+            }
+            if let diagnosticsError { Text(diagnosticsError).foregroundStyle(.red) }
+        } header: {
+            Text("Connection diagnostics")
+        } footer: {
+            Text("Records network addresses and connection checks locally, up to 8 MB. Terminal content and passwords are excluded. Disable recording before sharing a completed test.")
         }
     }
 

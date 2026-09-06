@@ -409,10 +409,45 @@ fn staged<E: std::fmt::Display>(stage: &'static str) -> impl Fn(E) -> RtcError {
     move |error| RtcError::Stack(format!("[{stage}] {error}"))
 }
 
+/// The ICE library keeps background tasks alive until explicitly closed.
+/// Keep that responsibility through gathering, connection errors, cancellation,
+/// and finally the connected channel. Dropping a Rust future must release its
+/// sockets and TURN allocations, not leave checks running behind a retry.
+struct OwnedAgent(Arc<Agent>, tokio::runtime::Handle);
+
+impl std::ops::Deref for OwnedAgent {
+    type Target = Agent;
+    fn deref(&self) -> &Agent {
+        &self.0
+    }
+}
+
+impl Drop for OwnedAgent {
+    fn drop(&mut self) {
+        let agent = Arc::clone(&self.0);
+        self.1.spawn(async move {
+            let _ = agent.close().await;
+        });
+    }
+}
+
+struct AttemptTrace {
+    id: String,
+    finished: bool,
+}
+impl Drop for AttemptTrace {
+    fn drop(&mut self) {
+        if !self.finished {
+            log::info!(target: "latch_transport", "attempt={} transport cancelled", self.id);
+        }
+    }
+}
+
 /// An ICE agent after candidate gathering and before peer connection.
 pub struct RtcEndpoint {
-    agent: Agent,
+    agent: OwnedAgent,
     selected_path: Arc<AtomicU8>,
+    local_ufrag: String,
 }
 
 impl RtcEndpoint {
@@ -484,6 +519,7 @@ impl RtcEndpoint {
         .await
         .map_err(stack)?;
 
+        let agent = OwnedAgent(Arc::new(agent), tokio::runtime::Handle::current());
         let (candidate_tx, mut candidate_rx) = mpsc::channel(16);
         agent.on_candidate(Box::new(move |candidate| {
             let candidate_tx = candidate_tx.clone();
@@ -519,6 +555,7 @@ impl RtcEndpoint {
             Self {
                 agent,
                 selected_path,
+                local_ufrag: local_ufrag.clone(),
             },
             LocalDescription {
                 credentials: IceCredentials {
@@ -545,6 +582,38 @@ impl RtcEndpoint {
         remote: RemoteDescription,
         role: Role,
     ) -> Result<RtcConnection, RtcError> {
+        let mut trace = AttemptTrace {
+            id: crate::diagnostics::fingerprint(match role {
+                Role::Initiator => &self.local_ufrag,
+                Role::Responder => &remote.credentials.ufrag,
+            }),
+            finished: false,
+        };
+        let result = self.connect_inner(remote, role).await;
+        trace.finished = true;
+        match &result {
+            Ok(_) => {
+                log::info!(target: "latch_transport", "attempt={} transport connected", trace.id)
+            }
+            Err(error) => {
+                log::warn!(target: "latch_transport", "attempt={} transport failed stage={}", trace.id, error.stage())
+            }
+        }
+        result
+    }
+
+    async fn connect_inner(
+        self,
+        remote: RemoteDescription,
+        role: Role,
+    ) -> Result<RtcConnection, RtcError> {
+        let attempt = crate::diagnostics::fingerprint(match role {
+            Role::Initiator => &self.local_ufrag,
+            Role::Responder => &remote.credentials.ufrag,
+        });
+        log::info!(target: "latch_transport", "attempt={attempt} connect role={role:?} local_credential={} remote_credential={}",
+            crate::diagnostics::fingerprint(&self.local_ufrag),
+            crate::diagnostics::fingerprint(&remote.credentials.ufrag));
         log::info!(
             target: "latch_transport",
             "connecting as {role:?} to {} remote candidate(s): {}",
@@ -608,7 +677,7 @@ impl RtcEndpoint {
 
         log::info!(
             target: "latch_transport",
-            "ICE nominated a pair as {role:?}: {}",
+            "attempt={attempt} ICE nominated a pair as {role:?}: {}",
             match SelectedRoute::from_code(selected_path.load(Ordering::Acquire)) {
                 Some(route) => format!("{route:?}"),
                 None => "route not yet observed".to_owned(),
@@ -669,7 +738,7 @@ impl RtcEndpoint {
 
 /// Connected reliable ordered byte-record surface consumed by Noise.
 pub struct RtcConnection {
-    agent: Agent,
+    agent: OwnedAgent,
     association: Arc<Association>,
     channel: Arc<DataChannel>,
     selected_path: Arc<AtomicU8>,
@@ -714,9 +783,11 @@ impl RtcConnection {
 
     /// Closes the data channel, SCTP association, and ICE agent.
     pub async fn close(&self) -> Result<(), RtcError> {
-        self.channel.close().await.map_err(stack)?;
-        self.association.close().await.map_err(stack)?;
-        self.agent.close().await.map_err(stack)
+        // An upper-layer close failure must not skip socket/allocation cleanup.
+        let channel = self.channel.close().await.map_err(stack);
+        let association = self.association.close().await.map_err(stack);
+        let agent = self.agent.close().await.map_err(stack);
+        channel.and(association).and(agent)
     }
 }
 
@@ -891,6 +962,103 @@ mod tests {
         assert_eq!(staged("sctp")("abort").stage(), "sctp");
         assert_eq!(staged("channel")("closed").stage(), "channel");
         assert_eq!(stack("no candidate pairs").stage(), "ice");
+    }
+
+    async fn cleanup_endpoint() -> (RtcEndpoint, Arc<Agent>) {
+        let (endpoint, _) = RtcEndpoint::gather_on_test_network(
+            IceCredentials {
+                ufrag: "cleanup-ufrag".into(),
+                password: "cleanup-password-with-more-than-128-bits".into(),
+            },
+            &[],
+            Arc::new(TestNetwork::new(Some(Default::default()))),
+        )
+        .await
+        .unwrap();
+        let observer = Arc::clone(&endpoint.agent.0);
+        assert!(!observer.get_local_candidates().await.unwrap().is_empty());
+        (endpoint, observer)
+    }
+
+    async fn assert_agent_closed(agent: &Agent) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !agent.get_local_candidates().await.unwrap().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("abandoned agent retained its candidates and sockets");
+    }
+
+    fn unreachable_peer() -> RemoteDescription {
+        RemoteDescription {
+            credentials: IceCredentials {
+                ufrag: "missing-peer".into(),
+                password: "missing-password-with-more-than-128-bits".into(),
+            },
+            candidates: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn dropping_a_gathered_endpoint_closes_its_sockets() {
+        let (endpoint, observer) = cleanup_endpoint().await;
+        // UniFFI may destroy its last handle on a Swift thread outside Tokio.
+        std::thread::spawn(move || drop(endpoint)).join().unwrap();
+        assert_agent_closed(&observer).await;
+    }
+
+    #[tokio::test]
+    async fn cancelling_connect_closes_the_checking_agent() {
+        let (endpoint, observer) = cleanup_endpoint().await;
+        let (tx, mut rx) = mpsc::channel(4);
+        observer.on_connection_state_change(Box::new(move |state| {
+            let tx = tx.clone();
+            Box::pin(async move {
+                let _ = tx.send(state).await;
+            })
+        }));
+        let pending = tokio::spawn(endpoint.connect(unreachable_peer(), Role::Initiator));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while rx.recv().await != Some(webrtc_ice::state::ConnectionState::Checking) {}
+        })
+        .await
+        .unwrap();
+        pending.abort();
+        assert!(matches!(pending.await, Err(error) if error.is_cancelled()));
+        assert_agent_closed(&observer).await;
+    }
+
+    #[tokio::test]
+    async fn an_ice_timeout_closes_the_agent_before_a_retry() {
+        let (endpoint, observer) = cleanup_endpoint().await;
+        let result = endpoint.connect(unreachable_peer(), Role::Initiator).await;
+        assert!(
+            matches!(result, Err(RtcError::Stack(message)) if message == "ICE connectivity checks timed out")
+        );
+        assert_agent_closed(&observer).await;
+    }
+
+    #[tokio::test]
+    async fn an_invalid_candidate_closes_the_agent() {
+        let (endpoint, observer) = cleanup_endpoint().await;
+        let mut remote = unreachable_peer();
+        remote.candidates.push(TransportCandidate {
+            candidate_type: "host".into(),
+            priority: 1,
+            foundation: "1".into(),
+            component: 1,
+            protocol: "udp".into(),
+            address: "invalid".into(),
+            related_address: None,
+            related_port: None,
+            tcp_type: None,
+        });
+        assert!(matches!(
+            endpoint.connect(remote, Role::Initiator).await,
+            Err(RtcError::InvalidCandidate(_))
+        ));
+        assert_agent_closed(&observer).await;
     }
 
     #[tokio::test]
