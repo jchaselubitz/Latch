@@ -209,6 +209,17 @@ fn turn_servers() -> Vec<IceServer> {
     }]
 }
 
+/// What the Mac's helper is actually launched with: STUN for a reflexive
+/// candidate and nothing that could allocate a relay. The TURN server answers
+/// plain binding requests too, so it doubles as the STUN server here.
+fn stun_servers() -> Vec<IceServer> {
+    vec![IceServer {
+        url: format!("stun:{TURN_SERVER_IP}:{TURN_SERVER_PORT}"),
+        username: String::new(),
+        credential: String::new(),
+    }]
+}
+
 fn credentials(ufrag: &str) -> IceCredentials {
     IceCredentials {
         ufrag: ufrag.to_owned(),
@@ -231,17 +242,38 @@ async fn connect_across(
     RtcConnection,
     RtcConnection,
 ) {
-    let servers = turn_servers();
+    connect_across_with(internet, &turn_servers(), &turn_servers(), Duration::ZERO).await
+}
+
+/// `connect_across` with each side's own server list and a Mac that starts
+/// answering `mac_delay` after the phone has started its checks.
+///
+/// The delay is the production hand-off: the phone runs its checks the moment
+/// its offer is accepted, while the Mac still has to collect the offer from
+/// the control plane, authorize it, hand it to the helper, and have the
+/// helper drain it — and until the Mac's agent sends its first check, the
+/// Mac's NAT drops everything the phone sends to the reflexive address.
+async fn connect_across_with(
+    internet: &SimulatedInternet,
+    phone_servers: &[IceServer],
+    mac_servers: &[IceServer],
+    mac_delay: Duration,
+) -> (
+    Option<SelectedRoute>,
+    Option<SelectedRoute>,
+    RtcConnection,
+    RtcConnection,
+) {
     let (phone, mac) = tokio::join!(
         RtcEndpoint::gather_with_network(
             credentials("phone"),
-            &servers,
+            phone_servers,
             false,
             Some(Arc::clone(&internet.phone)),
         ),
         RtcEndpoint::gather_with_network(
             credentials("mac"),
-            &servers,
+            mac_servers,
             false,
             Some(Arc::clone(&internet.mac)),
         )
@@ -264,13 +296,18 @@ async fn connect_across(
             },
             Role::Initiator,
         ),
-        mac_endpoint.connect(
-            RemoteDescription {
-                credentials: phone_description.credentials,
-                candidates: phone_description.candidates,
-            },
-            Role::Responder,
-        )
+        async {
+            tokio::time::sleep(mac_delay).await;
+            mac_endpoint
+                .connect(
+                    RemoteDescription {
+                        credentials: phone_description.credentials,
+                        candidates: phone_description.candidates,
+                    },
+                    Role::Responder,
+                )
+                .await
+        }
     );
     let phone = phone.expect("the phone completes ICE, DTLS, and SCTP");
     let mac = mac.expect("the Mac completes ICE, DTLS, and SCTP");
@@ -331,6 +368,94 @@ async fn symmetric_nats_on_both_sides_fall_to_the_relay() {
     assert_eq!(phone.selected_path(), SelectedPath::Relay);
     assert_records_round_trip(&phone, &mac).await;
 
+    let _ = tokio::join!(phone.close(), mac.close());
+    internet.shutdown().await;
+}
+
+/// The field failure: a phone on a carrier, a Mac on a home router, and a
+/// Mac that starts answering a second or two after the phone started
+/// checking.
+///
+/// The phone's checks reach the Mac's reflexive address only once the Mac's
+/// own first check has opened its port-restricted NAT, which cannot happen
+/// before the Mac has the offer. An ICE agent that gives each pair a fixed
+/// handful of checks and then abandons it — and, as the controlling side,
+/// never revives a pair on the strength of the Mac's later inbound check —
+/// has already written every pair off by then. The Mac's check succeeds, the
+/// phone answers it, and both then wait for a nomination that the phone will
+/// never send: a timeout on both ends with a working path between them.
+#[tokio::test]
+async fn a_mac_that_answers_late_is_still_reached_before_the_phone_gives_up() {
+    let internet = build_internet(symmetric(), port_restricted_cone())
+        .await
+        .expect("the simulated internet starts");
+    let (phone_route, mac_route, phone, mac) = connect_across_with(
+        &internet,
+        &turn_servers(),
+        &stun_servers(),
+        // Past the budget an agent with the library's default of seven
+        // checks at 200ms spends on a pair, with room for the timing to
+        // land either side of it.
+        Duration::from_millis(2_500),
+    )
+    .await;
+
+    assert_eq!(
+        phone_route,
+        Some(SelectedRoute::Relay),
+        "a symmetric NAT on the phone leaves the relayed pair as the one it can nominate"
+    );
+    assert_eq!(mac_route, Some(SelectedRoute::Relay));
+    assert_records_round_trip(&phone, &mac).await;
+
+    let _ = tokio::join!(phone.close(), mac.close());
+    internet.shutdown().await;
+}
+
+/// A Mac whose router allocates a new external port per destination, with
+/// no relay of its own: the phone's only route is its relay, and the only
+/// Mac address that answers there is the one the Mac's own check comes from,
+/// which the phone has to learn as a peer-reflexive candidate.
+#[tokio::test]
+async fn a_symmetric_mac_with_stun_only_is_reached_through_the_phones_relay() {
+    let internet = build_internet(symmetric(), symmetric())
+        .await
+        .expect("the simulated internet starts");
+    let (phone_route, mac_route, phone, mac) = connect_across_with(
+        &internet,
+        &turn_servers(),
+        &stun_servers(),
+        Duration::from_millis(500),
+    )
+    .await;
+
+    assert_eq!(phone_route, Some(SelectedRoute::Relay));
+    assert_eq!(mac_route, Some(SelectedRoute::Relay));
+    assert_records_round_trip(&phone, &mac).await;
+
+    let _ = tokio::join!(phone.close(), mac.close());
+    internet.shutdown().await;
+}
+
+/// The same Mac against a phone on a cone NAT: hole punching is possible
+/// from the Mac's side only, and the phone must find the Mac's
+/// per-destination port from the Mac's inbound check.
+#[tokio::test]
+async fn a_symmetric_mac_with_stun_only_is_reached_directly_from_a_cone_phone() {
+    let internet = build_internet(port_restricted_cone(), symmetric())
+        .await
+        .expect("the simulated internet starts");
+    let (phone_route, mac_route, phone, mac) = connect_across_with(
+        &internet,
+        &turn_servers(),
+        &stun_servers(),
+        Duration::from_millis(500),
+    )
+    .await;
+
+    assert_ne!(phone_route, None);
+    assert_ne!(mac_route, None);
+    assert_records_round_trip(&phone, &mac).await;
     let _ = tokio::join!(phone.close(), mac.close());
     internet.shutdown().await;
 }

@@ -167,6 +167,36 @@ struct RemoteIceCandidate: Codable, Equatable, Sendable {
 /// authorize this Mac's gateway, which is why an offer only ever reaches the
 /// helper after a fresh local device-state check, and why the helper still runs
 /// the full Noise handshake against the local device store afterwards.
+/// The stdin document for `latch remote-access relay-servers`: one entry per
+/// relay URL, flattened the way the helper's agent takes them, with the
+/// credential's expiry so the helper drops it on time.
+struct RemoteRelayServersDocument: Encodable, Equatable, Sendable {
+    struct Server: Encodable, Equatable, Sendable {
+        let url: String
+        let username: String
+        let credential: String
+    }
+
+    let servers: [Server]
+    let expiresAt: UInt64
+
+    /// Nil when nothing usable was issued: a relay without a credential
+    /// cannot allocate, and a document with no relay has nothing to record.
+    init?(_ credentials: ControlPlaneTurnCredentials) {
+        let servers = credentials.iceServers.flatMap { server -> [Server] in
+            guard let username = server.username, !username.isEmpty,
+                  let credential = server.credential, !credential.isEmpty
+            else { return [] }
+            return server.urls
+                .filter { !ControlPlaneIceServer.isStun($0) }
+                .map { Server(url: $0, username: username, credential: credential) }
+        }
+        guard !servers.isEmpty else { return nil }
+        self.servers = servers
+        self.expiresAt = credentials.expiresAt
+    }
+}
+
 struct RemoteRendezvousOfferDocument: Encodable, Equatable, Sendable {
     let requestID: String
     let peerDeviceID: String

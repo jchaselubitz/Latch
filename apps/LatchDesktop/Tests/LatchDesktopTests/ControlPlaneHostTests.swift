@@ -170,6 +170,17 @@ private final class StubControlPlaneHostAPI: ControlPlaneHostAPI, @unchecked Sen
         return iceServers
     }
 
+    var turnCredentials = ControlPlaneTurnCredentials(iceServers: [], expiresAt: 0)
+    var turnCredentialPeers: [String] = []
+
+    func turnCredentials(deviceToken: String, peerDeviceID: String) async throws -> ControlPlaneTurnCredentials {
+        if let failure { throw failure }
+        lock.lock()
+        turnCredentialPeers.append(peerDeviceID)
+        lock.unlock()
+        return turnCredentials
+    }
+
     func setRelayEnabled(accountToken: String, enabled: Bool) async throws {
         lock.lock()
         recorded.relaySettings.append(enabled)
@@ -712,6 +723,58 @@ final class ControlPlaneHostTests: XCTestCase {
         XCTAssertEqual(servers, ["stun:stun.cloudflare.com:3478"])
         // Asked before any phone paired, so this is what enrolls the Mac.
         XCTAssertEqual(api.log.enrollments.count, 1)
+    }
+
+    func testRelayServersKeepOnlyCredentialedRelaysAndTheirExpiry() async throws {
+        let api = StubControlPlaneHostAPI()
+        api.turnCredentials = ControlPlaneTurnCredentials(
+            iceServers: [
+                // What the service returns: the STUN entry the helper already
+                // has, then a relay entry that repeats it alongside the TURN
+                // URLs, then a relay with no credential.
+                ControlPlaneIceServer(urls: ["stun:stun.cloudflare.com:3478"]),
+                ControlPlaneIceServer(
+                    urls: [
+                        "stun:stun.cloudflare.com:3478",
+                        "turn:turn.cloudflare.com:3478?transport=udp",
+                        "turns:turn.cloudflare.com:5349?transport=tcp",
+                    ],
+                    username: "turn-user",
+                    credential: "turn-credential"
+                ),
+                ControlPlaneIceServer(urls: ["turn:relay.example:3478"]),
+            ],
+            expiresAt: 1_700_000_120
+        )
+        let host = makeHost(api: api)
+        try host.setAddress("https://control.example")
+
+        let issued = try await host.relayServers(
+            publicKey: macKey, macName: "Studio Mac", peerDeviceID: "dev_phone"
+        )
+        XCTAssertEqual(api.turnCredentialPeers, ["dev_phone"])
+        XCTAssertEqual(issued.expiresAt, 1_700_000_120)
+        XCTAssertEqual(
+            issued.iceServers,
+            [ControlPlaneIceServer(
+                urls: [
+                    "turn:turn.cloudflare.com:3478?transport=udp",
+                    "turns:turn.cloudflare.com:5349?transport=tcp",
+                ],
+                username: "turn-user",
+                credential: "turn-credential"
+            )]
+        )
+
+        // The helper's document is one entry per URL, expiry carried along.
+        let document = try XCTUnwrap(RemoteRelayServersDocument(issued))
+        XCTAssertEqual(document.servers.map(\.url), issued.iceServers[0].urls)
+        XCTAssertEqual(document.servers.map(\.username), ["turn-user", "turn-user"])
+        XCTAssertEqual(document.expiresAt, 1_700_000_120)
+        XCTAssertNil(
+            RemoteRelayServersDocument(ControlPlaneTurnCredentials(iceServers: [], expiresAt: 1)),
+            "a document with nothing to allocate on was still produced"
+        )
     }
 
     func testStunServersAreUnavailableWithoutAControlPlane() async {

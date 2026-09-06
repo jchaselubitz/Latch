@@ -52,6 +52,14 @@ const MAX_PENDING_OFFERS: usize = 32;
 /// re-gathered agent description. Short enough that a phone waiting on a
 /// rendezvous does not notice it, long enough to be free when nothing happens.
 const OFFER_POLL_INTERVAL: Duration = Duration::from_millis(500);
+/// How often pending offers are drained to the ICE agent.
+///
+/// This sits on the connect's critical path: the phone runs its checks from
+/// the moment its offer is accepted, and nothing it sends gets through the
+/// Mac's NAT until the agent has answered with a check of its own. A
+/// directory read every tenth of a second is nothing next to the half second
+/// the general poll would add to every attempt.
+const OFFER_DRAIN_INTERVAL: Duration = Duration::from_millis(100);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// The deadline every peer transport applies to a single record read.
 ///
@@ -1315,6 +1323,11 @@ impl Paths {
     fn lan_readiness(&self) -> PathBuf {
         self.runtime().join("lan-ready.json")
     }
+    /// The relay servers the desktop app last handed the helper.
+    fn relay_servers(&self) -> PathBuf {
+        self.runtime().join("relay-servers.json")
+    }
+
     fn offers(&self) -> PathBuf {
         self.runtime().join("offers")
     }
@@ -1832,7 +1845,7 @@ async fn run_lan(
     let connection_limit = Arc::new(Semaphore::new(MAX_LAN_CONNECTIONS));
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .context("cannot install the terminate handler")?;
-    let mut offer_poll = tokio::time::interval(OFFER_POLL_INTERVAL);
+    let mut offer_poll = tokio::time::interval(OFFER_DRAIN_INTERVAL);
     let mut connection_poll = tokio::time::interval(OFFER_POLL_INTERVAL);
 
     loop {
@@ -2201,6 +2214,116 @@ impl Drop for ConnectionGauge {
                 Some(current.saturating_sub(1))
             });
     }
+}
+
+/// One relay the helper may allocate on, exactly as the control plane issued
+/// it. The credential is the short-lived TURN one; it authenticates the
+/// allocation and nothing in Latch.
+#[allow(missing_docs)] // The enclosing type and serialized field names are the contract docs.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RelayServer {
+    pub url: String,
+    pub username: String,
+    pub credential: String,
+}
+
+/// The relay servers the helper gathers against, and when their credential
+/// stops working.
+///
+/// A relay candidate of the Mac's own is what lets a phone reach a Mac whose
+/// NAT drops the phone's traffic to the reflexive address: the phone's
+/// packets then arrive on the Mac's outbound TURN flow, which every NAT
+/// admits. Relay policy is enforced where the credential is minted — the
+/// control plane refuses an account with the relay off — so what is recorded
+/// here is already permitted, and the helper only has to use it before it
+/// expires.
+#[allow(missing_docs)] // The enclosing type and serialized field names are the contract docs.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RelayServers {
+    pub servers: Vec<RelayServer>,
+    pub expires_at: u64,
+}
+
+/// More relays than a credential service issues for one device.
+const MAX_RELAY_SERVERS: usize = 8;
+/// Longer than any credential the control plane is configured to mint.
+const MAX_RELAY_CREDENTIAL_LIFETIME: Duration = Duration::from_secs(24 * 60 * 60);
+/// Bounds a URL or credential string well above anything real.
+const MAX_RELAY_FIELD: usize = 512;
+
+impl RelayServer {
+    fn validate(&self) -> anyhow::Result<()> {
+        let scheme = self.url.split(':').next().unwrap_or_default();
+        if !(scheme.eq_ignore_ascii_case("turn") || scheme.eq_ignore_ascii_case("turns")) {
+            bail!("{} is not a relay URL", self.url);
+        }
+        if self.url.len() > MAX_RELAY_FIELD
+            || self
+                .url
+                .bytes()
+                .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
+        {
+            bail!("a relay URL is malformed");
+        }
+        if self.username.is_empty()
+            || self.username.len() > MAX_RELAY_FIELD
+            || self.credential.is_empty()
+            || self.credential.len() > MAX_RELAY_FIELD
+        {
+            bail!("a relay credential is empty or too long");
+        }
+        Ok(())
+    }
+}
+
+impl RelayServers {
+    /// Bounds the document before the helper allocates on anything in it.
+    pub fn validate(&self, now: u64) -> anyhow::Result<()> {
+        if self.servers.is_empty() || self.servers.len() > MAX_RELAY_SERVERS {
+            bail!("relay servers must contain between 1 and {MAX_RELAY_SERVERS} entries");
+        }
+        if self.expires_at <= now || self.expires_at > now + MAX_RELAY_CREDENTIAL_LIFETIME.as_secs()
+        {
+            bail!("relay credentials have an invalid lifetime");
+        }
+        for server in &self.servers {
+            server.validate()?;
+        }
+        Ok(())
+    }
+}
+
+/// Records the relay servers the helper should gather against next.
+pub fn record_relay_servers(home: &LatchHome, relay: &RelayServers) -> anyhow::Result<()> {
+    let paths = Paths::new(home);
+    ensure_enabled(&paths)?;
+    relay.validate(unix_time())?;
+    ensure_private_directory(&paths.runtime())?;
+    write_json(&paths.relay_servers(), relay)
+}
+
+/// Forgets the recorded relay servers. Absent is the ordinary case, not an error.
+pub fn clear_relay_servers(home: &LatchHome) -> anyhow::Result<()> {
+    let paths = Paths::new(home);
+    match fs::remove_file(paths.relay_servers()) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// The relay servers the helper may allocate on right now: none when nothing
+/// was recorded, and none once the recorded credential has expired, so an
+/// agent never gathers against a relay that would refuse it mid-allocation.
+pub fn load_relay_servers(home: &LatchHome) -> Vec<RelayServer> {
+    let paths = Paths::new(home);
+    read_json::<RelayServers>(&paths.relay_servers())
+        .ok()
+        .filter(|relay| relay.validate(unix_time()).is_ok())
+        .map(|relay| relay.servers)
+        .unwrap_or_default()
 }
 
 /// Records one approved rendezvous offer for a running helper to act on.
@@ -3209,6 +3332,58 @@ mod tests {
         assert_eq!(rejected.len(), 1);
         assert_eq!(rejected[0]["result"], "rejected");
         assert!(rejected[0]["deviceId"].is_null());
+    }
+
+    #[test]
+    fn relay_servers_are_stored_privately_and_forgotten_when_their_credential_expires() {
+        let (_dir, home) = home();
+        set_enabled(&home, true).unwrap();
+        let paths = Paths::new(&home);
+        let now = unix_time();
+        let relay = RelayServers {
+            servers: vec![RelayServer {
+                url: "turn:turn.cloudflare.com:3478?transport=udp".into(),
+                username: "turn-user".into(),
+                credential: "turn-credential".into(),
+            }],
+            expires_at: now + 120,
+        };
+        record_relay_servers(&home, &relay).unwrap();
+        assert_eq!(load_relay_servers(&home), relay.servers);
+        assert_eq!(
+            fs::metadata(paths.relay_servers())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+
+        // Only a relay belongs here: STUN comes from the launch arguments,
+        // and a credential for it would be meaningless.
+        let mut stun = relay.clone();
+        stun.servers[0].url = "stun:stun.cloudflare.com:3478".into();
+        assert!(record_relay_servers(&home, &stun).is_err());
+        let mut blank = relay.clone();
+        blank.servers[0].credential.clear();
+        assert!(record_relay_servers(&home, &blank).is_err());
+        let mut immortal = relay.clone();
+        immortal.expires_at = now + MAX_RELAY_CREDENTIAL_LIFETIME.as_secs() + 1;
+        assert!(record_relay_servers(&home, &immortal).is_err());
+        // The refusals left the good record in place.
+        assert_eq!(load_relay_servers(&home), relay.servers);
+
+        // A credential that has run out is dropped on the way out rather than
+        // handed to an agent whose allocation the relay would refuse.
+        let mut expired = relay.clone();
+        expired.expires_at = now.saturating_sub(1);
+        write_json(&paths.relay_servers(), &expired).unwrap();
+        assert!(load_relay_servers(&home).is_empty());
+
+        clear_relay_servers(&home).unwrap();
+        assert!(!paths.relay_servers().exists());
+        clear_relay_servers(&home).unwrap();
+        assert!(load_relay_servers(&home).is_empty());
     }
 
     #[test]

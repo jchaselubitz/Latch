@@ -471,6 +471,18 @@ struct ControlPlaneIceServer: Decodable, Equatable, Sendable {
     }
 }
 
+/// Relay servers the control plane issued this Mac, and when the credential
+/// inside them stops working.
+struct ControlPlaneTurnCredentials: Decodable, Equatable, Sendable {
+    let iceServers: [ControlPlaneIceServer]
+    let expiresAt: UInt64
+
+    init(iceServers: [ControlPlaneIceServer], expiresAt: UInt64) {
+        self.iceServers = iceServers
+        self.expiresAt = expiresAt
+    }
+}
+
 /// The host-side calls, behind a protocol so pairing is testable without a
 /// deployed control plane.
 protocol ControlPlaneHostAPI: Sendable {
@@ -504,6 +516,7 @@ protocol ControlPlaneHostAPI: Sendable {
     func rendezvousOffers(deviceToken: String, wait: UInt64) async throws -> [ControlPlaneRendezvousOffer]
     /// The STUN servers a device may gather reflexive candidates against.
     func iceServers(deviceToken: String) async throws -> [ControlPlaneIceServer]
+    func turnCredentials(deviceToken: String, peerDeviceID: String) async throws -> ControlPlaneTurnCredentials
     func setRelayEnabled(accountToken: String, enabled: Bool) async throws
 }
 
@@ -667,6 +680,15 @@ actor HTTPControlPlaneHostAPI: ControlPlaneHostAPI {
             body: nil
         )
         return response.iceServers
+    }
+
+    func turnCredentials(deviceToken: String, peerDeviceID: String) async throws -> ControlPlaneTurnCredentials {
+        try await send(
+            path: "/v1/turn-credentials",
+            method: "POST",
+            token: deviceToken,
+            body: ["peerDeviceId": peerDeviceID]
+        )
     }
 
     func setRelayEnabled(accountToken: String, enabled: Bool) async throws {
@@ -1038,6 +1060,35 @@ final class ControlPlaneHost {
             .flatMap(\.urls)
             .filter(ControlPlaneIceServer.isStun)
             .filter { seen.insert($0).inserted }
+    }
+
+    /// The relay servers this Mac may allocate on, issued for its pairing
+    /// with `peerDeviceID`.
+    ///
+    /// Relay policy is enforced where these are minted: an account with the
+    /// relay off is refused here, and the helper then gathers against STUN
+    /// alone. STUN entries the service returns alongside are dropped — the
+    /// helper already has them from launch — and so is any relay entry
+    /// without a credential, which could not allocate.
+    func relayServers(
+        publicKey: String,
+        macName: String,
+        peerDeviceID: String
+    ) async throws -> ControlPlaneTurnCredentials {
+        guard let address else { throw ControlPlaneHostError.notConfigured }
+        let credentials = try await enrollment(publicKey: publicKey, name: macName)
+        let issued = try await apiFactory(address).turnCredentials(
+            deviceToken: credentials.deviceToken,
+            peerDeviceID: peerDeviceID
+        )
+        let relays = issued.iceServers.compactMap { server -> ControlPlaneIceServer? in
+            let urls = server.urls.filter { !ControlPlaneIceServer.isStun($0) }
+            guard !urls.isEmpty, let username = server.username, !username.isEmpty,
+                  let credential = server.credential, !credential.isEmpty
+            else { return nil }
+            return ControlPlaneIceServer(urls: urls, username: username, credential: credential)
+        }
+        return ControlPlaneTurnCredentials(iceServers: relays, expiresAt: issued.expiresAt)
     }
 
     /// Mirrors the local relay switch to the account-level relay issuer. This

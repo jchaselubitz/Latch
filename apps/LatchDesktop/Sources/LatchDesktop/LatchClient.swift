@@ -218,6 +218,16 @@ actor LatchClient {
         try run(["remote-access", "offer"], stdin: encoder.encode(offer))
     }
 
+    /// Hands the helper the relay servers the control plane issued, for its
+    /// next gather.
+    func recordRelayServers(_ document: RemoteRelayServersDocument) throws {
+        try run(["remote-access", "relay-servers"], stdin: encoder.encode(document))
+    }
+
+    func clearRelayServers() throws {
+        try run(["remote-access", "relay-servers", "--clear"])
+    }
+
     func setRemoteRelayEnabled(_ enabled: Bool) throws {
         try run(["remote-access", "relay", enabled ? "enable" : "disable"])
     }

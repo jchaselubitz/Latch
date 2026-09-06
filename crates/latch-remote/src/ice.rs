@@ -12,8 +12,9 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, bail, Context};
 use async_trait::async_trait;
 use latch::cli::remote_access::{
-    candidate_lifetime_from_now, record_ice_answer, IceCandidateRecord, IceReadiness, PeerReader,
-    PeerRoute, PeerStream, PeerTransport, PeerWriter, RemoteOffer, PROXY_IDLE_TIMEOUT,
+    candidate_lifetime_from_now, load_relay_servers, record_ice_answer, IceCandidateRecord,
+    IceReadiness, PeerReader, PeerRoute, PeerStream, PeerTransport, PeerWriter, RemoteOffer,
+    PROXY_IDLE_TIMEOUT,
 };
 use latch::session::paths::LatchHome;
 use latch_transport::policy::IceServer;
@@ -85,7 +86,10 @@ impl IceResponder {
     ///
     /// `servers` are STUN URLs used for server-reflexive gathering. Passing
     /// none is valid and yields host candidates only — the LAN and tailnet
-    /// case, where every usable address is already on an interface.
+    /// case, where every usable address is already on an interface. Relays
+    /// are not passed here: the desktop app records the ones the control
+    /// plane issued, and each gather reads them fresh (see
+    /// [`Responder::servers_for_gather`]).
     pub fn new(home: LatchHome, servers: Vec<IceServer>) -> anyhow::Result<Self> {
         let (ufrag, password) = IceReadiness::generate_credentials()?;
         Ok(Self::with_credentials(
@@ -162,18 +166,39 @@ impl IceResponder {
 }
 
 impl Responder {
+    /// STUN from the launch arguments plus whatever relay the desktop app
+    /// has recorded since.
+    ///
+    /// Read at every gather, so a refreshed credential reaches the next agent
+    /// without a relaunch and an expired one simply drops out. The relay is
+    /// what makes this Mac reachable from a phone whose traffic the Mac's NAT
+    /// refuses on the reflexive address: with a relay candidate of the Mac's
+    /// own, the phone's packets arrive on the Mac's outbound TURN flow.
+    fn servers_for_gather(&self) -> Vec<IceServer> {
+        let mut servers = self.servers.clone();
+        if let Some(home) = &self.home {
+            servers.extend(load_relay_servers(home).into_iter().map(|relay| IceServer {
+                url: relay.url,
+                username: relay.username,
+                credential: relay.credential,
+            }));
+        }
+        servers
+    }
+
     /// Gathers one agent and records the description presence should publish.
     async fn gather(&self) -> anyhow::Result<IceReadiness> {
+        let servers = self.servers_for_gather();
         let (endpoint, local) = match &self.test_network {
             Some(network) => {
                 RtcEndpoint::gather_on_test_network(
                     self.credentials.clone(),
-                    &self.servers,
+                    &servers,
                     Arc::clone(network),
                 )
                 .await
             }
-            None => RtcEndpoint::gather(self.credentials.clone(), &self.servers).await,
+            None => RtcEndpoint::gather(self.credentials.clone(), &servers).await,
         }
         .context("ICE candidate gathering failed")?;
         let readiness = self.readiness(&local);
@@ -253,6 +278,14 @@ impl PeerTransport for IceResponder {
         // produced no stream; the phone retries with a fresh one.
         tokio::spawn(async move {
             let connection = endpoint.connect(remote, Role::Responder).await;
+            match &connection {
+                Ok(connection) => log::info!(
+                    target: "latch_remote",
+                    "answered an offer: connected, route {:?}",
+                    connection.selected_route()
+                ),
+                Err(error) => log::warn!(target: "latch_remote", "answered an offer: {error}"),
+            }
             if let Some(home) = home {
                 // A failed answer is the denominator of the connect rate, so
                 // it is recorded as deliberately as a successful one.

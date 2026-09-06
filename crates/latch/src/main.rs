@@ -362,6 +362,12 @@ enum RemoteAccessCommand {
         #[arg(value_parser = ["enable", "disable", "never"])]
         state: String,
     },
+    /// Hand the running helper the relay servers the control plane issued this Mac, read as JSON on stdin, or clear them with --clear. The helper allocates on them at its next gather. Relay policy is enforced where the credential is minted, so a Mac whose account has the relay off is never given one
+    RelayServers {
+        /// Forget the recorded relay servers instead of reading new ones.
+        #[arg(long)]
+        clear: bool,
+    },
     /// Export inspectable privacy-safe diagnostics as JSON.
     Diagnostics,
     /// Show the minimal local security audit trail.
@@ -899,6 +905,24 @@ fn dispatch(command: Option<Command>) -> Result<()> {
                         remote_access::RelayMode::Never => println!("relay never"),
                         _ => println!("relay {state}d"),
                     }
+                    Ok(())
+                }
+                RemoteAccessCommand::RelayServers { clear } => {
+                    if clear {
+                        remote_access::clear_relay_servers(&home)?;
+                        println!("Cleared the helper's relay servers.");
+                        return Ok(());
+                    }
+                    let mut document = String::new();
+                    std::io::Read::read_to_string(&mut std::io::stdin(), &mut document)
+                        .context("cannot read the relay server document from stdin")?;
+                    let relay: remote_access::RelayServers =
+                        serde_json::from_str(&document).context("invalid relay server document")?;
+                    remote_access::record_relay_servers(&home, &relay)?;
+                    println!(
+                        "Recorded {} relay server(s) for the running helper.",
+                        relay.servers.len()
+                    );
                     Ok(())
                 }
                 RemoteAccessCommand::Diagnostics => {

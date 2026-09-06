@@ -76,6 +76,18 @@ final class RemoteAccessController: ObservableObject {
     private var replacementWatch: Task<Void, Never>?
     private static let replacementPollInterval: Duration = .milliseconds(250)
     private static let replacementPollAttempts = 24
+    /// Keeps the helper supplied with relay credentials while the relay is
+    /// allowed. See `refreshRelayServers()`.
+    private var relayCredentialTask: Task<Void, Never>?
+    /// Whether the helper currently holds relay servers this app recorded,
+    /// so they are withdrawn when the relay is turned off or remote access
+    /// stops, and not re-cleared on every idle turn of the loop.
+    private var relayServersRecorded = false
+    /// The shortest pause between two credential requests. A credential is
+    /// refreshed at half its life, and the service mints them for minutes,
+    /// so this only matters when it answers with an error.
+    private static let relayRefreshFloor: Duration = .seconds(15)
+    private static let relayRetryDelay: Duration = .seconds(60)
     /// How long each offer collection is held open on the control plane.
     private static let offerWaitSeconds: UInt64 = 20
     /// The floor between collections. A service that predates the wait answers
@@ -344,6 +356,72 @@ final class RemoteAccessController: ObservableObject {
                 }
             }
         }
+        if relayCredentialTask == nil {
+            relayCredentialTask = Task { [weak self] in
+                while !Task.isCancelled {
+                    guard let self else { return }
+                    let delay = await self.refreshRelayServers()
+                    if Task.isCancelled { return }
+                    try? await Task.sleep(for: delay)
+                }
+            }
+        }
+    }
+
+    /// Fetches relay credentials for the helper, or withdraws them, and
+    /// returns how long to wait before doing so again.
+    ///
+    /// The helper gathers a relay candidate of its own so a phone's traffic
+    /// reaches this Mac on the Mac's outbound TURN flow, which every NAT
+    /// admits, rather than on a reflexive address that the Mac's NAT may
+    /// refuse — which is what a phone on a carrier saw here: the Mac's
+    /// checks reached it and were answered, and its own never arrived.
+    /// Issuance is where relay policy lives, so this asks only while the
+    /// local switches allow it, names a paired phone because the service
+    /// issues per pairing, and refreshes at half the credential's life.
+    private func refreshRelayServers() async -> Duration {
+        guard status.enabled, status.relayEnabled, !status.neverRelay,
+              controlPlane.isConfigured, let publicKey = status.publicKey,
+              let peer = activeDevices.compactMap(\.controlPlaneDeviceID).first
+        else {
+            withdrawRelayServers()
+            return Self.relayRetryDelay
+        }
+        do {
+            let issued = try await controlPlane.relayServers(
+                publicKey: publicKey,
+                macName: Self.macName,
+                peerDeviceID: peer
+            )
+            guard let document = RemoteRelayServersDocument(issued) else {
+                withdrawRelayServers()
+                return Self.relayRetryDelay
+            }
+            try await client.recordRelayServers(document)
+            relayServersRecorded = true
+            let now = UInt64(Date().timeIntervalSince1970)
+            let remaining = issued.expiresAt > now ? issued.expiresAt - now : 0
+            return max(Self.relayRefreshFloor, .seconds(Int64(remaining / 2)))
+        } catch {
+            errorMessage = error.localizedDescription
+            return Self.relayRetryDelay
+        }
+    }
+
+    /// Takes recorded relay servers away from the helper. A refusal to
+    /// relay must reach the agent, not only the switch in Settings.
+    private func withdrawRelayServers() {
+        guard relayServersRecorded else { return }
+        relayServersRecorded = false
+        Task { [client] in try? await client.clearRelayServers() }
+    }
+
+    /// Re-runs the credential loop from the top after a relay switch moved,
+    /// so a refusal is withdrawn now rather than at the next refresh.
+    private func restartRelayCredentials() {
+        relayCredentialTask?.cancel()
+        relayCredentialTask = nil
+        startPresence()
     }
 
     private func stopPresence(clear: Bool) {
@@ -354,6 +432,9 @@ final class RemoteAccessController: ObservableObject {
         offerTask = nil
         replacementWatch?.cancel()
         replacementWatch = nil
+        relayCredentialTask?.cancel()
+        relayCredentialTask = nil
+        withdrawRelayServers()
         approvedRendezvousOffers = []
         deliveredOffers = []
         // Withdrawn once per stop, not once per poll: the readiness loop calls
@@ -848,6 +929,7 @@ final class RemoteAccessController: ObservableObject {
             errorMessage = error.localizedDescription
             await refresh()
         }
+        restartRelayCredentials()
     }
 
     func setRelayEnabled(_ enabled: Bool) async {
@@ -864,6 +946,7 @@ final class RemoteAccessController: ObservableObject {
             }
             errorMessage = nil
             await refresh()
+            restartRelayCredentials()
         } catch {
             errorMessage = error.localizedDescription
         }

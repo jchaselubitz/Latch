@@ -22,7 +22,9 @@ struct Arguments {
     /// STUN URL used for server-reflexive candidate gathering. May be repeated.
     /// Omitting it gathers host candidates only, which is what a LAN or a
     /// tailnet needs; a TURN URL is refused because relay allocation is a
-    /// policy decision this flag must not be able to make.
+    /// policy decision this flag must not be able to make. Relays reach the
+    /// helper through `latch remote-access relay-servers`, after the control
+    /// plane has issued them to this Mac.
     #[arg(long = "ice-server")]
     ice_servers: Vec<String>,
 }
@@ -30,6 +32,8 @@ struct Arguments {
 fn main() -> anyhow::Result<()> {
     let arguments = Arguments::parse();
     let home = LatchHome::from_env()?;
+    latch_remote::diagnostics::install_if_requested(&home.remote_access_dir())
+        .context("cannot open the ICE diagnostics log")?;
     if !arguments.latch_bin.is_file() {
         anyhow::bail!(
             "latch executable does not exist: {}",

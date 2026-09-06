@@ -18,9 +18,12 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+log = { version = "0.4", features = ["std"] }
 async-trait.workspace = true
 clap.workspace = true
 latch = { path = "../latch" }
 latch-transport = { path = "../latch-transport" }
 tokio.workspace = true
 
+[dev-dependencies]
+tempfile.workspace = true

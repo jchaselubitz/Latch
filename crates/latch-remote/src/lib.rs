@@ -7,5 +7,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 
+/// Opt-in ICE trace for diagnosing a failed answer.
+pub mod diagnostics;
 /// The helper's ICE responder, driven by rendezvous offers.
 pub mod ice;

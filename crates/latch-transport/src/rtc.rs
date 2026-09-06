@@ -52,6 +52,27 @@ const INITIATOR_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// the phone reports as the Mac's.
 const RESPONDER_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How often the agent runs its checks. The library default, restated so the
+/// check budget below is derived from it rather than from a number that
+/// happens to match.
+const CHECK_INTERVAL: Duration = Duration::from_millis(200);
+
+/// How many checks a candidate pair gets before the agent writes it off.
+///
+/// The library's default is seven, which at the check interval is under two
+/// seconds, and a pair the agent has written off is never checked again: as
+/// the controlling side the phone does not revive one on the strength of a
+/// later inbound check from the Mac. Two seconds is shorter than the
+/// production hand-off. The phone starts checking the moment its offer is
+/// accepted, while the Mac still has to collect the offer, authorize it, and
+/// hand it to the helper — and until the Mac's agent has sent its first
+/// check, the Mac's port-restricted NAT drops every check the phone sends to
+/// the reflexive address. A pair is worth checking for as long as either
+/// end is still waiting for the connection, so the budget covers the longer
+/// of the two connect timeouts.
+const MAX_BINDING_REQUESTS: u16 =
+    (RESPONDER_CONNECT_TIMEOUT.as_millis() / CHECK_INTERVAL.as_millis()) as u16;
+
 /// The in-memory network used by round-trip tests. See
 /// [`RtcEndpoint::gather_on_test_network`].
 #[doc(hidden)]
@@ -134,6 +155,26 @@ pub enum Role {
     Initiator,
     /// Mac helper controlled endpoint.
     Responder,
+}
+
+/// Content-free description of a candidate list for the diagnostics log:
+/// type, transport, and address family only, never an address or a port.
+fn summarize(candidates: &[TransportCandidate]) -> String {
+    candidates
+        .iter()
+        .map(|candidate| {
+            let family = if candidate.address.starts_with('[') {
+                "v6"
+            } else {
+                "v4"
+            };
+            format!(
+                "{}/{}/{}",
+                candidate.candidate_type, candidate.protocol, family
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// ICE credentials exchanged through the structured control-plane contract.
@@ -267,8 +308,8 @@ pub struct RtcEndpoint {
 }
 
 impl RtcEndpoint {
-    /// Gathers candidates. Passing TURN servers here is valid only for the
-    /// policy-controlled post-direct-failure retry.
+    /// Gathers candidates. A TURN server in `servers` adds a relay candidate;
+    /// whether one may be passed is decided where the credential is issued.
     pub async fn gather(
         credentials: IceCredentials,
         servers: &[IceServer],
@@ -328,6 +369,8 @@ impl RtcEndpoint {
             },
             include_loopback,
             net,
+            check_interval: CHECK_INTERVAL,
+            max_binding_requests: Some(MAX_BINDING_REQUESTS),
             ..Default::default()
         })
         .await
@@ -357,6 +400,13 @@ impl RtcEndpoint {
             candidates.push(TransportCandidate::from_webrtc(candidate.as_ref()));
         }
         let (local_ufrag, local_password) = agent.get_local_user_credentials().await;
+        log::info!(
+            target: "latch_transport",
+            "gathered {} against {} server(s): {}",
+            candidates.len(),
+            servers.len(),
+            summarize(&candidates)
+        );
         Ok((
             Self {
                 agent,
@@ -387,6 +437,12 @@ impl RtcEndpoint {
         remote: RemoteDescription,
         role: Role,
     ) -> Result<RtcConnection, RtcError> {
+        log::info!(
+            target: "latch_transport",
+            "connecting as {role:?} to {} remote candidate(s): {}",
+            remote.candidates.len(),
+            summarize(&remote.candidates)
+        );
         for candidate in &remote.candidates {
             let parsed: Arc<dyn Candidate + Send + Sync> =
                 Arc::new(unmarshal_candidate(&candidate.to_sdp()?).map_err(stack)?);
@@ -420,6 +476,14 @@ impl RtcEndpoint {
         };
         let selected_path = self.selected_path;
 
+        log::info!(
+            target: "latch_transport",
+            "ICE nominated a pair as {role:?}: {}",
+            match SelectedRoute::from_code(selected_path.load(Ordering::Acquire)) {
+                Some(route) => format!("{route:?}"),
+                None => "route not yet observed".to_owned(),
+            }
+        );
         let legacy_ice: Arc<dyn LegacyConn + Send + Sync> = Arc::new(ModernToLegacy(ice));
         let legacy_dtls: Arc<dyn LegacyConn + Send + Sync> = Arc::new(
             DTLSConn::new(
