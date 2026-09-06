@@ -4,7 +4,7 @@
 //! structured Latch control-plane contract, while this module composes ICE,
 //! DTLS, SCTP, and DCEP directly.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -155,6 +155,80 @@ pub enum Role {
     Initiator,
     /// Mac helper controlled endpoint.
     Responder,
+}
+
+/// Whether a peer's candidate is worth pairing with from this endpoint.
+///
+/// A host candidate on a private, carrier-shared, or link-local address can
+/// be reached only from the network it belongs to. Off that network it is
+/// dead weight, and expensive dead weight when this end holds a relay: every
+/// check the agent sends to it goes through the TURN client, which asks the
+/// relay for a permission first, is refused for an unroutable peer, forgets
+/// the refusal, and asks again on the next check — five refused requests a
+/// second per address, for as long as the checks run. The one place such a
+/// host is reachable is the network this endpoint is on itself, which is kept:
+/// a phone that missed Bonjour on the Mac's Wi-Fi still gets a direct pair.
+///
+/// Reflexive and relay candidates are always kept; deciding whether they
+/// work is what the checks are for.
+fn reachable_from_here(candidate: &TransportCandidate, local_hosts: &[IpAddr]) -> bool {
+    if candidate.candidate_type != "host" {
+        return true;
+    }
+    let Ok(address) = candidate.address.parse::<SocketAddr>() else {
+        return true;
+    };
+    let ip = address.ip();
+    if globally_routable(ip) {
+        return true;
+    }
+    local_hosts.iter().any(|local| same_network(*local, ip))
+}
+
+/// Routable across the internet, as far as the address alone can tell.
+fn globally_routable(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let octets = v4.octets();
+            !(v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_multicast()
+                || v4.is_documentation()
+                // Carrier-grade NAT shared space (100.64/10) and the
+                // IETF protocol assignments block (192.0.0/24), which is
+                // where a phone's IPv4 side of a 464XLAT setup lives.
+                || (octets[0] == 100 && (64..=127).contains(&octets[1]))
+                || (octets[0] == 192 && octets[1] == 0 && octets[2] == 0))
+        }
+        IpAddr::V6(v6) => {
+            let first = v6.segments()[0];
+            !(v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                // Link-local (fe80::/10) and unique local (fc00::/7).
+                || first & 0xffc0 == 0xfe80
+                || first & 0xfe00 == 0xfc00)
+        }
+    }
+}
+
+/// Whether two addresses are, by their shape, on one network: the same /24
+/// for IPv4, the same /64 for IPv6, or both loopback.
+fn same_network(local: IpAddr, remote: IpAddr) -> bool {
+    match (local, remote) {
+        (IpAddr::V4(local), IpAddr::V4(remote)) => {
+            (local.is_loopback() && remote.is_loopback())
+                || local.octets()[..3] == remote.octets()[..3]
+        }
+        (IpAddr::V6(local), IpAddr::V6(remote)) => {
+            (local.is_loopback() && remote.is_loopback())
+                || local.segments()[..4] == remote.segments()[..4]
+        }
+        _ => false,
+    }
 }
 
 /// Content-free description of a candidate list for the diagnostics log:
@@ -477,7 +551,29 @@ impl RtcEndpoint {
             remote.candidates.len(),
             summarize(&remote.candidates)
         );
-        for candidate in &remote.candidates {
+        let local_hosts: Vec<IpAddr> = self
+            .agent
+            .get_local_candidates()
+            .await
+            .map_err(stack)?
+            .iter()
+            .filter(|candidate| candidate.candidate_type() == CandidateType::Host)
+            .filter_map(|candidate| candidate.address().parse().ok())
+            .collect();
+        let usable: Vec<&TransportCandidate> = remote
+            .candidates
+            .iter()
+            .filter(|candidate| reachable_from_here(candidate, &local_hosts))
+            .collect();
+        // A peer that published nothing reachable is still worth the checks
+        // it implies rather than an immediate refusal: the filter exists to
+        // spare the relay, not to second-guess the other end.
+        let usable = if usable.is_empty() {
+            remote.candidates.iter().collect()
+        } else {
+            usable
+        };
+        for candidate in usable {
             let parsed: Arc<dyn Candidate + Send + Sync> =
                 Arc::new(unmarshal_candidate(&candidate.to_sdp()?).map_err(stack)?);
             self.agent.add_remote_candidate(&parsed).map_err(stack)?;
@@ -738,6 +834,49 @@ mod nat_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_peers_private_host_is_paired_only_from_its_own_network() {
+        fn host(address: &str) -> TransportCandidate {
+            TransportCandidate {
+                candidate_type: "host".into(),
+                priority: 1,
+                foundation: "1".into(),
+                component: 1,
+                protocol: "udp".into(),
+                address: address.into(),
+                related_address: None,
+                related_port: None,
+                tcp_type: None,
+            }
+        }
+        let on_lan: Vec<IpAddr> = vec!["192.168.1.20".parse().unwrap()];
+        let elsewhere: Vec<IpAddr> = vec!["10.9.8.7".parse().unwrap()];
+
+        // A phone on this Mac's Wi-Fi is a direct pair; the same phone seen
+        // from anywhere else is not, and a carrier's shared or 464XLAT
+        // address never is.
+        assert!(reachable_from_here(&host("192.168.1.30:5000"), &on_lan));
+        assert!(!reachable_from_here(&host("192.168.1.30:5000"), &elsewhere));
+        assert!(!reachable_from_here(&host("100.101.46.8:5000"), &on_lan));
+        assert!(!reachable_from_here(&host("192.0.0.4:5000"), &on_lan));
+        assert!(!reachable_from_here(
+            &host("[fd7a:115c:a1e0::1]:5000"),
+            &on_lan
+        ));
+        assert!(!reachable_from_here(&host("[fe80::1]:5000"), &on_lan));
+        // A public address of either family is worth a check.
+        assert!(reachable_from_here(&host("1.1.1.1:5000"), &elsewhere));
+        assert!(reachable_from_here(&host("[2001:db8::9]:5000"), &elsewhere));
+        // Reflexive and relay candidates are never filtered.
+        let mut relay = host("10.0.0.1:1");
+        relay.candidate_type = "relay".into();
+        assert!(reachable_from_here(&relay, &elsewhere));
+        // Loopback pairs with loopback, which is what the in-memory tests do.
+        let loopback: Vec<IpAddr> = vec!["127.0.0.1".parse().unwrap()];
+        assert!(reachable_from_here(&host("127.0.0.1:5000"), &loopback));
+        assert!(!reachable_from_here(&host("127.0.0.1:5000"), &on_lan));
+    }
 
     #[test]
     fn a_connect_error_names_the_stage_it_failed_in() {
