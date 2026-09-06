@@ -299,6 +299,44 @@ final class RemoteAccessTests: XCTestCase {
         )
     }
 
+    @MainActor
+    func testPresenceKeepsTheRelayAheadOfDuplicateReflexiveCandidates() {
+        // One reflexive candidate per server URL — a STUN server and three
+        // TURN URLs — all the same public address on different ports, then
+        // the two relays those URLs allocated, then the interfaces.
+        let reflexive = (0..<4).map { index in
+            gathered(type: "srflx", priority: 1_694_498_815, address: "203.0.113.9:\(50_000 + index)")
+        }
+        let relays = (0..<2).map { index in
+            gathered(type: "relay", priority: 16_777_215, address: "198.51.100.7:\(9_000 + index)")
+        }
+        let hosts = (0..<4).map { index in
+            gathered(type: "host", priority: 2_130_706_431, address: "192.168.1.\(index):1")
+        }
+        let selected = RemoteAccessController.presenceCandidates(from: hosts + reflexive + relays)
+
+        // Four places after the listener's, and a naive priority order would
+        // have spent all four on the same reflexive address.
+        XCTAssertEqual(selected.count, 4)
+        XCTAssertEqual(selected[0].address, "203.0.113.9:50000")
+        XCTAssertEqual(selected[1].type, "relay")
+        XCTAssertEqual(selected[2].type, "relay")
+        XCTAssertEqual(selected[3].address, hosts[0].address)
+
+        // A second family gets its own reflexive entry.
+        let v6 = gathered(type: "srflx", priority: 1_694_498_815, address: "[2001:db8::9]:50000")
+        let both = RemoteAccessController.presenceCandidates(from: reflexive + [v6] + relays)
+        XCTAssertEqual(both.prefix(2).map(\.address), ["203.0.113.9:50000", "[2001:db8::9]:50000"])
+        XCTAssertEqual(both[2].type, "relay")
+        XCTAssertEqual(both[3].type, "relay")
+
+        // Never-relay still publishes hosts alone.
+        XCTAssertTrue(
+            RemoteAccessController.presenceCandidates(from: hosts + reflexive + relays, neverRelay: true)
+                .allSatisfy { $0.type == "host" }
+        )
+    }
+
     /// A CLI that predates these fields must still produce a decodable status:
     /// they are additions to a contract the desktop app polls constantly, and a
     /// hard requirement would turn a stale CLI into "remote access is broken".

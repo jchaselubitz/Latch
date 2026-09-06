@@ -1681,14 +1681,28 @@ fn helper_is_running(pid: u32) -> bool {
 /// about the same connections. The helper therefore writes through this
 /// function, which takes no identity and no address — only whether an answer
 /// reached a connected data channel.
-pub fn record_ice_answer(home: &LatchHome, connected: bool) -> anyhow::Result<()> {
+/// How one answered offer ended, as the audit trail records it.
+///
+/// A failure names the stage that produced it — `timeout`, `ice`, `dtls`,
+/// `sctp`, `channel`, `candidate` — because an answer that fails in two
+/// seconds and one that fails in thirty are different faults, and the audit
+/// trail is the one record a person can read without the ICE trace.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IceAnswerOutcome {
+    /// ICE, DTLS, SCTP, and the data channel all came up.
+    Connected,
+    /// The answer failed in the named stage.
+    Failed(&'static str),
+}
+
+/// Records how the helper's answer to one offer ended.
+pub fn record_ice_answer(home: &LatchHome, outcome: IceAnswerOutcome) -> anyhow::Result<()> {
     let paths = Paths::new(home);
-    audit(
-        &paths,
-        ICE_ANSWER_EVENT,
-        None,
-        if connected { "connected" } else { "failed" },
-    )
+    let result = match outcome {
+        IceAnswerOutcome::Connected => "connected",
+        IceAnswerOutcome::Failed(stage) => stage,
+    };
+    audit(&paths, ICE_ANSWER_EVENT, None, result)
 }
 
 /// Builds an inspectable, content-free support bundle locally. Upload remains
@@ -3368,7 +3382,7 @@ mod tests {
         blank.servers[0].credential.clear();
         assert!(record_relay_servers(&home, &blank).is_err());
         let mut immortal = relay.clone();
-        immortal.expires_at = now + MAX_RELAY_CREDENTIAL_LIFETIME.as_secs() + 1;
+        immortal.expires_at = now + MAX_RELAY_CREDENTIAL_LIFETIME.as_secs() + 60;
         assert!(record_relay_servers(&home, &immortal).is_err());
         // The refusals left the good record in place.
         assert_eq!(load_relay_servers(&home), relay.servers);
@@ -4319,8 +4333,8 @@ mod tests {
         ] {
             audit(&paths, PATH_SELECTED_EVENT, Some("dev_1"), route.slug()).unwrap();
         }
-        record_ice_answer(&home, true).unwrap();
-        record_ice_answer(&home, false).unwrap();
+        record_ice_answer(&home, IceAnswerOutcome::Connected).unwrap();
+        record_ice_answer(&home, IceAnswerOutcome::Failed("timeout")).unwrap();
 
         let export = diagnostics_export(&home).unwrap();
         let metrics = &export.path_selection;

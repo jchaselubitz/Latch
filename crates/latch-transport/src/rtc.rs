@@ -301,6 +301,40 @@ pub enum RtcError {
     RecordTooLarge,
 }
 
+impl RtcError {
+    /// Which stage of a connect this error belongs to, as a short slug fit
+    /// for the audit trail: `candidate`, `server`, `timeout`, `ice`, `dtls`,
+    /// `sctp`, `channel`, or `record`. A connect that fails in two seconds
+    /// and one that fails in thirty are different failures, and the audit
+    /// trail is where that difference has to be legible.
+    pub fn stage(&self) -> &'static str {
+        match self {
+            Self::InvalidCandidate(_) => "candidate",
+            Self::InvalidIceServer(_) => "server",
+            Self::RecordTooLarge => "record",
+            Self::Stack(message) => {
+                if message.contains("timed out") {
+                    "timeout"
+                } else if let Some(stage) = message.strip_prefix('[') {
+                    match stage.split(']').next().unwrap_or_default() {
+                        "dtls" => "dtls",
+                        "sctp" => "sctp",
+                        "channel" => "channel",
+                        _ => "ice",
+                    }
+                } else {
+                    "ice"
+                }
+            }
+        }
+    }
+}
+
+/// Labels a stack error with the stage that produced it.
+fn staged<E: std::fmt::Display>(stage: &'static str) -> impl Fn(E) -> RtcError {
+    move |error| RtcError::Stack(format!("[{stage}] {error}"))
+}
+
 /// An ICE agent after candidate gathering and before peer connection.
 pub struct RtcEndpoint {
     agent: Agent,
@@ -492,7 +526,7 @@ impl RtcEndpoint {
                     certificates: vec![Certificate::generate_self_signed(vec![
                         "latch-transport".to_owned()
                     ])
-                    .map_err(stack)?],
+                    .map_err(staged("dtls"))?],
                     // DTLS is transport encryption only. Noise authenticates the
                     // pairing-record pin immediately above this channel.
                     insecure_skip_verify: true,
@@ -503,16 +537,16 @@ impl RtcEndpoint {
                 None,
             )
             .await
-            .map_err(stack)?,
+            .map_err(staged("dtls"))?,
         );
         let dtls: Arc<dyn ModernConn + Send + Sync> = Arc::new(LegacyToModern(legacy_dtls));
         let association = Arc::new(match role {
             Role::Initiator => Association::client(sctp_config(dtls, "latch-initiator"))
                 .await
-                .map_err(stack)?,
+                .map_err(staged("sctp"))?,
             Role::Responder => Association::server(sctp_config(dtls, "latch-responder"))
                 .await
-                .map_err(stack)?,
+                .map_err(staged("sctp"))?,
         });
         let config = DataChannelConfig {
             negotiated: false,
@@ -523,10 +557,10 @@ impl RtcEndpoint {
         let channel = match role {
             Role::Initiator => DataChannel::dial(&association, 0, config)
                 .await
-                .map_err(stack)?,
+                .map_err(staged("channel"))?,
             Role::Responder => DataChannel::accept::<DataChannel>(&association, config, &[])
                 .await
-                .map_err(stack)?,
+                .map_err(staged("channel"))?,
         };
         Ok(RtcConnection {
             agent: self.agent,
@@ -704,6 +738,21 @@ mod nat_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_connect_error_names_the_stage_it_failed_in() {
+        assert_eq!(RtcError::InvalidCandidate("x".into()).stage(), "candidate");
+        assert_eq!(RtcError::InvalidIceServer("x".into()).stage(), "server");
+        assert_eq!(RtcError::RecordTooLarge.stage(), "record");
+        assert_eq!(
+            RtcError::Stack("ICE connectivity checks timed out".into()).stage(),
+            "timeout"
+        );
+        assert_eq!(staged("dtls")("handshake failed").stage(), "dtls");
+        assert_eq!(staged("sctp")("abort").stage(), "sctp");
+        assert_eq!(staged("channel")("closed").stage(), "channel");
+        assert_eq!(stack("no candidate pairs").stage(), "ice");
+    }
 
     #[tokio::test]
     async fn host_candidates_carry_a_reliable_ordered_record() {

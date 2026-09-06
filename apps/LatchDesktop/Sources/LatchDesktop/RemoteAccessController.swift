@@ -551,8 +551,27 @@ final class RemoteAccessController: ObservableObject {
             // the published list between presence refreshes.
             return left.offset < right.offset
         }
-        return ordered
-            .map(\.element)
+        .map(\.element)
+        // The agent gathers one reflexive candidate per server URL, all from
+        // the same NAT, so a Mac with a relay ends up with several that differ
+        // only by port. One per address family is what a phone needs; the
+        // rest would crowd out the relay candidate, which is the one a phone
+        // behind an unfriendly NAT can actually reach.
+        var reflexiveFamilies: Set<Bool> = []
+        var leading: [RemoteIceCandidate] = []
+        var duplicateReflexive: [RemoteIceCandidate] = []
+        for candidate in ordered {
+            if candidate.type == "srflx" {
+                if reflexiveFamilies.insert(candidate.address.hasPrefix("[")).inserted {
+                    leading.append(candidate)
+                } else {
+                    duplicateReflexive.append(candidate)
+                }
+            } else {
+                leading.append(candidate)
+            }
+        }
+        return (leading + duplicateReflexive)
             .prefix(ControlPlaneHost.maxCandidates - ControlPlaneHost.maxListenerCandidates)
             .map { $0 }
     }

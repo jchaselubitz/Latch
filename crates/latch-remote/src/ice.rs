@@ -12,9 +12,9 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, bail, Context};
 use async_trait::async_trait;
 use latch::cli::remote_access::{
-    candidate_lifetime_from_now, load_relay_servers, record_ice_answer, IceCandidateRecord,
-    IceReadiness, PeerReader, PeerRoute, PeerStream, PeerTransport, PeerWriter, RemoteOffer,
-    PROXY_IDLE_TIMEOUT,
+    candidate_lifetime_from_now, load_relay_servers, record_ice_answer, IceAnswerOutcome,
+    IceCandidateRecord, IceReadiness, PeerReader, PeerRoute, PeerStream, PeerTransport, PeerWriter,
+    RemoteOffer, PROXY_IDLE_TIMEOUT,
 };
 use latch::session::paths::LatchHome;
 use latch_transport::policy::IceServer;
@@ -289,7 +289,13 @@ impl PeerTransport for IceResponder {
             if let Some(home) = home {
                 // A failed answer is the denominator of the connect rate, so
                 // it is recorded as deliberately as a successful one.
-                let _ = record_ice_answer(&home, connection.is_ok());
+                let _ = record_ice_answer(
+                    &home,
+                    match &connection {
+                        Ok(_) => IceAnswerOutcome::Connected,
+                        Err(error) => IceAnswerOutcome::Failed(error.stage()),
+                    },
+                );
             }
             if let Ok(connection) = connection {
                 let _ = accepted.send(peer_stream(connection)).await;
