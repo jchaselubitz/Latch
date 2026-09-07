@@ -459,3 +459,186 @@ async fn a_symmetric_mac_with_stun_only_is_reached_directly_from_a_cone_phone() 
     let _ = tokio::join!(phone.close(), mac.close());
     internet.shutdown().await;
 }
+
+/// A TURN allocation can succeed even though later permission transactions
+/// stop receiving replies. It must not park checks on unrelated direct paths.
+#[tokio::test]
+async fn a_stalled_turn_permission_does_not_block_direct_nomination() {
+    stalled_permission_case(
+        port_restricted_cone(),
+        port_restricted_cone(),
+        SelectedRoute::Reflexive,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_stalled_turn_permission_does_not_block_a_healthy_remote_relay() {
+    stalled_permission_case(symmetric(), symmetric(), SelectedRoute::Relay).await;
+}
+
+async fn stalled_permission_case(phone_nat: NatType, mac_nat: NatType, expected: SelectedRoute) {
+    let internet = build_internet(phone_nat, mac_nat).await.unwrap();
+    let dropped = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    internet
+        .wan
+        .lock()
+        .await
+        .add_chunk_filter(Box::new({
+            let dropped = Arc::clone(&dropped);
+            move |chunk| {
+                let bytes = chunk.user_data();
+                let permission = chunk.source_addr().ip().to_string() == "27.1.1.1"
+                    && chunk.destination_addr().ip().to_string() == TURN_SERVER_IP
+                    && bytes.starts_with(&[0, 8]); // STUN CreatePermission request
+                if permission {
+                    dropped.fetch_add(1, Ordering::Relaxed);
+                }
+                !permission
+            }
+        }))
+        .await;
+    let connected = tokio::time::timeout(
+        Duration::from_secs(6),
+        connect_across_with(
+            &internet,
+            &turn_servers(),
+            &turn_servers(),
+            Duration::from_millis(600),
+        ),
+    )
+    .await;
+    assert!(
+        dropped.load(Ordering::Relaxed) > 0,
+        "test did not stall any permission request"
+    );
+    let (phone_route, mac_route, phone, mac) =
+        connected.expect("one stalled TURN request blocked healthy direct checks and nomination");
+    assert_eq!(phone_route, Some(expected));
+    assert_eq!(mac_route, Some(expected));
+    assert_records_round_trip(&phone, &mac).await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        let _ = tokio::join!(phone.close(), mac.close());
+        internet.shutdown().await;
+    })
+    .await
+    .expect("stalled permission blocked shutdown");
+}
+
+/// A cellular client can reach TURN over IPv6 even though its allocated
+/// peer-facing relay address is IPv4. Cloudflare uses exactly this split.
+#[tokio::test]
+async fn an_ipv6_turn_server_supplies_an_ipv4_relay() {
+    let net = Arc::new(Net::new(None));
+    let listener = net.bind("[::1]:0".parse().unwrap()).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let mut keys = HashMap::new();
+    keys.insert(
+        TURN_USER.to_owned(),
+        turn::auth::generate_auth_key(TURN_USER, TURN_REALM, TURN_PASSWORD),
+    );
+    let server = turn::server::Server::new(turn::server::config::ServerConfig {
+        conn_configs: vec![turn::server::config::ConnConfig {
+            conn: listener,
+            relay_addr_generator: Box::new(
+                turn::relay::relay_static::RelayAddressGeneratorStatic {
+                    relay_address: "127.0.0.1".parse().unwrap(),
+                    address: "127.0.0.1".into(),
+                    net: Arc::clone(&net),
+                },
+            ),
+        }],
+        realm: TURN_REALM.into(),
+        auth_handler: Arc::new(StaticCredential(keys)),
+        channel_bind_timeout: Duration::ZERO,
+        alloc_close_notify: None,
+    })
+    .await
+    .unwrap();
+    let servers = [IceServer {
+        url: format!("turn:[::1]:{port}?transport=udp"),
+        username: TURN_USER.into(),
+        credential: TURN_PASSWORD.into(),
+    }];
+    let (endpoint, local) = tokio::time::timeout(
+        Duration::from_secs(10),
+        RtcEndpoint::gather_with_network(
+            credentials("ipv6-turn-client"),
+            &servers,
+            true,
+            Some(net),
+        ),
+    )
+    .await
+    .expect("IPv6 TURN gathering finishes")
+    .unwrap();
+    let has_ipv4_relay = local
+        .candidates
+        .iter()
+        .any(|c| c.candidate_type == "relay" && c.address.parse::<SocketAddr>().unwrap().is_ipv4());
+    assert!(
+        has_ipv4_relay,
+        "IPv6 TURN allocation did not yield an IPv4 relay"
+    );
+    let relay = endpoint
+        .agent
+        .get_local_candidates()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|c| c.candidate_type() == CandidateType::Relay)
+        .unwrap();
+    let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let target: Arc<dyn Candidate + Send + Sync> = Arc::new(
+        webrtc_ice::candidate::candidate_host::CandidateHostConfig {
+            base_config: webrtc_ice::candidate::candidate_base::CandidateBaseConfig {
+                network: "udp".into(),
+                address: "127.0.0.1".into(),
+                port: peer.local_addr().unwrap().port(),
+                component: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+        .new_candidate_host()
+        .unwrap(),
+    );
+    relay
+        .write_to(b"IPv6 client to IPv4 peer", target.as_ref())
+        .await
+        .unwrap();
+    let mut packet = [0; 128];
+    let (n, source) = tokio::time::timeout(Duration::from_secs(2), peer.recv_from(&mut packet))
+        .await
+        .expect("relay forwards data across address families")
+        .unwrap();
+    assert_eq!(&packet[..n], b"IPv6 client to IPv4 peer");
+    assert_eq!(source, relay.addr());
+    endpoint.close().await.unwrap();
+    server.close().await.unwrap();
+    assert!(
+        has_ipv4_relay,
+        "an IPv6-only TURN listener must supply a usable IPv4 relay candidate"
+    );
+}
+
+#[tokio::test]
+async fn tcp_turn_urls_do_not_wait_for_udp_stun_responses() {
+    // This UDP port intentionally never responds. A TCP/TLS URL must not
+    // generate plaintext UDP STUN probes or charge their five-second timeout.
+    let listener = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let servers = [IceServer {
+        url: format!("turns:127.0.0.1:{port}?transport=tcp"),
+        username: TURN_USER.into(),
+        credential: TURN_PASSWORD.into(),
+    }];
+    let (endpoint, _) = tokio::time::timeout(
+        Duration::from_secs(2),
+        RtcEndpoint::gather_with_network(credentials("no-udp-probe"), &servers, true, None),
+    )
+    .await
+    .expect("TCP/TLS URLs must not wait for UDP responses")
+    .unwrap();
+    endpoint.close().await.unwrap();
+}

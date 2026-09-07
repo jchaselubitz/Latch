@@ -26,7 +26,9 @@ fn allowed(target: &str) -> bool {
 fn safe_message(message: &str) -> bool {
     // The pinned ICE version prints the peer's password in start_connectivity_checks.
     // Drop the entire record, never try to partially redact an unknown format.
-    !message.contains("remotePwd") && !message.to_ascii_lowercase().contains("password")
+    !message.contains("remotePwd")
+        && !message.to_ascii_lowercase().contains("password")
+        && !message.contains("try_send data =")
 }
 
 impl log::Log for TraceLogger {
@@ -111,7 +113,7 @@ pub fn configure(path: Option<&Path>) -> Result<(), String> {
     } else {
         log::LevelFilter::Off
     });
-    log::info!(target: "latch_transport", "ICE diagnostics enabled; build={} lifecycle-v2; local only; bounded to 8 MiB", env!("CARGO_PKG_VERSION"));
+    log::info!(target: "latch_transport", "ICE diagnostics enabled; build={} lifecycle-v2 stun-queues-v1 response-drain-v1 turn-ipv6-v1; local only; bounded to 8 MiB", env!("CARGO_PKG_VERSION"));
     Ok(())
 }
 
@@ -131,6 +133,7 @@ mod tests {
     fn credentials_and_unrelated_protocols_are_excluded() {
         assert!(!safe_message("Started agent: remotePwd: secret"));
         assert!(!safe_message("password=secret"));
+        assert!(!safe_message("try_send data = [23, 254, 253], from = peer"));
         assert!(safe_message("Nominatable pair found, nominating"));
         assert!(!allowed("webrtc_dtls"));
         assert!(!allowed("latch::noise"));

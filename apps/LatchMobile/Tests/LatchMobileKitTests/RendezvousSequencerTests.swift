@@ -32,8 +32,22 @@ final class RendezvousSequencerTests: XCTestCase {
         )
     }
 
+    func testProvidersForOneMacShareSequencingAndRememberTheConsumedAgent() async {
+        let key = UUID().uuidString
+        let first = RendezvousSequencer.shared(for: key)
+        let second = RendezvousSequencer.shared(for: key)
+        XCTAssertTrue(first === second)
+        XCTAssertFalse(first === RendezvousSequencer.shared(for: UUID().uuidString))
+        let agent = RendezvousSequencer.AnsweredAgent(iceUfrag: "consumed", candidates: [])
+        await first.recordAnswer(agent)
+        let remembered = await second.answeredAgent
+        XCTAssertEqual(remembered, agent)
+    }
+
     func testOffersFromOneRouteArePostedOneAtATime() async throws {
-        let sequencer = RendezvousSequencer()
+        let key = UUID().uuidString
+        let sequencer = RendezvousSequencer.shared(for: key)
+        let otherProvider = RendezvousSequencer.shared(for: key)
         let order = Recorder()
         let firstMayFinish = Gate()
 
@@ -47,7 +61,7 @@ final class RendezvousSequencerTests: XCTestCase {
         // The second is enqueued while the first is parked inside its work.
         await order.waitUntil(count: 1)
         let second = Task {
-            try await sequencer.serialized {
+            try await otherProvider.serialized {
                 await order.note("second started")
             }
         }

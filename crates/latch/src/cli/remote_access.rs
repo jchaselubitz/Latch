@@ -965,6 +965,13 @@ pub trait PeerReader: Send {
 pub trait PeerWriter: Send {
     /// Writes one record.
     async fn write_record(&mut self, record: &[u8]) -> anyhow::Result<()>;
+
+    /// Completes a successful response before the proxy releases the stream.
+    /// TCP writes already pass bytes to the socket; queued record transports
+    /// must wait for delivery here. Errors and revocation skip this step.
+    async fn finish(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 /// How an accepted peer stream reaches the phone.
@@ -2514,6 +2521,7 @@ async fn proxy_connection(
                 .await
                 .map_err(|_| anyhow!("gateway response idle timeout"))??;
             if read == 0 {
+                writer.finish().await?;
                 return Ok::<(), anyhow::Error>(());
             }
             let encrypted = {
@@ -3650,6 +3658,111 @@ mod tests {
             service.get_property_val_str("identityKey"),
             Some(identity.public_key.as_str())
         );
+    }
+
+    /// Models a record transport whose writes enqueue data until normal
+    /// response completion. Handshake records still pass through immediately.
+    struct BufferedResponseWriter {
+        socket: tokio::net::tcp::OwnedWriteHalf,
+        handshake_written: bool,
+        pending: Vec<Vec<u8>>,
+    }
+
+    #[async_trait]
+    impl PeerWriter for BufferedResponseWriter {
+        async fn write_record(&mut self, record: &[u8]) -> anyhow::Result<()> {
+            if self.handshake_written {
+                self.pending.push(record.to_vec());
+                Ok(())
+            } else {
+                self.handshake_written = true;
+                write_frame(&mut self.socket, record).await
+            }
+        }
+
+        async fn finish(&mut self) -> anyhow::Result<()> {
+            for record in self.pending.drain(..) {
+                write_frame(&mut self.socket, &record).await?;
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn noise_proxy_delivers_a_complete_http_response_before_releasing_queued_writes() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (_dir, home) = home();
+            set_enabled(&home, true).unwrap();
+            let paths = Paths::new(&home);
+            let mac_identity = identity(&paths).unwrap();
+            let (phone_private, phone_public) = keypair();
+            let pairing = create_pairing(&home).unwrap();
+            confirm_pairing(
+                &home,
+                &pairing.pairing_id,
+                &pairing.secret,
+                &phone_public,
+                "HTTP response test phone",
+                DevicePermission::Observe,
+                None,
+            )
+            .unwrap();
+            ensure_private_directory(&paths.runtime()).unwrap();
+            let token = paths.runtime().join("gateway.token");
+            write_bytes_atomic(&token, b"test-gateway-token").unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let gateway_addr = listener.local_addr().unwrap();
+            let response = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n[]";
+            let gateway = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let _ = read_request_headers(&mut socket).await;
+                socket.write_all(response).await.unwrap();
+                // Immediate EOF, exactly as the one-request HTTP gateway does.
+            });
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let proxy = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                let (reader, writer) = socket.into_split();
+                let peer = PeerStream {
+                    reader: Box::new(TcpPeerReader(reader)),
+                    writer: Box::new(BufferedResponseWriter {
+                        socket: writer,
+                        handshake_written: false,
+                        pending: Vec::new(),
+                    }),
+                    route: PeerRoute::Unknown,
+                };
+                proxy_connection(
+                    peer,
+                    &paths,
+                    &mac_identity,
+                    &token,
+                    gateway_addr,
+                    &Arc::new(AtomicUsize::new(0)),
+                )
+                .await
+            });
+            let socket = TcpStream::connect(address).await.unwrap();
+            let (mut reader, mut writer) = socket.into_split();
+            let mut noise = initiator_handshake(&mut reader, &mut writer, &phone_private).await;
+            encrypt_record(
+                &mut writer,
+                &mut noise,
+                b"GET /v2/sessions HTTP/1.1\r\nHost: latch\r\n\r\n",
+            )
+            .await
+            .unwrap();
+            let mut received = Vec::new();
+            while received.len() < response.len() {
+                received.extend(decrypt_record(&mut reader, &mut noise).await.unwrap());
+            }
+            assert_eq!(received, response);
+            proxy.await.unwrap().unwrap();
+            gateway.await.unwrap();
+        })
+        .await
+        .expect("the HTTP response completes before its deadline");
     }
 
     /// Losing the grant closes a live terminal exactly as losing the pairing

@@ -22,12 +22,15 @@ use latch_transport::rtc::{
     IceCredentials, LocalDescription, RemoteDescription, Role, RtcConnection, RtcEndpoint,
     SelectedRoute, TestNetwork, TransportCandidate,
 };
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, Notify, Semaphore};
 
 /// How many connected-but-unclaimed streams may queue before the helper drains
 /// them. `serve_lan` accepts continuously, so this only absorbs the gap between
 /// a data channel opening and the accept loop's next turn.
 const ACCEPT_BACKLOG: usize = 4;
+
+// Leave room inside the phone's 15-second check deadline for nomination.
+const REPLACEMENT_WAIT: Duration = Duration::from_secs(8);
 
 /// How old an unused agent may get before it is gathered again.
 ///
@@ -62,9 +65,10 @@ struct Responder {
     credentials: IceCredentials,
     servers: Vec<IceServer>,
     /// The gathered, unused agent. `None` while one is being answered or
-    /// re-gathered, which is what makes a second concurrent offer a clean
-    /// refusal rather than a silent drop.
+    /// re-gathered. Offers wait briefly for its replacement in background tasks.
     idle: Mutex<Option<IdleAgent>>,
+    idle_ready: Notify,
+    offer_slots: Arc<Semaphore>,
     /// See [`REGATHER_AFTER`]; overridable so a test need not wait minutes.
     regather_after: Duration,
     description: Mutex<Option<IceReadiness>>,
@@ -131,6 +135,8 @@ impl IceResponder {
                 credentials,
                 servers,
                 idle: Mutex::new(None),
+                idle_ready: Notify::new(),
+                offer_slots: Arc::new(Semaphore::new(ACCEPT_BACKLOG)),
                 regather_after,
                 description: Mutex::new(None),
                 accepted,
@@ -211,6 +217,7 @@ impl Responder {
             gathered_at: Instant::now(),
         });
         *self.description.lock().await = Some(readiness.clone());
+        self.idle_ready.notify_waiters();
         if let Some(previous) = replaced {
             // Its ports are no longer what presence advertises. A phone that
             // read them a moment ago still connects: the fresh agent answers
@@ -219,6 +226,24 @@ impl Responder {
             let _ = previous.endpoint.close().await;
         }
         Ok(readiness)
+    }
+
+    async fn take_idle(&self) -> anyhow::Result<RtcEndpoint> {
+        tokio::time::timeout(REPLACEMENT_WAIT, async {
+            loop {
+                // Register before checking the slot, so a completed gather
+                // cannot notify between the empty check and subscription.
+                let ready = self.idle_ready.notified();
+                tokio::pin!(ready);
+                ready.as_mut().enable();
+                if let Some(idle) = self.idle.lock().await.take() {
+                    return idle.endpoint;
+                }
+                ready.await;
+            }
+        })
+        .await
+        .context("ICE replacement agent did not become ready before its deadline")
     }
 
     /// Whether the unused agent has outlived the re-gather threshold. An
@@ -255,6 +280,7 @@ impl Responder {
 #[async_trait]
 impl PeerTransport for IceResponder {
     async fn start(&self) -> anyhow::Result<IceReadiness> {
+        log::info!(target: "latch_remote", "responder lifecycle=offer-handover-v1");
         let readiness = self.inner.gather().await?;
         self.spawn_refresh();
         Ok(readiness)
@@ -264,14 +290,10 @@ impl PeerTransport for IceResponder {
         let remote = remote_description(&offer);
         let attempt = latch_transport::diagnostics::fingerprint(&offer.ice_ufrag);
         log::info!(target: "latch_remote", "request={} attempt={attempt} offer received", offer.request_id);
-        let endpoint = self
-            .inner
-            .idle
-            .lock()
-            .await
-            .take()
-            .ok_or_else(|| anyhow!("the ICE agent is already answering an offer"))?
-            .endpoint;
+        let permit = Arc::clone(&self.inner.offer_slots)
+            .try_acquire_owned()
+            .map_err(|_| anyhow!("the ICE offer backlog is full"))?;
+        let inner = Arc::clone(&self.inner);
         let accepted = self.inner.accepted.clone();
         let home = self.inner.home.clone();
         // Connecting waits on the peer's connectivity checks, and gathering the
@@ -279,6 +301,24 @@ impl PeerTransport for IceResponder {
         // loop, so both run detached. A failed attempt is simply an offer that
         // produced no stream; the phone retries with a fresh one.
         tokio::spawn(async move {
+            let _permit = permit;
+            let waiting_since = Instant::now();
+            let endpoint = match inner.take_idle().await {
+                Ok(endpoint) => endpoint,
+                Err(error) => {
+                    log::warn!(target: "latch_remote", "attempt={attempt} replacement wait failed: {error}");
+                    if let Some(home) = &home {
+                        let _ = record_ice_answer(home, IceAnswerOutcome::Failed("replacement"));
+                    }
+                    return;
+                }
+            };
+            log::info!(target: "latch_remote", "attempt={attempt} replacement wait completed elapsed_ms={}", waiting_since.elapsed().as_millis());
+            tokio::spawn(async move {
+                if let Err(error) = inner.gather().await {
+                    log::warn!(target: "latch_remote", "replacement gathering failed: {error}");
+                }
+            });
             let connection = endpoint.connect(remote, Role::Responder).await;
             match &connection {
                 Ok(connection) => log::info!(
@@ -304,10 +344,6 @@ impl PeerTransport for IceResponder {
             if let Ok(connection) = connection {
                 let _ = accepted.send(peer_stream(connection)).await;
             }
-        });
-        let inner = Arc::clone(&self.inner);
-        tokio::spawn(async move {
-            let _ = inner.gather().await;
         });
         Ok(())
     }
@@ -384,6 +420,10 @@ impl PeerReader for RtcPeerReader {
 
 #[async_trait]
 impl PeerWriter for RtcPeerWriter {
+    async fn finish(&mut self) -> anyhow::Result<()> {
+        self.0 .0.drain().await.map_err(|error| anyhow!("{error}"))
+    }
+
     async fn write_record(&mut self, record: &[u8]) -> anyhow::Result<()> {
         self.0
              .0
@@ -445,4 +485,85 @@ fn unix_now() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn an_offer_during_regather_waits_without_blocking_accepts() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let network = Arc::new(TestNetwork::new(Some(Default::default())));
+            let mac_credentials = IceCredentials {
+                ufrag: "mac-gap-test".into(),
+                password: "mac-gap-test-password-with-enough-entropy".into(),
+            };
+            let responder = IceResponder::for_test(mac_credentials.clone(), network.clone());
+            let published = responder.start().await.unwrap();
+            // The old agent's addresses are still published while its
+            // replacement is gathering. The phone has already read them.
+            let consumed = responder.inner.idle.lock().await.take().unwrap();
+            let (phone, description) = RtcEndpoint::gather_on_test_network(
+                IceCredentials {
+                    ufrag: "phone-gap-test".into(),
+                    password: "phone-gap-test-password-with-enough-entropy".into(),
+                },
+                &[],
+                network,
+            )
+            .await
+            .unwrap();
+            let offer = RemoteOffer {
+                request_id: "a".repeat(32),
+                peer_device_id: "b".repeat(32),
+                ice_ufrag: description.credentials.ufrag,
+                ice_pwd: description.credentials.password,
+                candidates: description
+                    .candidates
+                    .iter()
+                    .map(|c| record(c, unix_now() + 60))
+                    .collect(),
+                expires_at: unix_now() + 60,
+            };
+            tokio::time::timeout(Duration::from_millis(100), responder.offer(offer))
+                .await
+                .expect("offer handling must not block the helper's accept loop")
+                .expect("an offer in the replacement gap must be retained");
+            let dialing = tokio::spawn(async move {
+                phone
+                    .connect(
+                        RemoteDescription {
+                            credentials: mac_credentials,
+                            candidates: published
+                                .candidates
+                                .iter()
+                                .map(transport_candidate)
+                                .collect(),
+                        },
+                        Role::Initiator,
+                    )
+                    .await
+                    .unwrap()
+            });
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            responder.inner.gather().await.unwrap();
+            consumed.endpoint.close().await.unwrap();
+            let mut peer = responder.accept().await.unwrap();
+            let phone = dialing.await.unwrap();
+            phone.write(b"request after handover").await.unwrap();
+            assert_eq!(
+                peer.reader.read_record().await.unwrap(),
+                b"request after handover"
+            );
+            peer.writer
+                .write_record(b"response after handover")
+                .await
+                .unwrap();
+            assert_eq!(phone.read().await.unwrap(), b"response after handover");
+            phone.close().await.unwrap();
+        })
+        .await
+        .expect("replacement agent connects before the phone deadline");
+    }
 }

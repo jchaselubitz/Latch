@@ -34,7 +34,7 @@ public final class NativeRemoteChannelProvider: RemoteNoiseChannelProvider, @unc
     private let pathReporter: RemotePathReporter
     private let policy = RemoteTransportPolicy()
     private let iceConfiguration = IceConfiguration()
-    private let sequencer = RendezvousSequencer()
+    private let sequencer: RendezvousSequencer
     private var pathChangeHandler: (@Sendable () async -> Void)?
 
     public convenience init(context: RemoteChannelContext) {
@@ -52,6 +52,7 @@ public final class NativeRemoteChannelProvider: RemoteNoiseChannelProvider, @unc
         pathReporter: RemotePathReporter = RemotePathReporter(),
         pathChangeHandler: (@Sendable () async -> Void)? = nil
     ) {
+        self.sequencer = .shared(for: record.mac.publicKey)
         self.record = record
         self.signaling = signaling
         self.pathReporter = pathReporter

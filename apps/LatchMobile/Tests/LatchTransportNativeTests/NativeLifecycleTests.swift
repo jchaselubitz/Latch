@@ -43,6 +43,8 @@ final class NativeLifecycleTests: XCTestCase {
         try await transport.close()
         let contents = try String(contentsOf: log, encoding: .utf8)
         XCTAssertTrue(contents.contains("lifecycle-v2"))
+        XCTAssertTrue(contents.contains("stun-queues-v1"))
+        XCTAssertTrue(contents.contains("turn-ipv6-v1"))
         XCTAssertTrue(contents.contains("transport cancelled"))
         XCTAssertFalse(contents.contains("NEVER-LOG-THIS-REMOTE-PASSWORD"))
         XCTAssertFalse(contents.contains("remotePwd"))

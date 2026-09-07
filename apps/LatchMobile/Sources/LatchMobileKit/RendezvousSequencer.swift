@@ -13,7 +13,7 @@ import Foundation
 /// opens a fresh channel for every loopback connection, so a screen that
 /// makes two requests posts two offers seconds apart.
 ///
-/// Two rules keep the phone out of the window. Offers from one route are
+/// Two rules keep the phone out of the window. Offers for one Mac are
 /// posted one at a time, so parallel loopback connections cannot race each
 /// other for the Mac's single idle agent. And before posting, the phone waits
 /// until presence no longer describes the agent its last offer was answered
@@ -21,6 +21,14 @@ import Foundation
 /// on its slow cadence, and offering anyway is still the right move — it is
 /// only less likely to land.
 public actor RendezvousSequencer {
+    private nonisolated static let registry = PeerSequencers()
+
+    /// Route rebuilds and separate providers on this phone share the Mac's one
+    /// offer queue. Keep the last consumed agent across those rebuilds too.
+    public nonisolated static func shared(for peerPublicKey: String) -> RendezvousSequencer {
+        registry.sequencer(for: peerPublicKey)
+    }
+
     /// The agent the last offer was answered with: enough of the answer to
     /// recognise the same agent in a later presence read, and nothing else.
     public struct AnsweredAgent: Equatable, Sendable {
@@ -115,5 +123,19 @@ public actor RendezvousSequencer {
                 }
             }
         }
+    }
+}
+
+private final class PeerSequencers: @unchecked Sendable {
+    private let lock = NSLock()
+    private var peers: [String: RendezvousSequencer] = [:]
+
+    func sequencer(for key: String) -> RendezvousSequencer {
+        lock.lock()
+        defer { lock.unlock() }
+        if let existing = peers[key] { return existing }
+        let created = RendezvousSequencer()
+        peers[key] = created
+        return created
     }
 }

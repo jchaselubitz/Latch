@@ -19,6 +19,15 @@ use latch_remote::ice::IceResponder;
 
 #[tokio::test]
 async fn an_approved_offer_yields_a_peer_stream_carrying_noise_records() {
+    peer_stream_round_trip(false).await;
+}
+
+#[tokio::test]
+async fn a_final_response_survives_the_proxy_finishing() {
+    peer_stream_round_trip(true).await;
+}
+
+async fn peer_stream_round_trip(finish_response: bool) {
     let network = Arc::new(TestNetwork::new(Some(Default::default())));
     let mac = IceCredentials {
         ufrag: "macufrag".into(),
@@ -111,8 +120,20 @@ async fn an_approved_offer_yields_a_peer_stream_carrying_noise_records() {
         .write_record(b"noise response record")
         .await
         .expect("the helper writes");
+    if finish_response {
+        // A close-delimited HTTP gateway can reach EOF immediately after its
+        // last response write. The proxy then drops both peer halves.
+        peer.writer
+            .finish()
+            .await
+            .expect("the response is delivered");
+        drop(peer);
+    }
     assert_eq!(
-        phone_channel.read().await.expect("the phone reads"),
+        tokio::time::timeout(Duration::from_secs(3), phone_channel.read())
+            .await
+            .expect("the final response arrives before the request deadline")
+            .expect("the phone reads"),
         b"noise response record"
     );
 

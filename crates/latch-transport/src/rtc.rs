@@ -782,12 +782,31 @@ impl RtcConnection {
     }
 
     /// Closes the data channel, SCTP association, and ICE agent.
+    /// This is immediate cleanup; successful response writers must drain first.
     pub async fn close(&self) -> Result<(), RtcError> {
         // An upper-layer close failure must not skip socket/allocation cleanup.
         let channel = self.channel.close().await.map_err(stack);
         let association = self.association.close().await.map_err(stack);
         let agent = self.agent.close().await.map_err(stack);
         channel.and(association).and(agent)
+    }
+
+    /// Waits for the peer to acknowledge queued records before normal teardown.
+    /// SCTP write completion only enqueues bytes. Closing the association at
+    /// that point can discard the final HTTP response. The bound also ensures
+    /// a vanished peer cannot hold cleanup indefinitely. Cancellation remains
+    /// safe: callers can drop this future and use immediate `close`.
+    pub async fn drain(&self) -> Result<(), RtcError> {
+        log::info!(target: "latch_transport", "response drain started queued_bytes={}", self.channel.buffered_amount());
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while self.channel.buffered_amount() != 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .map_err(|_| RtcError::Stack("[channel] response delivery timed out".into()))?;
+        log::info!(target: "latch_transport", "response drain completed");
+        Ok(())
     }
 }
 

@@ -1,5 +1,6 @@
 [workspace]
 resolver = "2"
+exclude = ["vendor/webrtc-ice"]
 members = [
     "crates/latch",
     "crates/latch-term",
@@ -11,7 +12,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2609061156.0"
+version = "0.2609070836.0"
 edition = "2021"
 rust-version = "1.82"
 license = "UNLICENSED"
@@ -57,3 +58,7 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
+
+[patch.crates-io]
+# Keep independent ICE paths moving when a TURN permission request stalls.
+webrtc-ice = { path = "vendor/webrtc-ice" }
