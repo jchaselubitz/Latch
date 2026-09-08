@@ -1,6 +1,6 @@
 # Secure relay remote access implementation plan
 
-Date: 7 September 2026, updated 8 September 2026. Reviewed after the connection fixes in this session, then revised by the planning-review objective `coo:952.tskr` (see section 13). Status: Objectives 1 and 2 implemented and locally verified (sections 14 and 15); deployment, physical WSS validation, and live APNs delivery remain in Objective 3.
+Date: 7 September 2026, updated 8 September 2026. Reviewed after the connection fixes in this session, then revised by the planning-review objective `coo:952.tskr` (see section 13). Status: Objectives 1 and 2 implemented and locally verified (sections 14 and 15); Objective 3 deployment and cutover performed on 8 September (section 16); the physical matrix, soak, and live APNs delivery are in progress there.
 
 Overlord mission: **coo:952 — Replace remote access with an encrypted relay and resilient mobile sessions**. Objective order: `coo:952.tskr` (plan review), `coo:952.ay7b` (secure transport), `coo:952.95p7` (resilience), then `coo:952.wfc0` (deployment and physical verification). Auto-advance remains disabled.
 
@@ -465,3 +465,91 @@ Push capability on the App ID, and place `APNS_KEY_ID`/`APNS_TEAM_ID`/
 secret store; the sandbox environment matches the development-signed build),
 and every physical-device measurement. Nothing here is deployed; the working
 tree is uncommitted.
+
+## 16. Objective 3 implementation record
+
+Objective `coo:952.wfc0` performed the coordinated cutover on 8 September
+2026 after the owner granted commit, push, and deployment permission for the
+shared checkout. Material facts and design changes against sections 8–11:
+
+- **Deployed services.** Railway project `latch`: the control plane (`Latch`)
+  redeployed from `main` at `0e5d4c5` and reports 7 applied migrations with
+  `relayConfigured: true`; a new `latch-relay` service (root `services/relay`,
+  one replica, app sleeping disabled, readiness on `/health/ready`) at
+  `wss://latch-relay-production.up.railway.app/v1/connect`, source connected
+  to `main`. Secrets (Ed25519 admission key `latch-remote-link-2026-09a`,
+  relay service token, invalidation secret, operator secret) were minted for
+  this deployment and placed only in Railway's variable store. Verified from
+  the Mac: relay live/ready; WebSocket upgrade answers 401 without a token and
+  403 with a forged one, so the `Authorization` header traverses the edge
+  intact (note: `curl` must use HTTP/1.1 for this probe; over HTTP/2 the edge
+  does not attempt an upgrade); the certificate validates with the system
+  trust store; the relay hostname publishes an A record and no AAAA, so an
+  IPv6-only phone reaches it through carrier NAT64 and the field report
+  reports that family, not native IPv6.
+- **Forward migration `0007_retire_ice_signaling.sql`** drops the
+  `turn_credentials`, `rendezvous_offers`, `presence`, `relay_tickets`, and
+  `pairing_requests` tables and revokes every pairing and phone identity with
+  no `remote_links` row, keeping the Mac identity and owner account. The
+  Desktop therefore kept its stored account and host tokens and needed no
+  owner invitation; every phone must re-enrol. A PostgreSQL regression proves
+  the drop and the revocation predicate. The `pg_dump` taken for rollback
+  ran after the platform's own deploy had already applied the migration, so
+  it is a post-cutover backup; the retired tables exist only in Railway's
+  platform backups, and the rollback runbook says so.
+- **Mac payload.** Version `0.2609080610.0` was built, Developer ID signed,
+  notarized, installed with the supervising Desktop quit first, and tagged
+  (`v0.2609080610.0`, CLI archives published by the release workflow). A
+  concurrent session in the shared checkout then bumped the workspace to
+  `0.2609080625.0` while the Desktop poll fix below was being rebuilt, so the
+  coordinated installed release is `0.2609080625.0`: `latch`
+  `3501b38a3d329d44b0f873cff9fe3b00eee36e9e6e2dcfc67fa17863bba68e92`,
+  `latch-remote`
+  `8e6900a82eab41a5f8c7a9547e7002ea6bc5e810095e45441316db618f46d5b5`,
+  `latchd` `e8a903fd2a04075ea7fe4ce607f17852b8cce796eee6116c2f3c082e9c1ebbb9`,
+  Desktop executable
+  `6cb882f1132a3f2a34d32856bb8bf9d1e77755eb9614d0a89291ff4f4cf6df66`
+  (notarized, stapled). All running `latchd` sessions survived both swaps.
+  The ICE-baseline binaries and app bundle and the intermediate
+  `0.2609080610.0` bundle are kept under `~/.latch/remote-access/rollback/`.
+  The locally built payload is the installed one and is identified by these
+  hashes, not by the CI archive of the same tag. The two remaining active
+  retired-protocol device records on the Mac were revoked with
+  `latch remote-access revoke`, matching the directory.
+- **Phone build.** The iPhone build is signed by the wildcard team profile,
+  which lacks Push Notifications, and Xcode has no signed-in account to
+  update it. An interim build without the `aps-environment` entitlement was
+  installed (`dev.cooperativ.latch.mobile` 0.1.0, iOS 27.0 SDK). Live APNs
+  remains blocked on the owner actions in section 7 and is carried in the
+  field report as outstanding, not waived.
+- **Cold-open harness.** The plan named an XCUITest harness; the delivered
+  `scripts/phone-diagnostics.sh` launches the real app from not-running over
+  USB with `xcrun devicectl` and the app records one `cold_open` line per
+  process from the kernel's process start time (`ColdOpenRecorder`, stage
+  `launch`). Reconnect cycles are started by launch argument so the in-app
+  runner needs no tap. `scripts/diagnostics_summary.py` produces per-stage
+  p50/p95/max and `scripts/field-run.sh finish --phone-log` embeds them in
+  the Mac-side record. The reasons for the substitution are in the field
+  report.
+- **Demonstrated fix.** The new Desktop polled `GET /v1/remote-links` every
+  two seconds while no phone was linked (observed in the control-plane request
+  log after install); the idle re-check is now 20 seconds and enrollment
+  still restarts supervision immediately.
+- **Workflow fix.** The control-plane GitHub Actions deploy step uploaded the
+  repository checkout to a service whose root is `services/control-plane`, so
+  Railpack found nothing and the explicit deploy failed on every push while
+  the platform's own GitHub integration deployed correctly; the step now
+  passes `--path-as-root`.
+- **Relay key rotation** gained the bounded previous-key overlap
+  (`ADMISSION_PREVIOUS_KEY_ID`/`ADMISSION_PREVIOUS_PUBLIC_KEY_PEM`) the
+  runbook needs.
+- **Retired cloud resources.** The control plane's TURN provider variables,
+  presence and rendezvous TTLs, and the Cloudflare TURN key are deleted only
+  after the matrix passes, per section 11 item 7; until then they are
+  inert (no code reads them) and listed in the operations document.
+
+Operations, runbooks, and the cost model are in
+`docs/REMOTE_LINK_OPERATIONS.md`; the matrix procedure, gates, identities,
+and results table are in `docs/REMOTE_ACCESS_FIELD_VERIFICATION.md`. The
+physical matrix, soak, and APNs delivery require the owner at the phone and
+are recorded there as they run.

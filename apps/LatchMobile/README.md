@@ -107,7 +107,12 @@ Settings → Diagnostics runs real suspend/resume cycles through the owner and
 writes content-free per-attempt stage timings to Files › Latch ›
 latch-diagnostics. Its skip-LAN switch measures the relay path from a network
 where the Mac is also nearby; it is a diagnostics setting, not a transport
-mode.
+mode. The same runner starts without a tap when the app is launched with
+`-latchDiagnosticsCycles N` (plus optional `-latchDiagnosticsSkipLAN 1`,
+`-latchDiagnosticsTerminal 1`, `-latchDiagnosticsPause S`), and
+`-latchDiagnosticsColdOpen 1` arms one `cold_open` record for the process,
+measured from the kernel's process start to a usable gateway;
+`scripts/phone-diagnostics.sh` drives both over USB for the physical matrix.
 
 ## Contracts
 

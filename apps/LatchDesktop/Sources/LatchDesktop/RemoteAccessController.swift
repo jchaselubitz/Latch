@@ -34,6 +34,8 @@ final class RemoteAccessController: ObservableObject {
     static let keepAwakeKey = "remoteAccessKeepAwakeWhilePluggedIn"
     private static let restartDelays: [UInt64] = [1, 2, 5, 10, 30]
     private static let powerPollInterval: Duration = .seconds(30)
+    /// Directory re-check while no phone is linked.
+    static let idleLinkPollInterval: Duration = .seconds(20)
     private let client: LatchClient
     private let controlPlane: ControlPlaneHost
     private let defaults: UserDefaults
@@ -128,9 +130,15 @@ final class RemoteAccessController: ObservableObject {
                     let assignments = try await self.remoteLinkAssignments()
                     guard !Task.isCancelled else { return }
                     if assignments.isEmpty {
+                        // Nothing to supervise until a phone is enrolled;
+                        // enrollment restarts this loop immediately, so the
+                        // idle re-check only has to notice a link created
+                        // elsewhere. Two seconds here was a request every
+                        // two seconds against the directory for every
+                        // unpaired Mac.
                         self.phase = .onlineRelay(peers: 0)
                         attempt = 0
-                        try await Task.sleep(for: .seconds(2))
+                        try await Task.sleep(for: Self.idleLinkPollInterval)
                         continue
                     }
                     self.linkStatuses = [:]

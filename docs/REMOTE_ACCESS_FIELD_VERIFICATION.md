@@ -127,12 +127,12 @@ automated.
 
 | Component | Identity |
 | --- | --- |
-| Source | commit of the Objective 3 delivery (recorded when committed) |
-| Mac payload | version, and SHA-256 of `latch`, `latch-remote`, `latchd` from the signed archive (recorded at install) |
-| Desktop | `/Applications/Latch.app` `CFBundleShortVersionString` (recorded at install) |
+| Source | `main` at the Objective 3 cutover commit `0e5d4c5` plus the follow-up commit carrying the fixes below |
+| Mac payload | `0.2609080625.0`, Developer ID signed and notarized: `latch` `3501b38a…a68e92`, `latch-remote` `8e6900a8…46d5b5`, `latchd` `e8a903fd…1ebbb9` (full hashes in plan section 16) |
+| Desktop | `/Applications/Latch.app` `0.2609080625.0`, executable `6cb882f1…f6df66`, notarized and stapled |
 | Phone | `dev.cooperativ.latch.mobile` 0.1.0 (1), development-signed with the team profile, built with Xcode 27 beta against the iOS 27.0 SDK; executable and `LatchTransportFFI` SHA-256 recorded at install. **Interim build has no `aps-environment` entitlement** (see outstanding) |
-| Control plane | `release` from `GET /health/ready` |
-| Relay | Railway deployment id |
+| Control plane | `release` `0e5d4c547f7c4c45ab9cc0129fb33422334671c9`, 7 migrations, `relayConfigured: true`, `apnsConfigured: false` |
+| Relay | Railway service `latch-relay`, deployment `43ee28fe-57f6-44cb-aa9b-67a6530708bf` from the same commit |
 
 ## Results
 

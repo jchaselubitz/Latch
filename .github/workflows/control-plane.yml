@@ -79,4 +79,6 @@ jobs:
             exit 0
           fi
           npm install -g @railway/cli@4
-          railway up --service "${{ vars.RAILWAY_SERVICE_NAME || 'Latch' }}" --ci
+          # The service's root directory is services/control-plane; the upload
+          # must present this directory as the root or Railpack finds nothing.
+          railway up --service "${{ vars.RAILWAY_SERVICE_NAME || 'Latch' }}" --ci --path-as-root

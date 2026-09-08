@@ -13,7 +13,7 @@ use latch_transport::link::{
     LinkConfig, LinkPurpose, LinkRole, LinkTimings, SecureLink, Service, WssRecordIo,
 };
 use openssl::{pkcs12::Pkcs12, pkey::PKey, stack::Stack, x509::X509};
-use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
+use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_native_tls::TlsAcceptor;
@@ -28,13 +28,21 @@ fn test_certificates(subject: &str) -> (TlsAcceptor, String) {
     let ca_key = KeyPair::generate().unwrap();
     let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
     ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    // rcgen gives every certificate the same default subject; OpenSSL then
+    // sees a leaf whose issuer equals its own subject and treats it as
+    // self-signed, so the Linux CI run rejected the chain that
+    // Security.framework accepted. Distinct names keep both verifiers honest.
+    ca_params
+        .distinguished_name
+        .push(DnType::CommonName, "Latch composed-test CA");
     let ca = ca_params.self_signed(&ca_key).unwrap();
 
     let leaf_key = KeyPair::generate().unwrap();
-    let leaf = CertificateParams::new(vec![subject.to_owned()])
-        .unwrap()
-        .signed_by(&leaf_key, &ca, &ca_key)
-        .unwrap();
+    let mut leaf_params = CertificateParams::new(vec![subject.to_owned()]).unwrap();
+    leaf_params
+        .distinguished_name
+        .push(DnType::CommonName, subject);
+    let leaf = leaf_params.signed_by(&leaf_key, &ca, &ca_key).unwrap();
     let leaf_x509 = X509::from_pem(leaf.pem().as_bytes()).unwrap();
     let ca_x509 = X509::from_pem(ca.pem().as_bytes()).unwrap();
     let pkey = PKey::private_key_from_pem(leaf_key.serialize_pem().as_bytes()).unwrap();
