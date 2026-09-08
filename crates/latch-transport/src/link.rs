@@ -43,6 +43,12 @@ pub const DEAD_PEER_TIMEOUT: Duration = Duration::from_secs(45);
 
 const NOISE_PATTERN: &str = "Noise_XX_25519_ChaChaPoly_BLAKE2s";
 const DUPLEX_BUFFER_BYTES: usize = 256 * 1024;
+/// Bound on delivering the final frames of a link that is closing normally:
+/// bytes already written (a response, an enrollment receipt) must reach the
+/// carrier before it closes, and frames already received must reach their
+/// streams before the connection is dropped. Cancellation past this bound is
+/// immediate.
+const CLOSE_DRAIN_LIMIT: Duration = Duration::from_secs(3);
 
 /// Liveness timing for one link. Production callers use the defaults; tests
 /// shorten them to exercise the same code paths in milliseconds.
@@ -745,9 +751,17 @@ impl SecureLink {
         let (closed_tx, closed) = tokio::sync::watch::channel(false);
         let driver = tokio::spawn(async move {
             run_driver(connection, command_rx, inbound_tx, &mut crypt_task).await;
-            // The select above may already have consumed the transport task's
-            // completion; a finished JoinHandle must not be polled again.
-            if !crypt_task.is_finished() {
+            // `run_driver` returning dropped the yamux connection and with it
+            // the plaintext pipe's application end, so the transport task now
+            // reads whatever yamux flushed last (final data frames, the
+            // stream FIN, GoAway), sends it, and closes the carrier itself.
+            // Aborting it here lost the enrollment receipt in the field: the
+            // frames were queued but never encrypted and sent. The select
+            // above may already have consumed the task's completion; a
+            // finished JoinHandle must not be polled again.
+            if !crypt_task.is_finished()
+                && timeout(CLOSE_DRAIN_LIMIT, &mut crypt_task).await.is_err()
+            {
                 crypt_task.abort();
                 let _ = crypt_task.await;
             }
@@ -860,7 +874,7 @@ impl SecureLink {
         let _ = self.commands.send(DriverCommand::Close(send)).await;
         let _ = timeout(Duration::from_secs(2), receive).await;
         if let Some(task) = self.task.lock().await.take() {
-            let _ = timeout(Duration::from_secs(2), task).await;
+            let _ = timeout(CLOSE_DRAIN_LIMIT + Duration::from_secs(1), task).await;
         }
     }
 }
@@ -878,7 +892,26 @@ async fn run_driver<T>(
             biased;
             // The record carrier ending (peer gone, dead-peer timeout, protocol
             // failure) stops the driver even when no stream is being polled.
-            _ = &mut *crypt_task => break,
+            // Records decrypted just before the end may still sit in the
+            // plaintext pipe as unparsed frames: a peer that answers and then
+            // closes puts its answer and its close on the wire back to back.
+            // Parse them into their streams (bounded) before the connection
+            // goes away, so a reader sees the final bytes and then EOF rather
+            // than only EOF.
+            _ = &mut *crypt_task => {
+                let drain = async {
+                    loop {
+                        match poll_fn(|cx| connection.poll_next_inbound(cx)).await {
+                            Some(Ok(stream)) => {
+                                if inbound.try_send(stream).is_err() { break; }
+                            }
+                            Some(Err(_)) | None => break,
+                        }
+                    }
+                };
+                let _ = timeout(CLOSE_DRAIN_LIMIT, drain).await;
+                break;
+            }
             command = commands.recv() => match command {
                 Some(DriverCommand::Open(reply)) => {
                     let result = poll_fn(|cx| connection.poll_new_outbound(cx))
@@ -1499,6 +1532,62 @@ mod tests {
         let mut rest = Vec::new();
         assert!(accepted.read_to_end(&mut rest).await.is_err() || rest.is_empty());
         assert!(host.accept(LinkPurpose::Session).await.is_err());
+        controller.close().await;
+    }
+
+    #[tokio::test]
+    async fn final_bytes_written_before_close_arrive_before_eof() {
+        // The enrollment helper writes its encrypted receipt, shuts the
+        // stream, and closes the link in the same breath; the phone must read
+        // the receipt and then EOF. In the field it read only EOF, because
+        // the host aborted its transport task before the frames were sent
+        // and the controller dropped its connection the instant the carrier
+        // ended. Both directions are exercised.
+        let (controller_io, host_io) = pair();
+        let (controller_keys, host_keys) = keys();
+        let controller = SecureLink::establish(
+            controller_io,
+            config(
+                LinkRole::Controller,
+                &controller_keys.private,
+                &controller_keys.public,
+                &host_keys.public,
+            ),
+        );
+        let host = SecureLink::establish(
+            host_io,
+            config(
+                LinkRole::Host,
+                &host_keys.private,
+                &host_keys.public,
+                &controller_keys.public,
+            ),
+        );
+        let (controller, host) = tokio::try_join!(controller, host).unwrap();
+        let opened = controller.open(Service::Gateway, 3);
+        let accepted = host.accept(LinkPurpose::Session);
+        let (mut opened, (_, mut accepted)) = tokio::try_join!(opened, accepted).unwrap();
+
+        let payload: Vec<u8> = (0..40_000_u32).map(|value| (value % 251) as u8).collect();
+        accepted.write_all(&payload).await.unwrap();
+        accepted.shutdown().await.unwrap();
+        host.close().await;
+
+        let mut received = Vec::new();
+        let _ = tokio::time::timeout(Duration::from_secs(5), opened.read_to_end(&mut received))
+            .await
+            .expect("controller read did not finish");
+        assert_eq!(
+            received.len(),
+            payload.len(),
+            "final bytes were lost at close"
+        );
+        assert_eq!(received, payload);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), controller.closed())
+                .await
+                .is_ok()
+        );
         controller.close().await;
     }
 

@@ -544,6 +544,29 @@ shared checkout. Material facts and design changes against sections 8–11:
   revoked one when no active record exists; a regression test re-enrols a
   revoked key and checks both outcomes. This shipped as the follow-up payload
   recorded below; nothing in the relay, control plane, or phone changed.
+- **Demonstrated failure at first pairing, second cause.** With the
+  authority fix installed the helper stayed up, but the phone still reported
+  the secure connection closing before its request completed and never
+  requested a session admission: the enrollment receipt itself was lost.
+  The Mac's enrollment helper writes the encrypted receipt, shuts the
+  stream, and closes the link in one go; `SecureLink::close` then aborted the
+  transport task the moment yamux had queued the final frames, so they were
+  never encrypted and sent, and the socket closed without them. On the
+  receiving side the driver's `select!` was biased toward the carrier ending
+  and dropped the yamux connection while the just-decrypted frames still sat
+  unparsed in the plaintext pipe, so even a delivered receipt could lose the
+  race against the close that follows it. Both ends now drain within a
+  3-second bound (`CLOSE_DRAIN_LIMIT`): the transport task is awaited, not
+  aborted, after the connection is dropped, and a carrier ending parses the
+  buffered frames into their streams before the connection goes away. The
+  regression `final_bytes_written_before_close_arrive_before_eof` writes
+  40,000 bytes, shuts the stream, and closes the link in the same breath; it
+  failed on the previous driver with "final bytes were lost at close" and
+  passes now. This is the transport-independent "complete final response
+  delivery before normal close" protection carried over from section 2,
+  which the composed tests had not exercised because their links stayed open
+  after the last write. Fixing it required a new XCFramework and phone build
+  as well as a new Mac payload.
 - **Demonstrated fix.** The new Desktop polled `GET /v1/remote-links` every
   two seconds while no phone was linked (observed in the control-plane request
   log after install); the idle re-check is now 20 seconds and enrollment
