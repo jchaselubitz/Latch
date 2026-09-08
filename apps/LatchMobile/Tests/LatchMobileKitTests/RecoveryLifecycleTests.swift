@@ -50,6 +50,15 @@ final class RecoveryLifecycleTests: XCTestCase {
         func drop() { lock.withLock { dropped = true } }
     }
 
+    /// Waits for a condition that a background poll loop will produce; the
+    /// fixed settle below is enough locally but not on a loaded CI runner.
+    private func waitUntil(_ condition: @escaping @MainActor () -> Bool) async {
+        for _ in 0..<200 {
+            if condition() { return }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+    }
+
     private func settle() async {
         for _ in 0..<40 { await Task.yield() }
         try? await Task.sleep(for: .milliseconds(40))
@@ -73,7 +82,7 @@ final class RecoveryLifecycleTests: XCTestCase {
         // The socket dies without a close frame: interrupted, resumable, and
         // the keystrokes typed at it are reported as possibly undelivered.
         connection.drop()
-        await settle()
+        await waitUntil { terminal.state == .interrupted(resumable: true) }
         XCTAssertEqual(terminal.state, .interrupted(resumable: true))
         XCTAssertTrue(terminal.inputMayBeUndelivered)
         XCTAssertTrue(terminal.canResume)
@@ -98,7 +107,7 @@ final class RecoveryLifecycleTests: XCTestCase {
         await settle()
         XCTAssertEqual(terminal.state, .attached)
         connection.drop()
-        await settle()
+        await waitUntil { terminal.state == .interrupted(resumable: false) }
         XCTAssertEqual(terminal.state, .interrupted(resumable: false))
         XCTAssertFalse(terminal.canResume)
         XCTAssertFalse(terminal.resume(), "no capability means no automatic reattach")

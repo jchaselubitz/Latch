@@ -900,12 +900,9 @@ async fn run_driver<T>(
             // than only EOF.
             _ = &mut *crypt_task => {
                 let drain = async {
-                    loop {
-                        match poll_fn(|cx| connection.poll_next_inbound(cx)).await {
-                            Some(Ok(stream)) => {
-                                if inbound.try_send(stream).is_err() { break; }
-                            }
-                            Some(Err(_)) | None => break,
+                    while let Some(Ok(stream)) = poll_fn(|cx| connection.poll_next_inbound(cx)).await {
+                        if inbound.try_send(stream).is_err() {
+                            break;
                         }
                     }
                 };
