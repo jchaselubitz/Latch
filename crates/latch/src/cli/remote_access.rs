@@ -788,12 +788,25 @@ async fn wait_readiness(path: &Path) -> anyhow::Result<Readiness> {
     bail!("timed out waiting for supervised gateway readiness")
 }
 
+/// Resolves a controller key to its current record. A phone keeps its
+/// identity key across re-enrollment, so the store can hold revoked earlier
+/// records for the same key; enrollment refuses a second *active* record for
+/// a key, so the active one (if any) is the authority, and only when every
+/// record for the key is revoked does the newest revoked one answer.
 fn lookup_device(paths: &Paths, public_key: &str) -> anyhow::Result<Option<DeviceRecord>> {
     let store: DeviceStore = read_json_or_default(&paths.devices())?;
-    Ok(store
+    let mut matching = store
         .devices
         .into_iter()
-        .find(|item| item.public_key == public_key))
+        .filter(|item| item.public_key == public_key);
+    let mut newest = None;
+    for item in matching.by_ref() {
+        if !item.revoked {
+            return Ok(Some(item));
+        }
+        newest = Some(item);
+    }
+    Ok(newest)
 }
 
 fn identity(paths: &Paths) -> anyhow::Result<Identity> {
@@ -1081,6 +1094,45 @@ mod tests {
         )
         .unwrap();
         (directory, home, key)
+    }
+
+    #[test]
+    fn a_re_enrolled_key_resolves_to_its_active_record_not_an_older_revoked_one() {
+        // A phone keeps its identity key across re-pairing. The first
+        // pairing after the transport replacement failed exactly here: the
+        // retired-protocol record for the same key had been revoked and the
+        // lookup returned it, so the helper refused a controller the owner
+        // had just approved.
+        let (_directory, home, key) = enrolled_home(DevicePermission::Control);
+        let paths = Paths::new(&home);
+        let first = list_devices(&home).unwrap()[0].device_id.clone();
+        revoke(&home, &first).unwrap();
+        assert!(matches!(
+            current_device(&paths, &key, initial_grant_revision()),
+            Err(error) if error.to_string() == "revoked controller"
+        ));
+
+        let second = authorize_enrollment(
+            &home,
+            &format!("enr_{}", "3".repeat(32)),
+            &key,
+            "Test phone again",
+            DevicePermission::Interact,
+            &format!("dev_{}", "4".repeat(32)),
+        )
+        .unwrap();
+        let current = current_device(&paths, &key, initial_grant_revision()).unwrap();
+        assert_eq!(current.device_id, second.device_id);
+        assert_eq!(current.permission, DevicePermission::Interact);
+        assert!(!current.revoked);
+
+        // Revoking the active record leaves only revoked history for the key,
+        // and that must still read as revoked, never as unpaired.
+        revoke(&home, &second.device_id).unwrap();
+        assert!(matches!(
+            current_device(&paths, &key, initial_grant_revision()),
+            Err(error) if error.to_string() == "revoked controller"
+        ));
     }
 
     #[test]

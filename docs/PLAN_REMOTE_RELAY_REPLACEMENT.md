@@ -531,6 +531,19 @@ shared checkout. Material facts and design changes against sections 8–11:
   p50/p95/max and `scripts/field-run.sh finish --phone-log` embeds them in
   the Mac-side record. The reasons for the substitution are in the field
   report.
+- **Demonstrated failure at first pairing.** The owner's first four pairing
+  attempts ended with the Mac reporting success and the phone reporting "the
+  secure connection closed before the request completed". The helper
+  Desktop launched for the new link exited immediately with `revoked
+  controller`: the phone keeps its identity key across reinstall and
+  re-enrollment, the retired-protocol record for that same key had been
+  revoked during cutover, and `lookup_device` returned the first record
+  matching the key, so the authority refused a controller the owner had just
+  approved. The fix makes a key resolve to its active record (enrollment
+  already refuses a second active record per key) and only to the newest
+  revoked one when no active record exists; a regression test re-enrols a
+  revoked key and checks both outcomes. This shipped as the follow-up payload
+  recorded below; nothing in the relay, control plane, or phone changed.
 - **Demonstrated fix.** The new Desktop polled `GET /v1/remote-links` every
   two seconds while no phone was linked (observed in the control-plane request
   log after install); the idle re-check is now 20 seconds and enrollment
