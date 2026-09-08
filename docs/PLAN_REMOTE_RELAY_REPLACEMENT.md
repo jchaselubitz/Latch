@@ -678,6 +678,19 @@ and results table are in `docs/REMOTE_ACCESS_FIELD_VERIFICATION.md`. The
 physical matrix, soak, and APNs delivery require the owner at the phone and
 are recorded there as they run.
 
+- **Demonstrated failure in the manual subset: terminal input and session
+  creation.** The owner's first terminal attach showed the keyboard but no
+  keystroke reached the session, and "start session here" loaded forever,
+  while listing, preview, and output all worked. The FFI `RemoteStream`
+  guarded its logical stream with one lock and `read` held it while waiting
+  for bytes, so on the phone every write after the first (WebSocket frames
+  carrying keystrokes, a POST body arriving after the head) blocked behind
+  the response reader forever; single-write GETs were unaffected. The stream
+  is now split into independently locked read and write halves. Regression:
+  a write completes while a reader is parked on the same stream. The Mac
+  gateway was exercised directly and created a session in 0.1 s, which is
+  what isolated the fault to the phone's link path.
+
 ### Objective 3 stopping point (8 September 2026, 11:30 UTC)
 
 The owner asked for a stopping point that covers the common network

@@ -96,7 +96,22 @@ pub struct RemoteLink {
 /// One independently closable logical service stream on a shared Remote Link.
 #[derive(uniffi::Object)]
 pub struct RemoteStream {
-    stream: Mutex<Option<LogicalStream>>,
+    // Independently locked halves: a reader parked in `read` must never hold
+    // up a `write`. With one lock, a WebSocket (terminal input) or a POST body
+    // arriving after the head waited behind the response reader forever;
+    // only single-write GETs worked (seen in the field on 8 September 2026).
+    reader: Mutex<Option<tokio::io::ReadHalf<LogicalStream>>>,
+    writer: Mutex<Option<tokio::io::WriteHalf<LogicalStream>>>,
+}
+
+impl RemoteStream {
+    fn new(stream: LogicalStream) -> Self {
+        let (reader, writer) = tokio::io::split(stream);
+        Self {
+            reader: Mutex::new(Some(reader)),
+            writer: Mutex::new(Some(writer)),
+        }
+    }
 }
 
 #[uniffi::export(async_runtime = "tokio")]
@@ -248,9 +263,7 @@ impl RemoteLink {
             .open(service.into(), grant_revision)
             .await
             .map_err(failure)?;
-        Ok(Arc::new(RemoteStream {
-            stream: Mutex::new(Some(stream)),
-        }))
+        Ok(Arc::new(RemoteStream::new(stream)))
     }
 
     /// Waits for an untrusted relay hint or the opaque redeemed lease handle.
@@ -312,30 +325,30 @@ impl RemoteLink {
 impl RemoteStream {
     /// Writes application bytes to this logical stream.
     pub async fn write(&self, bytes: Vec<u8>) -> Result<(), TransportError> {
-        let mut stream = self.stream.lock().await;
-        stream
-            .as_mut()
-            .ok_or(TransportError::InvalidState)?
-            .write_all(&bytes)
-            .await
-            .map_err(io_failure)
+        let mut writer = self.writer.lock().await;
+        let writer = writer.as_mut().ok_or(TransportError::InvalidState)?;
+        writer.write_all(&bytes).await.map_err(io_failure)?;
+        writer.flush().await.map_err(io_failure)
     }
 
     /// Reads at most 16 KiB; an empty result is normal EOF.
     pub async fn read(&self) -> Result<Vec<u8>, TransportError> {
-        let mut stream = self.stream.lock().await;
-        let stream = stream.as_mut().ok_or(TransportError::InvalidState)?;
+        let mut reader = self.reader.lock().await;
+        let reader = reader.as_mut().ok_or(TransportError::InvalidState)?;
         let mut bytes = vec![0_u8; 16 * 1024];
-        let read = stream.read(&mut bytes).await.map_err(io_failure)?;
+        let read = reader.read(&mut bytes).await.map_err(io_failure)?;
         bytes.truncate(read);
         Ok(bytes)
     }
 
     /// Gracefully closes only this logical stream, retaining the shared link.
+    /// The write half is shut down (FIN to the peer); the read half is
+    /// dropped, so a reader parked in `read` sees EOF.
     pub async fn close(&self) -> Result<(), TransportError> {
-        if let Some(mut stream) = self.stream.lock().await.take() {
-            stream.shutdown().await.map_err(io_failure)?;
+        if let Some(mut writer) = self.writer.lock().await.take() {
+            writer.shutdown().await.map_err(io_failure)?;
         }
+        self.reader.lock().await.take();
         Ok(())
     }
 }
@@ -511,5 +524,70 @@ mod tests {
             .expect("peer closure was not observed by the FFI owner");
         assert!(ffi.is_closed());
         ffi.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_parked_reader_does_not_block_a_write_on_the_same_stream() {
+        // Terminal input and POST bodies are written while a reader waits for
+        // the response. In the field neither ever reached the Mac because
+        // read and write shared one lock.
+        let builder = snow::Builder::new("Noise_XX_25519_ChaChaPoly_BLAKE2s".parse().unwrap());
+        let controller_keys = builder.generate_keypair().unwrap();
+        let host_keys = builder.generate_keypair().unwrap();
+        let (controller_io, host_io) = pair();
+        let controller = SecureLink::establish(
+            controller_io,
+            config(CoreLinkRole::Controller, &controller_keys, &host_keys),
+        );
+        let host = SecureLink::establish(
+            host_io,
+            config(CoreLinkRole::Host, &host_keys, &controller_keys),
+        );
+        let (controller, host) = tokio::try_join!(controller, host).unwrap();
+        let ffi = RemoteLink {
+            link: controller,
+            control: None,
+            timings: RemoteLinkStageTimings::default(),
+        };
+        let opened = ffi.open_service(RemoteLinkService::Gateway, 1);
+        let accepted = host.accept(CoreLinkPurpose::Session);
+        let (stream, peer) = tokio::join!(opened, accepted);
+        let stream = stream.unwrap();
+        let (_header, mut peer) = peer.unwrap();
+
+        // The peer answers only after it has received the second write, the
+        // way a gateway answers a POST only once the body has arrived.
+        let echo = tokio::spawn(async move {
+            let mut head = [0_u8; 4];
+            peer.read_exact(&mut head).await.unwrap();
+            let mut body = [0_u8; 4];
+            peer.read_exact(&mut body).await.unwrap();
+            peer.write_all(b"done").await.unwrap();
+            peer.flush().await.unwrap();
+            peer
+        });
+        stream.write(b"head".to_vec()).await.unwrap();
+        let reader = {
+            let stream = stream.clone();
+            tokio::spawn(async move { stream.read().await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            stream.write(b"body".to_vec()),
+        )
+        .await
+        .expect("write blocked behind the parked reader")
+        .unwrap();
+        let answer = tokio::time::timeout(std::time::Duration::from_secs(2), reader)
+            .await
+            .expect("no answer")
+            .unwrap()
+            .unwrap();
+        assert_eq!(answer, b"done");
+        let _peer = echo.await.unwrap();
+        stream.close().await.unwrap();
+        ffi.close().await.unwrap();
+        host.close().await;
     }
 }
