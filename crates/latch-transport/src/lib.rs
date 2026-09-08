@@ -1,18 +1,13 @@
 //! Shared remote transport for the dedicated Mac helper and the iOS XCFramework.
 //!
-//! The crate owns connectivity (ICE, DTLS, SCTP, and one reliable ordered data
-//! channel). Noise remains above this layer and is the only peer-authentication
-//! mechanism used by Latch.
+//! The crate owns the reusable authenticated link: system-validated WSS or
+//! framed LAN records, Noise XX peer authentication, and bounded Yamux streams.
 
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 
-pub mod diagnostics;
-
-/// Direct-first connection policy and transport-neutral byte-channel contract.
-pub mod policy;
-/// webrtc-rs ICE/DTLS/SCTP/data-channel implementation.
-pub mod rtc;
+/// Remote-link v1 contracts shared by WSS, LAN, the helper, and UniFFI.
+pub mod link;
 
 /// Diagnostic name emitted by the dedicated helper.
-pub const STACK_NAME: &str = "webrtc-ice/dtls/sctp/data+noise";
+pub const STACK_NAME: &str = "wss-or-lan/noise-xx/yamux/v1";

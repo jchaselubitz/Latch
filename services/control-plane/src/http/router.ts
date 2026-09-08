@@ -32,6 +32,8 @@ export interface RequestContext {
   /** The query string, parsed. Empty for a request without one. */
   readonly query: URLSearchParams;
   readonly headers: IncomingMessage['headers'];
+  /** Normalized transport peer, or the trusted edge's first forwarded peer. */
+  readonly sourceIp: string;
   /** Parsed JSON body, or `null` for bodyless requests. */
   readonly body: unknown;
 }
@@ -80,6 +82,10 @@ export class Router {
 
   patch(pattern: string, handler: Handler): this {
     return this.add('PATCH', pattern, handler);
+  }
+
+  put(pattern: string, handler: Handler): this {
+    return this.add('PUT', pattern, handler);
   }
 
   delete(pattern: string, handler: Handler): this {
@@ -159,6 +165,7 @@ export interface RequestLog {
 export function createListener(
   router: Router,
   log: (entry: RequestLog) => void,
+  trustProxy = false,
 ): (request: IncomingMessage, response: ServerResponse) => void {
   return (request, response) => {
     const startedAt = process.hrtime.bigint();
@@ -192,12 +199,16 @@ export function createListener(
           throw new HttpError(404, 'not_found', 'no such resource');
         }
         const body = method === 'GET' || method === 'DELETE' ? null : await readBody(request);
+        const forwarded = request.headers['x-forwarded-for'];
+        const firstForwarded = Array.isArray(forwarded) ? forwarded[0] : forwarded?.split(',', 1)[0];
+        const sourceIp = (trustProxy ? firstForwarded?.trim() : request.socket.remoteAddress) || 'unknown';
         const reply = await matched.handler({
           method,
           path,
           params: matched.params,
           query,
           headers: request.headers,
+          sourceIp,
           body,
         });
         send(reply.status, reply.body);

@@ -398,6 +398,11 @@ public final class ConversationStore {
         case "ambiguous":
             operations[index].status = .ambiguous
             operations[index].reason = reason ?? "It is unknown whether the host received this message."
+        case "unknown":
+            // The gateway retains no receipt for this id. It is not new work:
+            // review it rather than send it again.
+            operations[index].status = .manualReview
+            operations[index].reason = reason ?? "The host has no record of this message; review before sending again."
         default:
             operations[index].status = .manualReview
             operations[index].reason = reason ?? "The host returned an unknown operation result."
@@ -454,6 +459,10 @@ public final class ConversationStore {
 
     private func replayRetainedOperations() {
         let now = Date.now
+        // Ambiguous outcomes are reconciled from the receipt, never redispatched.
+        for operation in operations where operation.status == .ambiguous {
+            Task { try? await socket?.send(.operationStatus(operationId: operation.id)) }
+        }
         for index in operations.indices where operations[index].status == .sending {
             guard now.timeIntervalSince(operations[index].createdAt) <= retentionSeconds else {
                 operations[index].status = .manualReview

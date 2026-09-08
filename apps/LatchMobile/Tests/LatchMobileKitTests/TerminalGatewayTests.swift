@@ -56,8 +56,6 @@ final class TerminalGatewayTests: XCTestCase {
         XCTAssertFalse(surface.restricted(to: .observe).terminal)
         XCTAssertFalse(surface.restricted(to: .interact).terminal)
         XCTAssertTrue(surface.restricted(to: .control).terminal)
-        // A manual `latch serve` link carries no grant at all, and the gateway
-        // grants loopback requests control.
-        XCTAssertTrue(surface.restricted(to: nil).terminal)
+        XCTAssertFalse(surface.restricted(to: nil).terminal)
     }
 }

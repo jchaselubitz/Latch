@@ -274,4 +274,32 @@ Installed helper SHA-256:
 `7bfc23be1c0cae159b38e9109c782d640a563f06f7dc1d39eb4e6497e42923eb`.
 Rollback helper: `/private/tmp/latch-remote-before-handover-20260907`.
 The specific handover improvement has regression coverage; its effect on the
-next physical phone run is not yet measured.
+next physical phone run was not yet measured at the time of that installation.
+
+## Final physical baseline after helper handover
+
+Before starting the WSS replacement on 7 September 2026, the owner repeated
+the complete physical flow four times on an iPhone 16 with Wi-Fi disabled and
+cellular data active. Every pass loaded the session list, created a shell,
+attached its terminal, accepted `pwd`, and rendered
+`/Users/jake/Development`. Each individual step took approximately one to
+three seconds. The phone's retained path counter read `Direct 193` after the
+run.
+
+The corresponding Mac-side field record is
+[`field-runs/cellular-to-home-nat-20260907T095841Z.json`](field-runs/cellular-to-home-nat-20260907T095841Z.json).
+During its measurement window the Mac recorded 26 authenticated connections:
+22 `direct_reflexive` and four `lan`, with 22 of 22 ICE answers connected.
+The four LAN entries fall outside the cellular-only phone actions and are kept
+in the raw delta rather than silently removed. No failure was reported in the
+four owner-observed cellular flows.
+
+The running helper for this final confirmation was
+`/Users/jake/.local/bin/latch-remote` version `0.2609070836.0`, signed by team
+`X84RPB4674`, SHA-256
+`27a1fa65486dbef7e82a0c6d157b8aa7de05e0fcf8db0054b64dfff299b981cb`.
+It carries `offer-handover-v1`, `response-drain-v1`, and `turn-ipv6-v1`.
+The archived source revision is
+`a2ab11dd44c8f68a887f6d276daa3af8b0ca7e97`, tagged
+`remote-ice-baseline-2026-09`. This closes the replacement start gate; it is
+historical ICE baseline evidence, not WSS release evidence or a measured p95.

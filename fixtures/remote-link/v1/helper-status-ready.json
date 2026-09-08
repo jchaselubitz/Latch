@@ -1,0 +1,9 @@
+{
+  "type": "status",
+  "version": 1,
+  "status": "ready",
+  "carrier": "relay",
+  "connectMs": 180,
+  "peerWaitMs": 0,
+  "authenticateMs": 40
+}

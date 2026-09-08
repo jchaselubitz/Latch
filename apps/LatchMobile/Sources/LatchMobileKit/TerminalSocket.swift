@@ -8,9 +8,18 @@ public enum TerminalSocketError: Error, Equatable, Sendable {
 ///
 /// There is no `reconnecting` case, and that absence is the design: see
 /// `TerminalSocket`.
+/// One inbound frame. The gateway relays PTY output as binary and speaks
+/// control frames as text; they are never told apart by inspecting bytes.
+public enum TerminalInbound: Equatable, Sendable {
+    case output(Data)
+    case control(String)
+}
+
 public enum TerminalSocketEvent: Sendable {
     case connecting
-    case attached
+    /// The surface is held. `resumeCapability` is what proves this holder may
+    /// take it back after transport loss; nil on a gateway that sends none.
+    case attached(resumeCapability: String?, resumeWindowSeconds: UInt64?)
     case output(Data)
     /// The connection ended. `reason` is the gateway's application close code
     /// translated through the contract; `detail` carries a transport error
@@ -27,6 +36,9 @@ public enum TerminalSocketEvent: Sendable {
 /// sentence from "the connection dropped".
 public protocol TerminalSocketConnection: Sendable {
     func receive() async throws -> Data
+    /// Receives one frame, keeping control text apart from pane bytes. The
+    /// default treats every frame as output, which is what fakes deliver.
+    func receiveFrame() async throws -> TerminalInbound
     func send(_ bytes: Data) async throws
     /// Control frames go as text; PTY input goes as binary. The gateway
     /// distinguishes them by frame type, never by inspecting bytes.
@@ -34,6 +46,12 @@ public protocol TerminalSocketConnection: Sendable {
     func cancel()
     /// The close code observed on this connection, once it has closed.
     var closeCode: Int? { get }
+}
+
+public extension TerminalSocketConnection {
+    func receiveFrame() async throws -> TerminalInbound {
+        .output(try await receive())
+    }
 }
 
 public final class URLSessionTerminalSocketConnection: TerminalSocketConnection, @unchecked Sendable {
@@ -55,15 +73,20 @@ public final class URLSessionTerminalSocketConnection: TerminalSocketConnection,
     public var url: URL? { task.originalRequest?.url }
 
     public func receive() async throws -> Data {
+        switch try await receiveFrame() {
+        case .output(let data): return data
+        case .control: return Data()
+        }
+    }
+
+    public func receiveFrame() async throws -> TerminalInbound {
         switch try await task.receive() {
         case .data(let data):
-            data
+            return .output(data)
         case .string(let text):
-            // The gateway relays PTY output as binary. A text frame is not
-            // expected here, but its bytes are still pane bytes.
-            Data(text.utf8)
+            return .control(text)
         @unknown default:
-            Data()
+            return .output(Data())
         }
     }
 
@@ -152,11 +175,29 @@ public actor TerminalSocket {
                 return
             }
             connection = opened
-            await eventHandler(.attached)
+            // The gateway announces the held surface with an `attached`
+            // control frame before any pane byte. A gateway that sends none
+            // is still attached, just without a resume capability.
+            var announced = false
             while running, !Task.isCancelled {
-                let data = try await opened.receive()
-                if !data.isEmpty {
-                    await eventHandler(.output(data))
+                switch try await opened.receiveFrame() {
+                case .control(let text):
+                    if let frame = try? JSONDecoder().decode(TerminalAttachedFrame.self, from: Data(text.utf8)),
+                       frame.type == "attached" {
+                        announced = true
+                        await eventHandler(.attached(
+                            resumeCapability: frame.resumeCapability,
+                            resumeWindowSeconds: frame.resumeWindowSeconds
+                        ))
+                    }
+                case .output(let data):
+                    if !announced {
+                        announced = true
+                        await eventHandler(.attached(resumeCapability: nil, resumeWindowSeconds: nil))
+                    }
+                    if !data.isEmpty {
+                        await eventHandler(.output(data))
+                    }
                 }
             }
         } catch is CancellationError {

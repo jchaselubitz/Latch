@@ -26,25 +26,23 @@ using; a Terminal tab may flash briefly so Command-T can run.
 ## Remote access
 
 Settings → Remote Access turns on a paired-phone gateway: the app spawns a
-helper that owns a loopback-only `latch serve` gateway and a WebRTC ICE
-responder, and lets a paired iPhone reach it either on the LAN or off it. Each
+helper that owns outbound WSS connections to the opaque relay and an
+authenticated LAN entry point. The helper establishes one pinned Noise XX
+link per paired phone, multiplexes bounded logical streams with Yamux, and
+forwards only authorized streams to a loopback-only `latch serve` gateway. Each
 paired device's row separates two decisions — a base Observe/Interact picker
 and an explicit "Allow terminal" switch mapped to the `control` permission —
 new pairings begin with both Control and terminal access enabled, and a change
 to either takes effect immediately, including on a connection that is already
-open. A "never relay" switch pairs with
-`latch remote-access relay never` to keep TURN out of the offer entirely and
-restrict the Mac's published presence to host candidates, which is what makes
-a Tailscale/tailnet address a working path with the relay refused outright.
+open. Enrollment uses a five-minute QR payload with a service admission code
+and a separate QR-only secret; the owner compares transcript-derived words and
+approves the exact proposed phone key before the grant is committed.
 
-While Remote Access is on and at least one phone is connected, the app holds
-an `IOPMAssertion` to prevent idle sleep, released the moment the last phone
-disconnects or the feature is turned off. That narrows, but does not remove,
-the hard constraint underneath all of this: **the phone can only reach a Mac
-that is running Latch Desktop and awake.** There is no server component
-independent of this app. `docs/REMOTE_ACCESS_DESKTOP.md` in the Latch
-repository is the full design record — process boundaries, pairing, the
-control-plane mirror, and what each side of the audit trail records.
+The phone can only reach a Mac that is running Latch Desktop and awake. The
+next objective adds connection-aware sleep prevention and mobile lifecycle
+recovery; this objective establishes the secure link, enrollment, capability
+adapter, and live authorization boundary. `docs/REMOTE_ACCESS_DESKTOP.md` is
+the full design record.
 
 ## Development
 

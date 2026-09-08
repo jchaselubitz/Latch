@@ -23,7 +23,20 @@ async-trait.workspace = true
 clap.workspace = true
 latch = { path = "../latch" }
 latch-transport = { path = "../latch-transport" }
+mdns-sd.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 tokio.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+futures.workspace = true
+latch = { path = "../latch", features = ["remote-link-test"] }
+latch-transport = { path = "../latch-transport", features = ["test-ca"] }
+native-tls.workspace = true
+openssl = "0.10"
+rcgen = "0.13.2"
+snow.workspace = true
+tokio-native-tls = "0.3.1"
+tokio-tungstenite.workspace = true

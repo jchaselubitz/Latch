@@ -18,6 +18,7 @@ use axum::{Json, Router};
 use serde::Serialize;
 use tokio::net::TcpListener;
 
+use super::attention::AttentionWatcher;
 use super::auth::{
     load_token, origin_allowed, presented_token, selected_subprotocol, token_matches,
 };
@@ -27,8 +28,10 @@ use super::contract::{
 };
 use super::conversation::{self, ConversationConnect, ConversationQuery};
 use super::directory::{self, BrowseError};
-use super::routes::{route_for, Grant, RouteId, RouteSpec, DEVICE_GRANT_HEADER, ROUTES};
-use super::terminal::{self, TerminalConnect, TerminalQuery};
+use super::routes::{
+    route_for, Grant, RouteId, RouteSpec, DEVICE_GRANT_HEADER, DEVICE_ID_HEADER, ROUTES,
+};
+use super::terminal::{self, ResumeRegistry, TerminalConnect, TerminalQuery};
 use super::ServeOptions;
 use crate::cli::attach::SessionLookupError;
 use crate::cli::create::{self, RemoteShellError, RemoteShellRequest};
@@ -46,6 +49,23 @@ struct AppState {
     gateway_instance_id: String,
     /// Also keeps the exclusive Hub writer lock alive for the gateway lifetime.
     conversation_hub: ConversationHub,
+    /// Bounded resume grants for terminal surfaces handed to remote devices.
+    terminal_resumes: ResumeRegistry,
+    /// Gateway-owned attention producer for watched sessions.
+    attention: AttentionWatcher,
+}
+
+/// Opaque device identity the loopback proxy proved for this request, or
+/// `None` for a local client. Receipts and resume grants are scoped to it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct DeviceContext(pub Option<String>);
+
+fn is_device_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 96
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
 #[derive(Debug)]
@@ -93,6 +113,8 @@ pub async fn run(options: ServeOptions) -> anyhow::Result<()> {
             crate::conversation::connector_for_session(connector_home.clone(), id)
         }),
     )?;
+    let attention = AttentionWatcher::new(options.home.clone(), conversation_hub.clone());
+    tokio::spawn(attention.clone().run());
     let state = AppState {
         home: options.home,
         token_file: options.token_file,
@@ -100,6 +122,8 @@ pub async fn run(options: ServeOptions) -> anyhow::Result<()> {
         bind_is_loopback: options.bind.ip().is_loopback(),
         gateway_instance_id: gateway_instance_id.clone(),
         conversation_hub,
+        terminal_resumes: ResumeRegistry::default(),
+        attention,
     };
     let app = router(state);
 
@@ -153,6 +177,7 @@ pub(crate) fn test_router(
     conversation_hub: ConversationHub,
     latch_bin: std::path::PathBuf,
 ) -> Router {
+    let attention = AttentionWatcher::new(home.clone(), conversation_hub.clone());
     router(AppState {
         home,
         token_file,
@@ -160,6 +185,8 @@ pub(crate) fn test_router(
         bind_is_loopback: true,
         gateway_instance_id: "gw-test".to_owned(),
         conversation_hub,
+        terminal_resumes: ResumeRegistry::default(),
+        attention,
     })
 }
 
@@ -271,6 +298,25 @@ async fn require_token(
             }
         };
     request.headers_mut().remove(DEVICE_GRANT_HEADER);
+    let device = match request.headers().get(DEVICE_ID_HEADER) {
+        Some(value) if peer_is_loopback => Some(
+            value
+                .to_str()
+                .ok()
+                .filter(|value| is_device_id(value))
+                .map(str::to_owned)
+                .ok_or_else(|| ApiError::new(StatusCode::BAD_REQUEST, "invalid device id"))?,
+        ),
+        Some(_) => {
+            return Err(ApiError::new(
+                StatusCode::FORBIDDEN,
+                "device id header is trusted only from the loopback proxy",
+            ))
+        }
+        None => None,
+    };
+    request.headers_mut().remove(DEVICE_ID_HEADER);
+    request.extensions_mut().insert(DeviceContext(device));
     let method = request.method().as_str();
     let target = request
         .uri()
@@ -368,6 +414,7 @@ const MAX_CREATE_BODY_BYTES: usize = 1024;
 /// attach is spawned.
 async fn create_session(
     State(state): State<AppState>,
+    Extension(device): Extension<DeviceContext>,
     body: axum::body::Bytes,
 ) -> Result<Response, ApiError> {
     if body.len() > MAX_CREATE_BODY_BYTES {
@@ -399,6 +446,7 @@ async fn create_session(
             home,
             request_id: request.request_id,
             cwd,
+            device: device.0,
         })
     })
     .await
@@ -439,6 +487,13 @@ fn map_remote_shell_error(error: RemoteShellError) -> ApiError {
             StatusCode::CONFLICT,
             "request_id_conflict",
             "this request id already created a session in another directory",
+        ),
+        // Another device owns this id. Saying which would leak that device's
+        // existence; the stable code is enough for the phone to stop retrying.
+        RemoteShellError::DeviceConflict => ApiError::coded(
+            StatusCode::FORBIDDEN,
+            "request_id_foreign",
+            "this request id belongs to another device",
         ),
         // The engine's failure detail can name paths, binaries, and kernel
         // state. The phone gets the stable code instead.
@@ -595,6 +650,7 @@ async fn terminal_ws(
     State(state): State<AppState>,
     headers: HeaderMap,
     Extension(_grant): Extension<Grant>,
+    Extension(device): Extension<DeviceContext>,
 ) -> Response {
     let mut upgrade = ws;
     if let Some(protocol) = selected_subprotocol(&headers) {
@@ -606,6 +662,9 @@ async fn terminal_ws(
         session: id,
         cols: query.cols,
         rows: query.rows,
+        resume: query.resume,
+        device: device.0,
+        resumes: state.terminal_resumes.clone(),
     };
     upgrade.on_upgrade(move |socket| terminal::run(socket, connect))
 }
@@ -617,6 +676,7 @@ async fn conversation_ws(
     State(state): State<AppState>,
     headers: HeaderMap,
     Extension(grant): Extension<Grant>,
+    Extension(device): Extension<DeviceContext>,
 ) -> Response {
     let mut upgrade = ws;
     if let Some(protocol) = selected_subprotocol(&headers) {
@@ -629,6 +689,8 @@ async fn conversation_ws(
         hub: state.conversation_hub.clone(),
         session: id,
         grant,
+        device: device.0,
+        attention: Some(state.attention.clone()),
         query,
     };
     upgrade.on_upgrade(move |socket| conversation::run(socket, connect))

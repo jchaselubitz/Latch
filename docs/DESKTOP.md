@@ -41,15 +41,18 @@ from Settings or a terminal to diagnose the complete CLI payload.
 ## Remote access
 
 **Settings → Remote Access** enables the paired-device service. Latch Desktop
-starts and supervises `latch remote-access lan-serve`, which in turn owns a
-short-lived, loopback-only `latch serve` gateway. The app never holds the
-gateway bearer token or makes that plaintext gateway public.
+starts and supervises one outbound Remote Link for each paired phone. The
+helper races an authenticated LAN connection with outbound WSS on TCP 443,
+then carries Noise-encrypted Yamux streams to a short-lived, loopback-only
+`latch serve` gateway. The app never holds the gateway bearer token or makes
+that plaintext gateway public.
 
-To pair a phone, turn Remote Access on and select **Pair a Device**. The app
-creates a five-minute QR-compatible pairing record. If a control-plane address
-is configured, it registers the pairing so the mobile app can locate this Mac;
-otherwise the address must be supplied to the phone separately. Confirm the
-pairing phrase on both devices before using the new device.
+To pair a phone, configure the control plane with an operator-minted one-use
+owner invitation, turn Remote Access on, and select **Pair a Device**. Scan the
+five-minute Remote Link code. Its independent QR-only enrollment secret is
+mixed into the Noise transcript and never sent to either cloud service.
+Compare the transcript-derived words, then explicitly approve the named phone
+on the Mac.
 
 Each paired device has an access grant: `observe`, `interact`, or `control`.
 Control permits terminal access, which remains exclusive: opening it on the
@@ -57,10 +60,11 @@ phone takes the terminal surface from the current Mac viewer. Grant changes
 and revocation take effect on active connections.
 
 Remote access requires Latch Desktop to be running and the Mac to be awake.
-While a paired device is connected, the app prevents idle sleep; it cannot
-prevent a lid close, manual sleep, reboot, or quitting Latch Desktop. The
-**Never relay** preference rejects TURN fallback and is useful with a Tailscale
-network, but it does not make an offline Mac reachable.
+**Keep this Mac awake while a phone is connected** is off by default; when on,
+it prevents idle sleep only while the Mac is plugged in and a phone is
+actually authenticated. A lid close, manual sleep, reboot, or quitting Latch
+Desktop still makes the Mac unreachable, and the phone reports it as offline
+until the helper is re-admitted after wake.
 
 The detailed process, trust boundary, pairing protocol, and audit behaviour are
 in [REMOTE_ACCESS_DESKTOP.md](REMOTE_ACCESS_DESKTOP.md).

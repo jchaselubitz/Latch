@@ -1,8 +1,31 @@
 # Remote access security findings
 
+> Historical findings from the retired implementation. Relevant trust-boundary
+> requirements were carried into
+> [the current threat model](REMOTE_ACCESS_THREAT_MODEL.md).
+
 Reviewed 6 September 2026. This document records the security findings from the Latch Desktop / Latch Mobile QR-linking review and provides input for a remediation-planning mission. It is not a remediation implementation or evidence that a deployed system has been exploited.
 
 Tracking: Overlord mission **coo:949 — Plan remediation of Latch remote access security findings**, objective `coo:949.9y5b`. Created as a draft; execution has not started.
+
+## Remote Link resolution record (7 September 2026)
+
+Objective `coo:952.ay7b` revalidated every finding against the clean Remote
+Link replacement. The observations below remain the historical source record;
+the current status is:
+
+| ID | Current disposition | Acceptance evidence |
+| --- | --- | --- |
+| SEC-01 | Resolved in source | Independent QR-only secret is bound into the enrollment Noise prologue; the Mac approves the exact encrypted phone proposal and Mobile persists only the exact encrypted receipt. The admission-without-secret, wrong-pin, mismatch, cancel, and receipt tests pass. |
+| SEC-02 | Resolved in source | Local grants carry a monotonic revision. The fixed proxy re-reads current state every 250 ms and closes an active privileged stream after any stale revision or insufficient grant. The live-downgrade proxy regression passes. |
+| SEC-03 | Resolved in source | Anonymous account creation is gone. Operator-minted one-use owner invitations, per-device/owner/source/deployment admission budgets, explicit account relay entitlement, single-use redemption, and bandwidth/connection ceilings bound funded relay use. |
+| SEC-04 | Resolved in source | The previous credential mechanism is removed. Pairing/device revocation atomically queues opaque room invalidation in PostgreSQL; the worker retains it until authenticated relay acknowledgement. Restart/delivery and relay invalidation tests pass. |
+| VAL-01 | Resolved in source | Proxy forwarding tasks are explicitly aborted on every grant-read error or revocation path. Corrupt authority storage fails closed, and final response completion plus live-downgrade tests pass. |
+| VAL-02 | Resolved in source | The iOS adapter binds only to loopback, requires a random 256-bit per-listener capability in the first bounded request, removes caller authority, and exposes no caller-selected destination. Missing/forged capability tests and the native iOS build pass. |
+
+These are implementation/test results, not a deployed security audit. Service
+capture, signed-device, physical cross-process, and incident-runbook evidence
+remain release gates in Objective 3.
 
 ## Scope and evidence
 

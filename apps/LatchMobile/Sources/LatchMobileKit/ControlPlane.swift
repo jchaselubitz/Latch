@@ -1,44 +1,12 @@
 import Foundation
 
-/// What the phone sends to enroll itself against one scanned pairing code.
-///
-/// The device public key is the identity being enrolled; the secret is proof
-/// that whoever is asking was in front of the unlocked Mac within the last five
-/// minutes. The phrase is sent so the service can show the Mac the same words
-/// the phone is showing — it is not a credential and proves nothing on its own.
-public struct PairingEnrollment: Equatable, Sendable {
-    public let pairingId: String
-    public let secret: String
-    public let devicePublicKey: String
-    public let deviceName: String
-    public let phrase: String
-
-    public init(
-        pairingId: String,
-        secret: String,
-        devicePublicKey: String,
-        deviceName: String,
-        phrase: String
-    ) {
-        self.pairingId = pairingId
-        self.secret = secret
-        self.devicePublicKey = devicePublicKey
-        self.deviceName = deviceName
-        self.phrase = phrase
-    }
-
-    var body: [String: Any] {
-        [
-            "formatVersion": PairingPayload.supportedFormatVersion,
-            "secret": secret,
-            "device": [
-                "publicKey": devicePublicKey,
-                "name": deviceName,
-                "platform": "ios"
-            ],
-            "phrase": phrase
-        ]
-    }
+public struct RemoteEnrollmentClaim: Decodable, Equatable, Sendable {
+    public let version: Int
+    public let enrollmentId: String
+    public let provisionalDeviceId: String
+    public let provisionalToken: String
+    public let relayUrl: URL
+    public let controllerAdmission: String
 }
 
 /// What the control plane returns once the Mac has confirmed the phone.
@@ -90,48 +58,17 @@ public struct PairingConfirmation: Decodable, Equatable, Sendable {
     public let mac: Mac
     /// Short-lived credential for later control-plane calls.
     public let accessToken: String?
-    /// The phrase the Mac displayed, when the service echoes it back.
-    public let phrase: String?
-
-    public init(device: Device, mac: Mac, accessToken: String? = nil, phrase: String? = nil) {
+    public init(device: Device, mac: Mac, accessToken: String? = nil) {
         self.device = device
         self.mac = mac
         self.accessToken = accessToken
-        self.phrase = phrase
     }
 }
 
 /// Why a control-plane call failed.
 public enum ControlPlaneError: Error, Equatable, Sendable, LocalizedError {
-    /// No control-plane address is known for this pairing.
-    case noAddress
-    /// The pairing record is gone: consumed, cancelled, or never existed.
-    case pairingUnavailable
-    /// The five minutes are up on the service's clock too.
-    case pairingExpired
-    /// This identity is already enrolled with the Mac.
-    case alreadyPaired
     /// The secret or the access token was rejected. Not retryable.
     case rejected(String)
-    /// The Mac's key in the answer is not the key in the QR code. Either the
-    /// service is lying about which Mac this is, or something is in the middle.
-    case identityMismatch(expected: String, received: String)
-    /// The paired Mac has no current presence. Retryable: it may come online
-    /// inside the next presence window.
-    case macNotReachable(String)
-    /// The paired Mac published no presence at all, which in practice means
-    /// one of two things a person can act on. Kept separate from
-    /// `macNotReachable` so the message names them instead of quoting the
-    /// service's phrasing back at the person.
-    case macOffline
-    /// Relay credentials were refused because the account kill switch is off.
-    /// Direct and LAN paths are unaffected.
-    case relayDisabled(String)
-    /// This pairing has no control-plane Mac id, so only a typed `latch serve`
-    /// address can reach it.
-    case manualLinkOnly
-    /// A candidate the phone was about to publish would be rejected.
-    case invalidCandidate(String)
     /// Any other non-2xx answer.
     case http(status: Int, path: String, reason: String)
     /// The answer did not match the contract.
@@ -141,33 +78,7 @@ public enum ControlPlaneError: Error, Equatable, Sendable, LocalizedError {
 
     public var message: String {
         switch self {
-        case .noAddress:
-            return "This pairing code does not say where to enroll, and no address was given."
-        case .pairingUnavailable:
-            return "Your Mac has already used or cancelled this pairing code. Show a new one."
-        case .pairingExpired:
-            return "This pairing code expired. Show a new one on your Mac."
-        case .alreadyPaired:
-            return "This phone is already paired with that Mac. Remove it there first."
         case .rejected(let reason):
-            return reason
-        case .identityMismatch(let expected, let received):
-            return """
-            This Mac answered with identity \(HexCoding.abbreviate(received)), but the code \
-            was for \(HexCoding.abbreviate(expected)). Pairing stopped; do not confirm it.
-            """
-        case .macNotReachable(let reason):
-            let detail = reason.isEmpty ? "it has not published a way to reach it" : reason
-            return "Your Mac is not reachable right now: \(detail)."
-        case .macOffline:
-            return "Your Mac is asleep or Latch is not running."
-        case .relayDisabled(let reason):
-            return reason.isEmpty
-                ? "Relay is disabled for this account. Direct or LAN access still works if your Mac is on the same network."
-                : reason
-        case .manualLinkOnly:
-            return "This pairing has no Mac to reach over the control plane. Link with a typed latch serve address instead."
-        case .invalidCandidate(let reason):
             return reason
         case .http(let status, let path, let reason):
             return "\(path) failed (\(status)): \(reason)"
@@ -191,33 +102,26 @@ public enum ControlPlaneError: Error, Equatable, Sendable, LocalizedError {
     /// the Mac may publish again on its next refresh.
     public var isRetryable: Bool {
         switch self {
-        case .transport, .http, .macNotReachable, .macOffline: return true
+        case .transport, .http: return true
         default: return false
         }
     }
 }
 
-/// The phone's half of the control-plane pairing API.
-///
-/// The control plane is deliberately thin: it enrolls a device against a
-/// pairing record the Mac created, reports the permission the Mac granted, and
-/// accepts a revocation. It never sees a gateway token, terminal bytes, or a
-/// private key — see `docs/REMOTE_ACCESS_THREAT_MODEL.md`.
+/// Device-authenticated control-plane maintenance operations.
 public protocol ControlPlaneClient: Sendable {
-    /// Enrolls this phone against a scanned pairing code.
-    func enroll(pairingId: String, enrollment: PairingEnrollment) async throws -> PairingConfirmation
     /// Re-reads the device record, which is how the phone notices a revoke or
     /// a permission change made on the Mac.
     func device(deviceId: String, accessToken: String) async throws -> PairingConfirmation
     /// Revokes this phone from the phone's side.
     func revoke(deviceId: String, accessToken: String) async throws
+    /// Registers the opaque APNs token so the Mac can ask for a generic
+    /// attention alert. The token is the only thing sent.
+    func registerPush(token: String, accessToken: String) async throws
+    func unregisterPush(accessToken: String) async throws
 }
 
-/// The HTTP implementation of pairing and signaling.
-///
-/// Pairing and signaling share one client because they share one credential:
-/// the device bearer stored on `PairedDeviceRecord`. They stay separate
-/// protocols so a pairing-only stub does not have to pretend to rendezvous.
+/// HTTP implementation of Remote Link enrollment and control operations.
 public actor HTTPControlPlaneClient: ControlPlaneClient, SignalingClient {
     private let baseURL: URL
     private let session: URLSession
@@ -228,13 +132,20 @@ public actor HTTPControlPlaneClient: ControlPlaneClient, SignalingClient {
         self.session = session
     }
 
-    public func enroll(
-        pairingId: String,
-        enrollment: PairingEnrollment
-    ) async throws -> PairingConfirmation {
-        let body = try JSONSerialization.data(withJSONObject: enrollment.body)
+    public func claimRemoteEnrollment(
+        enrollmentId: String,
+        admissionCode: String,
+        name: String,
+        publicKey: String
+    ) async throws -> RemoteEnrollmentClaim {
+        let body = try JSONSerialization.data(withJSONObject: [
+            "admissionCode": admissionCode,
+            "name": name,
+            "platform": "ios",
+            "publicKey": publicKey,
+        ])
         return try await request(
-            path: "/v1/pairings/\(escape(pairingId))/confirm",
+            path: "/v1/enrollments/\(escape(enrollmentId))/claim",
             method: "POST",
             body: body,
             accessToken: nil
@@ -255,6 +166,25 @@ public actor HTTPControlPlaneClient: ControlPlaneClient, SignalingClient {
             path: "/v1/devices/\(escape(deviceId))/revoke",
             method: "POST",
             body: Data("{}".utf8),
+            accessToken: accessToken
+        )
+    }
+
+    public func registerPush(token: String, accessToken: String) async throws {
+        let body = try JSONSerialization.data(withJSONObject: ["pushToken": token])
+        let _: EmptyResponse = try await request(
+            path: "/v1/push-registrations",
+            method: "PUT",
+            body: body,
+            accessToken: accessToken
+        )
+    }
+
+    public func unregisterPush(accessToken: String) async throws {
+        let _: EmptyResponse = try await request(
+            path: "/v1/push-registrations",
+            method: "DELETE",
+            body: nil,
             accessToken: accessToken
         )
     }
@@ -312,47 +242,18 @@ public actor HTTPControlPlaneClient: ControlPlaneClient, SignalingClient {
         }
     }
 
-    /// Turns a control-plane error body into the failure the UI should show.
-    ///
-    /// The status codes are distinguished because the recovery differs: an
-    /// expired or consumed pairing means "show a new code on the Mac", while a
-    /// rejected secret means the code did not come from that Mac at all.
+    /// Turns a control-plane error body into a typed failure.
     static func error(status: Int, path: String, data: Data) -> ControlPlaneError {
         let body = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         let code = body?["error"] as? String
         let reason = body?["reason"] as? String ?? code ?? ""
         switch status {
-        case 401:
+        case 401, 403, 404, 409, 410:
             return .rejected(
                 reason.isEmpty
-                    ? "The control plane rejected this pairing. The code may have been used already."
+                    ? "The control plane rejected this Remote Link operation."
                     : reason
             )
-        case 403:
-            if Self.isRelayDisabled(code: code, reason: reason) {
-                return .relayDisabled(
-                    reason.isEmpty
-                        ? "Relay is disabled for this account. Direct or LAN access still works if your Mac is on the same network."
-                        : reason
-                )
-            }
-            return .rejected(
-                reason.isEmpty
-                    ? "The control plane rejected this pairing. The code may have been used already."
-                    : reason
-            )
-        case 404:
-            return .pairingUnavailable
-        case 409:
-            if code == "already_paired" { return .alreadyPaired }
-            // The service says "target_offline" for exactly one condition:
-            // the Mac has no live presence record. That is either a sleeping
-            // Mac or a Mac with Latch closed, and both are things the person
-            // fixes at the Mac rather than on the phone.
-            if code == "target_offline" { return .macOffline }
-            return .pairingUnavailable
-        case 410:
-            return .pairingExpired
         default:
             return .http(
                 status: status,
@@ -362,10 +263,4 @@ public actor HTTPControlPlaneClient: ControlPlaneClient, SignalingClient {
         }
     }
 
-    /// The account relay kill switch is a different recovery from a revoked
-    /// pairing: the person should try LAN/direct, not scan a new code.
-    private static func isRelayDisabled(code: String?, reason: String) -> Bool {
-        let haystack = "\(code ?? "") \(reason)".lowercased()
-        return haystack.contains("relay access is disabled") || haystack.contains("relay_disabled")
-    }
 }

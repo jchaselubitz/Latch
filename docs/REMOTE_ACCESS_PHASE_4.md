@@ -1,5 +1,9 @@
 # Remote access Phase 4 hardening and validation
 
+> Historical validation plan for the retired transport. Use
+> [the Remote Link replacement plan](PLAN_REMOTE_RELAY_REPLACEMENT.md) for
+> current gates and do not treat results here as WSS evidence.
+
 This document is the production-boundary record for remote access, including
 the paired iPhone client. The public gateway remains loopback-only; LAN and
 ICE/TURN adapters terminate mutually authenticated encryption before reaching

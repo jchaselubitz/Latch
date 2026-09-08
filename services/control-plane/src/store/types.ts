@@ -10,15 +10,16 @@
 import type {
   Account,
   AccessEvent,
-  Candidate,
   Device,
   DeviceRole,
   Pairing,
-  PairingRequest,
   Permission,
-  Presence,
-  RelayTicket,
-  RendezvousOffer,
+  OwnerInvitation,
+  PushRegistration,
+  RemoteAdmission,
+  RemoteEnrollment,
+  RemoteLink,
+  RelayRevocation,
 } from '../domain.ts';
 
 export interface CreateAccountInput {
@@ -37,51 +38,53 @@ export interface CreateDeviceInput {
   readonly tokenDigest: string;
 }
 
-export interface PublishPresenceInput {
-  readonly deviceId: string;
-  readonly accountId: string;
-  readonly candidates: readonly Candidate[];
-  readonly iceUfrag?: string;
-  readonly icePwd?: string;
+export interface CreateOwnerInvitationInput {
+  readonly id: string;
+  readonly secretDigest: string;
   readonly expiresAt: number;
 }
 
-export interface CreateOfferInput {
+export interface CreateRemoteEnrollmentInput {
   readonly id: string;
   readonly accountId: string;
-  readonly requesterDeviceId: string;
-  readonly targetDeviceId: string;
-  readonly requestId: string;
-  readonly candidates: readonly Candidate[];
-  readonly iceUfrag?: string;
-  readonly icePwd?: string;
+  readonly hostDeviceId: string;
+  readonly roomId: string;
+  readonly admissionDigest: string;
   readonly expiresAt: number;
 }
 
-export interface CreatePairingRequestInput {
-  readonly pairingId: string;
-  readonly accountId: string;
+export interface CreateRemoteAdmissionInput {
+  readonly id: string;
+  readonly linkId: string | null;
+  readonly enrollmentId: string | null;
+  readonly roomId: string;
+  readonly role: 'host' | 'controller';
+  readonly purpose: 'enrollment' | 'session';
+  readonly generation: number;
+  readonly expiresAt: number;
+}
+
+export interface ClaimRemoteEnrollmentInput {
+  readonly id: string;
+  readonly admissionDigest: string;
+  readonly provisionalDeviceId: string;
+  readonly provisionalName: string;
+  readonly provisionalPlatform: string;
+  readonly provisionalPublicKey: string;
+  readonly provisionalTokenDigest: string;
+  readonly now: number;
+}
+
+export interface FinalizeRemoteEnrollmentInput {
+  readonly id: string;
   readonly hostDeviceId: string;
-  readonly secretDigest: string;
-  readonly phrase: string | null;
+  readonly controllerPublicKey: string;
   readonly permission: Permission;
-  readonly expiresAt: number;
-}
-
-export interface CreateRelayTicketInput {
-  readonly relayId: string;
-  readonly accountId: string;
-  readonly hostDeviceId: string;
-  readonly clientDeviceId: string;
-  readonly secretDigest: string;
-  readonly expiresAt: number;
-}
-
-export interface CreateTurnCredentialInput {
-  readonly accountId: string;
-  readonly deviceId: string;
-  readonly username: string;
-  readonly expiresAt: number;
+  readonly linkId: string;
+  readonly linkRoomId: string;
+  readonly completedAt: string;
+  readonly now: number;
+  readonly maxDevices: number;
 }
 
 export interface Store {
@@ -94,6 +97,8 @@ export interface Store {
   setRelayEnabled(accountId: string, enabled: boolean): Promise<Account | null>;
   /** Resolves an account bearer credential to its account. */
   accountByTokenDigest(accountId: string, tokenDigest: string): Promise<Account | null>;
+  createOwnerInvitation(input: CreateOwnerInvitationInput): Promise<OwnerInvitation>;
+  consumeOwnerInvitation(id: string, secretDigest: string, consumedAt: string, now: number): Promise<boolean>;
 
   createDevice(input: CreateDeviceInput): Promise<Device>;
   getDevice(deviceId: string): Promise<Device | null>;
@@ -103,10 +108,7 @@ export interface Store {
   deviceByTokenDigest(deviceId: string, tokenDigest: string): Promise<Device | null>;
   touchDevice(deviceId: string, seenAt: string): Promise<void>;
   rotateDeviceKey(deviceId: string, publicKey: string): Promise<Device | null>;
-  /**
-   * Revokes a device and removes every capability derived from it: presence,
-   * pending rendezvous offers, and unexpired relay tickets.
-   */
+  /** Revokes a device and invalidates every Remote Link derived from it. */
   revokeDevice(deviceId: string, revokedAt: string): Promise<Device | null>;
 
   upsertPairing(
@@ -120,38 +122,41 @@ export interface Store {
   listPairingsForDevice(deviceId: string): Promise<Pairing[]>;
   revokePairing(hostDeviceId: string, clientDeviceId: string, revokedAt: string): Promise<boolean>;
 
-  createPairingRequest(input: CreatePairingRequestInput): Promise<PairingRequest>;
-  /** Unconsumed, unexpired request, or `null`. */
-  getPairingRequest(pairingId: string, now: number): Promise<PairingRequest | null>;
-  /** Marks a request consumed. Returns false when another caller won the race. */
-  consumePairingRequest(pairingId: string, consumedAt: string, now: number): Promise<boolean>;
-  countPendingPairingRequests(hostDeviceId: string, now: number): Promise<number>;
+  createRemoteEnrollment(input: CreateRemoteEnrollmentInput): Promise<RemoteEnrollment>;
+  getRemoteEnrollment(id: string, now: number): Promise<RemoteEnrollment | null>;
+  claimRemoteEnrollment(input: ClaimRemoteEnrollmentInput): Promise<boolean>;
+  /** Atomically commits the provisional device, grant, link, and enrollment. */
+  finalizeRemoteEnrollment(input: FinalizeRemoteEnrollmentInput): Promise<RemoteLink | null>;
+  cancelRemoteEnrollment(id: string, cancelledAt: string): Promise<boolean>;
 
-  publishPresence(input: PublishPresenceInput): Promise<Presence>;
-  getPresence(deviceId: string, now: number): Promise<Presence | null>;
-  clearPresence(deviceId: string): Promise<void>;
+  getOrCreateRemoteLink(accountId: string, hostDeviceId: string, clientDeviceId: string, roomId: string): Promise<RemoteLink>;
+  getRemoteLink(id: string): Promise<RemoteLink | null>;
+  createRemoteAdmission(input: CreateRemoteAdmissionInput): Promise<RemoteAdmission>;
+  redeemRemoteAdmission(id: string, attemptId: string, leaseId: string, leaseExpiresAt: number, now: number): Promise<RemoteAdmission | null>;
+  getRemoteAdmission(id: string): Promise<RemoteAdmission | null>;
+  getRemoteAdmissionByLease(leaseId: string): Promise<RemoteAdmission | null>;
+  extendRemoteLease(leaseId: string, expiresAt: number, now: number): Promise<RemoteAdmission | null>;
+  listPendingRelayRevocations(limit: number): Promise<RelayRevocation[]>;
+  acknowledgeRelayRevocation(id: string, acknowledgedAt: string): Promise<void>;
 
-  createOffer(input: CreateOfferInput): Promise<RendezvousOffer>;
-  /** Returns and consumes the offers addressed to `deviceId`. */
-  takeOffers(targetDeviceId: string, now: number): Promise<RendezvousOffer[]>;
-
-  createRelayTicket(input: CreateRelayTicketInput): Promise<RelayTicket>;
-  getRelayTicket(relayId: string, now: number): Promise<RelayTicket | null>;
+  /** Replaces the device's APNs token. Revocation and unpairing remove it. */
+  upsertPushRegistration(deviceId: string, pushToken: string, updatedAt: string): Promise<void>;
+  getPushRegistration(deviceId: string): Promise<PushRegistration | null>;
+  deletePushRegistration(deviceId: string): Promise<boolean>;
   /**
-   * Records a one-time endpoint admission. Returns `null` when the ticket is
-   * unknown or expired and `false` when the device was already admitted.
+   * Records one attention event for deduplication. Returns false when the
+   * host already submitted this event id.
    */
-  admitToRelayTicket(relayId: string, deviceId: string, now: number): Promise<boolean | null>;
-
-  /** Stores only Cloudflare's username revocation handle, never its password. */
-  createTurnCredential(input: CreateTurnCredentialInput): Promise<void>;
-  /** Atomically returns and removes active usernames for the listed devices. */
-  takeTurnCredentialUsernames(deviceIds: readonly string[], now: number): Promise<string[]>;
-  takeTurnCredentialUsernamesForAccount(accountId: string, now: number): Promise<string[]>;
+  recordAttentionEvent(
+    hostDeviceId: string,
+    clientDeviceId: string,
+    eventId: string,
+    createdAt: string,
+  ): Promise<boolean>;
 
   recordAccessEvent(event: AccessEvent): Promise<void>;
   listAccessEvents(accountId: string, limit: number): Promise<AccessEvent[]>;
 
-  /** Deletes expired presence, offers, and tickets. Returns rows removed. */
+  /** Deletes expired enrollment/admission state. Returns rows removed. */
   purgeExpired(now: number): Promise<number>;
 }

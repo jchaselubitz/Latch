@@ -130,7 +130,8 @@ test('every reasoned close names why the surface ended', async () => {
   const cases: [number, string][] = [
     [4408, 'slow_client'],
     [4410, 'session_exited'],
-    [4500, 'kernel_error']
+    [4500, 'kernel_error'],
+    [4411, 'resume_refused']
   ];
   for (const [code, reason] of cases) {
     const handle = attach();

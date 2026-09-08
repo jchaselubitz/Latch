@@ -1,161 +1,136 @@
 # Remote-access threat model
 
-This document covers the paired-device remote-access platform described in
-[REMOTE_ACCESS_IMPLEMENTATION_PLAN.md](REMOTE_ACCESS_IMPLEMENTATION_PLAN.md).
-`latch serve` is not a public remote server.
+This document covers Remote Link v1, the only supported Latch remote-access
+transport. The historical transport and its pairing records are not accepted
+by current clients.
 
-## Assets and classification
+## Assets and allowed locations
 
-| Asset | Classification | Allowed location |
-| --- | --- | --- |
-| Terminal bytes, messages, prompts, commands, cwd, environment | highly sensitive content | Mac and paired client only, encrypted in transit |
-| Gateway bearer token | internal-hop secret | owner-only Mac storage and the loopback gateway only |
-| Device private keys and pairing secret | authentication secret | Keychain/Secure Enclave or owner-only Mac storage only |
-| Device public keys, opaque device IDs, revocation state | sensitive metadata | Mac and minimal control plane |
-| Presence, path type, aggregate byte counts, coarse errors | operational metadata | local audit log; opt-in diagnostic upload only |
+| Asset | Allowed location |
+| --- | --- |
+| Terminal bytes, messages, prompts, commands, paths, and environment | Mac and paired phone only; encrypted in transit |
+| Gateway bearer and phone loopback capability | Endpoint owner-only memory/runtime state |
+| Endpoint private keys and QR-only enrollment secret | Keychain/Secure Enclave or owner-only Mac storage; never a service |
+| Endpoint public keys, opaque device IDs, grant revision, revocation state | Mac plus minimal control-plane directory |
+| Opaque room, role, generation, expiry, limits, lease ID | Control plane and relay |
+| Coarse audit result and bounded operational counts | Local audit; service audit without content |
 
-The relay and control plane never receive terminal bytes, transcript content,
-gateway tokens, device private keys, endpoint session keys, session names,
-repository paths, or prompt answers.
+The relay and control plane never receive gateway tokens, endpoint private
+keys, QR-only enrollment secrets, Noise session keys, terminal data,
+transcripts, session names, repository paths, prompt answers, or command text.
 
 ## Trust boundaries
 
-1. **Local session kernel → loopback gateway.** The gateway has the existing
-   bearer token and may reach only its own Latch process. It remains bound to
-   loopback; a remote peer cannot select an arbitrary local TCP destination.
-2. **Gateway → desktop remote-access agent.** The agent is the policy
-   enforcement point. It maps a mutually authenticated device key to a local
-   authorization record before forwarding an allowed `/v1` operation.
-3. **Paired device → encrypted transport.** A device identity is authenticated
-   during every connection. Authorization is checked on connection and on each
-   privileged operation; a client-provided device ID is never authoritative.
-4. **Endpoints → rendezvous/relay.** The control plane coordinates candidates
-   only. Cloudflare Realtime TURN is the named third-party relay: it sees
-   ciphertext, endpoint network metadata, sizes, and timing, but cannot
-   terminate the Noise encryption or read application content. DTLS is
-   transport encryption required by SCTP, not the paired-device identity;
-   Noise XX above the data channel proves the static key pinned during pairing.
-5. **Desktop helper → readiness file.** The readiness document identifies a
-   locally bound process but intentionally excludes the gateway token. The
-   supervisor provisions an owner-only parent directory; the file is owner-only.
+1. **Session kernel to loopback gateway.** `latch serve` is bound to loopback
+   and uses a short-lived owner-only bearer. It can reach only its own Latch
+   process.
+2. **Mac authority to transport helper.** The ordinary `latch` process maps an
+   already-authenticated peer key to a current local grant and one fixed
+   gateway destination. Caller authority headers are removed and replaced
+   internally.
+3. **Phone app to native transport.** Swift reaches the authenticated Rust
+   channel only through a random 256-bit loopback capability. There is no
+   manually entered gateway address or token.
+4. **Endpoint to endpoint.** Every link performs fresh Noise XX with pinned
+   static keys before Yamux or gateway bytes. TLS protects the WSS carrier but
+   is not endpoint identity.
+5. **Endpoints to relay.** Single-use signed admissions select one opaque room,
+   role, purpose, generation, expiry, and limits. Admissions do not authorize
+   application actions.
+6. **Relay to control plane.** Redemption, lease renewal, and invalidation use
+   dedicated service authentication. The relay cannot mint claims or inspect
+   encrypted records.
 
-## Authorization and recovery
+## Enrollment
 
-`observe` can list sessions and read the available observation surfaces.
-`interact` adds structured message and prompt resolution. `control` adds
-terminal bytes and resize. A direct CLI `pair confirm` defaults to `interact`,
-while Latch Desktop's approved pairing flow grants `control` so its terminal
-switch begins enabled. A revoked device is removed from the Mac allowlist,
-active streams close, and later handshakes are rejected. A gateway-token
-rotation affects new internal handshakes only; that token is never sent to a
-phone.
+An operator-minted one-use invitation replaces anonymous owner bootstrap. A
+five-minute QR code carries both the relay admission code and an independent
+256-bit secret that is never sent to a service. The secret is mixed into the
+Noise prologue. Possession of the admission code alone therefore cannot
+complete enrollment.
 
-`control` is granted as a separate "Allow terminal" decision layered on top of
-the base `observe`/`interact` picker, not as the top notch of a single
-severity ladder: the Mac remembers what a device held underneath the grant, so
-turning the terminal off returns the device to Interact or Observe as it was
-rather than to a default. A grant is written to the local device store first —
-the store the helper actually enforces against — and then mirrored to the
-control-plane pairing row; a mirror failure is reported but never rolls the
-local grant back, because the Mac is the authority and the directory is a
-convenience for the phone's own UI.
+After authenticated key exchange, both endpoints derive comparison words from
+the transcript. The unlocked Mac displays the phone name and exact proposed
+key; owner approval atomically commits that key, permission, room, and grant
+revision. Cancellation, expiry, replay with changed fields, or key
+substitution fails closed.
 
-Revocation and a permission *downgrade* are both enforced by the same 250 ms
-device-state check in `proxy_connection` (`crates/latch/src/cli/remote_access.rs`).
-The check compares the device's live permission against the grant the
-connected route actually required, not against the grant held at handshake
-time, so a device dropped from `control` to `interact` mid-session loses its
-terminal and keeps its chat connection — the terminal route's own requirement
-is what closes, not the whole pairing. The audit trail records a
-`permission_downgraded` event distinct from revocation so the two are
-distinguishable after the fact.
+## Authorization and revocation
 
-On the phone, opening a terminal is additionally gated behind the device
-owner: `TerminalUnlock` runs `LAContext` with
-`deviceOwnerAuthentication` (Face ID or Touch ID, passcode fallback — never a
-refusal for a device with no biometric enrollment) before a `TerminalSession`
-is returned, and caches one passed check for a five-minute grace window so
-repeated attach/detach within that window costs one prompt rather than one per
-attach. A phone with no passcode set is refused outright rather than waved
-through. This is a client-side gate on top of the Mac's `control` grant, not a
-replacement for it: a stolen unlocked phone still needs the terminal grant to
-have been given, and a phone that has the grant but fails the device-owner
-check gets no terminal. Chat is deliberately not gated the same way — a lost
-or stolen phone still needing Face ID to read a conversation would be a
-different, and here unwanted, tradeoff.
+`observe` reads session/conversation observation surfaces, `interact` adds
+structured actions, and `control` adds terminal input and resize. Terminal
+access also requires iOS device-owner authentication and always takes the
+session's exclusive human surface.
 
-A terminal surface a phone is holding is also released unilaterally by the
-phone after inactivity: `AppModel` releases a held terminal after two minutes
-with no input while the app is not the frontmost app (backgrounding outright
-releases it immediately). This bounds how long a phone that is not actively
-being watched — a notification, an incoming call, the app switcher, the Face
-ID prompt itself — can keep the Mac's one terminal surface parked away from
-whoever is actually at the keyboard. It is a phone-side liveness cleanup, not
-a security boundary: the Mac's revocation and downgrade checks above remain
-the authoritative enforcement point.
-
-There is no read-only terminal mode to fall back on. A terminal connection is
-the session's single exclusive surface, so the gateway requires the `control`
-grant for the terminal route and refuses `observe` and `interact` before the
-WebSocket is opened. Observation without control is served by the conversation
-socket, which cannot take the surface or type into a pane, and by
-`GET /v2/sessions/{id}/preview`.
-
-That preview is not the read-only terminal this rule denies. It is a
-`capture-pane` query — one read of the pane's cells at one instant, the same
-kind of read the conversation connector already performs to observe a screen —
-so it enters no attach, paints no second surface, follows nothing, and carries
-no input. `observe` therefore permits it. It does widen what an `observe`
-device can read: the pane's rendered screen, and up to 200 lines of
-primary-screen history, which the conversation projection does not expose
-verbatim. That is deliberate and bounded — the same session content the grant
-already entitles the device to read through the conversation socket, in the
-form the pane holds it — and it is capped, deadline-bounded, and forced to zero
-history while a full-screen application owns the pane.
-
-Two further limits keep a terminal connection from being used as a denial of
-service against the session itself. The steal only commits once the socket has
-declared a real terminal size, so an unauthenticated or half-initialised
-socket cannot evict the desk surface. And a peer that stops draining output is
-closed and its attach reaped, rather than being allowed to hold the surface
-while the pane stalls behind it.
+The Mac rechecks current device state every 250 ms on active routes. A
+downgrade closes only streams whose route now exceeds the grant; revocation
+closes all streams. The control-plane grant revision prevents a stale admission
+from restoring old permission, and the durable outbox closes both relay roles.
 
 ## Abuse cases and mitigations
 
-| Abuse case | Required mitigation and recovery |
+| Abuse case | Mitigation |
 | --- | --- |
-| Stolen/replayed QR material | Single-use, high-entropy pairing secret; five-minute expiry; confirmation on unlocked Mac; consume on success or cancellation. |
-| Stolen unlocked phone | Local device authentication before a new connection and sensitive operation; per-device revocation immediately closes streams. |
-| Compromised relay/control plane | Pin paired endpoint keys; transcript-bound authenticated key agreement; end-to-end encryption before relay application data; retain no content on the service. |
-| DNS, certificate, or LAN impersonation | Verify the paired Mac identity on every local/direct path; Bonjour is discovery only, never authorization. |
-| Browser-origin attack on gateway | Keep loopback binding, reject non-loopback origins, require bearer authentication, and do not expose the token to remote clients. |
-| Confused deputy to another local service | The remote agent has one fixed loopback target and an allowlisted `/v1` surface; no host/port supplied by a device is ever dialed. |
-| Duplicate submit after reconnect | `Idempotency-Key` binds one message or resolve payload to one resolved session for the gateway instance's bounded retry window. Reuse with different content returns 409. |
-| Terminal-control escalation | Explicit `control` grant on the terminal route, with no lesser terminal mode to downgrade into; authorizer checks every terminal operation. |
-| Permission downgraded mid-session (not just revoked) | The 250 ms device-state check compares against the route's required grant, not the grant held at handshake, and closes a live terminal stream the moment `control` is lost while leaving a lesser-permission stream (e.g. chat) open. |
-| Stolen unlocked phone reaches the terminal | `TerminalUnlock` requires `LAContext` device-owner authentication before a `TerminalSession` opens, independent of the Mac's `control` grant; a phone with no passcode is refused. |
-| Phone left connected and unattended holds the Mac's terminal | The idle countdown releases a held terminal surface after two minutes with no input while the app is not frontmost; backgrounding releases it immediately. |
-| Surface denial of service | A steal commits only after a valid size is declared; socket writes are deadline-bounded and a non-draining peer is evicted and its attach reaped, so a stalled device cannot hold the surface or block the pane. |
-| Connection exhaustion | Per-device/account connection, frame, request, and buffered-byte limits; reject before proxying; audit aggregate failure category only. |
-| Hostile terminal output | Treat output as terminal bytes, never markup; use a hardened renderer and avoid putting content in diagnostics, notifications, or logs. |
-| Update/dependency compromise | Signed/notarized helper, signed update metadata, pinned dependency review, and rollback/runbook before production rollout. |
+| Malicious control plane substitutes a phone | QR-only secret in the Noise prologue plus transcript comparison and exact-key Mac approval |
+| Admission replay | Short expiry, one-time redemption ID, role/purpose binding, generation, bounded attempt ID |
+| Compromised relay | Pinned Noise identities and opaque bounded records; no endpoint metadata in claims |
+| DNS or TLS interception | Operating-system certificate validation plus pinned endpoint key |
+| Browser-origin or local malware probes the adapter | Loopback-only random capability, bounded first request, no caller-selected destination |
+| Forged grant headers or route escalation | Strip caller authority, insert current Mac-owned capability, shared route table and live grant check |
+| Permission downgrade or revocation during a stream | 250 ms local check, monotonically increasing grant revision, relay room invalidation |
+| Connection or memory exhaustion | Admission budgets, one active role per room, frame/stream/header limits, 8 MiB relay backpressure bound |
+| Slow/non-draining peer | Deadlines, cancellation propagation, writer eviction, attach cleanup |
+| Duplicate application action after reconnect | Existing idempotency and gateway-instance rules; never replay terminal input automatically |
+| Sensitive diagnostics | Content-free coarse events only; secrets and application fields rejected mechanically |
 
 ## Failure behavior
 
-Authentication/authorization failures are explicit and non-retryable. Network
-interruptions reauthenticate, rediscover capabilities, resume events from the
-last acknowledged cursor, and reattach a terminal from its current screen.
-Clients must not automatically replay terminal input or `keys`. They may retry
-a message or prompt resolution only with the same idempotency key and only
-while the observed `gatewayInstanceId` is unchanged. A changed instance ID
-means the in-memory v1 retry window was lost; the client must refresh state and
-ask for user confirmation rather than guess whether a prior submission ran.
+Authentication and authorization failures are explicit and non-retryable for
+that attempt. Transport loss cancels all child streams and requires a fresh
+admission and handshake. A lease extension is accepted only when signed,
+unexpired, and bound to the current lease. Revocation remains effective when
+the relay is temporarily unavailable because the local Mac is authoritative
+and invalidation is queued durably.
 
-## Security validation required before release
+## Required evidence
 
-Phase 4 must exercise pairing replay, identity substitution, revocation during
-an active stream, direct and forced-relay captures, malformed framing, rate
-limits, lock/sleep/network changes, update failures, and log/crash-report
-redaction. No release is approved if a relay capture or service log reveals a
-gateway token, terminal byte, transcript, message, prompt answer, or endpoint
-decryption key.
+Before deployment, verification must cover:
+
+- admission without the QR secret, wrong peer pin, and exact-key enrollment;
+- unauthorized and malformed gateway paths, forged authority, oversized
+  headers, pipelining, blocked writers, final response completion, and current
+  grant enforcement;
+- single-use redemption, lease renewal, role replacement, backpressure, and
+  authenticated invalidation;
+- real PostgreSQL migration/atomicity/privacy tests;
+- a real TLS/WSS composed endpoint-to-gateway path;
+- Desktop, Swift package, generated XCFramework, and native iOS builds; and
+- deployed-service captures and physical-device/network evidence in the later
+  deployment objective.
+
+No release is approved if relay or service evidence contains an application
+payload, gateway token, QR-only secret, endpoint private key, or Noise session
+key.
+
+## Deployed configuration and residual risks
+
+The relay and control plane are single-replica Railway services behind the
+platform TLS edge; the relay serves plain WebSocket inside the platform and
+the endpoints validate the edge certificate with the operating system trust
+store. The edge therefore sees WebSocket framing and the admission bearer in
+the upgrade request, but never a Noise plaintext: every record inside the
+socket is end-to-end encrypted between the pinned endpoint keys, so a
+compromised edge or relay is bounded to traffic analysis and denial of
+service. Service secrets (admission signing key, relay service token,
+invalidation secret, operator secret, APNs key) live in Railway's variable
+store; their rotation and the bounded previous-key overlap are in
+[REMOTE_LINK_OPERATIONS.md](REMOTE_LINK_OPERATIONS.md).
+
+Residual risks accepted for this release: a single relay replica is a single
+point of availability (not confidentiality); the relay hostname currently
+resolves through the platform's edge, so an IPv6-only phone may reach it via
+carrier NAT64 rather than native IPv6; attention notifications carry a fixed
+sentence and no identifiers, but their timing reveals that some session
+changed state; and the Mac's 250 ms grant check bounds, rather than
+eliminates, the window in which a just-revoked phone can still receive
+bytes.

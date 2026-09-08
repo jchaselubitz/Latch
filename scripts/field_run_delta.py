@@ -1,71 +1,82 @@
 #!/usr/bin/env python3
-"""Turns two diagnostics snapshots into one recorded field-run result.
+"""Turns two Remote Link audit snapshots into one recorded field-run result.
 
 `scripts/field-run.sh` calls this; it is separate only because computing a
 delta between two JSON documents in shell is worse than it sounds.
 
-What it emits is deliberately narrow. The diagnostics bundle is content-free by
-contract, and this must not become the place that widens it: only the
-path-selection counters and the coarse event names are read out, and the note
-is whatever the person running the scenario typed.
+What it emits is deliberately narrow: only coarse event names and stream-open
+counts are read out, and the note is whatever the person running the scenario
+typed. The Objective 2 diagnostics runner will add per-stage timings without
+widening this content boundary.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
+from collections import Counter
 from pathlib import Path
 
-ROUTES = ("lan", "direct_host", "direct_reflexive", "relay", "unknown")
-
-
-def delta(before: dict, after: dict) -> dict:
-    """Counters gained between the two snapshots.
-
-    The audit trail is bounded, so a long-running Mac can age rows out and make
-    a counter fall. A negative delta is reported as such rather than clamped:
-    silently showing zero would turn "the evidence rolled over" into "nothing
-    happened", and those need different responses from whoever reads it.
-    """
-    before_paths = before.get("pathSelection", {})
-    after_paths = after.get("pathSelection", {})
-    before_routes = before_paths.get("routes", {})
-    after_routes = after_paths.get("routes", {})
-
-    result = {
-        "routes": {
-            route: after_routes.get(route, 0) - before_routes.get(route, 0)
-            for route in ROUTES
-        }
+def delta(before: list[dict], after: list[dict]) -> dict:
+    """Coarse events gained between two bounded audit snapshots."""
+    before_events = Counter(item.get("event") for item in before if item.get("event"))
+    after_events = Counter(item.get("event") for item in after if item.get("event"))
+    gained = {
+        name: count - before_events.get(name, 0)
+        for name, count in after_events.items()
+        if count - before_events.get(name, 0)
     }
-    for field in ("connections", "direct", "relay", "iceAnswers", "iceAnswersConnected"):
-        result[field] = after_paths.get(field, 0) - before_paths.get(field, 0)
-
-    before_events = before.get("eventCounts", {})
-    after_events = after.get("eventCounts", {})
-    events = {}
-    for name in set(before_events) | set(after_events):
-        gained = after_events.get(name, 0) - before_events.get(name, 0)
-        if gained:
-            events[name] = gained
-    result["events"] = dict(sorted(events.items()))
-    return result
+    return {
+        "streamsOpened": gained.get("remote_link_stream_opened", 0),
+        "streamsClosed": gained.get("remote_link_stream_closed", 0),
+        "events": dict(sorted(gained.items())),
+    }
 
 
-def summarize(routes: dict) -> str:
-    counted = ", ".join(f"{name} {count}" for name, count in routes.items() if count)
-    return counted or "none counted"
+def phone_summary(log: str, since: str) -> dict | None:
+    """Per-kind attempt counts and stage percentiles from the phone's records."""
+    if not log:
+        return None
+    script = Path(__file__).with_name("diagnostics_summary.py")
+    args = [sys.executable, str(script), log, "--json"]
+    if since:
+        args += ["--since", since]
+    output = subprocess.run(args, check=True, capture_output=True, text=True).stdout
+    return json.loads(output)
+
+
+def phone_cell(run: dict) -> str:
+    summary = run.get("phoneSummary")
+    if not summary:
+        return run.get("phone") or "-"
+    parts = []
+    for kind, body in summary.items():
+        p95 = body.get("stages", {}).get("applicationReady", {}).get("p95")
+        launch = body.get("stages", {}).get("launch", {}).get("p95")
+        detail = f'{body["succeeded"]}/{body["attempts"]} {kind.replace("_", " ")}s'
+        if launch is not None:
+            detail += f", p95 launch {launch} ms"
+        elif p95 is not None:
+            detail += f", p95 ready {p95} ms"
+        parts.append(detail)
+    return "; ".join(parts) or "-"
 
 
 def row(run: dict) -> str:
     macs = run["macDelta"]
-    measured = f'{macs["connections"]} connection(s): {summarize(macs["routes"])}'
+    if "streamsOpened" in macs:
+        measured = f'{macs["streamsOpened"]} stream(s) opened, {macs["streamsClosed"]} closed'
+    else:
+        # Historical schema-v1 field runs stay readable after the transport
+        # replacement without teaching new tooling the retired path taxonomy.
+        measured = f'{macs.get("connections", 0)} historical connection(s)'
     cells = [
         run["title"],
         run["result"],
         measured,
-        run.get("phone") or "-",
+        phone_cell(run),
         run.get("note") or "-",
     ]
     return "| " + " | ".join(cell.replace("|", "\\|") for cell in cells) + " |"
@@ -104,7 +115,7 @@ def main() -> int:
     before = json.loads(Path(sys.argv[1]).read_text())
     after = json.loads(Path(sys.argv[2]).read_text())
     run = {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "scenario": os.environ["LATCH_SCENARIO"],
         "title": os.environ["LATCH_TITLE"],
         "result": os.environ["LATCH_RESULT"],
@@ -113,6 +124,10 @@ def main() -> int:
         "recordedAt": os.environ["LATCH_STAMP"],
         "macDelta": delta(before, after),
     }
+    summary = phone_summary(os.environ.get("LATCH_PHONE_LOG", ""), os.environ.get("LATCH_PHONE_SINCE", ""))
+    if summary is not None:
+        run["phoneLog"] = os.path.basename(os.environ["LATCH_PHONE_LOG"].rstrip("/"))
+        run["phoneSummary"] = summary
     print(json.dumps(run, indent=2))
     return 0
 

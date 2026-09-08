@@ -8,20 +8,132 @@
 //! stopped reading hold the surface, and must never leave the attach process
 //! alive after the socket is gone.
 
+use std::collections::HashMap;
 use std::io;
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use axum::extract::ws::{close_code, CloseFrame, Message, WebSocket};
 use serde::Deserialize;
 use tokio::io::unix::AsyncFd;
 use tokio::time::timeout;
 
+use super::contract::TerminalAttachedFrame;
 use super::pty::{PtyChild, SpawnAttachRequest};
 use crate::engine::SurfaceRelease;
 use crate::session::manifest::TerminalSize;
 use crate::session::paths::LatchHome;
+
+/// How long after the gateway loses a remote socket its holder may resume the
+/// surface with the capability from the `attached` frame.
+pub const RESUME_WINDOW: Duration = Duration::from_secs(60);
+/// How long a resume waits for the previous relay of the same surface to
+/// notice its socket is gone before checking the daemon's attach state.
+const RESUME_HANDOVER_WAIT: Duration = Duration::from_secs(3);
+
+struct ResumeGrant {
+    capability: String,
+    device: Option<String>,
+    /// True while the socket that received the capability is still relaying.
+    relaying: bool,
+    /// When that socket was lost without a reasoned close, if it was.
+    released_at: Option<Instant>,
+}
+
+/// Bounded resume grants, one per session, for surfaces this gateway handed
+/// to remote devices. A grant proves that the same device held the surface
+/// moments ago; it never overrides a newer holder.
+#[derive(Clone, Default)]
+pub struct ResumeRegistry {
+    inner: Arc<Mutex<HashMap<String, ResumeGrant>>>,
+}
+
+impl ResumeRegistry {
+    /// Mints a fresh capability for `session`, replacing any earlier grant.
+    fn grant(&self, session: &str, device: Option<String>) -> String {
+        let capability = random_capability();
+        self.inner.lock().expect("resume registry poisoned").insert(
+            session.to_owned(),
+            ResumeGrant {
+                capability: capability.clone(),
+                device,
+                relaying: true,
+                released_at: None,
+            },
+        );
+        capability
+    }
+
+    /// The socket holding `capability` ended. A transport loss keeps the
+    /// grant resumable for [`RESUME_WINDOW`]; a reasoned or deliberate end
+    /// removes it, so nothing can resume a surface that was given back or
+    /// taken away.
+    fn release(&self, session: &str, capability: &str, resumable: bool) {
+        let mut grants = self.inner.lock().expect("resume registry poisoned");
+        let Some(grant) = grants.get_mut(session) else {
+            return;
+        };
+        if !constant_time_eq(&grant.capability, capability) {
+            return;
+        }
+        if resumable {
+            grant.relaying = false;
+            grant.released_at = Some(Instant::now());
+        } else {
+            grants.remove(session);
+        }
+    }
+
+    fn is_relaying(&self, session: &str) -> bool {
+        self.inner
+            .lock()
+            .expect("resume registry poisoned")
+            .get(session)
+            .is_some_and(|grant| grant.relaying)
+    }
+
+    /// Whether `capability` is the unexpired grant for `session` held by
+    /// `device`. Does not consult the daemon; the caller does that last.
+    fn matches(&self, session: &str, capability: &str, device: Option<&str>) -> bool {
+        let grants = self.inner.lock().expect("resume registry poisoned");
+        let Some(grant) = grants.get(session) else {
+            return false;
+        };
+        if grant.device.as_deref() != device {
+            return false;
+        }
+        if !constant_time_eq(&grant.capability, capability) {
+            return false;
+        }
+        match grant.released_at {
+            Some(released) => released.elapsed() <= RESUME_WINDOW,
+            None => grant.relaying,
+        }
+    }
+}
+
+fn random_capability() -> String {
+    use std::io::Read;
+    let mut bytes = [0_u8; 32];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut file| file.read_exact(&mut bytes))
+        .expect("system randomness is available");
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn constant_time_eq(left: &str, right: &str) -> bool {
+    let left = left.as_bytes();
+    let right = right.as_bytes();
+    if left.len() != right.len() {
+        return false;
+    }
+    left.iter()
+        .zip(right)
+        .fold(0_u8, |acc, (a, b)| acc | (a ^ b))
+        == 0
+}
 
 const PTY_BUFFER: usize = 32 * 1024;
 
@@ -53,6 +165,9 @@ const WS_CLOSE_STOLEN: u16 = 4409;
 const WS_CLOSE_SESSION_EXITED: u16 = 4410;
 /// Application close code: the session kernel failed to hand over a surface.
 const WS_CLOSE_KERNEL_ERROR: u16 = 4500;
+/// Application close code: the resume capability was stale, foreign, or a
+/// newer surface has attached since. Nothing was stolen.
+const WS_CLOSE_RESUME_REFUSED: u16 = 4411;
 
 /// Connection inputs for one terminal socket.
 pub struct TerminalConnect {
@@ -66,6 +181,13 @@ pub struct TerminalConnect {
     pub cols: Option<u16>,
     /// Initial rows from the WebSocket query string, when provided.
     pub rows: Option<u16>,
+    /// Resume capability from an earlier `attached` frame, when reconnecting
+    /// after transport loss.
+    pub resume: Option<String>,
+    /// Opaque device the loopback proxy proved, when remote.
+    pub device: Option<String>,
+    /// Gateway-wide resume grants.
+    pub resumes: ResumeRegistry,
 }
 
 /// `cols` / `rows` query parameters on `/v2/sessions/{id}/terminal`.
@@ -79,6 +201,8 @@ pub struct TerminalQuery {
     pub cols: Option<u16>,
     /// Initial rows. Must be paired with [`Self::cols`].
     pub rows: Option<u16>,
+    /// Resume capability from an earlier `attached` frame.
+    pub resume: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -129,8 +253,11 @@ enum RelayEnd {
     /// The attach process ended, or its PTY did. Its exit status is the
     /// authoritative reason, so the caller reaps it before closing the socket.
     Attach,
-    /// The peer went away. Nothing needs to be told to a closed socket.
+    /// The peer went away without saying so: transport loss. The holder may
+    /// resume inside [`RESUME_WINDOW`].
     Peer,
+    /// The peer sent a close frame: a deliberate detach. Nothing may resume it.
+    Detached,
     /// The peer stopped draining output within [`WRITE_DEADLINE`].
     SlowClient,
 }
@@ -148,6 +275,22 @@ pub async fn run(mut socket: WebSocket, connect: TerminalConnect) {
         .await;
         return;
     };
+    // A resume is honoured only when the same device presents the unexpired
+    // capability and nobody else holds the surface. Otherwise this is a
+    // refusal, not a steal: the person must take control deliberately.
+    if let Some(capability) = connect.resume.as_deref() {
+        if !may_resume(&connect, id.as_str(), capability).await {
+            close_socket(
+                &mut socket,
+                TerminalClose {
+                    code: WS_CLOSE_RESUME_REFUSED,
+                    reason: "resume_refused",
+                },
+            )
+            .await;
+            return;
+        }
+    }
     // Nothing above this point has touched the session. The steal happens when
     // the attach process is spawned, so both the authorisation check in the
     // route table and this size handshake complete before any existing surface
@@ -176,6 +319,26 @@ pub async fn run(mut socket: WebSocket, connect: TerminalConnect) {
         }
     };
 
+    // The surface is held. Tell the holder how to come back after transport
+    // loss before any pane byte, so a client that loses the socket mid-frame
+    // already has its capability.
+    let capability = connect.resumes.grant(id.as_str(), connect.device.clone());
+    let attached = TerminalAttachedFrame {
+        r#type: "attached".into(),
+        resume_capability: capability.clone(),
+        resume_window_seconds: RESUME_WINDOW.as_secs(),
+    };
+    if let Ok(text) = serde_json::to_string(&attached) {
+        if timeout(WRITE_DEADLINE, socket.send(Message::Text(text.into())))
+            .await
+            .map_or(true, |result| result.is_err())
+        {
+            connect.resumes.release(id.as_str(), &capability, false);
+            pty.shutdown().await;
+            return;
+        }
+    }
+
     let end = relay(&mut socket, &master, &mut pty).await;
     match end {
         RelayEnd::Attach => {
@@ -183,12 +346,14 @@ pub async fn run(mut socket: WebSocket, connect: TerminalConnect) {
             // reports why instead of being overwritten by our own signal.
             let release = pty.wait().await;
             pty.shutdown().await;
+            connect.resumes.release(id.as_str(), &capability, false);
             close_socket(&mut socket, TerminalClose::from_release(release)).await;
         }
         // A socket that dropped mid-frame, or one we gave up writing to, must
         // not leave an attach process behind still counted as the live surface.
         RelayEnd::SlowClient => {
             pty.shutdown().await;
+            connect.resumes.release(id.as_str(), &capability, false);
             close_socket(
                 &mut socket,
                 TerminalClose {
@@ -198,8 +363,54 @@ pub async fn run(mut socket: WebSocket, connect: TerminalConnect) {
             )
             .await;
         }
-        RelayEnd::Peer => pty.shutdown().await,
+        RelayEnd::Detached => {
+            pty.shutdown().await;
+            connect.resumes.release(id.as_str(), &capability, false);
+            // The peer began the closing handshake; polling to the end
+            // flushes the queued close reply so the detach is acknowledged
+            // rather than reset.
+            let _ = timeout(WRITE_DEADLINE, async {
+                while let Some(Ok(_)) = socket.recv().await {}
+            })
+            .await;
+        }
+        RelayEnd::Peer => {
+            pty.shutdown().await;
+            connect.resumes.release(id.as_str(), &capability, true);
+        }
     }
+}
+
+/// Whether `capability` may resume `session` for the connecting device:
+/// the grant must match device and capability inside its window, the
+/// previous relay must have finished releasing the surface, and the daemon
+/// must report no live attach — the last check is what stops a resume from
+/// ever displacing a newer human surface.
+async fn may_resume(connect: &TerminalConnect, session: &str, capability: &str) -> bool {
+    if !connect
+        .resumes
+        .matches(session, capability, connect.device.as_deref())
+    {
+        return false;
+    }
+    let started = Instant::now();
+    while connect.resumes.is_relaying(session) && started.elapsed() < RESUME_HANDOVER_WAIT {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    if !connect
+        .resumes
+        .matches(session, capability, connect.device.as_deref())
+    {
+        return false;
+    }
+    let home = connect.home.clone();
+    let Ok(id) = crate::session::paths::SessionId::parse(session) else {
+        return false;
+    };
+    let attached = tokio::task::spawn_blocking(move || crate::engine::surface_attached(&home, &id))
+        .await
+        .unwrap_or(true);
+    !attached
 }
 
 async fn relay(
@@ -253,7 +464,7 @@ async fn relay(
                         }
                     }
                     Some(Ok(Message::Pong(_))) => {}
-                    Some(Ok(Message::Close(_))) => return RelayEnd::Peer,
+                    Some(Ok(Message::Close(_))) => return RelayEnd::Detached,
                 }
             }
         }
@@ -592,6 +803,16 @@ mod tests {
         grant: &str,
         receive_buffer: libc::c_int,
     ) -> Result<tungstenite::WebSocket<TcpStream>, u16> {
+        connect_device(harness, query, grant, None, receive_buffer)
+    }
+
+    fn connect_device(
+        harness: &Harness,
+        query: &str,
+        grant: &str,
+        device: Option<&str>,
+        receive_buffer: libc::c_int,
+    ) -> Result<tungstenite::WebSocket<TcpStream>, u16> {
         let url = format!(
             "ws://{}/v2/sessions/{SESSION}/terminal{query}",
             harness.address
@@ -605,6 +826,12 @@ mod tests {
             "x-latch-device-grant",
             HeaderValue::from_str(grant).expect("grant header"),
         );
+        if let Some(device) = device {
+            request.headers_mut().insert(
+                "x-latch-device-id",
+                HeaderValue::from_str(device).expect("device header"),
+            );
+        }
         let stream = if receive_buffer > 0 {
             small_window_stream(harness.address, receive_buffer)
         } else {
@@ -696,6 +923,130 @@ mod tests {
 
     fn wait_until(predicate: impl FnMut() -> bool, message: &str) {
         wait_until_within(predicate, message, Duration::from_secs(10));
+    }
+
+    /// Reads frames until the gateway's `attached` frame arrives and returns
+    /// its resume capability.
+    fn attached_capability(socket: &mut tungstenite::WebSocket<TcpStream>) -> String {
+        loop {
+            match socket.read().expect("attached frame") {
+                tungstenite::Message::Text(text) => {
+                    let frame: TerminalAttachedFrame =
+                        serde_json::from_str(text.as_str()).expect("attached frame shape");
+                    assert_eq!(frame.r#type, "attached");
+                    assert_eq!(frame.resume_window_seconds, RESUME_WINDOW.as_secs());
+                    assert_eq!(frame.resume_capability.len(), 64);
+                    return frame.resume_capability;
+                }
+                tungstenite::Message::Close(frame) => {
+                    panic!("closed before attaching: {frame:?}")
+                }
+                _ => continue,
+            }
+        }
+    }
+
+    /// Drops the TCP connection without a close frame: transport loss, not a
+    /// detach.
+    fn lose(socket: tungstenite::WebSocket<TcpStream>) {
+        let stream = socket.into_inner();
+        let _ = stream.shutdown(std::net::Shutdown::Both);
+        drop(stream);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_lost_holder_resumes_with_its_capability_and_nobody_else_can() {
+        let harness = harness("sleep 30").await;
+        let mut first = connect_device(&harness, "?cols=80&rows=24", "control", Some("phone"), 0)
+            .expect("handshake");
+        let capability = attached_capability(&mut first);
+        wait_until(|| harness.stole(), "the first socket holds the surface");
+
+        // Another device holding the capability is refused before anything
+        // is spawned or displaced.
+        std::fs::remove_file(&harness.spawned).unwrap();
+        let mut foreign = connect_device(
+            &harness,
+            &format!("?cols=80&rows=24&resume={capability}"),
+            "control",
+            Some("other-phone"),
+            0,
+        )
+        .expect("handshake");
+        let (code, reason, _) = drain(&mut foreign);
+        assert_eq!(
+            (code, reason.as_str()),
+            (WS_CLOSE_RESUME_REFUSED, "resume_refused")
+        );
+        assert!(!harness.stole(), "a refused resume must not steal");
+
+        // Transport loss: the holder comes back with the same capability and
+        // the same device, and the surface is re-taken without a Take Control.
+        lose(first);
+        wait_until(
+            || !harness.attach_alive(),
+            "the lost socket's attach is reaped",
+        );
+        let mut resumed = connect_device(
+            &harness,
+            &format!("?cols=80&rows=24&resume={capability}"),
+            "control",
+            Some("phone"),
+            0,
+        )
+        .expect("handshake");
+        let second = attached_capability(&mut resumed);
+        assert_ne!(
+            second, capability,
+            "a resumed surface gets a fresh capability"
+        );
+        wait_until(|| harness.stole(), "the resumed socket holds the surface");
+
+        // A deliberate detach ends the grant: the old capability cannot
+        // resume, and neither can the one that was just minted.
+        resumed.close(None).expect("close frame");
+        // The gateway completes the closing handshake it did not start.
+        loop {
+            match resumed.read() {
+                Ok(_) => continue,
+                Err(tungstenite::Error::ConnectionClosed) => break,
+                Err(error) => panic!("detach was reset instead of acknowledged: {error}"),
+            }
+        }
+        wait_until(|| !harness.attach_alive(), "the detached attach is reaped");
+        std::fs::remove_file(&harness.spawned).unwrap();
+        for stale in [capability, second] {
+            let mut refused = connect_device(
+                &harness,
+                &format!("?cols=80&rows=24&resume={stale}"),
+                "control",
+                Some("phone"),
+                0,
+            )
+            .expect("handshake");
+            let (code, _, _) = drain(&mut refused);
+            assert_eq!(code, WS_CLOSE_RESUME_REFUSED);
+        }
+        assert!(!harness.stole(), "a stale resume never steals");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unknown_capability_never_takes_the_surface() {
+        let harness = harness("sleep 30").await;
+        let mut refused = connect_device(
+            &harness,
+            &format!("?cols=80&rows=24&resume={}", "ab".repeat(32)),
+            "control",
+            Some("phone"),
+            0,
+        )
+        .expect("handshake");
+        let (code, reason, _) = drain(&mut refused);
+        assert_eq!(
+            (code, reason.as_str()),
+            (WS_CLOSE_RESUME_REFUSED, "resume_refused")
+        );
+        assert!(!harness.stole());
     }
 
     fn wait_until_within(mut predicate: impl FnMut() -> bool, message: &str, limit: Duration) {

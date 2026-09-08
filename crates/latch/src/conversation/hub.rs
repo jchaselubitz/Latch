@@ -30,6 +30,10 @@ pub const MAX_CONVERSATION_BATCH_BYTES: usize = 256 * 1024;
 pub const MAX_CONVERSATION_SNAPSHOT_BYTES: usize = 512 * 1024;
 pub const MAX_OPERATION_RECORDS: usize = 512;
 pub const OPERATION_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
+/// The horizon inside which a client may automatically retry an operation id
+/// (`OPERATION_RETENTION_SECONDS` on the wire). A record younger than this
+/// must never be evicted silently: the id could then be replayed as new.
+pub const CLIENT_RETRY_HORIZON: Duration = Duration::from_secs(10 * 60);
 /// Retained mutation history a reconnecting subscriber can replay instead of
 /// paying for a snapshot. Exceeding either bound downgrades resume to snapshot.
 pub const MAX_RETAINED_MUTATIONS: usize = 512;
@@ -107,6 +111,14 @@ pub struct OperationRecord {
     pub action: Option<ConnectorAction>,
     #[serde(default)]
     pub reconciled: bool,
+    /// Opaque device that submitted the operation. Only that device may reuse
+    /// the id or read the outcome; a local (non-proxied) client records none.
+    #[serde(default)]
+    pub device: Option<String>,
+    /// Digest of the exact action so a reused id with a different payload is
+    /// a conflict rather than a silent replay of the first request.
+    #[serde(default)]
+    pub payload_digest: Option<String>,
 }
 #[derive(Clone, Debug)]
 pub enum SubscriberEvent {
@@ -124,6 +136,8 @@ pub enum SubscriberEvent {
 #[derive(Clone, Debug)]
 struct Subscriber {
     grant: Grant,
+    /// Opaque device identity proved by the loopback proxy, when remote.
+    device: Option<String>,
     queue: VecDeque<SubscriberEvent>,
     bytes: usize,
     last_snapshot: Option<Instant>,
@@ -319,6 +333,17 @@ impl ConversationHub {
         grant: Grant,
         position: ResumePosition,
     ) -> Option<(u64, SubscribeOutcome)> {
+        self.subscribe_device(id, grant, None, position)
+    }
+    /// `subscribe_at` for a remote device whose opaque identity the loopback
+    /// proxy proved. Operation ids and receipts are scoped to that device.
+    pub fn subscribe_device(
+        &self,
+        id: &ConversationId,
+        grant: Grant,
+        device: Option<String>,
+        position: ResumePosition,
+    ) -> Option<(u64, SubscribeOutcome)> {
         let mut hub = self.inner.lock().ok()?;
         let actor = hub.sessions.get_mut(id)?;
         let key = actor.next_subscriber;
@@ -327,6 +352,7 @@ impl ConversationHub {
             key,
             Subscriber {
                 grant,
+                device,
                 queue: VecDeque::new(),
                 bytes: 0,
                 last_snapshot: None,
@@ -704,18 +730,31 @@ impl ConversationHub {
             .sessions
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("unknown conversation"))?;
-        prune_operations(&mut actor.operations);
+        if prune_operations(&mut actor.operations) {
+            // A record inside the client retry horizon had to go to honour the
+            // count bound. Its id could now be replayed as new, so the epoch
+            // moves instead: every queued id is refused and re-based.
+            rotate_operation_epoch(actor)?;
+        }
+        let subscriber_record = actor
+            .subscribers
+            .get(&subscriber)
+            .ok_or_else(|| anyhow::anyhow!("unknown subscriber"))?;
+        let grant = subscriber_record.grant;
+        let device = subscriber_record.device.clone();
+        let payload_digest = Some(action_digest(action));
         if let Some(old) = actor.operations.iter().find(|r| r.id == operation_id) {
+            if old.device != device || old.payload_digest != payload_digest {
+                return Ok(OperationOutcome::Refused {
+                    reason: "operation id conflict: another device or payload already used this id"
+                        .into(),
+                });
+            }
             return Ok(match &old.outcome {
                 OperationOutcome::Started => OperationOutcome::Ambiguous,
                 v => v.clone(),
             });
         }
-        let grant = actor
-            .subscribers
-            .get(&subscriber)
-            .ok_or_else(|| anyhow::anyhow!("unknown subscriber"))?
-            .grant;
         let descriptor = actor
             .actions
             .iter()
@@ -757,6 +796,8 @@ impl ConversationHub {
             outcome: OperationOutcome::Started,
             action: Some(action.clone()),
             reconciled: false,
+            device,
+            payload_digest,
         };
         actor.operations.push_back(record.clone());
         actor.cache.append(&super::CacheBatch {
@@ -765,6 +806,28 @@ impl ConversationHub {
             operation_records: vec![serde_json::to_value(record)?],
         })?;
         Ok(OperationOutcome::Started)
+    }
+    /// Reads the retained outcome of an operation without resubmitting it.
+    /// Only the device that submitted it may read it; anyone else, and any
+    /// evicted or unknown id, gets `None` so an expired receipt can never be
+    /// mistaken for permission to execute again.
+    pub fn operation_status(
+        &self,
+        id: &ConversationId,
+        subscriber: u64,
+        operation_id: &str,
+    ) -> Option<OperationOutcome> {
+        let hub = self.inner.lock().ok()?;
+        let actor = hub.sessions.get(id)?;
+        let device = actor.subscribers.get(&subscriber)?.device.clone();
+        let record = actor.operations.iter().find(|r| r.id == operation_id)?;
+        if record.device != device {
+            return None;
+        }
+        Some(match &record.outcome {
+            OperationOutcome::Started => OperationOutcome::Ambiguous,
+            other => other.clone(),
+        })
     }
     /// Records a completed connector action. A hung/mutating worker calls this with Ambiguous.
     pub fn finish_action(
@@ -1059,12 +1122,86 @@ fn decode_operations(values: Vec<serde_json::Value>) -> VecDeque<OperationRecord
     }
     records
 }
-fn prune_operations(records: &mut VecDeque<OperationRecord>) {
-    let cutoff = now_ms().saturating_sub(OPERATION_RETENTION.as_millis());
+/// Evicts expired and over-count records. Returns true when the count bound
+/// forced out a record the client may still automatically retry, which the
+/// caller must answer by rotating the operation epoch.
+fn prune_operations(records: &mut VecDeque<OperationRecord>) -> bool {
+    let now = now_ms();
+    let cutoff = now.saturating_sub(OPERATION_RETENTION.as_millis());
+    let retry_cutoff = now.saturating_sub(CLIENT_RETRY_HORIZON.as_millis());
+    let mut evicted_retryable = false;
+    // `>=` because the caller is about to push one more record.
     while records.front().map(|r| r.at_ms < cutoff).unwrap_or(false)
-        || records.len() > MAX_OPERATION_RECORDS
+        || records.len() >= MAX_OPERATION_RECORDS
     {
-        records.pop_front();
+        let Some(dropped) = records.pop_front() else {
+            break;
+        };
+        if dropped.at_ms >= retry_cutoff {
+            evicted_retryable = true;
+        }
+    }
+    evicted_retryable
+}
+
+/// Replaces the operation epoch, re-bases every subscriber on a snapshot, and
+/// persists the new base so a restart cannot resurrect the old epoch.
+fn rotate_operation_epoch(actor: &mut SessionActor) -> Result<()> {
+    actor.projection.rotate_operation_epoch(fresh_epoch());
+    let records = actor
+        .operations
+        .iter()
+        .map(serde_json::to_value)
+        .collect::<Result<Vec<_>, _>>()?;
+    actor.cache.compact(
+        &actor
+            .projection
+            .snapshot_bounded(CACHE_PAGE, MAX_CONVERSATION_SNAPSHOT_BYTES),
+        &records,
+        &actor.latest_connector_checkpoint,
+    )?;
+    let snapshot = actor
+        .projection
+        .snapshot_bounded(SNAPSHOT_PAGE, MAX_CONVERSATION_SNAPSHOT_BYTES);
+    fanout(
+        actor,
+        SubscriberEvent::Snapshot(snapshot, SnapshotCause::OperationEpoch),
+    );
+    Ok(())
+}
+
+/// Stable digest of an action id and its canonical payload.
+fn action_digest(action: &ConnectorAction) -> String {
+    use sha2::Digest;
+    let mut digest = sha2::Sha256::new();
+    digest.update(action.id.as_bytes());
+    digest.update([0]);
+    digest.update(canonical_json(&action.payload).as_bytes());
+    format!("{:x}", digest.finalize())
+}
+
+fn canonical_json(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut keys: Vec<_> = map.keys().collect();
+            keys.sort();
+            let entries: Vec<String> = keys
+                .into_iter()
+                .map(|key| {
+                    format!(
+                        "{}:{}",
+                        serde_json::to_string(key).unwrap_or_default(),
+                        canonical_json(&map[key])
+                    )
+                })
+                .collect();
+            format!("{{{}}}", entries.join(","))
+        }
+        serde_json::Value::Array(items) => {
+            let entries: Vec<String> = items.iter().map(canonical_json).collect();
+            format!("[{}]", entries.join(","))
+        }
+        other => other.to_string(),
     }
 }
 fn now_ms() -> u128 {
@@ -1604,6 +1741,151 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn operation_ids_are_scoped_to_device_and_payload_and_receipts_to_device() {
+        let temp = tempfile::tempdir().unwrap();
+        let id = ConversationId::new("ses_scoped");
+        let hub = ConversationHub::new(temp.path()).unwrap();
+        hub.watch(
+            id.clone(),
+            Box::new(FakeConnector),
+            ConversationState::starting(None),
+        )
+        .unwrap();
+        let (phone_a, outcome) = hub
+            .subscribe_device(
+                &id,
+                Grant::Interact,
+                Some("phone-a".into()),
+                ResumePosition::default(),
+            )
+            .unwrap();
+        let SubscribeOutcome::Snapshot { snapshot, .. } = outcome else {
+            panic!("fresh subscribers snapshot");
+        };
+        let epoch = snapshot.operation_epoch;
+        let (phone_b, _) = hub
+            .subscribe_device(
+                &id,
+                Grant::Interact,
+                Some("phone-b".into()),
+                ResumePosition::default(),
+            )
+            .unwrap();
+        let action = ConnectorAction {
+            id: ACTION_SEND_MESSAGE.into(),
+            payload: json!({"text":"hello"}),
+        };
+        assert_eq!(
+            hub.begin_action(&id, phone_a, &epoch, "op-1".into(), &action)
+                .unwrap(),
+            OperationOutcome::Started
+        );
+        // Another device reusing the id is a conflict, never a replay or a
+        // second dispatch; the original outcome is not disclosed to it.
+        assert!(matches!(
+            hub.begin_action(&id, phone_b, &epoch, "op-1".into(), &action)
+                .unwrap(),
+            OperationOutcome::Refused { .. }
+        ));
+        assert_eq!(hub.operation_status(&id, phone_b, "op-1"), None);
+        // The same device with a different payload is also a conflict.
+        let other = ConnectorAction {
+            id: ACTION_SEND_MESSAGE.into(),
+            payload: json!({"text":"different"}),
+        };
+        assert!(matches!(
+            hub.begin_action(&id, phone_a, &epoch, "op-1".into(), &other)
+                .unwrap(),
+            OperationOutcome::Refused { .. }
+        ));
+        // The owner's receipt is readable without redispatch: in flight
+        // reads as ambiguous, and unknown ids are exactly that.
+        assert_eq!(
+            hub.operation_status(&id, phone_a, "op-1"),
+            Some(OperationOutcome::Ambiguous)
+        );
+        assert_eq!(hub.operation_status(&id, phone_a, "op-never"), None);
+        hub.finish_action(&id, "op-1", Ok(ApplyResult::Accepted { correlation: None }))
+            .unwrap();
+        assert!(matches!(
+            hub.operation_status(&id, phone_a, "op-1"),
+            Some(OperationOutcome::Accepted { .. })
+        ));
+        // Reusing the exact id and payload from the same device returns the
+        // recorded outcome rather than executing again.
+        assert!(matches!(
+            hub.begin_action(&id, phone_a, &epoch, "op-1".into(), &action)
+                .unwrap(),
+            OperationOutcome::Accepted { .. }
+        ));
+    }
+
+    #[test]
+    fn count_eviction_inside_the_retry_horizon_rotates_the_epoch() {
+        let temp = tempfile::tempdir().unwrap();
+        let id = ConversationId::new("ses_evict");
+        let hub = ConversationHub::new(temp.path()).unwrap();
+        hub.watch(
+            id.clone(),
+            Box::new(FakeConnector),
+            ConversationState::starting(None),
+        )
+        .unwrap();
+        let (subscriber, snapshot) = hub.subscribe(&id, Grant::Interact).unwrap();
+        let epoch = snapshot.operation_epoch;
+        let action = ConnectorAction {
+            id: ACTION_SEND_MESSAGE.into(),
+            payload: json!({}),
+        };
+        for index in 0..MAX_OPERATION_RECORDS {
+            assert_eq!(
+                hub.begin_action(&id, subscriber, &epoch, format!("op-{index}"), &action)
+                    .unwrap(),
+                OperationOutcome::Started
+            );
+            hub.finish_action(
+                &id,
+                &format!("op-{index}"),
+                Ok(ApplyResult::Refused {
+                    reason: "test".into(),
+                }),
+            )
+            .unwrap();
+        }
+        let _ = hub.drain(&id, subscriber);
+        // One more forces the oldest, still-retryable record out. Rather than
+        // let "op-0" look new, the epoch moves and this attempt is refused.
+        assert!(matches!(
+            hub.begin_action(&id, subscriber, &epoch, "op-overflow".into(), &action)
+                .unwrap(),
+            OperationOutcome::Refused { .. }
+        ));
+        let events = hub.drain(&id, subscriber);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            SubscriberEvent::Snapshot(_, SnapshotCause::OperationEpoch)
+        )));
+        let current = hub.snapshot(&id, 0).unwrap().operation_epoch;
+        assert_ne!(current, epoch);
+        assert!(matches!(
+            hub.begin_action(&id, subscriber, &epoch, "op-0".into(), &action)
+                .unwrap(),
+            OperationOutcome::Refused { .. }
+        ));
+        // The rotated epoch survives a restart: the persisted base carries it.
+        drop(hub);
+        let hub = ConversationHub::new(temp.path()).unwrap();
+        hub.watch(
+            id.clone(),
+            Box::new(FakeConnector),
+            ConversationState::starting(None),
+        )
+        .unwrap();
+        let (_, snapshot) = hub.subscribe(&id, Grant::Interact).unwrap();
+        assert_eq!(snapshot.operation_epoch, current);
     }
 
     #[test]

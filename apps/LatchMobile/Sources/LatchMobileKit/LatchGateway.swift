@@ -27,25 +27,33 @@ public struct GatewayLink: Equatable, Sendable, Codable {
 public actor LatchGateway {
     private static let maximumJSONResponseBytes = 512 * 1024
     private let link: GatewayLink
-    private let transport: any GatewayTransport
+    // Retaining the production transport keeps its capability listener and
+    // app-scoped native link owner alive for this gateway's full lifetime.
+    private let transport: (any GatewayTransport)?
     private let session: URLSession
     private let decoder = JSONDecoder()
     private var capabilities: GatewayCapabilities?
 
-    public init(link: GatewayLink, session: URLSession = .shared) {
-        transport = HTTPSGatewayTransport(link: link)
+    init(link: GatewayLink, session: URLSession = .shared) {
         self.link = link
+        self.transport = nil
         self.session = session
     }
 
     public init(transport: any GatewayTransport, session: URLSession = .shared) {
-        self.transport = transport
         link = transport.gatewayLink
+        self.transport = transport
         self.session = session
     }
 
     public var gateway: GatewayLink { link }
     public var discovered: GatewayCapabilities? { capabilities }
+
+    /// Stops the loopback adapter behind this gateway. Its capability is gone
+    /// with it; a later request through this gateway fails locally.
+    public func stopTransport() {
+        transport?.stop()
+    }
 
     @discardableResult
     public func discover() async throws -> GatewayCapabilities {
@@ -142,7 +150,8 @@ public actor LatchGateway {
     public func openTerminal(
         sessionID: String,
         cols: Int,
-        rows: Int
+        rows: Int,
+        resume: String? = nil
     ) async throws -> any TerminalSocketConnection {
         try await require(.terminal)
         guard var components = URLComponents(url: link.url, resolvingAgainstBaseURL: false) else {
@@ -152,8 +161,9 @@ public actor LatchGateway {
         components.path = "/v2/sessions/\(sessionID)/terminal"
         components.queryItems = [
             URLQueryItem(name: "cols", value: String(max(1, cols))),
-            URLQueryItem(name: "rows", value: String(max(1, rows)))
-        ]
+            URLQueryItem(name: "rows", value: String(max(1, rows))),
+            resume.map { URLQueryItem(name: "resume", value: $0) }
+        ].compactMap { $0 }
         guard let url = components.url else {
             throw LatchError.invalidURL(link.url.absoluteString)
         }
@@ -257,6 +267,11 @@ public actor LatchGateway {
             code: code,
             reason: reason
         ) { return .notAGateway }
+        // Another device owns this creation id. Retrying it will never work;
+        // the phone must start a new intent under a new id.
+        if status == 403, code == "request_id_foreign" {
+            return .refused(reason.isEmpty ? "This request belongs to another device." : reason)
+        }
         if status == 401 || (status == 403 && code != "unreadable_directory") {
             return .unauthorized
         }
@@ -264,7 +279,7 @@ public actor LatchGateway {
         // transport failure wearing an HTTP status, and the reason it carries
         // is already a sentence — a status line in front of it would only
         // bury the part the person can act on.
-        if status == 502, code == NoiseTunnelGatewayTransport.tunnelFailureCode {
+        if status == 502, code == RemoteLinkGatewayTransport.tunnelFailureCode {
             return .transport(reason.isEmpty ? "The connection to your Mac failed." : reason)
         }
         return .http(

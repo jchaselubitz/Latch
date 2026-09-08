@@ -26,11 +26,11 @@ final class RemotePathMetricsTests: XCTestCase {
     func testClearingTheIndicatorDoesNotDisturbTheCounters() {
         let reporter = RemotePathReporter(metrics: EphemeralRemotePathMetricsStore())
 
-        reporter.report(.direct)
+        reporter.report(.local)
         reporter.clear()
 
         XCTAssertNil(reporter.path)
-        XCTAssertEqual(reporter.tally.direct, 1)
+        XCTAssertEqual(reporter.tally.local, 1)
         XCTAssertEqual(reporter.tally.connections, 1)
     }
 
@@ -52,14 +52,14 @@ final class RemotePathMetricsTests: XCTestCase {
 
     func testRelayShareCountsOnlyOpenedChannels() {
         var tally = RemotePathTally()
-        tally.record(.direct)
-        tally.record(.direct)
-        tally.record(.direct)
+        tally.record(.local)
+        tally.record(.local)
+        tally.record(.local)
         tally.record(.relay)
         tally.failures += 5
 
         XCTAssertEqual(tally.relayShare, 0.25)
-        XCTAssertEqual(tally.summary, "Direct 3 · Relay 1 · Failed 5")
+        XCTAssertEqual(tally.summary, "Local 3 · Relay 1 · Failed 5")
     }
 
     func testACountedTallySurvivesANewReporterOnTheSameStore() {

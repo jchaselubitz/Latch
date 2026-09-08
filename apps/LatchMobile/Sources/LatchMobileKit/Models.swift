@@ -209,7 +209,7 @@ public enum LatchError: Error, Equatable, Sendable {
         case .invalidURL(let url):
             return "\(url) is not a valid gateway address."
         case .unauthorized:
-            return "The gateway rejected this token. Check Settings, or run `latch serve token` again."
+            return "The Mac rejected this Remote Link credential. Re-pair the device."
         case .refused(let reason):
             return reason
         case .http(let status, let path, let reason):
@@ -223,11 +223,7 @@ public enum LatchError: Error, Equatable, Sendable {
             // unreachable.
             return ProtocolMismatch(reported: reported, supported: supported).summary
         case .notAGateway:
-            return """
-            That's the Latch control plane, not your Mac. Pair this phone under Remote access \
-            using the code your Mac shows, or enter a tunnel to `latch serve` — not the \
-            control-plane URL from Mac Remote Access settings.
-            """
+            return "This address is the Latch control plane, not the authenticated Mac gateway. Reconnect Remote Link."
         case .endpointUnavailable(let endpoint):
             return "This gateway does not offer \(endpoint.rawValue)."
         case .transport(let detail):

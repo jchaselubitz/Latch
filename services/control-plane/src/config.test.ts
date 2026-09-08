@@ -10,11 +10,13 @@ describe('configuration', () => {
     const config = loadConfig(base);
     assert.equal(config.port, 8080);
     assert.equal(config.host, '0.0.0.0');
-    assert.equal(config.presenceTtlSeconds, 90);
-    assert.equal(config.turnCredentialTtlSeconds, 120);
     assert.equal(config.maxDevicesPerAccount, 32);
-    assert.equal(config.cloudflareTurnApiToken, null);
     assert.equal(config.migrateOnBoot, true);
+    assert.equal(config.admissionRatePerDevice, 60);
+    assert.equal(config.admissionRatePerOwner, 180);
+    assert.equal(config.admissionRatePerIp, 120);
+    assert.equal(config.admissionRateGlobal, 1_000);
+    assert.equal(config.trustProxy, false);
   });
 
   it('fails fast without a database url', () => {
@@ -23,14 +25,7 @@ describe('configuration', () => {
 
   it('rejects out-of-range and malformed values', () => {
     assert.throws(() => loadConfig({ ...base, PORT: 'http' }), ConfigError);
-    assert.throws(() => loadConfig({ ...base, PRESENCE_TTL_SECONDS: '86400' }), ConfigError);
     assert.throws(() => loadConfig({ ...base, MIGRATE_ON_BOOT: 'maybe' }), ConfigError);
-  });
-
-  it('requires a valid complete Cloudflare TURN configuration', () => {
-    assert.throws(() => loadConfig({ ...base, CLOUDFLARE_TURN_KEY_ID: 'a'.repeat(32) }), ConfigError);
-    assert.throws(() => loadConfig({ ...base, CLOUDFLARE_TURN_KEY_ID: 'bad', CLOUDFLARE_TURN_API_TOKEN: 'x'.repeat(32) }), ConfigError);
-    const config = loadConfig({ ...base, CLOUDFLARE_TURN_KEY_ID: 'a'.repeat(32), CLOUDFLARE_TURN_API_TOKEN: 'x'.repeat(32) });
-    assert.equal(config.cloudflareTurnApiToken?.length, 32);
+    assert.throws(() => loadConfig({ ...base, REMOTE_ADMISSION_RATE_PER_DEVICE: '2' }), ConfigError);
   });
 });

@@ -1,13 +1,10 @@
 //! Internet-facing transport for the dedicated remote-access helper.
 //!
-//! The `latch` crate owns the authenticated Noise proxy and every
-//! authorization decision above it. This crate owns the connectivity beneath
-//! it, and is the only place the ICE/DTLS/SCTP stack is linked.
+//! The `latch` crate owns local authorization and gateway semantics. This
+//! crate exclusively owns WSS/LAN connectivity, Noise, and multiplexing.
 
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 
-/// Opt-in ICE trace for diagnosing a failed answer.
-pub mod diagnostics;
-/// The helper's ICE responder, driven by rendezvous offers.
-pub mod ice;
+/// WSS/Noise/Yamux host owner and authenticated gateway handoff.
+pub mod link;

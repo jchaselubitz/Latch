@@ -129,8 +129,45 @@ struct TerminalView: View {
             closedScreen(title: "The terminal connection failed.", detail: reason)
         case .closed(let reason):
             closedScreen(for: reason)
+        case .interrupted(let resumable):
+            interruptedScreen(resumable: resumable)
         case .idle, nil:
             previewScreen
+        }
+    }
+
+    /// The transport dropped under a held surface. A valid resume capability
+    /// lets the owner take it back automatically when the link returns; the
+    /// gateway refuses if anyone else attached meanwhile. Without one, coming
+    /// back is a deliberate Take Control. Input is never replayed.
+    private func interruptedScreen(resumable: Bool) -> some View {
+        VStack(spacing: 0) {
+            surfaceView
+            VStack(spacing: 10) {
+                Text(resumable ? "Connection lost. Reconnecting…" : "Connection lost.")
+                    .font(.headline)
+                if terminal?.inputMayBeUndelivered == true {
+                    Label("Input typed just before the drop may not have reached your Mac.", systemImage: "exclamationmark.triangle")
+                        .font(.footnote)
+                        .foregroundStyle(.orange)
+                        .multilineTextAlignment(.center)
+                }
+                Text(resumable
+                    ? "The terminal comes back here once the secure connection returns, unless something else has taken it."
+                    : "Taking the terminal again is a new attach and takes it from whatever holds it now.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                if resumable {
+                    ProgressView()
+                } else {
+                    Button("Take Control") { Task { await reattach() } }
+                        .buttonStyle(.borderedProminent)
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .padding(16)
+            .background(.bar)
         }
     }
 
@@ -211,6 +248,13 @@ struct TerminalView: View {
             closedScreen(
                 title: "The session's terminal failed on the Mac.",
                 detail: "Check the session on the Mac before reattaching."
+            )
+        case .resumeRefused:
+            closedScreen(
+                title: "The terminal could not be resumed.",
+                detail: "Something else attached to this session, or the reconnect window passed. Taking control is a deliberate step and takes it from whatever holds it now.",
+                actionTitle: "Take Control",
+                refreshesPreview: true
             )
         case nil:
             closedScreen(

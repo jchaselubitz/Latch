@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "scenario": "cellular-to-home-nat",
+  "title": "Cellular to home NAT",
+  "result": "pass",
+  "phone": "Direct 193",
+  "note": "Physical iPhone 16 on cellular with Wi-Fi off: four repeated session-list, shell creation, terminal attach, and pwd output passes; owner confirmed /Users/jake/Development each time. Each individual step took approximately 1-3 seconds. Final installed helper handover baseline.",
+  "recordedAt": "20260907T095841Z",
+  "macDelta": {
+    "routes": {
+      "lan": 4,
+      "direct_host": 0,
+      "direct_reflexive": 22,
+      "relay": 0,
+      "unknown": 0
+    },
+    "connections": 26,
+    "direct": 26,
+    "relay": 0,
+    "iceAnswers": 22,
+    "iceAnswersConnected": 22,
+    "events": {
+      "connection_opened": 26,
+      "connection_rejected": 12,
+      "ice_answer": 22,
+      "path_selected": 26,
+      "rendezvous_offer": 22
+    }
+  }
+}

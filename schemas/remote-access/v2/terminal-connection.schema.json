@@ -6,23 +6,40 @@
   "type": "object",
   "properties": {
     "cols": { "type": "integer", "minimum": 1, "maximum": 65535 },
-    "rows": { "type": "integer", "minimum": 1, "maximum": 65535 }
+    "rows": { "type": "integer", "minimum": 1, "maximum": 65535 },
+    "resume": {
+      "description": "A bounded resume capability from an earlier `attached` frame on this device. It proves the same holder is reconnecting after transport loss; the gateway honours it only while it is unexpired and no other surface has attached since. Without it, or when it is refused, connecting is an ordinary steal that the client must make the person initiate.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
   },
   "additionalProperties": false,
   "$defs": {
     "closeReason": {
-      "description": "Reason carried in the WebSocket close frame. `detached` is a clean end; every other value says why the surface was taken away.",
-      "enum": ["detached", "stolen", "slow_client", "session_exited", "kernel_error"]
+      "description": "Reason carried in the WebSocket close frame. `detached` is a clean end; every other value says why the surface was taken away. `resume_refused` means the resume capability was stale, unknown, bound to another device, or another surface attached meanwhile; nothing was stolen.",
+      "enum": ["detached", "stolen", "slow_client", "session_exited", "kernel_error", "resume_refused"]
     },
     "closeCode": {
       "description": "Application close codes paired with closeReason. 1000 accompanies `detached`.",
       "type": "object",
-      "required": ["stolen", "slowClient", "sessionExited", "kernelError"],
+      "required": ["stolen", "slowClient", "sessionExited", "kernelError", "resumeRefused"],
       "properties": {
         "stolen": { "const": 4409 },
         "slowClient": { "const": 4408 },
         "sessionExited": { "const": 4410 },
-        "kernelError": { "const": 4500 }
+        "kernelError": { "const": 4500 },
+        "resumeRefused": { "const": 4411 }
+      },
+      "additionalProperties": false
+    },
+    "attachedFrame": {
+      "description": "Text frame the gateway sends once the surface is held by this socket, before any pane bytes. `resumeCapability` is a one-holder secret the client presents as the `resume` query when reconnecting after transport loss, never for a deliberate detach. It is honoured for `resumeWindowSeconds` after the gateway loses this socket and only while no other surface has attached since.",
+      "type": "object",
+      "required": ["type", "resumeCapability", "resumeWindowSeconds"],
+      "properties": {
+        "type": { "const": "attached" },
+        "resumeCapability": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "resumeWindowSeconds": { "type": "integer", "minimum": 1 }
       },
       "additionalProperties": false
     }

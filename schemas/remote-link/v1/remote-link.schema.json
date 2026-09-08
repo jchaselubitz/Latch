@@ -1,0 +1,153 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cooperativ.dev/latch/schemas/remote-link/v1/remote-link.schema.json",
+  "title": "Latch Remote Link v1",
+  "type": "object",
+  "oneOf": [
+    { "$ref": "#/$defs/enrollmentProposal" },
+    { "$ref": "#/$defs/pairingApproved" },
+    { "$ref": "#/$defs/admissionClaim" },
+    { "$ref": "#/$defs/leaseExtension" },
+    { "$ref": "#/$defs/linkHello" },
+    { "$ref": "#/$defs/openService" },
+    { "$ref": "#/$defs/helperMessage" }
+  ],
+  "$defs": {
+    "purpose": { "enum": ["enrollment", "session"] },
+    "role": { "enum": ["host", "controller"] },
+    "permission": { "enum": ["observe", "interact", "control"] },
+    "status": {
+      "enum": ["lan_ready", "connecting", "waiting_for_peer", "authenticating", "ready", "link_closed", "offline", "revoked", "unsupported_version", "pairing_required"]
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["maxStreams", "streamWindowBytes", "totalBufferBytes", "recordBytes"],
+      "properties": {
+        "maxStreams": { "const": 32 },
+        "streamWindowBytes": { "const": 262144 },
+        "totalBufferBytes": { "const": 8388608 },
+        "recordBytes": { "const": 65535 }
+      }
+    },
+    "enrollmentProposal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "version", "enrollmentId", "provisionalDeviceId", "controllerPublicKey", "name", "permission"],
+      "properties": {
+        "type": { "const": "enrollment_proposal" },
+        "version": { "const": 1 },
+        "enrollmentId": { "type": "string", "pattern": "^[A-Za-z0-9_-]{16,64}$" },
+        "provisionalDeviceId": { "type": "string", "minLength": 1, "maxLength": 96 },
+        "controllerPublicKey": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "permission": { "$ref": "#/$defs/permission" }
+      }
+    },
+    "pairingApproved": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "version", "enrollmentId", "hostPublicKey", "controllerPublicKey", "permission", "grantRevision"],
+      "properties": {
+        "type": { "const": "pairing_approved" },
+        "version": { "const": 1 },
+        "enrollmentId": { "type": "string" },
+        "hostPublicKey": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "controllerPublicKey": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "permission": { "$ref": "#/$defs/permission" },
+        "grantRevision": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "admissionClaim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["iss", "aud", "kid", "roomId", "role", "purpose", "jti", "generation", "nbf", "exp", "limits"],
+      "properties": {
+        "iss": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "aud": { "const": "latch-relay" },
+        "kid": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "roomId": { "type": "string", "pattern": "^[A-Za-z0-9_-]{43}$" },
+        "role": { "$ref": "#/$defs/role" },
+        "purpose": { "$ref": "#/$defs/purpose" },
+        "jti": { "type": "string", "pattern": "^[A-Za-z0-9_-]{16,96}$" },
+        "generation": { "type": "integer", "minimum": 1 },
+        "nbf": { "type": "integer", "minimum": 0 },
+        "exp": { "type": "integer", "minimum": 0 },
+        "limits": { "$ref": "#/$defs/limits" }
+      }
+    },
+    "leaseExtension": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["iss", "aud", "kid", "roomId", "role", "purpose", "jti", "generation", "nbf", "exp", "limits", "leaseId"],
+      "properties": {
+        "iss": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "aud": { "const": "latch-relay" },
+        "kid": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "roomId": { "type": "string", "pattern": "^[A-Za-z0-9_-]{43}$" },
+        "role": { "$ref": "#/$defs/role" },
+        "purpose": { "$ref": "#/$defs/purpose" },
+        "jti": { "type": "string", "pattern": "^[A-Za-z0-9_-]{16,96}$" },
+        "generation": { "type": "integer", "minimum": 1 },
+        "nbf": { "type": "integer", "minimum": 0 },
+        "exp": { "type": "integer", "minimum": 0 },
+        "limits": { "$ref": "#/$defs/limits" },
+        "leaseId": { "type": "string", "pattern": "^[A-Za-z0-9_-]{16,96}$" }
+      }
+    },
+    "linkHello": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "version", "nonce", "grantRevision", "limits"],
+      "properties": {
+        "type": { "const": "link_hello" },
+        "version": { "const": 1 },
+        "nonce": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "grantRevision": { "type": "integer", "minimum": 0 },
+        "limits": { "$ref": "#/$defs/limits" }
+      }
+    },
+    "openService": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "version", "service", "grantRevision"],
+      "properties": {
+        "type": { "const": "open_service" },
+        "version": { "const": 1 },
+        "service": { "enum": ["gateway", "enrollment", "control"] },
+        "grantRevision": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "helperMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "version"],
+      "properties": {
+        "type": { "enum": ["configure", "enrollment_pending", "enrollment_decision", "enrollment_rejected", "enrollment_committed", "enrollment_mirrored", "enrollment_complete", "grant_invalidated", "status", "lease_started", "lease_extension", "admission_needed", "admission", "shutdown"] },
+        "version": { "const": 1 },
+        "status": { "$ref": "#/$defs/status" },
+        "requestId": { "type": "string", "maxLength": 96 },
+        "enrollmentId": { "type": "string", "maxLength": 64 },
+        "provisionalDeviceId": { "type": "string", "maxLength": 96 },
+        "controllerPublicKey": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "permission": { "$ref": "#/$defs/permission" },
+        "comparison": { "type": "string", "pattern": "^[0-9a-f]{4} [0-9a-f]{4} [0-9a-f]{4} [0-9a-f]{4}$" },
+        "approved": { "type": "boolean" },
+        "grantRevision": { "type": "integer", "minimum": 1 },
+        "payload": { "type": "object" },
+        "leaseId": { "type": "string", "minLength": 16, "maxLength": 96 },
+        "expiresAt": { "type": "integer", "minimum": 0 },
+        "claim": { "type": "string", "maxLength": 4096 },
+        "reason": { "type": "string", "maxLength": 64 },
+        "carrier": { "enum": ["lan", "relay"] },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "connectMs": { "type": "integer", "minimum": 0 },
+        "peerWaitMs": { "type": "integer", "minimum": 0 },
+        "authenticateMs": { "type": "integer", "minimum": 0 },
+        "relayUrl": { "type": "string", "pattern": "^wss://", "maxLength": 2048 },
+        "admission": { "type": "string", "maxLength": 4096 }
+      }
+    }
+  }
+}

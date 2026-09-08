@@ -178,74 +178,17 @@ actor LatchClient {
         try run(["remote-access", "revoke", deviceID])
     }
 
-    func createRemotePairing() throws -> PairingMaterial {
-        try request(["remote-access", "pair", "create", "--json"])
-    }
-
-    /// Records a phone in this Mac's local device store after it enrolled with
-    /// the control plane. The control plane holds the directory; the Mac holds
-    /// the authorization, and only this call creates it.
-    func confirmRemotePairing(
-        pairingID: String,
-        secret: String,
-        devicePublicKey: String,
-        name: String,
-        permission: DevicePermission,
-        controlPlaneDeviceID: String?
-    ) throws -> RemotePairingConfirmation {
-        var arguments = [
-            "remote-access", "pair", "confirm",
-            "--pairing-id", pairingID,
-            "--secret", secret,
-            "--device-public-key", devicePublicKey,
-            "--name", name,
-            "--permission", permission.rawValue,
-        ]
-        if let controlPlaneDeviceID {
-            arguments.append(contentsOf: ["--control-plane-device-id", controlPlaneDeviceID])
-        }
-        return try request(arguments)
-    }
-
-    /// Hands one approved rendezvous offer to the running helper's ICE agent.
-    ///
-    /// This is the only path from the control plane's offer queue into the
-    /// transport, and it is deliberately the same path everything else in
-    /// Remote Access takes: through the CLI, which validates the offer and
-    /// writes it into its own private runtime directory. The app never touches
-    /// that directory and never speaks to the helper directly.
-    func recordRendezvousOffer(_ offer: RemoteRendezvousOfferDocument) throws {
-        try run(["remote-access", "offer"], stdin: encoder.encode(offer))
-    }
-
-    /// Hands the helper the relay servers the control plane issued, for its
-    /// next gather.
-    func recordRelayServers(_ document: RemoteRelayServersDocument) throws {
-        try run(["remote-access", "relay-servers"], stdin: encoder.encode(document))
-    }
-
-    func clearRelayServers() throws {
-        try run(["remote-access", "relay-servers", "--clear"])
-    }
-
-    func setRemoteRelayEnabled(_ enabled: Bool) throws {
-        try run(["remote-access", "relay", enabled ? "enable" : "disable"])
-    }
-
-    /// The strict form of the same switch. It refuses relay admission as
-    /// `disable` does and additionally narrows what presence may publish, so
-    /// turning it off returns to the ordinary disabled state rather than
-    /// silently re-permitting the relay.
-    func setRemoteNeverRelay(_ never: Bool) throws {
-        try run(["remote-access", "relay", never ? "never" : "disable"])
-    }
-
     func remoteAudit() throws -> [RemoteAuditEvent] {
         try request(["remote-access", "audit", "--json"])
     }
 
-    func remoteDiagnostics() throws -> RemoteDiagnostics {
-        try request(["remote-access", "diagnostics"])
+    /// Pending content-free attention events the gateway spooled.
+    func remoteAttentionEvents() throws -> [RemoteAttentionEvent] {
+        try request(["remote-access", "attention-events", "--json"])
+    }
+
+    func acknowledgeRemoteAttention(_ eventID: String) throws {
+        try run(["remote-access", "attention-ack", eventID])
     }
 
     /// Runs a command whose success is the whole result. Output is discarded so

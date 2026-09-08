@@ -12,6 +12,7 @@ crates/
 apps/LatchDesktop/         # native macOS client
 packages/                  # TypeScript presentation clients
 services/control-plane/    # cloud control plane (independent deployable)
+services/relay/            # opaque Remote Link frames (independent deployable)
 fixtures/conversation/     # raw Claude/Codex connector corpus
 fixtures/vt/               # irreplaceable recorded harness streams
 ```
@@ -73,6 +74,26 @@ relay forwards opaque frames and never learns a pairing, a device key, or an
 account. Neither may store terminal content, transcripts, session names, or a
 Latch gateway token; `services/control-plane/src/privacy.test.ts` enforces
 that mechanically for the control plane.
+
+Each service is deployed as exactly one always-awake replica: the relay's
+room affinity is in-process, and a sleeping service would add its wake time
+to every cold open. Migrations are forward-only and apply at boot; retired
+tables are dropped by a later migration, never by editing an applied one.
+Operational procedure lives in `docs/REMOTE_LINK_OPERATIONS.md`.
+
+## Remote Link has one transport owner
+
+`latch-transport` is the only Remote Link network, cryptography, and
+multiplexing implementation. It owns platform-validated WSS, authenticated LAN
+carriers, Noise XX, Yamux, bounded records, and cancellation. `latch-remote`
+drives it on the Mac; iOS consumes the same core through
+`latch-transport-ffi`.
+
+The ordinary `latch` crate must not depend on `latch-transport`, open an
+internet or LAN listener, or implement another handshake. It owns local device
+grants and accepts already-authenticated logical streams through one fixed,
+capability-protected loopback gateway. The phone may not accept a manually
+entered gateway address or bearer token.
 
 ## No Overlord in `crates/`
 

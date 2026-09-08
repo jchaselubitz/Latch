@@ -83,6 +83,12 @@ pub struct ConversationConnect {
     pub session: String,
     /// Grant the gateway proved for this upgrade. The Hub re-checks it per message.
     pub grant: Grant,
+    /// Opaque device the loopback proxy proved, when remote. Operation ids
+    /// and receipts are scoped to it, and it marks the session as watched
+    /// for attention notifications.
+    pub device: Option<String>,
+    /// Gateway-owned attention producer, when running inside `latch serve`.
+    pub attention: Option<super::attention::AttentionWatcher>,
     pub query: ConversationQuery,
 }
 
@@ -93,6 +99,8 @@ pub async fn run(mut socket: WebSocket, connect: ConversationConnect) {
         hub,
         session,
         grant,
+        device,
+        attention,
         query,
     } = connect;
     let Ok(resolved) = crate::cli::manage::resolve_existing(&home, &session) else {
@@ -116,7 +124,9 @@ pub async fn run(mut socket: WebSocket, connect: ConversationConnect) {
         .await;
         return;
     }
-    let Some((subscriber, outcome)) = hub.subscribe_at(&id, grant, query.position()) else {
+    let Some((subscriber, outcome)) =
+        hub.subscribe_device(&id, grant, device.clone(), query.position())
+    else {
         let _ = send(
             &mut socket,
             ConversationServerMessage::Error {
@@ -127,6 +137,13 @@ pub async fn run(mut socket: WebSocket, connect: ConversationConnect) {
         .await;
         return;
     };
+
+    // Opening a conversation from a paired device is what makes the session
+    // watched: from here the gateway keeps observing it for attention
+    // transitions even after this socket is gone.
+    if let (Some(device), Some(attention)) = (device.as_deref(), attention.as_ref()) {
+        attention.watch(id.as_str(), device);
+    }
 
     // The server speaks first. Nothing is expected from the client to get here.
     for message in first_messages(outcome) {
@@ -273,6 +290,29 @@ async fn handle(
                 }
             }
             true
+        }
+        ConversationClientMessage::OperationStatus { operation_id } => {
+            if operation_id.is_empty() || operation_id.len() > MAX_ID {
+                return send(
+                    socket,
+                    protocol_error("invalid_message", "operation_status is out of bounds"),
+                )
+                .await
+                .is_ok();
+            }
+            // A lookup never dispatches. An id this device did not submit,
+            // or one no longer retained, is `unknown`: the client reviews it
+            // rather than treating the gap as permission to send again.
+            let message = match hub.operation_status(id, subscriber, &operation_id) {
+                Some(outcome) => operation_result(operation_id, outcome),
+                None => ConversationServerMessage::OperationResult {
+                    operation_id,
+                    status: OperationResultStatus::Unknown,
+                    item_id: None,
+                    reason: Some("no retained receipt for this operation".into()),
+                },
+            };
+            send(socket, message).await.is_ok()
         }
         ConversationClientMessage::HistoryRequest {
             request_id,

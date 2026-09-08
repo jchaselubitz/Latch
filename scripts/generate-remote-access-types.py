@@ -86,6 +86,7 @@ pub enum TerminalCloseReason {
     SlowClient,
     SessionExited,
     KernelError,
+    ResumeRefused,
 }
 
 impl TerminalCloseReason {
@@ -98,6 +99,7 @@ impl TerminalCloseReason {
             Self::Stolen => 4409,
             Self::SessionExited => 4410,
             Self::KernelError => 4500,
+            Self::ResumeRefused => 4411,
         }
     }
 }
@@ -207,7 +209,7 @@ pub enum SnapshotReason { Initial, Generation, OperationEpoch, Overflow }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum OperationResultStatus { Accepted, Refused, Ambiguous }
+pub enum OperationResultStatus { Accepted, Refused, Ambiguous, Unknown }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -283,6 +285,19 @@ pub enum ConversationClientMessage {
         before_ordinal: u64,
         limit: u16,
     },
+    OperationStatus {
+        #[serde(rename = "operationId")]
+        operation_id: String,
+    },
+}
+
+/// Text frame sent once the terminal surface is held by this socket.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalAttachedFrame {
+    pub r#type: String,
+    pub resume_capability: String,
+    pub resume_window_seconds: u64,
 }
 '''
     return subprocess.run(
@@ -304,13 +319,15 @@ export type TerminalCloseReason =
   | 'stolen'
   | 'slow_client'
   | 'session_exited'
-  | 'kernel_error';
+  | 'kernel_error'
+  | 'resume_refused';
 export const TERMINAL_CLOSE_CODES = {
   detached: 1000,
   slow_client: 4408,
   stolen: 4409,
   session_exited: 4410,
-  kernel_error: 4500
+  kernel_error: 4500,
+  resume_refused: 4411
 } as const satisfies Record<TerminalCloseReason, number>;
 export type GatewayFeatures = { exclusiveTerminal: boolean };
 export type GatewayReadiness = {

@@ -1,5 +1,5 @@
 //! Generated from `schemas/remote-access/v2/*.schema.json`; do not edit by hand.
-//! Canonical schema set SHA-256: 1959ddbd129ee68dd25683c44cafde0bd935016be357eee163603cb7b66eddb5
+//! Canonical schema set SHA-256: 2e776b5a80e328cda45fbb0ecfd51c0151d77a20e7dd15abbb75bc3fde4f67e0
 
 use serde::{Deserialize, Serialize};
 
@@ -38,6 +38,7 @@ pub enum TerminalCloseReason {
     SlowClient,
     SessionExited,
     KernelError,
+    ResumeRefused,
 }
 
 impl TerminalCloseReason {
@@ -50,6 +51,7 @@ impl TerminalCloseReason {
             Self::Stolen => 4409,
             Self::SessionExited => 4410,
             Self::KernelError => 4500,
+            Self::ResumeRefused => 4411,
         }
     }
 }
@@ -202,6 +204,7 @@ pub enum OperationResultStatus {
     Accepted,
     Refused,
     Ambiguous,
+    Unknown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -289,4 +292,17 @@ pub enum ConversationClientMessage {
         before_ordinal: u64,
         limit: u16,
     },
+    OperationStatus {
+        #[serde(rename = "operationId")]
+        operation_id: String,
+    },
+}
+
+/// Text frame sent once the terminal surface is held by this socket.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalAttachedFrame {
+    pub r#type: String,
+    pub resume_capability: String,
+    pub resume_window_seconds: u64,
 }

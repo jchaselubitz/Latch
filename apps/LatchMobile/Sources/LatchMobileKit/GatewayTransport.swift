@@ -1,208 +1,32 @@
-import CryptoKit
 import Foundation
 import Network
-
-public enum RemoteTransportPath: Sendable {
-    case direct
-    case relay
-}
-
-public enum RemoteTransportPolicyError: Error, Equatable, Sendable {
-    /// A relay attempt was assembled without a relay server to attempt it with.
-    case missingTurnServer
-}
-
-/// Small platform-independent state machine mirrored by the Rust boundary.
-/// Keeping it in the kit makes relay issuance and capability invalidation
-/// testable without an XCFramework or simulator.
-///
-/// Relay servers are allowed into the first attempt. Preferring a direct path
-/// is ICE's own job — host and reflexive candidates outrank relay candidates
-/// in the pair priority formula — so withholding TURN never made direct more
-/// likely, it only guaranteed a second round trip for every phone that could
-/// not get there directly. Refusing relay outright is still possible, but it
-/// is enforced where the credentials are minted: the control plane returns 403
-/// for an account with relay disabled, and this policy never manufactures a
-/// server the control plane declined to issue.
-public actor RemoteTransportPolicy {
-    private var selectedPath: RemoteTransportPath?
-
-    public init() {}
-
-    /// Checks that a relay attempt actually has a relay server behind it.
-    ///
-    /// This is the recovery path for an attempt that ran direct-only because
-    /// credential issuance failed, not a gate on issuance itself.
-    public func authorizeRelayAttempt(servers: [IceServer]) throws {
-        guard servers.contains(where: \.isTurn) else {
-            throw RemoteTransportPolicyError.missingTurnServer
-        }
-    }
-
-    /// Returns true exactly when capabilities must be rediscovered.
-    public func recordSelectedPath(_ path: RemoteTransportPath) -> Bool {
-        defer { selectedPath = path }
-        return selectedPath.map { $0 != path } ?? false
-    }
-}
+import Security
 
 /// The mechanism that makes the gateway URL usable.
-///
-/// Gateway clients deliberately stay HTTP/WebSocket clients.
-/// A manual link supplies an HTTPS (or local HTTP) URL directly; the paired
-/// route supplies a private loopback URL whose listener carries bytes through
-/// a pinned Noise session. Keeping this seam here prevents two implementations
-/// of the gateway protocol and its WebSocket framing.
 public protocol GatewayTransport: Sendable {
     var gatewayLink: GatewayLink { get }
+    /// Stops accepting local connections and discards any capability.
+    func stop()
 }
 
-/// The pre-existing `latch serve` path a person configures in Settings.
-public struct HTTPSGatewayTransport: GatewayTransport, Sendable {
-    public let gatewayLink: GatewayLink
-
-    public init(link: GatewayLink) {
-        gatewayLink = link
-    }
+public extension GatewayTransport {
+    func stop() {}
 }
 
-/// A TCP target for the Mac's authenticated remote listener.
-///
-/// This is intentionally a transport address, never a gateway URL or
-/// credential. The gateway itself remains loopback-only on the Mac.
-public struct NoiseTunnelTarget: @unchecked Sendable {
-    fileprivate let endpoint: NWEndpoint
-
-    public init(host: String, port: UInt16) throws {
-        let trimmed = host.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, port != 0, let port = NWEndpoint.Port(rawValue: port) else {
-            throw NoiseTunnelError.invalidTarget
-        }
-        endpoint = .hostPort(host: NWEndpoint.Host(trimmed), port: port)
-    }
-
-    fileprivate init(endpoint: NWEndpoint) {
-        self.endpoint = endpoint
-    }
-}
-
-/// One reliable ordered record channel produced by the shared Rust core.
-///
-/// Each channel carries exactly one Noise session. The Rust layer owns ICE,
-/// DTLS, SCTP, consent freshness, and path selection; this Swift layer still
-/// owns the Noise handshake and verifies the pairing-record pin.
-public protocol RemoteNoiseChannel: NoiseFrameChannel {
+/// A gateway stream whose peer authentication and multiplexing are already
+/// owned by the shared Rust Remote Link core.
+public protocol AuthenticatedGatewayChannel: Sendable {
+    func read() async throws -> Data
+    func write(_ bytes: Data) async throws
     func close() async
 }
 
-/// Opens a fresh remote record channel for one loopback HTTP/WebSocket socket.
-public protocol RemoteNoiseChannelProvider: Sendable {
-    func openChannel() async throws -> any RemoteNoiseChannel
+public protocol AuthenticatedGatewayChannelProvider: Sendable {
+    func openGatewayChannel() async throws -> any AuthenticatedGatewayChannel
 }
 
-/// A plain TCP channel to the Mac's authenticated listener.
-///
-/// Two routes share it: a Bonjour result on the local network, and a host
-/// address the Mac published as presence — which is how a tailnet works with no
-/// ICE involved at all, because a Tailscale address is just another interface
-/// the listener is bound on. Nothing is trusted more for having come from one
-/// of those than the other; the pinned Noise handshake runs over both.
-///
-/// `openChannel` waits for the connection to be established rather than
-/// returning an optimistic one. A caller that falls through to another target
-/// needs to learn here that this one failed: handing back a channel whose
-/// connect is still in flight moves the failure into the Noise handshake, where
-/// there is no other target left to try.
-public struct LANRemoteNoiseChannelProvider: RemoteNoiseChannelProvider, @unchecked Sendable {
-    /// Long enough for a tailnet address that has to bring a tunnel up, short
-    /// enough that a list of interface addresses — most of which this phone
-    /// cannot route to — does not take a minute to walk.
-    public static let defaultConnectTimeout = Duration.seconds(4)
-
-    private let target: NoiseTunnelTarget
-    private let connectTimeout: Duration
-    private let queue = DispatchQueue(label: "dev.cooperativ.latch.lan-noise-channel")
-
-    public init(
-        target: NoiseTunnelTarget,
-        connectTimeout: Duration = LANRemoteNoiseChannelProvider.defaultConnectTimeout
-    ) {
-        self.target = target
-        self.connectTimeout = connectTimeout
-    }
-
-    public func openChannel() async throws -> any RemoteNoiseChannel {
-        let connection = NWConnection(to: target.endpoint, using: .tcp)
-        do {
-            try await Self.start(connection, on: queue, within: connectTimeout)
-        } catch {
-            connection.cancel()
-            throw error
-        }
-        return NWConnectionNoiseChannel(connection: connection)
-    }
-
-    private static func start(
-        _ connection: NWConnection,
-        on queue: DispatchQueue,
-        within timeout: Duration
-    ) async throws {
-        let completion = ContinuationGuard()
-        try await withThrowingTaskGroup(of: Void.self) { group in
-            group.addTask {
-                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                    connection.stateUpdateHandler = { state in
-                        switch state {
-                        case .ready:
-                            guard completion.markCompleted() else { return }
-                            continuation.resume()
-                        case .failed(let error):
-                            guard completion.markCompleted() else { return }
-                            continuation.resume(throwing: NoiseError.transport(error.localizedDescription))
-                        case .cancelled:
-                            guard completion.markCompleted() else { return }
-                            continuation.resume(throwing: NoiseTunnelError.macNotReachable)
-                        case .waiting(let error):
-                            // Network.framework keeps retrying a refused
-                            // connect until something changes, and reports it
-                            // here rather than as a failure. Nothing is going
-                            // to change: the host answered, and nothing is
-                            // listening on that port. Waiting out the timeout
-                            // would only hold ICE behind a dead address. Other
-                            // waits — no route yet, a tunnel still coming up —
-                            // are left to the timeout, because those do change.
-                            guard case .posix(let code) = error, code == .ECONNREFUSED,
-                                  completion.markCompleted() else { return }
-                            continuation.resume(throwing: NoiseError.transport(error.localizedDescription))
-                        default:
-                            break
-                        }
-                    }
-                    connection.start(queue: queue)
-                }
-            }
-            group.addTask {
-                try await Task.sleep(for: timeout)
-                // Cancelling drives the handler above, so the waiting task is
-                // resumed by the same path a real failure takes rather than by
-                // a second continuation nobody owns.
-                connection.cancel()
-                throw NoiseTunnelError.macNotReachable
-            }
-            defer { group.cancelAll() }
-            try await group.next()
-        }
-    }
-}
-
-/// Installs an `NWListener` handler before the listener starts, while allowing
-/// the transport that owns accepted connections to be created after the
-/// listener has selected its ephemeral port.
-///
-/// Network.framework requires a connection handler at `start()` time. The
-/// gateway link cannot be constructed until the listener becomes ready and
-/// exposes that port, so this router bridges the initialization cycle without
-/// dropping an early connection or starting the listener in an invalid state.
+/// Installs a listener handler before the listener starts while allowing its
+/// owner to be constructed after Network.framework selects the ephemeral port.
 final class DeferredConnectionHandler<Connection>: @unchecked Sendable {
     typealias Handler = @Sendable (Connection) -> Void
 
@@ -228,17 +52,13 @@ final class DeferredConnectionHandler<Connection>: @unchecked Sendable {
         let queued = pending
         pending.removeAll(keepingCapacity: false)
         lock.unlock()
-
         queued.forEach(handler)
     }
 }
 
-/// User-facing local errors from the paired tunnel.
-public enum NoiseTunnelError: Error, Equatable, Sendable, LocalizedError {
-    case invalidTarget
-    case macNotReachable
+public enum RemoteLinkTransportError: Error, Equatable, Sendable, LocalizedError {
     case listenerUnavailable
-    case callerSuppliedCredential
+    case invalidCapability
     case malformedRequest
     case requestHeaderTooLarge
     case closed
@@ -247,14 +67,10 @@ public enum NoiseTunnelError: Error, Equatable, Sendable, LocalizedError {
 
     public var message: String {
         switch self {
-        case .invalidTarget:
-            return "This Mac did not provide a usable remote-access address."
-        case .macNotReachable:
-            return "This Mac is not reachable on this network."
         case .listenerUnavailable:
             return "The phone could not start its local secure connection."
-        case .callerSuppliedCredential:
-            return "This secure connection refuses credentials supplied by the phone."
+        case .invalidCapability:
+            return "The local Remote Link capability was missing or invalid."
         case .malformedRequest:
             return "The local secure connection received an incomplete HTTP request."
         case .requestHeaderTooLarge:
@@ -265,15 +81,17 @@ public enum NoiseTunnelError: Error, Equatable, Sendable, LocalizedError {
     }
 }
 
-/// Guards a continuation against being resumed twice. `stateUpdateHandler`
-/// runs serially on the queue passed to `start`, but that guarantee is not
-/// visible to the Swift 6 concurrency checker, so the flag is kept behind
-/// a lock rather than as a captured `var`.
+/// Guards a continuation against being resumed twice by listener callbacks.
 final class ContinuationGuard: @unchecked Sendable {
     private let lock = NSLock()
     private var completed = false
 
-    /// Returns `true` the first time it is called, `false` after that.
+    var isCompleted: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return completed
+    }
+
     func markCompleted() -> Bool {
         lock.lock()
         defer { lock.unlock() }
@@ -283,100 +101,66 @@ final class ContinuationGuard: @unchecked Sendable {
     }
 }
 
-/// A listener-backed paired transport.
+/// Receives content-free stage timings from the adapter: how long a logical
+/// stream took to open and how long a response took to complete.
+public typealias LinkStageRecorder = @Sendable (LinkStageSample) -> Void
+
+/// Capability-protected loopback adapter for a Rust-owned Remote Link stream.
 ///
-/// There is one fresh Noise session for every inbound loopback connection.
-/// That mirrors the Mac's `authorize_and_inject` boundary: ordinary HTTP
-/// requests are one authorized operation and the sole long-lived exception is
-/// the WebSocket connection URLSession itself keeps open.
-public final class NoiseTunnelGatewayTransport: GatewayTransport, @unchecked Sendable {
-    /// Marks a 502 the phone wrote itself. No gateway sends this code.
-    static let tunnelFailureCode = "tunnel_unreachable"
+/// One instance lives per link generation. Suspending the app stops it and
+/// discards its capability; resuming starts a new one with a new random
+/// capability and a new ephemeral port, so a token that leaked while the app
+/// was backgrounded opens nothing afterwards.
+public final class RemoteLinkGatewayTransport: GatewayTransport, @unchecked Sendable {
+    /// Marks a 502 generated by the phone rather than by the Mac gateway.
+    static let tunnelFailureCode = "remote_link_unreachable"
 
     public let gatewayLink: GatewayLink
 
     private let listener: NWListener
-    private let target: NoiseTunnelTarget?
-    private let channelProvider: (any RemoteNoiseChannelProvider)?
-    private let staticKey: Curve25519.KeyAgreement.PrivateKey
-    private let pinnedMacPublicKey: String
-    private let queue = DispatchQueue(label: "dev.cooperativ.latch.noise-tunnel")
+    private let provider: any AuthenticatedGatewayChannelProvider
+    private let capability: String
+    private let recorder: LinkStageRecorder?
+    private let queue = DispatchQueue(label: "dev.cooperativ.latch.remote-link-loopback")
+    private let stopped = ContinuationGuard()
 
     private init(
         listener: NWListener,
-        target: NoiseTunnelTarget?,
-        channelProvider: (any RemoteNoiseChannelProvider)?,
-        staticKey: Curve25519.KeyAgreement.PrivateKey,
-        pinnedMacPublicKey: String,
-        gatewayLink: GatewayLink
+        provider: any AuthenticatedGatewayChannelProvider,
+        capability: String,
+        gatewayLink: GatewayLink,
+        recorder: LinkStageRecorder?
     ) {
         self.listener = listener
-        self.target = target
-        self.channelProvider = channelProvider
-        self.staticKey = staticKey
-        self.pinnedMacPublicKey = pinnedMacPublicKey
+        self.provider = provider
+        self.capability = capability
         self.gatewayLink = gatewayLink
+        self.recorder = recorder
     }
+
+    /// The listener's capability, for tests proving rotation. Never logged.
+    var capabilityForTesting: String { capability }
+
+    /// True once `stop()` ran; a stopped adapter refuses every connection.
+    public var isStopped: Bool { stopped.isCompleted }
 
     deinit {
         listener.cancel()
     }
 
-    /// Starts a listener bound to `127.0.0.1` on an ephemeral port.
-    ///
-    /// The paired record supplies the pin; no rendezvous-provided identity or
-    /// Bonjour TXT value is accepted as authority for the handshake.
     public static func start(
-        target: NoiseTunnelTarget,
+        authenticatedProvider: any AuthenticatedGatewayChannelProvider,
         pairedDevice: PairedDeviceRecord,
-        identityStore: any DeviceIdentityStoring
-    ) async throws -> NoiseTunnelGatewayTransport {
-        guard pairedDevice.isActive else {
-            throw NoiseTunnelError.closed
-        }
-        let staticKey = try identityStore.privateKey()
-        let pin = try pairedDevice.pinnedMacPublicKey()
+        recorder: LinkStageRecorder? = nil
+    ) async throws -> RemoteLinkGatewayTransport {
+        guard pairedDevice.isActive else { throw RemoteLinkTransportError.closed }
         let listenerAndLink = try await makeLoopbackListener()
-        let transport = NoiseTunnelGatewayTransport(
+        let transport = RemoteLinkGatewayTransport(
             listener: listenerAndLink.listener,
-            target: target,
-            channelProvider: nil,
-            staticKey: staticKey,
-            pinnedMacPublicKey: pin,
-            gatewayLink: listenerAndLink.link
-        )
-        listenerAndLink.router.install { [weak transport] connection in
-            guard let transport else {
-                connection.cancel()
-                return
-            }
-            Task { await transport.accept(connection) }
-        }
-        // The loopback URL is not exposed until after this handler is set, so
-        // the app cannot race its own first URLSession request.
-        return transport
-    }
-
-    /// Starts the same loopback shim over the shared Rust ICE transport.
-    ///
-    /// The provider is asked for a fresh reliable ordered channel per inbound
-    /// connection, preserving the Mac's one-authorized-request boundary.
-    public static func start(
-        channelProvider: any RemoteNoiseChannelProvider,
-        pairedDevice: PairedDeviceRecord,
-        identityStore: any DeviceIdentityStoring
-    ) async throws -> NoiseTunnelGatewayTransport {
-        guard pairedDevice.isActive else { throw NoiseTunnelError.closed }
-        let staticKey = try identityStore.privateKey()
-        let pin = try pairedDevice.pinnedMacPublicKey()
-        let listenerAndLink = try await makeLoopbackListener()
-        let transport = NoiseTunnelGatewayTransport(
-            listener: listenerAndLink.listener,
-            target: nil,
-            channelProvider: channelProvider,
-            staticKey: staticKey,
-            pinnedMacPublicKey: pin,
-            gatewayLink: listenerAndLink.link
+            provider: authenticatedProvider,
+            capability: listenerAndLink.capability,
+            gatewayLink: listenerAndLink.link,
+            recorder: recorder
         )
         listenerAndLink.router.install { [weak transport] connection in
             guard let transport else {
@@ -388,16 +172,15 @@ public final class NoiseTunnelGatewayTransport: GatewayTransport, @unchecked Sen
         return transport
     }
 
-    /// Stops accepting new loopback requests and closes the local listener.
-    /// iOS suspension tears these sockets down too; callers create a fresh
-    /// transport on resume rather than treating an old link as live.
     public func stop() {
+        _ = stopped.markCompleted()
         listener.cancel()
     }
 
     private static func makeLoopbackListener() async throws -> (
         listener: NWListener,
         link: GatewayLink,
+        capability: String,
         router: DeferredConnectionHandler<NWConnection>
     ) {
         let parameters = NWParameters.tcp
@@ -407,17 +190,27 @@ public final class NoiseTunnelGatewayTransport: GatewayTransport, @unchecked Sen
         )
         let listener = try NWListener(using: parameters, on: .any)
         let router = DeferredConnectionHandler<NWConnection>()
-        // Network.framework requires this before `start()`. The transport is
-        // installed into the router immediately after the selected port is
-        // available and before the loopback URL is exposed to URLSession.
         listener.newConnectionHandler = { connection in router.receive(connection) }
         try await waitUntilReady(listener)
-        guard let port = listener.port else { throw NoiseTunnelError.listenerUnavailable }
+        guard let port = listener.port else { throw RemoteLinkTransportError.listenerUnavailable }
+        let capability = try randomCapability()
         return (
             listener,
-            GatewayLink(url: URL(string: "http://127.0.0.1:\(port.rawValue)")!, token: ""),
+            GatewayLink(
+                url: URL(string: "http://127.0.0.1:\(port.rawValue)")!,
+                token: capability
+            ),
+            capability,
             router
         )
+    }
+
+    private static func randomCapability() throws -> String {
+        var bytes = [UInt8](repeating: 0, count: 32)
+        guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess else {
+            throw RemoteLinkTransportError.listenerUnavailable
+        }
+        return bytes.map { String(format: "%02x", $0) }.joined()
     }
 
     private static func waitUntilReady(_ listener: NWListener) async throws {
@@ -428,25 +221,25 @@ public final class NoiseTunnelGatewayTransport: GatewayTransport, @unchecked Sen
                 case .ready:
                     guard completion.markCompleted() else { return }
                     continuation.resume(returning: ())
-                case .failed:
+                case .failed, .cancelled:
                     guard completion.markCompleted() else { return }
-                    continuation.resume(throwing: NoiseTunnelError.listenerUnavailable)
-                case .cancelled:
-                    guard completion.markCompleted() else { return }
-                    continuation.resume(throwing: NoiseTunnelError.listenerUnavailable)
+                    continuation.resume(throwing: RemoteLinkTransportError.listenerUnavailable)
                 default:
                     break
                 }
             }
-            listener.start(queue: DispatchQueue(label: "dev.cooperativ.latch.noise-listener"))
+            listener.start(queue: DispatchQueue(label: "dev.cooperativ.latch.remote-link-listener"))
         }
     }
 
-
     private func accept(_ loopback: NWConnection) async {
+        guard !stopped.isCompleted else {
+            loopback.cancel()
+            return
+        }
         loopback.start(queue: queue)
         do {
-            var validator = TunnelRequestValidator()
+            var validator = TunnelRequestValidator(expectedCapability: capability)
             while true {
                 let bytes = try await loopback.receiveData()
                 if let firstRequest = try validator.append(bytes) {
@@ -454,9 +247,7 @@ public final class NoiseTunnelGatewayTransport: GatewayTransport, @unchecked Sen
                     return
                 }
             }
-        } catch let error as NoiseTunnelError {
-            await reject(loopback, reason: error.message)
-        } catch let error as NoiseError {
+        } catch let error as RemoteLinkTransportError {
             await reject(loopback, reason: error.message)
         } catch {
             await reject(loopback, reason: error.localizedDescription)
@@ -464,48 +255,47 @@ public final class NoiseTunnelGatewayTransport: GatewayTransport, @unchecked Sen
     }
 
     private func bridge(loopback: NWConnection, firstRequest: Data) async throws {
-        let channel: any RemoteNoiseChannel
-        if let channelProvider {
-            channel = try await channelProvider.openChannel()
-        } else if let target {
-            let remote = NWConnection(to: target.endpoint, using: .tcp)
-            remote.start(queue: queue)
-            channel = NWConnectionNoiseChannel(connection: remote)
-        } else {
-            throw NoiseTunnelError.invalidTarget
+        let opening = Date()
+        let channel: any AuthenticatedGatewayChannel
+        do {
+            channel = try await provider.openGatewayChannel()
+        } catch {
+            recorder?(LinkStageSample(stage: .streamOpen, milliseconds: Self.millis(since: opening), outcome: .failed))
+            throw error
         }
+        recorder?(LinkStageSample(stage: .streamOpen, milliseconds: Self.millis(since: opening)))
         defer {
             Task { await channel.close() }
             loopback.cancel()
         }
-        let noise = try await NoiseXX.connect(
-            channel: channel,
-            staticKey: staticKey,
-            pinnedPeerPublicKey: pinnedMacPublicKey
-        )
-
-        // The two tasks each own a Noise direction. NoiseSession serializes
-        // each cipher state internally, but no task is allowed to hold a
-        // transport lock while waiting on socket I/O.
+        try await channel.write(firstRequest)
+        let recorder = self.recorder
         try await withThrowingTaskGroup(of: Void.self) { group in
             group.addTask {
-                try await Self.copyLoopbackToNoise(
-                    loopback,
-                    firstRequest: firstRequest,
-                    channel: channel,
-                    session: noise
-                )
+                while !Task.isCancelled {
+                    try await channel.write(try await loopback.receiveData())
+                }
             }
             group.addTask {
-                try await Self.copyNoiseToLoopback(loopback, channel: channel, session: noise)
+                var first: Date?
+                while !Task.isCancelled {
+                    do {
+                        let bytes = try await channel.read()
+                        if first == nil { first = Date() }
+                        try await loopback.sendData(bytes)
+                    } catch {
+                        // Normal EOF after a complete response is what ends
+                        // this reader; the sample measures first byte to last.
+                        if let first {
+                            recorder?(LinkStageSample(stage: .responseComplete, milliseconds: Self.millis(since: first)))
+                        }
+                        throw error
+                    }
+                }
             }
             do {
                 _ = try await group.next()
             } catch {
-                // Task cancellation does not itself interrupt an outstanding
-                // Network receive. Closing both sockets does, so the sibling
-                // exits promptly instead of keeping a completed HTTP request
-                // or WebSocket teardown alive indefinitely.
                 await channel.close()
                 loopback.cancel()
                 group.cancelAll()
@@ -517,39 +307,11 @@ public final class NoiseTunnelGatewayTransport: GatewayTransport, @unchecked Sen
         }
     }
 
-    private static func copyLoopbackToNoise(
-        _ loopback: NWConnection,
-        firstRequest: Data,
-        channel: any NoiseFrameChannel,
-        session: NoiseSession
-    ) async throws {
-        try await channel.writeFrame(try session.encrypt(firstRequest))
-        while !Task.isCancelled {
-            let bytes = try await loopback.receiveData()
-            try await channel.writeFrame(try session.encrypt(bytes))
-        }
-    }
-
-    private static func copyNoiseToLoopback(
-        _ loopback: NWConnection,
-        channel: any NoiseFrameChannel,
-        session: NoiseSession
-    ) async throws {
-        while !Task.isCancelled {
-            let ciphertext = try await channel.readFrame()
-            try await loopback.sendData(try session.decrypt(ciphertext))
-        }
+    private static func millis(since date: Date) -> UInt64 {
+        UInt64(max(0, Date().timeIntervalSince(date) * 1000))
     }
 
     private func reject(_ connection: NWConnection, reason: String) async {
-        // This is intentionally a response rather than silently stripping a
-        // header: URLSession gets a useful local failure and a future caller
-        // cannot accidentally leak a credential into the paired transport.
-        //
-        // It is sent in the gateway's own error shape, tagged with a code no
-        // gateway uses, so the client can tell "this phone could not reach
-        // your Mac" from "your Mac answered with an error" and show the
-        // sentence rather than a status line.
         let body = (try? JSONSerialization.data(withJSONObject: [
             "error": Self.tunnelFailureCode,
             "reason": reason
@@ -560,82 +322,77 @@ public final class NoiseTunnelGatewayTransport: GatewayTransport, @unchecked Sen
     }
 }
 
-/// Buffers just enough of a loopback HTTP request to enforce the tunnel's
-/// credential boundary before the first byte is sent to the Mac.
+/// Requires the unguessable per-listener capability and strips it before any
+/// bytes enter Remote Link. The Mac therefore receives no phone-local bearer.
 struct TunnelRequestValidator {
     private static let maxHeaderBytes = 64 * 1024
+    private let expectedAuthorization: String
     private var pending = Data()
     private var accepted = false
+
+    init(expectedCapability: String) {
+        expectedAuthorization = "Bearer \(expectedCapability)"
+    }
 
     mutating func append(_ bytes: Data) throws -> Data? {
         guard !accepted else { return bytes }
         pending.append(bytes)
         guard pending.count <= Self.maxHeaderBytes else {
-            throw NoiseTunnelError.requestHeaderTooLarge
+            throw RemoteLinkTransportError.requestHeaderTooLarge
         }
         guard let end = pending.range(of: Data("\r\n\r\n".utf8)) else { return nil }
         let header = pending[..<end.lowerBound]
         guard let text = String(data: header, encoding: .utf8) else {
-            throw NoiseTunnelError.malformedRequest
+            throw RemoteLinkTransportError.malformedRequest
         }
         let lines = text.components(separatedBy: "\r\n")
-        guard !lines.isEmpty else { throw NoiseTunnelError.malformedRequest }
+        guard let requestLine = lines.first, !requestLine.isEmpty else {
+            throw RemoteLinkTransportError.malformedRequest
+        }
+        var authorizationCount = 0
+        var sanitized = [requestLine]
         for line in lines.dropFirst() {
-            guard let colon = line.firstIndex(of: ":") else { continue }
-            let name = line[..<colon].trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            if name == "authorization" || name == "proxy-authorization" {
-                throw NoiseTunnelError.callerSuppliedCredential
+            guard let colon = line.firstIndex(of: ":") else {
+                throw RemoteLinkTransportError.malformedRequest
             }
+            let name = line[..<colon].trimmingCharacters(in: .whitespaces).lowercased()
+            let value = line[line.index(after: colon)...]
+                .trimmingCharacters(in: .whitespaces)
+            if name == "proxy-authorization" {
+                throw RemoteLinkTransportError.invalidCapability
+            }
+            if name == "authorization" {
+                authorizationCount += 1
+                guard authorizationCount == 1, value == expectedAuthorization else {
+                    throw RemoteLinkTransportError.invalidCapability
+                }
+                continue
+            }
+            sanitized.append(line)
         }
+        guard authorizationCount == 1 else { throw RemoteLinkTransportError.invalidCapability }
+        let body = pending[end.upperBound...]
+        var result = Data((sanitized.joined(separator: "\r\n") + "\r\n\r\n").utf8)
+        result.append(body)
         accepted = true
-        defer { pending.removeAll(keepingCapacity: false) }
-        return pending
-    }
-}
-
-/// Frames a Network connection for the existing Noise implementation.
-actor NWConnectionNoiseChannel: RemoteNoiseChannel {
-    private let connection: NWConnection
-    private var buffered = Data()
-
-    init(connection: NWConnection) {
-        self.connection = connection
-    }
-
-    func readFrame() async throws -> Data {
-        while true {
-            if let decoded = try NoiseFraming.decode(from: buffered) {
-                buffered = decoded.rest
-                return decoded.frame
-            }
-            buffered.append(try await connection.receiveData())
-        }
-    }
-
-    func writeFrame(_ frame: Data) async throws {
-        try await connection.sendData(try NoiseFraming.encode(frame))
-    }
-
-    func close() {
-        connection.cancel()
+        pending.removeAll(keepingCapacity: false)
+        return result
     }
 }
 
 private extension NWConnection {
-    func receiveData(maximumLength: Int = NoiseWire.maxRecord) async throws -> Data {
+    func receiveData(maximumLength: Int = 16 * 1024) async throws -> Data {
         try await withCheckedThrowingContinuation { continuation in
-            receive(
-                minimumIncompleteLength: 1,
-                maximumLength: maximumLength
-            ) { data, _, complete, error in
+            receive(minimumIncompleteLength: 1, maximumLength: maximumLength) {
+                data, _, complete, error in
                 if let error {
-                    continuation.resume(throwing: NoiseError.transport(error.localizedDescription))
+                    continuation.resume(throwing: error)
                 } else if let data, !data.isEmpty {
                     continuation.resume(returning: data)
                 } else if complete {
-                    continuation.resume(throwing: NoiseTunnelError.closed)
+                    continuation.resume(throwing: RemoteLinkTransportError.closed)
                 } else {
-                    continuation.resume(throwing: NoiseTunnelError.closed)
+                    continuation.resume(throwing: RemoteLinkTransportError.closed)
                 }
             }
         }
@@ -645,7 +402,7 @@ private extension NWConnection {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             send(content: data, completion: .contentProcessed { error in
                 if let error {
-                    continuation.resume(throwing: NoiseError.transport(error.localizedDescription))
+                    continuation.resume(throwing: error)
                 } else {
                     continuation.resume()
                 }
@@ -654,65 +411,57 @@ private extension NWConnection {
     }
 }
 
-/// Bonjour is only a reachability optimization. A matching identity TXT hint
-/// is preferred and an explicit mismatch is ignored, but iOS may initially
-/// surface a result before its TXT metadata. Such an unknown result is still
-/// safe to try because the Noise handshake verifies the paired key before any
-/// application bytes are forwarded.
+/// Bonjour supplies untrusted LAN coordinates only. Rust authenticates the
+/// exact paired Mac key before opening a logical service.
 public final class BonjourMacDiscovery: @unchecked Sendable {
     public static let serviceType = "_latch-remote._tcp"
 
     public init() {}
 
-    /// Browses briefly rather than returning on the browser's initial empty
-    /// result set. Bonjour commonly reports that empty set before multicast
-    /// responses arrive, and treating it as a completed search would turn a
-    /// discoverable Mac into a misleading offline result.
-    public func candidates(
+    public func remoteLinkTargets(
         matching pinnedMacPublicKey: String,
-        for duration: Duration = .seconds(5)
-    ) async throws -> [NoiseTunnelTarget] {
-        let pin = try NoiseXX.normalizedPin(pinnedMacPublicKey)
+        for duration: Duration = .milliseconds(250)
+    ) async -> [RemoteLinkLanTarget] {
+        let pin = pinnedMacPublicKey.lowercased()
+        guard pin.count == 64, pin.allSatisfy({ $0.isHexDigit }) else { return [] }
         let parameters = NWParameters.tcp
         parameters.includePeerToPeer = true
         let browser = NWBrowser(for: .bonjour(type: Self.serviceType, domain: nil), using: parameters)
-        let collector = BonjourCandidateCollector()
+        let collector = RemoteLinkLanTargetCollector()
         browser.browseResultsChangedHandler = { results, _ in
-            let classified = results.map { ($0, Self.identityKey(in: $0)) }
-            let targets = classified
-                .filter { Self.shouldAttempt(advertisedIdentityKey: $0.1, normalizedPin: pin) }
-                .sorted { left, right in
-                    // A cryptographically matching hint wins over an unknown
-                    // one. Noise remains authoritative for both.
-                    (left.1 == pin ? 0 : 1) < (right.1 == pin ? 0 : 1)
-                }
-                .map { NoiseTunnelTarget(endpoint: $0.0.endpoint) }
+            let targets = results.compactMap { result -> RemoteLinkLanTarget? in
+                guard case let .bonjour(record) = result.metadata,
+                      record["identityKey"]?.lowercased() == pin,
+                      record["linkVersion"] == "1",
+                      let host = record["lanHost"], !host.isEmpty,
+                      let portText = record["lanPort"],
+                      let port = UInt16(portText), port != 0
+                else { return nil }
+                return RemoteLinkLanTarget(host: host, port: port)
+            }
             Task { await collector.replace(with: targets) }
         }
-        browser.start(queue: DispatchQueue(label: "dev.cooperativ.latch.bonjour"))
+        browser.start(queue: DispatchQueue(label: "dev.cooperativ.latch.remote-link-bonjour"))
         defer { browser.cancel() }
         try? await Task.sleep(for: duration)
         return await collector.values
     }
+}
 
-    static func shouldAttempt(advertisedIdentityKey: String?, normalizedPin: String) -> Bool {
-        advertisedIdentityKey == nil || advertisedIdentityKey == normalizedPin
-    }
+public struct RemoteLinkLanTarget: Equatable, Sendable {
+    public let host: String
+    public let port: UInt16
 
-    private static func identityKey(in result: NWBrowser.Result) -> String? {
-        guard case let .bonjour(txtRecord) = result.metadata,
-              let key = txtRecord["identityKey"]
-        else {
-            return nil
-        }
-        return try? NoiseXX.normalizedPin(key)
+    public init(host: String, port: UInt16) {
+        self.host = host
+        self.port = port
     }
 }
 
-private actor BonjourCandidateCollector {
-    private(set) var values: [NoiseTunnelTarget] = []
+private actor RemoteLinkLanTargetCollector {
+    private(set) var values: [RemoteLinkLanTarget] = []
 
-    func replace(with values: [NoiseTunnelTarget]) {
+    func replace(with values: [RemoteLinkLanTarget]) {
         self.values = values
     }
 }

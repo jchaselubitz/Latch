@@ -30,8 +30,8 @@ final class NewSessionAppModelTests: XCTestCase {
 
     func testBrowserRequiresOwnerAndSharesItsGraceWindowWithTerminal() async throws {
         let authenticator = StubDeviceOwnerAuthenticator()
-        let model = makeManualModel(authenticator: authenticator)
-        await model.link(address: "https://mac.local:8787", token: "token")
+        let model = makePairedModel(authenticator: authenticator)
+        await connect(model)
 
         let browser = await model.newSessionFolderBrowser(mode: .create)
 
@@ -43,10 +43,10 @@ final class NewSessionAppModelTests: XCTestCase {
     }
 
     func testCancelledOwnerCheckNeverConstructsOrFetchesABrowser() async {
-        let model = makeManualModel(
+        let model = makePairedModel(
             authenticator: StubDeviceOwnerAuthenticator(approves: false)
         )
-        await model.link(address: "https://mac.local:8787", token: "token")
+        await connect(model)
         let requestsBefore = StubProtocol.requests.count
 
         let browser = await model.newSessionFolderBrowser(mode: .create)
@@ -57,14 +57,14 @@ final class NewSessionAppModelTests: XCTestCase {
 
     func testCreationRefreshesSessionsHighlightsResultAndDoesNotOpenATerminal() async throws {
         let terminalConnections = LockedCounter()
-        let model = makeManualModel(
+        let model = makePairedModel(
             authenticator: StubDeviceOwnerAuthenticator(),
             terminalConnector: { _, _, _ in
                 terminalConnections.increment()
                 throw LatchError.transport("must not attach")
             }
         )
-        await model.link(address: "https://mac.local:8787", token: "token")
+        await connect(model)
         StubProtocol.stub(
             method: "POST",
             path: "/v2/sessions",
@@ -95,7 +95,6 @@ final class NewSessionAppModelTests: XCTestCase {
             session: StubProtocol.session()
         )
         let model = AppModel(
-            storage: MemoryLinkStorage(),
             pairedGatewayFactory: { _ in gateway },
             newSessionFolderStore: MemoryNewSessionFolderStore(),
             terminalUnlock: TerminalUnlock(authenticator: StubDeviceOwnerAuthenticator(), grace: 600)
@@ -126,7 +125,6 @@ final class NewSessionAppModelTests: XCTestCase {
             session: StubProtocol.session()
         )
         let model = AppModel(
-            storage: MemoryLinkStorage(),
             pairedGatewayFactory: { _ in gateway },
             newSessionFolderStore: MemoryNewSessionFolderStore(),
             terminalUnlock: TerminalUnlock(authenticator: StubDeviceOwnerAuthenticator(), grace: 600)
@@ -158,8 +156,8 @@ final class NewSessionAppModelTests: XCTestCase {
              "operationRetentionSeconds":600}
             """
         )
-        let model = makeManualModel(authenticator: StubDeviceOwnerAuthenticator())
-        await model.link(address: "https://mac.local:8787", token: "token")
+        let model = makePairedModel(authenticator: StubDeviceOwnerAuthenticator())
+        await connect(model)
 
         XCTAssertFalse(model.advertisesNewSessionCreation)
         XCTAssertFalse(model.canBrowseNewSessionFolders)
@@ -174,12 +172,16 @@ final class NewSessionAppModelTests: XCTestCase {
     func testDefaultFolderMirrorsTheStoreAfterSelectionAndClearing() async throws {
         let store = MemoryNewSessionFolderStore()
         let model = AppModel(
-            storage: MemoryLinkStorage(),
-            sessionFactory: { LatchGateway(link: $0, session: StubProtocol.session()) },
+            pairedGatewayFactory: { _ in
+                LatchGateway(
+                    link: try GatewayLink(address: "https://mac.local:8787", token: "token"),
+                    session: StubProtocol.session()
+                )
+            },
             newSessionFolderStore: store,
             terminalUnlock: TerminalUnlock(authenticator: StubDeviceOwnerAuthenticator(), grace: 600)
         )
-        await model.link(address: "https://mac.local:8787", token: "token")
+        await connect(model)
         XCTAssertNil(model.defaultNewSessionFolder)
 
         let openedBrowser = await model.newSessionFolderBrowser(mode: .chooseDefault)
@@ -196,8 +198,8 @@ final class NewSessionAppModelTests: XCTestCase {
     /// The highlight is a pointer at a row, not a session the phone holds. It
     /// must not survive an unlink.
     func testUnlinkClearsTheCreatedSessionHighlight() async throws {
-        let model = makeManualModel(authenticator: StubDeviceOwnerAuthenticator())
-        await model.link(address: "https://mac.local:8787", token: "token")
+        let model = makePairedModel(authenticator: StubDeviceOwnerAuthenticator())
+        await connect(model)
         StubProtocol.stub(
             method: "POST",
             path: "/v2/sessions",
@@ -216,17 +218,25 @@ final class NewSessionAppModelTests: XCTestCase {
         XCTAssertNil(model.highlightedSessionID)
     }
 
-    private func makeManualModel(
+    private func makePairedModel(
         authenticator: StubDeviceOwnerAuthenticator,
         terminalConnector: AppModel.TerminalConnecting? = nil
     ) -> AppModel {
         AppModel(
-            storage: MemoryLinkStorage(),
-            sessionFactory: { LatchGateway(link: $0, session: StubProtocol.session()) },
+            pairedGatewayFactory: { _ in
+                LatchGateway(
+                    link: try GatewayLink(address: "https://mac.local:8787", token: "token"),
+                    session: StubProtocol.session()
+                )
+            },
             newSessionFolderStore: MemoryNewSessionFolderStore(),
             terminalConnector: terminalConnector,
             terminalUnlock: TerminalUnlock(authenticator: authenticator, grace: 600)
         )
+    }
+
+    private func connect(_ model: AppModel) async {
+        await model.connectPairedDevice(pairedRecord(permission: .control))
     }
 
     private func pairedRecord(permission: DevicePermission) -> PairedDeviceRecord {
@@ -240,7 +250,8 @@ final class NewSessionAppModelTests: XCTestCase {
                 name: "Mac"
             ),
             permission: permission,
-            phrase: "anchor-apple-maple"
+            comparison: "0123 4567 89ab cdef",
+            controlPlane: URL(string: "https://control.example")!
         )
     }
 }

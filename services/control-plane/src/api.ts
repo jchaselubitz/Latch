@@ -6,22 +6,22 @@
  * - account and device registration, and device revocation;
  * - a paired-device directory that mirrors grants a host device approved
  *   locally, never grants the control plane invents;
- * - short-lived presence and rendezvous so two paired devices can find each
- *   other's connection candidates;
- * - relay-ticket issuance and the authorization call the separately deployed
- *   relay makes before admitting an endpoint.
+ * - short-lived, single-use Remote Link admission and renewable leases;
+ * - durable relay-room invalidation after revoke.
  *
  * What never passes through here: terminal bytes, transcripts, session names,
  * prompt answers, device private keys, and the Latch gateway bearer token.
- * End-to-end encryption is unaffected by this service: it coordinates
- * candidates and admission only, and both endpoints still verify the peer
- * static key pinned during local pairing.
+ * It coordinates opaque room admission only; both endpoints authenticate the
+ * exact peer key through the shared Remote Link protocol.
  */
 
 import type { Config } from './config.ts';
-import type { TurnProvider } from './cloudflare-turn.ts';
 import type { Device, Permission } from './domain.ts';
-import { bearerToken, digestOf, issueCredential, newId, newSecret, subjectOf } from './credentials.ts';
+import { randomBytes } from 'node:crypto';
+
+import { REMOTE_LINK_LIMITS, signAdmission } from './admission.ts';
+import type { ApnsSender } from './apns.ts';
+import { bearerToken, digestOf, digestsMatch, issueCredential, newId, newSecret, subjectOf } from './credentials.ts';
 import { HttpError, Router } from './http/router.ts';
 import type { Handler, RequestContext } from './http/router.ts';
 import { RateLimiter } from './rate-limit.ts';
@@ -36,13 +36,8 @@ export interface ApiDependencies {
   readonly now: () => number;
   /** Names of applied migrations, for readiness reporting. */
   readonly readiness: () => Promise<{ migrations: string[] }>;
-  readonly turn: TurnProvider | null;
-  /**
-   * Waits `ms` of wall-clock time. Separate from `now`, which is the expiry
-   * clock tests drive by hand: a long poll has to sleep for real, and a test
-   * that wants it to return sooner substitutes this instead of the clock.
-   */
-  readonly sleep?: (ms: number) => Promise<void>;
+  /** Attention delivery, when configured. */
+  readonly apns?: ApnsSender | null;
 }
 
 const unauthorized = (): HttpError =>
@@ -50,21 +45,14 @@ const unauthorized = (): HttpError =>
 
 const forbidden = (message: string): HttpError => new HttpError(403, 'forbidden', message);
 
-/** Mirrors the local Mac limits in crates/latch/src/cli/remote_access.rs. */
-const MAX_PENDING_PAIRINGS = 8;
-const PAIRING_TTL_SECONDS = 5 * 60;
-/** Confirmation words shown on both screens. Not a credential. */
-const PHRASE = /^[a-z]+(?:[ -][a-z]+){1,5}$/;
-/**
- * How long `GET /v1/rendezvous` may hold a request open waiting for an offer.
- * A phone abandons its ICE attempt in well under a minute, so the host has to
- * learn about an offer in seconds, not on the next presence refresh; holding
- * the request is what makes that possible without a push channel. The cap
- * keeps every held request comfortably inside the proxy and server timeouts.
- */
-const MAX_RENDEZVOUS_WAIT_SECONDS = 25;
-/** How often a held request re-checks the queue. */
-const RENDEZVOUS_WAIT_POLL_MS = 400;
+const OWNER_INVITATION_TTL_SECONDS = 10 * 60;
+const ENROLLMENT_TTL_SECONDS = 5 * 60;
+const ADMISSION_TTL_SECONDS = 60;
+const LEASE_TTL_SECONDS = 10 * 60;
+/** An undelivered attention alert is stale after this; the phone refreshes anyway. */
+const ATTENTION_TTL_SECONDS = 10 * 60;
+const PUSH_TOKEN = /^[0-9a-f]{64}$/;
+const EVENT_ID = /^[0-9a-f]{32}$/;
 
 function unixSeconds(now: () => number): number {
   return Math.floor(now() / 1000);
@@ -85,10 +73,21 @@ function deviceView(device: Device, permission: Permission | null): Record<strin
 }
 
 export function createRouter(dependencies: ApiDependencies): Router {
-  const { config, store, now, turn } = dependencies;
-  const sleep =
-    dependencies.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const { config, store, now } = dependencies;
   const limiter = new RateLimiter(config.rateLimitPerMinute, 60_000, now);
+  const admissionPerDevice = new RateLimiter(config.admissionRatePerDevice, 60_000, now);
+  const admissionPerOwner = new RateLimiter(config.admissionRatePerOwner, 60_000, now);
+  const admissionPerIp = new RateLimiter(config.admissionRatePerIp, 60_000, now);
+  const admissionGlobal = new RateLimiter(config.admissionRateGlobal, 60_000, now);
+  const attentionPerHost = new RateLimiter(config.attentionRatePerHost, 60_000, now);
+
+  function requireAdmissionBudget(context: RequestContext, accountId: string, deviceId?: string): void {
+    const allowed = admissionGlobal.allow('deployment') &&
+      admissionPerOwner.allow(accountId) &&
+      admissionPerIp.allow(context.sourceIp) &&
+      (!deviceId || admissionPerDevice.allow(deviceId));
+    if (!allowed) throw new HttpError(429, 'remote_admission_limited', 'remote-link admission budget exhausted');
+  }
 
   /** Authenticates an account credential (`Authorization: Bearer <token>`). */
   async function requireAccount(context: RequestContext) {
@@ -150,15 +149,39 @@ export function createRouter(dependencies: ApiDependencies): Router {
     });
   }
 
-  async function revokeTurnCredentials(usernames: readonly string[]): Promise<void> {
-    if (!turn || usernames.length === 0) return;
-    // Cloudflare revocation is idempotent enough for retries; issue all calls
-    // concurrently so local revocation does not leave a long exposure window.
-    await Promise.all(usernames.map((username) => turn.revoke(username)));
-  }
-
   const body = (context: RequestContext, allowed: readonly string[]) =>
     validate.object(context.body ?? {}, allowed);
+
+  function requireOperator(context: RequestContext): void {
+    const token = bearerToken(context.headers.authorization);
+    if (!token || !config.operatorSecret || !digestsMatch(token, config.operatorSecret)) throw unauthorized();
+  }
+
+  function requireRelayService(context: RequestContext): void {
+    const token = bearerToken(context.headers.authorization);
+    if (!token || !config.relayServiceToken || !digestsMatch(token, config.relayServiceToken)) throw unauthorized();
+  }
+
+  async function issueRemoteAdmission(input: {
+    linkId: string | null;
+    enrollmentId: string | null;
+    roomId: string;
+    role: 'host' | 'controller';
+    purpose: 'enrollment' | 'session';
+    generation: number;
+  }) {
+    if (!config.admissionPrivateKeyPem) throw new HttpError(503, 'relay_not_configured', 'relay admission signing is not configured');
+    const at = unixSeconds(now);
+    const id = newId('adm');
+    await store.createRemoteAdmission({ ...input, id, expiresAt: at + ADMISSION_TTL_SECONDS });
+    const claim = signAdmission({
+      iss: config.admissionIssuer, aud: 'latch-relay', kid: config.admissionKeyId,
+      roomId: input.roomId, role: input.role, purpose: input.purpose, jti: id,
+      generation: input.generation, nbf: at, exp: at + ADMISSION_TTL_SECONDS,
+      limits: REMOTE_LINK_LIMITS,
+    }, config.admissionPrivateKeyPem);
+    return { claim, expiresAt: at + ADMISSION_TTL_SECONDS };
+  }
 
   const router = new Router(withValidationMapping);
 
@@ -181,7 +204,8 @@ export function createRouter(dependencies: ApiDependencies): Router {
           release: config.releaseId,
           environment: config.environment,
           migrations: migrations.length,
-          relayConfigured: Boolean(config.cloudflareTurnKeyId),
+          relayConfigured: Boolean(config.admissionPrivateKeyPem && config.relayServiceToken),
+          apnsConfigured: Boolean(dependencies.apns),
         },
       };
     } catch {
@@ -196,8 +220,27 @@ export function createRouter(dependencies: ApiDependencies): Router {
 
   // --- Accounts -------------------------------------------------------------
 
-  router.post('/v1/accounts', async (context) => {
-    const input = body(context, ['label']);
+  router.post('/v1/operator/owner-invitations', async (context) => {
+    requireOperator(context);
+    const input = body(context, ['ttlSeconds']);
+    const ttl = input.ttlSeconds === undefined ? OWNER_INVITATION_TTL_SECONDS : input.ttlSeconds;
+    if (!Number.isSafeInteger(ttl) || Number(ttl) < 60 || Number(ttl) > OWNER_INVITATION_TTL_SECONDS) {
+      throw new ValidationError('ttlSeconds', 'ttlSeconds must be an integer between 60 and 600');
+    }
+    const id = newId('inv');
+    const credential = issueCredential('owner-invitation', id);
+    await store.createOwnerInvitation({ id, secretDigest: credential.digest, expiresAt: unixSeconds(now) + Number(ttl) });
+    return { status: 201, body: { invitation: credential.token, expiresAt: unixSeconds(now) + Number(ttl) } };
+  });
+
+  router.post('/v1/accounts/claim', async (context) => {
+    const input = body(context, ['invitation', 'label']);
+    const invitation = validate.requiredString(input, 'invitation', /^inv_[0-9a-f]{32}\.[0-9a-f]{64}$/);
+    const invitationId = subjectOf(invitation)!;
+    const consumed = await store.consumeOwnerInvitation(
+      invitationId, digestOf('owner-invitation', invitation), new Date(now()).toISOString(), unixSeconds(now),
+    );
+    if (!consumed) throw forbidden('owner invitation is invalid, expired, or already used');
     const accountId = newId('acct');
     const credential = issueCredential('account', accountId);
     const account = await store.createAccount({
@@ -232,10 +275,6 @@ export function createRouter(dependencies: ApiDependencies): Router {
     const input = body(context, ['relayEnabled']);
     const enabled = validate.boolean(input, 'relayEnabled');
     const updated = await store.setRelayEnabled(account.id, enabled);
-    if (!enabled) {
-      const usernames = await store.takeTurnCredentialUsernamesForAccount(account.id, unixSeconds(now));
-      await revokeTurnCredentials(usernames);
-    }
     await audit(account.id, null, 'account.relay_enabled', 'allowed');
     return {
       status: 200,
@@ -298,11 +337,9 @@ export function createRouter(dependencies: ApiDependencies): Router {
     const nowSeconds = unixSeconds(now);
     const entries = [];
     for (const device of visible) {
-      const online = (await store.getPresence(device.id, nowSeconds)) !== null;
       entries.push({
         ...deviceView(device, permissions.get(device.id) ?? null),
         self: device.id === caller.id,
-        online,
       });
     }
     return { status: 200, body: { devices: entries } };
@@ -333,12 +370,7 @@ export function createRouter(dependencies: ApiDependencies): Router {
     return { status: 200, body: deviceView(rotated, null) };
   });
 
-  /**
-   * Revocation. Presence, pending rendezvous offers, and unexpired relay
-   * tickets for the device are dropped in the same operation, so a revoked
-   * device loses discovery and relay admission immediately rather than at the
-   * end of its current TTL.
-   */
+  /** Revocation immediately invalidates current Remote Link grants and rooms. */
   router.post('/v1/devices/:deviceId/revoke', async (context) => {
     const deviceId = context.params.deviceId ?? '';
     // Either the account credential (the operator's incident switch) or a
@@ -371,8 +403,6 @@ export function createRouter(dependencies: ApiDependencies): Router {
       }
     }
     const revoked = await store.revokeDevice(target.id, new Date(now()).toISOString());
-    const usernames = await store.takeTurnCredentialUsernames([target.id], unixSeconds(now));
-    await revokeTurnCredentials(usernames);
     await audit(target.accountId, target.id, 'device.revoke', 'allowed');
     return { status: 200, body: deviceView(revoked ?? target, null) };
   });
@@ -411,114 +441,6 @@ export function createRouter(dependencies: ApiDependencies): Router {
     );
     await audit(caller.accountId, client.id, 'pairing.create', 'allowed');
     return { status: 201, body: pairing };
-  });
-
-  /**
-   * Registers a pairing the host is displaying as a QR code. The Mac keeps
-   * the secret; the service receives only its digest, so a control-plane
-   * breach cannot answer a scan on the Mac's behalf.
-   */
-  router.post('/v1/pairings/requests', async (context) => {
-    const caller = await requireDevice(context);
-    if (caller.role !== 'host') {
-      throw forbidden('only a host device may open a pairing request');
-    }
-    const input = body(context, ['pairingId', 'secretDigest', 'phrase', 'permission', 'expiresAt']);
-    const nowSeconds = unixSeconds(now);
-    const pending = await store.countPendingPairingRequests(caller.id, nowSeconds);
-    if (pending >= MAX_PENDING_PAIRINGS) {
-      await audit(caller.accountId, caller.id, 'pairing.request', 'denied');
-      throw forbidden('too many pending pairing requests');
-    }
-    const request = await store.createPairingRequest({
-      pairingId: validate.requiredString(input, 'pairingId', /^[0-9a-zA-Z_-]{8,64}$/),
-      accountId: caller.accountId,
-      hostDeviceId: caller.id,
-      secretDigest: validate.requiredString(input, 'secretDigest', /^[0-9a-f]{64}$/),
-      phrase: input.phrase === undefined ? null : validate.requiredString(input, 'phrase', PHRASE),
-      permission: validate.permission(input, 'permission', 'interact'),
-      expiresAt: validate.expiresAt(input, 'expiresAt', nowSeconds, PAIRING_TTL_SECONDS),
-    });
-    await audit(caller.accountId, caller.id, 'pairing.request', 'allowed');
-    return {
-      status: 201,
-      body: { pairingId: request.pairingId, expiresAt: request.expiresAt, phrase: request.phrase },
-    };
-  });
-
-  /**
-   * Confirms a scanned pairing. The one-time secret is the only credential:
-   * possession of it proves the caller was in front of the unlocked Mac while
-   * the code was displayed. The request is consumed before the device is
-   * created, so two phones scanning the same code cannot both enrol.
-   */
-  router.post('/v1/pairings/:pairingId/confirm', async (context) => {
-    const pairingId = context.params.pairingId ?? '';
-    const input = body(context, ['formatVersion', 'secret', 'device', 'phrase']);
-    const nowSeconds = unixSeconds(now);
-    const request = await store.getPairingRequest(pairingId, nowSeconds);
-    if (!request) {
-      // Unknown, consumed, and expired are reported distinctly enough for the
-      // client to say "show a new code" without revealing which it was.
-      throw new HttpError(404, 'pairing_unavailable', 'no such pairing request');
-    }
-    if (digestOf('pairing', validate.requiredString(input, 'secret', /^[0-9a-zA-Z_-]{16,128}$/)) !==
-      request.secretDigest) {
-      await audit(request.accountId, request.hostDeviceId, 'pairing.confirm', 'denied');
-      throw forbidden('pairing secret does not match');
-    }
-    const device = validate.object(input.device ?? {}, ['publicKey', 'name', 'platform']);
-    const publicKey = validate.publicKey(device, 'publicKey');
-    const host = await store.getDevice(request.hostDeviceId);
-    if (!host || host.revokedAt !== null) {
-      throw new HttpError(410, 'pairing_expired', 'the host device is no longer available');
-    }
-    const existing = (await store.listDevices(request.accountId)).find(
-      (candidate) => candidate.publicKey === publicKey && candidate.revokedAt === null,
-    );
-    if (existing) {
-      await audit(request.accountId, existing.id, 'pairing.confirm', 'denied');
-      throw new HttpError(409, 'already_paired', 'this identity is already enrolled');
-    }
-    if ((await store.countDevices(request.accountId)) >= config.maxDevicesPerAccount) {
-      throw forbidden('device limit reached for this account');
-    }
-    if (!(await store.consumePairingRequest(pairingId, new Date(now()).toISOString(), nowSeconds))) {
-      throw new HttpError(409, 'pairing_consumed', 'this pairing code was already used');
-    }
-    const deviceId = newId('dev');
-    const credential = issueCredential('device', deviceId);
-    const enrolled = await store.createDevice({
-      id: deviceId,
-      accountId: request.accountId,
-      name: validate.requiredLabel(device, 'name'),
-      platform: validate.requiredString(device, 'platform', /^[a-z0-9.-]{2,32}$/),
-      role: 'client',
-      publicKey,
-      tokenDigest: credential.digest,
-    });
-    const pairing = await store.upsertPairing(
-      request.accountId,
-      host.id,
-      enrolled.id,
-      request.permission,
-    );
-    await audit(request.accountId, enrolled.id, 'pairing.confirm', 'allowed');
-    return {
-      status: 201,
-      body: {
-        device: {
-          deviceId: enrolled.id,
-          name: enrolled.name,
-          permission: pairing.permission,
-          revoked: false,
-        },
-        mac: { deviceId: host.id, publicKey: host.publicKey, name: host.name },
-        // Returned exactly once; only its digest is stored.
-        accessToken: credential.token,
-        phrase: request.phrase,
-      },
-    };
   });
 
   /** A device reads its own record and its host, to detect revocation. */
@@ -565,248 +487,302 @@ export function createRouter(dependencies: ApiDependencies): Router {
     if (!removed) {
       throw new HttpError(404, 'not_found', 'no such pairing');
     }
-    const usernames = await store.takeTurnCredentialUsernames([host, client], unixSeconds(now));
-    await revokeTurnCredentials(usernames);
     await audit(caller.accountId, peer.id, 'pairing.revoke', 'allowed');
     return { status: 200, body: { hostDeviceId: host, clientDeviceId: client, revoked: true } };
   });
 
-  // --- Presence -------------------------------------------------------------
+  // --- Remote Link v1 enrollment and opaque relay admission ----------------
 
-  router.post('/v1/presence', async (context) => {
-    const caller = await requireDevice(context);
-    const nowSeconds = unixSeconds(now);
-    const input = body(context, ['candidates', 'iceUfrag', 'icePwd']);
-    const parsed = validate.candidates(input, 'candidates', {
-      max: config.maxCandidates,
-      now: nowSeconds,
-      maxLifetimeSeconds: config.presenceTtlSeconds,
+  router.post('/v1/enrollments', async (context) => {
+    const host = await requireDevice(context);
+    body(context, []);
+    if (host.role !== 'host') throw forbidden('only a host device may open enrollment');
+    const account = await store.getAccount(host.accountId);
+    if (!account?.relayEnabled) throw forbidden('remote access is disabled for this account');
+    requireAdmissionBudget(context, host.accountId, host.id);
+    const id = newId('enr');
+    const roomId = randomBytes(32).toString('base64url');
+    const admissionCode = issueCredential('enrollment', id);
+    const expiresAt = unixSeconds(now) + ENROLLMENT_TTL_SECONDS;
+    await store.createRemoteEnrollment({
+      id, accountId: host.accountId, hostDeviceId: host.id, roomId,
+      admissionDigest: admissionCode.digest, expiresAt,
     });
-    const expiresAt = Math.min(
-      nowSeconds + config.presenceTtlSeconds,
-      Math.max(...parsed.map((candidate) => candidate.expiresAt)),
-    );
-    const ice = validate.iceCredentials(input);
-    const presence = await store.publishPresence({
-      deviceId: caller.id,
-      accountId: caller.accountId,
-      candidates: parsed,
-      ...ice,
-      expiresAt,
+    const hostAdmission = await issueRemoteAdmission({
+      linkId: null, enrollmentId: id, roomId, role: 'host', purpose: 'enrollment', generation: 1,
     });
-    return {
-      status: 200,
-      body: {
-        deviceId: presence.deviceId,
-        expiresAt: presence.expiresAt,
-        ttlSeconds: presence.expiresAt - nowSeconds,
-      },
-    };
-  });
-
-  router.delete('/v1/presence', async (context) => {
-    const caller = await requireDevice(context);
-    await store.clearPresence(caller.id);
-    return { status: 200, body: { deviceId: caller.id, published: false } };
-  });
-
-  router.get('/v1/presence/:deviceId', async (context) => {
-    const caller = await requireDevice(context);
-    const target = await store.getDevice(context.params.deviceId ?? '');
-    if (!target || target.accountId !== caller.accountId) {
-      throw new HttpError(404, 'not_found', 'no such device');
-    }
-    if (target.id !== caller.id && !(await pairingBetween(caller, target))) {
-      await audit(caller.accountId, target.id, 'presence.read', 'denied');
-      throw forbidden('devices must be paired to observe presence');
-    }
-    const presence = await store.getPresence(target.id, unixSeconds(now));
-    if (!presence) {
-      return { status: 200, body: { deviceId: target.id, online: false, candidates: [] } };
-    }
-    return {
-      status: 200,
-      body: {
-        deviceId: target.id,
-        online: true,
-        identityKey: target.publicKey,
-        candidates: presence.candidates,
-        ...(presence.iceUfrag ? { iceUfrag: presence.iceUfrag, icePwd: presence.icePwd } : {}),
-        expiresAt: presence.expiresAt,
-      },
-    };
-  });
-
-  // --- Rendezvous -----------------------------------------------------------
-
-  /**
-   * Exchanges connection candidates with a paired, currently-present device.
-   * The requester's candidates are held for the target to collect; the
-   * response carries the target's candidates and its pinned identity key so
-   * the caller can verify the peer static key during the Noise handshake.
-   */
-  router.post('/v1/rendezvous', async (context) => {
-    const caller = await requireDevice(context);
-    const nowSeconds = unixSeconds(now);
-    const input = body(context, ['targetDeviceId', 'requestId', 'candidates', 'iceUfrag', 'icePwd', 'expiresAt']);
-    const targetDeviceId = validate.opaqueId(input, 'targetDeviceId');
-    if (targetDeviceId === caller.id) {
-      throw new HttpError(409, 'invalid_target', 'rendezvous cannot target the calling device');
-    }
-    const target = await store.getDevice(targetDeviceId);
-    if (!target || target.accountId !== caller.accountId) {
-      throw new HttpError(404, 'not_found', 'no such device');
-    }
-    const pairing = await pairingBetween(caller, target);
-    if (!pairing || target.revokedAt !== null) {
-      await audit(caller.accountId, target.id, 'rendezvous.request', 'denied');
-      throw forbidden('rendezvous requires an active pairing');
-    }
-    const requestId = validate.requestId(input, 'requestId');
-    const parsed = validate.candidates(input, 'candidates', {
-      max: config.maxCandidates,
-      now: nowSeconds,
-      maxLifetimeSeconds: config.rendezvousTtlSeconds,
-    });
-    const requestedExpiry = validate.expiresAt(
-      input,
-      'expiresAt',
-      nowSeconds,
-      config.rendezvousTtlSeconds,
-    );
-    const ice = validate.iceCredentials(input);
-    const presence = await store.getPresence(target.id, nowSeconds);
-    if (!presence) {
-      await audit(caller.accountId, target.id, 'rendezvous.request', 'denied');
-      throw new HttpError(409, 'target_offline', 'target device has no current presence');
-    }
-    await store.createOffer({
-      id: newId('rdv'),
-      accountId: caller.accountId,
-      requesterDeviceId: caller.id,
-      targetDeviceId: target.id,
-      requestId,
-      candidates: parsed,
-      ...ice,
-      expiresAt: requestedExpiry,
-    });
-    await audit(caller.accountId, target.id, 'rendezvous.request', 'allowed');
-    return {
-      status: 200,
-      body: {
-        requestId,
-        peerDeviceId: target.id,
-        peerIdentityKey: target.publicKey,
-        permission: pairing.permission,
-        candidates: presence.candidates,
-        ...(presence.iceUfrag ? { iceUfrag: presence.iceUfrag, icePwd: presence.icePwd } : {}),
-        expiresAt: Math.min(presence.expiresAt, requestedExpiry),
-      },
-    };
-  });
-
-  /**
-   * Collects and consumes the offers addressed to the calling device.
-   *
-   * With `?wait=<seconds>` the request is held until at least one offer is
-   * queued or the wait elapses, whichever is first. Without it the call
-   * answers immediately, which is what a client that predates the wait gets.
-   * Authentication and the rate limit are charged once per request, not per
-   * re-check, so a host holding one request at a time costs a few requests a
-   * minute.
-   */
-  router.get('/v1/rendezvous', async (context) => {
-    const caller = await requireDevice(context);
-    const wait = validate.waitSeconds(context.query.get('wait'), MAX_RENDEZVOUS_WAIT_SECONDS);
-    const collect = async () => {
-      const offers = await store.takeOffers(caller.id, unixSeconds(now));
-      const results = [];
-      for (const offer of offers) {
-        const requester = await store.getDevice(offer.requesterDeviceId);
-        if (!requester || requester.revokedAt !== null) {
-          continue;
-        }
-        if (!(await pairingBetween(caller, requester))) {
-          continue;
-        }
-        results.push({
-          requestId: offer.requestId,
-          peerDeviceId: requester.id,
-          peerIdentityKey: requester.publicKey,
-          candidates: offer.candidates,
-          ...(offer.iceUfrag ? { iceUfrag: offer.iceUfrag, icePwd: offer.icePwd } : {}),
-          expiresAt: offer.expiresAt,
-        });
-      }
-      return results;
-    };
-    const deadline = Date.now() + wait * 1000;
-    let results = await collect();
-    while (results.length === 0 && Date.now() < deadline) {
-      await sleep(Math.min(RENDEZVOUS_WAIT_POLL_MS, Math.max(0, deadline - Date.now())));
-      results = await collect();
-    }
-    return { status: 200, body: { offers: results } };
-  });
-
-  // --- Cloudflare Realtime TURN --------------------------------------------
-
-  /**
-   * Provides public STUN servers before a peer is known. This is deliberately
-   * independent of the relay switch: disabling TURN fallback must not disable
-   * direct server-reflexive candidate gathering.
-   */
-  router.get('/v1/ice-servers', async (context) => {
-    await requireDevice(context);
-    if (!turn) {
-      throw new HttpError(503, 'relay_not_configured', 'Cloudflare ICE is not configured');
-    }
-    return { status: 200, body: { iceServers: turn.stunServers() } };
-  });
-
-  /** Issues Cloudflare ICE configuration only after existing pairing checks. */
-  router.post('/v1/turn-credentials', async (context) => {
-    const caller = await requireDevice(context);
-    const input = body(context, ['peerDeviceId']);
-    const peerDeviceId = validate.opaqueId(input, 'peerDeviceId');
-    const peer = await store.getDevice(peerDeviceId);
-    if (!peer || peer.accountId !== caller.accountId) {
-      throw new HttpError(404, 'not_found', 'no such device');
-    }
-    const pairing = await pairingBetween(caller, peer);
-    if (!pairing || peer.revokedAt !== null) {
-      await audit(caller.accountId, peer.id, 'turn.credentials', 'denied');
-      throw forbidden('TURN credentials require an active pairing');
-    }
-    const account = await store.getAccount(caller.accountId);
-    if (!account?.relayEnabled) {
-      await audit(caller.accountId, peer.id, 'turn.credentials', 'denied');
-      throw forbidden('relay access is disabled for this account');
-    }
-    if (!turn) {
-      throw new HttpError(503, 'relay_not_configured', 'Cloudflare TURN is not configured');
-    }
-    const nowSeconds = unixSeconds(now);
-    let iceServers;
-    try {
-      iceServers = await turn.issue(config.turnCredentialTtlSeconds);
-    } catch {
-      await audit(caller.accountId, peer.id, 'turn.credentials', 'denied');
-      throw new HttpError(503, 'relay_unavailable', 'TURN credential service is unavailable');
-    }
-    const usernames = iceServers.flatMap((server) => server.username ? [server.username] : []);
-    await Promise.all(usernames.map((username) => store.createTurnCredential({
-      accountId: caller.accountId, deviceId: caller.id, username,
-      expiresAt: nowSeconds + config.turnCredentialTtlSeconds,
-    })));
-    await audit(caller.accountId, peer.id, 'turn.credentials', 'allowed');
+    await audit(host.accountId, host.id, 'enrollment.open', 'allowed');
     return {
       status: 201,
       body: {
-        iceServers,
-        expiresAt: nowSeconds + config.turnCredentialTtlSeconds,
+        version: 1, enrollmentId: id, expiresAt, relayUrl: config.relayUrl,
+        hostPublicKey: host.publicKey, admissionCode: admissionCode.token,
+        hostAdmission: hostAdmission.claim,
       },
     };
+  });
+
+  router.post('/v1/enrollments/:enrollmentId/claim', async (context) => {
+    const enrollmentId = context.params.enrollmentId ?? '';
+    if (!validate.isOpaqueId(enrollmentId)) throw new HttpError(404, 'not_found', 'no such enrollment');
+    const input = body(context, ['admissionCode', 'name', 'platform', 'publicKey']);
+    const admissionCode = validate.requiredString(input, 'admissionCode', /^enr_[0-9a-f]{32}\.[0-9a-f]{64}$/);
+    if (subjectOf(admissionCode) !== enrollmentId) throw forbidden('enrollment admission does not match');
+    const provisionalDeviceId = newId('dev');
+    const provisionalCredential = issueCredential('device', provisionalDeviceId);
+    const claimed = await store.claimRemoteEnrollment({
+      id: enrollmentId,
+      admissionDigest: digestOf('enrollment', admissionCode),
+      provisionalDeviceId,
+      provisionalName: validate.requiredLabel(input, 'name'),
+      provisionalPlatform: validate.requiredString(input, 'platform', /^[a-z0-9.-]{2,32}$/),
+      provisionalPublicKey: validate.publicKey(input, 'publicKey'),
+      provisionalTokenDigest: provisionalCredential.digest,
+      now: unixSeconds(now),
+    });
+    if (!claimed) throw new HttpError(409, 'enrollment_unavailable', 'enrollment is invalid, expired, or already claimed');
+    const enrollment = await store.getRemoteEnrollment(enrollmentId, unixSeconds(now));
+    if (!enrollment) throw new HttpError(409, 'enrollment_unavailable', 'enrollment is unavailable');
+    requireAdmissionBudget(context, enrollment.accountId, provisionalDeviceId);
+    const controllerAdmission = await issueRemoteAdmission({
+      linkId: null, enrollmentId, roomId: enrollment.roomId,
+      role: 'controller', purpose: 'enrollment', generation: 1,
+    });
+    await audit(enrollment.accountId, provisionalDeviceId, 'enrollment.claim', 'allowed');
+    return {
+      status: 201,
+      body: {
+        version: 1, enrollmentId, provisionalDeviceId,
+        provisionalToken: provisionalCredential.token,
+        relayUrl: config.relayUrl, controllerAdmission: controllerAdmission.claim,
+      },
+    };
+  });
+
+  router.post('/v1/enrollments/:enrollmentId/complete', async (context) => {
+    const host = await requireDevice(context);
+    if (host.role !== 'host') throw forbidden('only a host device may complete enrollment');
+    const enrollmentId = context.params.enrollmentId ?? '';
+    const enrollment = await store.getRemoteEnrollment(enrollmentId, unixSeconds(now));
+    if (!enrollment || enrollment.hostDeviceId !== host.id || enrollment.accountId !== host.accountId) {
+      throw new HttpError(404, 'not_found', 'no such enrollment');
+    }
+    const input = body(context, ['controllerPublicKey', 'permission', 'grantRevision']);
+    const controllerPublicKey = validate.publicKey(input, 'controllerPublicKey');
+    const permission = validate.permission(input, 'permission', 'interact');
+    const grantRevision = input.grantRevision;
+    if (!Number.isSafeInteger(grantRevision) || Number(grantRevision) !== 1) {
+      throw new ValidationError('grantRevision', 'initial grantRevision must be 1');
+    }
+    if (!enrollment.provisionalDeviceId || !enrollment.provisionalTokenDigest ||
+        enrollment.provisionalPublicKey !== controllerPublicKey || !enrollment.provisionalName || !enrollment.provisionalPlatform) {
+      await audit(host.accountId, enrollment.provisionalDeviceId, 'enrollment.complete', 'denied');
+      throw forbidden('approval does not match the encrypted enrollment proposal');
+    }
+    const link = await store.finalizeRemoteEnrollment({
+      id: enrollmentId, hostDeviceId: host.id, controllerPublicKey, permission,
+      linkId: newId('link'), linkRoomId: randomBytes(32).toString('base64url'),
+      completedAt: new Date(now()).toISOString(), now: unixSeconds(now),
+      maxDevices: config.maxDevicesPerAccount,
+    });
+    if (!link) throw new HttpError(409, 'enrollment_unavailable', 'enrollment was already completed, cancelled, or over entitlement');
+    await audit(host.accountId, enrollment.provisionalDeviceId, 'enrollment.complete', 'allowed');
+    return {
+      status: 200,
+      body: {
+        version: 1, enrollmentId, hostPublicKey: host.publicKey,
+        controllerPublicKey, permission, grantRevision: link.grantRevision,
+        remoteLinkId: link.id,
+      },
+    };
+  });
+
+  router.delete('/v1/enrollments/:enrollmentId', async (context) => {
+    const host = await requireDevice(context);
+    const enrollment = await store.getRemoteEnrollment(context.params.enrollmentId ?? '', unixSeconds(now));
+    if (!enrollment || enrollment.hostDeviceId !== host.id) throw new HttpError(404, 'not_found', 'no such enrollment');
+    if (!(await store.cancelRemoteEnrollment(enrollment.id, new Date(now()).toISOString()))) {
+      throw new HttpError(409, 'enrollment_unavailable', 'enrollment cannot be cancelled');
+    }
+    return { status: 200, body: { enrollmentId: enrollment.id, cancelled: true } };
+  });
+
+  router.get('/v1/remote-links', async (context) => {
+    const caller = await requireDevice(context);
+    const pairings = await store.listPairingsForDevice(caller.id);
+    const links = [];
+    for (const pairing of pairings) {
+      const link = await store.getOrCreateRemoteLink(
+        pairing.accountId, pairing.hostDeviceId, pairing.clientDeviceId, randomBytes(32).toString('base64url'),
+      );
+      const peerId = caller.id === pairing.hostDeviceId ? pairing.clientDeviceId : pairing.hostDeviceId;
+      const peer = await store.getDevice(peerId);
+      if (peer && peer.revokedAt === null) {
+        links.push({
+          version: 1, linkId: link.id, peerDeviceId: peer.id, peerPublicKey: peer.publicKey,
+          permission: pairing.permission, grantRevision: link.grantRevision,
+        });
+      }
+    }
+    return { status: 200, body: { links } };
+  });
+
+  router.post('/v1/relay-admissions', async (context) => {
+    const caller = await requireDevice(context);
+    const input = body(context, ['peerDeviceId']);
+    const peer = await store.getDevice(validate.opaqueId(input, 'peerDeviceId'));
+    if (!peer || peer.accountId !== caller.accountId) throw new HttpError(404, 'not_found', 'no such device');
+    const pairing = await pairingBetween(caller, peer);
+    const account = await store.getAccount(caller.accountId);
+    if (!pairing || peer.revokedAt !== null || !account?.relayEnabled) {
+      await audit(caller.accountId, peer.id, 'relay.admission', 'denied');
+      throw forbidden('relay admission requires an active entitled pairing');
+    }
+    requireAdmissionBudget(context, caller.accountId, caller.id);
+    const hostId = caller.role === 'host' ? caller.id : peer.id;
+    const clientId = caller.role === 'client' ? caller.id : peer.id;
+    const link = await store.getOrCreateRemoteLink(
+      caller.accountId, hostId, clientId, randomBytes(32).toString('base64url'),
+    );
+    const role = caller.role === 'host' ? 'host' : 'controller';
+    const generation = role === 'host' ? link.hostGeneration + 1 : link.controllerGeneration + 1;
+    const admission = await issueRemoteAdmission({
+      linkId: link.id, enrollmentId: null, roomId: link.roomId,
+      role, purpose: 'session', generation,
+    });
+    await audit(caller.accountId, peer.id, 'relay.admission', 'allowed');
+    return { status: 201, body: { version: 1, relayUrl: config.relayUrl, admission: admission.claim, expiresAt: admission.expiresAt } };
+  });
+
+  // --- Attention notifications --------------------------------------------
+
+  /** A controller registers the APNs token the app received. One per device. */
+  router.put('/v1/push-registrations', async (context) => {
+    const caller = await requireDevice(context);
+    const input = body(context, ['pushToken']);
+    if (caller.role !== 'client') throw forbidden('only a controller device receives notifications');
+    const pushToken = validate.requiredString(input, 'pushToken', PUSH_TOKEN);
+    await store.upsertPushRegistration(caller.id, pushToken, new Date(now()).toISOString());
+    await audit(caller.accountId, caller.id, 'push.register', 'allowed');
+    return { status: 200, body: { registered: true } };
+  });
+
+  router.delete('/v1/push-registrations', async (context) => {
+    const caller = await requireDevice(context);
+    await store.deletePushRegistration(caller.id);
+    await audit(caller.accountId, caller.id, 'push.unregister', 'allowed');
+    return { status: 200, body: { registered: false } };
+  });
+
+  /**
+   * A host asks for one generic attention alert to a paired phone. The body
+   * names the phone and an opaque event id; nothing about the session, the
+   * prompt, or the approval travels here, and the payload sent to APNs is a
+   * fixed sentence. Delivery is best effort and never required for the
+   * phone's own foreground refresh.
+   */
+  router.post('/v1/attention', async (context) => {
+    const host = await requireDevice(context);
+    const input = body(context, ['clientDeviceId', 'eventId']);
+    if (host.role !== 'host') throw forbidden('only a host device may request attention');
+    const clientDeviceId = validate.opaqueId(input, 'clientDeviceId');
+    const eventId = validate.requiredString(input, 'eventId', EVENT_ID);
+    const client = await store.getDevice(clientDeviceId);
+    const pairing = client ? await store.getPairing(host.id, client.id) : null;
+    if (!client || client.accountId !== host.accountId || client.revokedAt !== null || !pairing) {
+      await audit(host.accountId, clientDeviceId, 'attention.notify', 'denied');
+      throw forbidden('attention requires an active pairing with that device');
+    }
+    if (!attentionPerHost.allow(host.id)) {
+      throw new HttpError(429, 'attention_limited', 'attention notification budget exhausted');
+    }
+    const fresh = await store.recordAttentionEvent(host.id, client.id, eventId, new Date(now()).toISOString());
+    if (!fresh) {
+      return { status: 202, body: { eventId, delivered: false, reason: 'duplicate' } };
+    }
+    const registration = await store.getPushRegistration(client.id);
+    if (!registration) {
+      return { status: 202, body: { eventId, delivered: false, reason: 'unregistered' } };
+    }
+    if (!dependencies.apns) {
+      return { status: 202, body: { eventId, delivered: false, reason: 'unconfigured' } };
+    }
+    const outcome = await dependencies.apns.send({
+      token: registration.pushToken,
+      collapseId: eventId,
+      expiresAt: unixSeconds(now) + ATTENTION_TTL_SECONDS,
+    });
+    if (outcome === 'invalid_token') {
+      // Apple says this token will never work again; keeping it would only
+      // repeat the failure on every event.
+      await store.deletePushRegistration(client.id);
+    }
+    await audit(host.accountId, client.id, 'attention.notify', outcome === 'delivered' ? 'allowed' : 'denied');
+    return {
+      status: 202,
+      body: { eventId, delivered: outcome === 'delivered', ...(outcome === 'delivered' ? {} : { reason: outcome }) },
+    };
+  });
+
+  router.post('/private/v1/relay/redemptions', async (context) => {
+    requireRelayService(context);
+    const input = body(context, ['ticketId', 'attemptId']);
+    const ticketId = validate.opaqueId(input, 'ticketId');
+    const attemptId = validate.requiredString(input, 'attemptId', /^[A-Za-z0-9_-]{16,96}$/);
+    const admission = await store.getRemoteAdmission(ticketId);
+    if (!admission) throw forbidden('admission is unavailable');
+    if (admission.linkId) {
+      const link = await store.getRemoteLink(admission.linkId);
+      if (!link) throw forbidden('link is unavailable');
+      const account = await store.getAccount(link.accountId);
+      const host = await store.getDevice(link.hostDeviceId);
+      const controller = await store.getDevice(link.clientDeviceId);
+      const pairing = await store.getPairing(link.hostDeviceId, link.clientDeviceId);
+      const currentGeneration = admission.role === 'host' ? link.hostGeneration : link.controllerGeneration;
+      if (!account?.relayEnabled || !host || host.revokedAt || !controller || controller.revokedAt || !pairing ||
+          admission.generation !== currentGeneration) {
+        throw forbidden('admission authorization is no longer current');
+      }
+    } else if (admission.enrollmentId) {
+      const enrollment = await store.getRemoteEnrollment(admission.enrollmentId, unixSeconds(now));
+      if (!enrollment || (admission.role === 'controller' && !enrollment.provisionalDeviceId)) {
+        throw forbidden('enrollment authorization is no longer current');
+      }
+    }
+    const leaseId = newId('lease');
+    const redeemed = await store.redeemRemoteAdmission(
+      ticketId, attemptId, leaseId, unixSeconds(now) + LEASE_TTL_SECONDS, unixSeconds(now),
+    );
+    if (!redeemed?.leaseId || !redeemed.leaseExpiresAt) throw forbidden('admission was already spent');
+    return { status: 200, body: { leaseId: redeemed.leaseId, expiresAt: redeemed.leaseExpiresAt } };
+  });
+
+  router.post('/v1/relay-leases/:leaseId/renew', async (context) => {
+    const caller = await requireDevice(context);
+    const leaseId = context.params.leaseId ?? '';
+    if (!/^lease_[0-9a-f]{32}$/.test(leaseId)) throw new HttpError(404, 'not_found', 'no such lease');
+    const current = await store.getRemoteAdmissionByLease(leaseId);
+    if (!current?.linkId || !current.leaseId || !config.admissionPrivateKeyPem) throw forbidden('lease is unavailable');
+    const link = await store.getRemoteLink(current.linkId);
+    if (!link) throw forbidden('link is unavailable');
+    const expectedDevice = current.role === 'host' ? link.hostDeviceId : link.clientDeviceId;
+    const pairing = await store.getPairing(link.hostDeviceId, link.clientDeviceId);
+    const account = await store.getAccount(link.accountId);
+    const currentGeneration = current.role === 'host' ? link.hostGeneration : link.controllerGeneration;
+    if (caller.id !== expectedDevice || !pairing || !account?.relayEnabled || current.generation !== currentGeneration) {
+      throw forbidden('lease authorization is no longer current');
+    }
+    const at = unixSeconds(now);
+    const expiresAt = at + LEASE_TTL_SECONDS;
+    const extended = await store.extendRemoteLease(leaseId, expiresAt, at);
+    if (!extended) throw forbidden('lease is unavailable');
+    const claim = signAdmission({
+      iss: config.admissionIssuer, aud: 'latch-relay', kid: config.admissionKeyId,
+      roomId: current.roomId, role: current.role, purpose: current.purpose,
+      jti: newId('ext'), generation: current.generation, nbf: at, exp: expiresAt,
+      limits: REMOTE_LINK_LIMITS, leaseId: current.leaseId,
+    }, config.admissionPrivateKeyPem);
+    return { status: 200, body: { leaseId, expiresAt, extension: claim } };
   });
 
   return router;

@@ -6,6 +6,10 @@
 use serde::{Deserialize, Serialize};
 
 pub const DEVICE_GRANT_HEADER: &str = "x-latch-device-grant";
+/// Mac-local opaque controller id, injected by the loopback proxy on the fixed
+/// internal hop so operation receipts and terminal resume grants can be scoped
+/// to the device that made them. Trusted from loopback only.
+pub const DEVICE_ID_HEADER: &str = "x-latch-device-id";
 
 /// Access granted to a paired device and required by a gateway route.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

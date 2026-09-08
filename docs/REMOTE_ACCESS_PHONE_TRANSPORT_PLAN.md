@@ -1,5 +1,8 @@
 # Remote access: phone transport plan
 
+> Historical planning record for the retired transport. The current design is
+> [Remote Link](DECISION_REMOTE_ACCESS_TRANSPORT.md).
+
 **Status:** implemented. Phases A through F below all landed under mission
 `coo:856`: the two datapath defects are fixed and covered by a round-trip
 test, the Mac publishes real ICE presence and answers rendezvous offers, the

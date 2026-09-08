@@ -1,0 +1,6 @@
+{
+  "type": "admission",
+  "version": 1,
+  "relayUrl": "wss://relay.example/v1/connect",
+  "admission": "eyJhbGciOiJFZERTQSIsImtpZCI6ImxhdGNoLXJlbW90ZS1saW5rLXYxIn0.e30.c2ln"
+}

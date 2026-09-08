@@ -1,72 +1,36 @@
 //! Dedicated process boundary for remote-facing parsers and sockets.
 
-use std::net::SocketAddr;
+use std::io::BufRead;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use anyhow::Context;
 use clap::Parser;
 use latch::session::paths::LatchHome;
-use latch_remote::ice::IceResponder;
-use latch_transport::policy::IceServer;
 
 #[derive(Parser)]
 #[command(name = "latch-remote", version, about)]
 struct Arguments {
-    /// Authenticated listener address; loopback is refused by the helper.
-    #[arg(long, default_value = "0.0.0.0:0")]
-    bind: SocketAddr,
+    /// Run the Remote Link v1 WSS host and read its admission JSON from stdin.
+    #[arg(long)]
+    link_serve: bool,
     /// Main latch executable used only to supervise the private loopback gateway.
     #[arg(long)]
     latch_bin: PathBuf,
-    /// STUN URL used for server-reflexive candidate gathering. May be repeated.
-    /// Omitting it gathers host candidates only, which is what a LAN or a
-    /// tailnet needs; a TURN URL is refused because relay allocation is a
-    /// policy decision this flag must not be able to make. Relays reach the
-    /// helper through `latch remote-access relay-servers`, after the control
-    /// plane has issued them to this Mac.
-    #[arg(long = "ice-server")]
-    ice_servers: Vec<String>,
 }
 
 fn main() -> anyhow::Result<()> {
     let arguments = Arguments::parse();
     let home = LatchHome::from_env()?;
-    latch_remote::diagnostics::install_if_requested(&home.remote_access_dir())
-        .context("cannot open the ICE diagnostics log")?;
-    if !arguments.latch_bin.is_file() {
-        anyhow::bail!(
-            "latch executable does not exist: {}",
-            arguments.latch_bin.display()
-        );
+    if !arguments.link_serve {
+        anyhow::bail!("latch-remote only supports --link-serve Remote Link v1");
     }
-    // The release boundary is not decorative: the terminal-facing `latch`
-    // binary does not depend on latch-transport, and this helper is the sole
-    // owner of the internet-facing protocol code. `serve_lan` receives the ICE
-    // agent as an injected transport rather than linking it.
-    let _stack = latch_transport::STACK_NAME;
-    let servers = arguments
-        .ice_servers
-        .into_iter()
-        .map(|url| {
-            let server = IceServer {
-                url,
-                username: String::new(),
-                credential: String::new(),
-            };
-            if server.is_turn() {
-                anyhow::bail!("--ice-server accepts STUN URLs only: {}", server.url);
-            }
-            Ok(server)
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    let responder =
-        IceResponder::new(home.clone(), servers).context("cannot create the ICE responder")?;
-    latch::cli::remote_access::serve_lan(
-        home,
-        arguments.bind,
-        arguments.latch_bin,
-        Some(Arc::new(responder)),
-    )
-    .context("remote-access helper failed")
+    let mut document = String::new();
+    std::io::stdin()
+        .lock()
+        .read_line(&mut document)
+        .context("cannot read Remote Link host configuration from stdin")?;
+    let config =
+        serde_json::from_str(&document).context("invalid Remote Link host configuration")?;
+    latch_remote::link::serve_remote_link(home, arguments.latch_bin, config)
+        .context("Remote Link helper failed")
 }

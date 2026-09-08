@@ -1,0 +1,20 @@
+{
+  "linkHello": {
+    "type": "link_hello",
+    "version": 1,
+    "nonce": "1111111111111111111111111111111111111111111111111111111111111111",
+    "grantRevision": 7,
+    "limits": {
+      "maxStreams": 32,
+      "streamWindowBytes": 262144,
+      "totalBufferBytes": 8388608,
+      "recordBytes": 65535
+    }
+  },
+  "openGateway": {
+    "type": "open_service",
+    "version": 1,
+    "service": "gateway",
+    "grantRevision": 7
+  }
+}

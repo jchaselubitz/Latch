@@ -56,80 +56,77 @@ export interface Pairing {
   readonly revokedAt: string | null;
 }
 
-/** A short-lived, structured ICE endpoint candidate. Never a gateway address. */
-export interface Candidate {
-  readonly address: string;
-  readonly expiresAt: number;
-  /** RFC 8445 candidate type. Omitted only by older host-candidate publishers. */
-  readonly type?: 'host' | 'srflx' | 'prflx' | 'relay';
-  /** ICE candidate priority. */
-  readonly priority?: number;
-  /** ICE candidate foundation, constrained to transport metadata characters. */
-  readonly foundation?: string;
-  readonly component?: 1 | 2;
-  readonly protocol?: 'udp' | 'tcp';
-  /** Related endpoint for server-reflexive, peer-reflexive, and relay candidates. */
-  readonly relatedAddress?: string;
-  readonly relatedPort?: number;
-  readonly tcpType?: 'active' | 'passive' | 'so';
-}
-
-export interface Presence {
-  readonly deviceId: string;
-  readonly accountId: string;
-  readonly candidates: readonly Candidate[];
-  /** ICE credentials are short-lived transport metadata, not a peer identity. */
-  readonly iceUfrag?: string;
-  readonly icePwd?: string;
-  readonly expiresAt: number;
-  readonly updatedAt: string;
-}
-
-/** A rendezvous offer held for the target device until it expires. */
-export interface RendezvousOffer {
+/** Operator-minted, single-use bootstrap for the sole owner's account. */
+export interface OwnerInvitation {
   readonly id: string;
-  readonly accountId: string;
-  readonly requesterDeviceId: string;
-  readonly targetDeviceId: string;
-  readonly requestId: string;
-  readonly candidates: readonly Candidate[];
-  readonly iceUfrag?: string;
-  readonly icePwd?: string;
-  readonly expiresAt: number;
-  readonly createdAt: string;
-}
-
-/**
- * Relay admission material. The plaintext authentication secret is returned
- * once at issuance and only its digest is retained, so a control-plane
- * database leak cannot admit an endpoint to a live relay slot.
- */
-export interface RelayTicket {
-  readonly relayId: string;
-  readonly accountId: string;
-  readonly hostDeviceId: string;
-  readonly clientDeviceId: string;
   readonly secretDigest: string;
-  readonly expiresAt: number;
-  readonly admittedDeviceIds: readonly string[];
-  readonly createdAt: string;
-}
-
-/**
- * A pairing request the host device is displaying as a QR code. Only the
- * digest of the one-time secret is held, mirroring the local Mac record, and
- * the row is single-use.
- */
-export interface PairingRequest {
-  readonly pairingId: string;
-  readonly accountId: string;
-  readonly hostDeviceId: string;
-  readonly secretDigest: string;
-  readonly phrase: string | null;
-  readonly permission: Permission;
   readonly expiresAt: number;
   readonly consumedAt: string | null;
   readonly createdAt: string;
+}
+
+/** Provisional enrollment; its QR-only secret is deliberately absent. */
+export interface RemoteEnrollment {
+  readonly id: string;
+  readonly accountId: string;
+  readonly hostDeviceId: string;
+  readonly roomId: string;
+  readonly admissionDigest: string;
+  readonly expiresAt: number;
+  readonly provisionalDeviceId: string | null;
+  readonly provisionalName: string | null;
+  readonly provisionalPlatform: string | null;
+  readonly provisionalPublicKey: string | null;
+  readonly provisionalTokenDigest: string | null;
+  readonly completedAt: string | null;
+  readonly cancelledAt: string | null;
+  readonly createdAt: string;
+}
+
+/** Stable opaque room assignment for one locally approved pair. */
+export interface RemoteLink {
+  readonly id: string;
+  readonly accountId: string;
+  readonly hostDeviceId: string;
+  readonly clientDeviceId: string;
+  readonly roomId: string;
+  readonly grantRevision: number;
+  readonly hostGeneration: number;
+  readonly controllerGeneration: number;
+  readonly createdAt: string;
+}
+
+/** Single-use signed relay admission tracked beyond its expiry. */
+export interface RemoteAdmission {
+  readonly id: string;
+  readonly linkId: string | null;
+  readonly enrollmentId: string | null;
+  readonly roomId: string;
+  readonly role: 'host' | 'controller';
+  readonly purpose: 'enrollment' | 'session';
+  readonly generation: number;
+  readonly expiresAt: number;
+  readonly attemptId: string | null;
+  readonly leaseId: string | null;
+  readonly leaseExpiresAt: number | null;
+  readonly createdAt: string;
+}
+
+/** Durable room invalidation delivered to the relay at least once. */
+export interface RelayRevocation {
+  readonly id: string;
+  readonly roomId: string;
+  readonly notAfter: number;
+  readonly attempts: number;
+  readonly acknowledgedAt: string | null;
+  readonly createdAt: string;
+}
+
+/** One opaque APNs token per controller device. */
+export interface PushRegistration {
+  readonly deviceId: string;
+  readonly pushToken: string;
+  readonly updatedAt: string;
 }
 
 /** Coarse, content-free audit record. */

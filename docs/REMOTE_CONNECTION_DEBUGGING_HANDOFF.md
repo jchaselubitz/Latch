@@ -1,5 +1,8 @@
 # Latch Mobile remote connection failure: debugging handoff
 
+> Historical handoff for the retired transport. Current debugging starts from
+> Remote Link status, coarse audit events, and the composed WSS test.
+
 Prepared 6 September 2026 for a fresh debugging context. Repository: `/Users/jake/Development/Cooperativ/Latch`. Source HEAD at preparation: `5dbbb6887b5cf4d4831802f7e53aa8642ede785c`. This is a handoff, not a claim that the remaining bug has been fixed.
 
 ## Goal and current assessment

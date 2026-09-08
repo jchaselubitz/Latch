@@ -280,11 +280,7 @@ enum Command {
         #[command(subcommand)]
         command: Option<ServeCommand>,
     },
-    /// Manage the paired, encrypted remote-access platform.
-    ///
-    /// This listener is separately authenticated and encrypted, and proxies
-    /// only to a supervised ephemeral loopback gateway. It never makes
-    /// `latch serve` remotely reachable.
+    /// Manage local Remote Link identity and controller grants.
     RemoteAccess {
         #[command(subcommand)]
         command: RemoteAccessCommand,
@@ -314,7 +310,7 @@ enum ServeCommand {
 enum RemoteAccessCommand {
     /// Enable the local remote-access service and create the Mac identity.
     Enable,
-    /// Report the remote-access lifecycle state, Mac identity, and listener.
+    /// Report the Remote Link lifecycle state and Mac identity.
     Status {
         /// Emit machine-readable JSON.
         #[arg(long)]
@@ -322,11 +318,6 @@ enum RemoteAccessCommand {
     },
     /// Disable new remote-access connections.
     Disable,
-    /// Create short-lived QR-compatible pairing material.
-    Pair {
-        #[command(subcommand)]
-        command: PairCommand,
-    },
     /// List paired devices without revealing their identity keys.
     Devices {
         /// Emit machine-readable JSON.
@@ -346,6 +337,17 @@ enum RemoteAccessCommand {
         /// Opaque paired-device identifier.
         device_id: String,
     },
+    /// List content-free attention events the gateway spooled for paired phones.
+    AttentionEvents {
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove one spooled attention event after forwarding it.
+    AttentionAck {
+        /// Opaque event id from `attention-events`.
+        event_id: String,
+    },
     /// Rotate a phone identity without changing its grants or re-pairing it.
     RotateDeviceKey {
         /// Opaque paired-device identifier.
@@ -354,89 +356,11 @@ enum RemoteAccessCommand {
         #[arg(long)]
         public_key: String,
     },
-    /// Independently enable or disable encrypted relay fallback.
-    Relay {
-        /// `enable`, `disable`, or `never`. `never` also narrows published
-        /// presence to host candidates, so a phone is only ever offered
-        /// addresses it can reach directly.
-        #[arg(value_parser = ["enable", "disable", "never"])]
-        state: String,
-    },
-    /// Hand the running helper the relay servers the control plane issued this Mac, read as JSON on stdin, or clear them with --clear. The helper allocates on them at its next gather. Relay policy is enforced where the credential is minted, so a Mac whose account has the relay off is never given one
-    RelayServers {
-        /// Forget the recorded relay servers instead of reading new ones.
-        #[arg(long)]
-        clear: bool,
-    },
-    /// Export inspectable privacy-safe diagnostics as JSON.
-    Diagnostics,
     /// Show the minimal local security audit trail.
     Audit {
         /// Emit machine-readable JSON.
         #[arg(long)]
         json: bool,
-    },
-    /// Supervise a private gateway and serve the authenticated LAN transport.
-    LanServe {
-        /// LAN listener address. This is not the plaintext gateway address.
-        #[arg(long, default_value = "0.0.0.0:0")]
-        bind: String,
-    },
-    /// Hand one approved rendezvous offer, read as JSON on stdin, to the
-    /// running helper's ICE agent. The control plane authorizes nothing: the
-    /// caller has already checked the peer against the local device store, and
-    /// Noise still decides who the peer is.
-    Offer,
-    /// Attempt an outbound-only direct UDP rendezvous probe for a paired
-    /// device. This is a headless transport smoke surface, not a phone UI.
-    DirectProbe {
-        /// Local UDP bind address used for simultaneous NAT probing.
-        #[arg(long, default_value = "0.0.0.0:0")]
-        bind: String,
-        /// 32-byte, one-time rendezvous identifier supplied by the
-        /// authenticated control plane as 64 hexadecimal characters.
-        #[arg(long)]
-        rendezvous_id: String,
-        /// Short-lived peer UDP candidate supplied by rendezvous. May be
-        /// repeated for multiple candidate paths.
-        #[arg(long, required = true)]
-        candidate: Vec<String>,
-        /// Give up after this many milliseconds.
-        #[arg(long, default_value_t = 3_000)]
-        timeout_ms: u64,
-    },
-}
-
-#[derive(Subcommand)]
-enum PairCommand {
-    /// Create one five-minute pairing record for QR encoding.
-    Create {
-        /// Emit machine-readable JSON (the default and recommended form).
-        #[arg(long, default_value_t = true)]
-        json: bool,
-    },
-    /// Confirm a phone identity after local user approval.
-    Confirm {
-        /// Pairing ID from the scanned QR record.
-        #[arg(long)]
-        pairing_id: String,
-        /// One-time secret from the scanned QR record.
-        #[arg(long)]
-        secret: String,
-        /// Phone Noise static public key, encoded as 32-byte hex.
-        #[arg(long)]
-        device_public_key: String,
-        /// User-approved phone name.
-        #[arg(long)]
-        name: String,
-        /// Initial permission; defaults to observe plus structured interaction.
-        #[arg(long, default_value = "interact", value_parser = parse_remote_permission)]
-        permission: DevicePermission,
-        /// The phone's device row in the control-plane directory, if it
-        /// enrolled against one. Recorded so a later grant change can be
-        /// mirrored there; it never authorizes anything on its own.
-        #[arg(long)]
-        control_plane_device_id: Option<String>,
     },
 }
 
@@ -804,11 +728,8 @@ fn dispatch(command: Option<Command>) -> Result<()> {
                         println!("{}", serde_json::to_string(&status)?);
                     } else {
                         println!(
-                            "remote access {}\nrelay {}\ndevice {}\npaired {} ({} revoked)\nlistener {}",
-                            if status.enabled { "enabled" } else { "disabled" },
-                            if status.never_relay {
-                                "never"
-                            } else if status.relay_enabled {
+                            "remote access {}\ndevice {}\npaired {} ({} revoked)",
+                            if status.enabled {
                                 "enabled"
                             } else {
                                 "disabled"
@@ -816,7 +737,6 @@ fn dispatch(command: Option<Command>) -> Result<()> {
                             status.device_id.as_deref().unwrap_or("none"),
                             status.paired_devices,
                             status.revoked_devices,
-                            status.listener_address.as_deref().unwrap_or("stopped"),
                         );
                     }
                     Ok(())
@@ -824,36 +744,6 @@ fn dispatch(command: Option<Command>) -> Result<()> {
                 RemoteAccessCommand::Disable => {
                     remote_access::set_enabled(&home, false)?;
                     println!("remote access disabled");
-                    Ok(())
-                }
-                RemoteAccessCommand::Pair {
-                    command: PairCommand::Create { json: _ },
-                } => {
-                    let material = remote_access::create_pairing(&home)?;
-                    println!("{}", serde_json::to_string(&material)?);
-                    Ok(())
-                }
-                RemoteAccessCommand::Pair {
-                    command:
-                        PairCommand::Confirm {
-                            pairing_id,
-                            secret,
-                            device_public_key,
-                            name,
-                            permission,
-                            control_plane_device_id,
-                        },
-                } => {
-                    let device = remote_access::confirm_pairing(
-                        &home,
-                        &pairing_id,
-                        &secret,
-                        &device_public_key,
-                        &name,
-                        permission,
-                        control_plane_device_id.as_deref(),
-                    )?;
-                    println!("{}", serde_json::to_string(&device)?);
                     Ok(())
                 }
                 RemoteAccessCommand::Devices { json } => {
@@ -886,50 +776,27 @@ fn dispatch(command: Option<Command>) -> Result<()> {
                     println!("device revoked");
                     Ok(())
                 }
+                RemoteAccessCommand::AttentionEvents { json } => {
+                    let events = latch::cli::serve::pending_attention_events(&home)?;
+                    if json {
+                        println!("{}", serde_json::to_string(&events)?);
+                    } else {
+                        for event in events {
+                            println!("{} {} {:?}", event.event_id, event.device_id, event.kind);
+                        }
+                    }
+                    Ok(())
+                }
+                RemoteAccessCommand::AttentionAck { event_id } => {
+                    latch::cli::serve::acknowledge_attention(&home, &event_id)?;
+                    Ok(())
+                }
                 RemoteAccessCommand::RotateDeviceKey {
                     device_id,
                     public_key,
                 } => {
                     remote_access::rotate_device_key(&home, &device_id, &public_key)?;
                     println!("device key rotated");
-                    Ok(())
-                }
-                RemoteAccessCommand::Relay { state } => {
-                    let mode = match state.as_str() {
-                        "enable" => remote_access::RelayMode::Enabled,
-                        "never" => remote_access::RelayMode::Never,
-                        _ => remote_access::RelayMode::Disabled,
-                    };
-                    remote_access::set_relay_mode(&home, mode)?;
-                    match mode {
-                        remote_access::RelayMode::Never => println!("relay never"),
-                        _ => println!("relay {state}d"),
-                    }
-                    Ok(())
-                }
-                RemoteAccessCommand::RelayServers { clear } => {
-                    if clear {
-                        remote_access::clear_relay_servers(&home)?;
-                        println!("Cleared the helper's relay servers.");
-                        return Ok(());
-                    }
-                    let mut document = String::new();
-                    std::io::Read::read_to_string(&mut std::io::stdin(), &mut document)
-                        .context("cannot read the relay server document from stdin")?;
-                    let relay: remote_access::RelayServers =
-                        serde_json::from_str(&document).context("invalid relay server document")?;
-                    remote_access::record_relay_servers(&home, &relay)?;
-                    println!(
-                        "Recorded {} relay server(s) for the running helper.",
-                        relay.servers.len()
-                    );
-                    Ok(())
-                }
-                RemoteAccessCommand::Diagnostics => {
-                    println!(
-                        "{}",
-                        serde_json::to_string(&remote_access::diagnostics_export(&home)?)?
-                    );
                     Ok(())
                 }
                 RemoteAccessCommand::Audit { json } => {
@@ -941,55 +808,6 @@ fn dispatch(command: Option<Command>) -> Result<()> {
                             println!("{event}");
                         }
                     }
-                    Ok(())
-                }
-                RemoteAccessCommand::LanServe { bind } => remote_access::serve_lan(
-                    home,
-                    bind.parse().context("invalid --bind address")?,
-                    std::env::current_exe().context("cannot locate the latch binary")?,
-                    // The terminal-facing binary owns no ICE agent. Only the
-                    // dedicated `latch-remote` helper supplies one.
-                    None,
-                ),
-                RemoteAccessCommand::Offer => {
-                    let mut document = String::new();
-                    std::io::Read::read_to_string(&mut std::io::stdin(), &mut document)
-                        .context("cannot read the offer document from stdin")?;
-                    let offer: remote_access::RemoteOffer = serde_json::from_str(&document)
-                        .context("invalid rendezvous offer document")?;
-                    remote_access::record_offer(&home, &offer)?;
-                    println!("Recorded a rendezvous offer for the running helper.");
-                    Ok(())
-                }
-                RemoteAccessCommand::DirectProbe {
-                    bind,
-                    rendezvous_id,
-                    candidate,
-                    timeout_ms,
-                } => {
-                    let candidates = candidate
-                        .into_iter()
-                        .map(|value| {
-                            value
-                                .parse()
-                                .map(remote_access::DirectCandidate::short_lived)
-                                .context("invalid --candidate address")
-                        })
-                        .collect::<Result<Vec<_>>>()?;
-                    let runtime = tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()?;
-                    let peer = runtime.block_on(remote_access::probe_direct_path(
-                        bind.parse().context("invalid --bind address")?,
-                        &rendezvous_id,
-                        &candidates,
-                        Duration::from_millis(timeout_ms),
-                    ))?;
-                    // Do not emit the peer address: connection diagnostics are
-                    // intentionally privacy-safe. The one-bit result is enough
-                    // for the headless smoke client.
-                    println!("{{\"state\":\"direct\",\"peerReachable\":true}}");
-                    let _ = peer;
                     Ok(())
                 }
             }

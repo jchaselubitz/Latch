@@ -1,25 +1,27 @@
 #!/usr/bin/env bash
 # Records one remote-access field scenario as evidence rather than as a memory.
 #
-# The physical rows in docs/REMOTE_ACCESS_PHASE_4.md cannot be produced by any
+# The physical rows of the Remote Link matrix cannot be produced by any
 # test in this repository: they need a phone on a carrier, a hotel Wi-Fi, a Mac
 # that actually goes to sleep. What this script does is make the run leave a
 # record — a before/after diff of the Mac's own path counters, plus what the
 # person saw — so a filled-in matrix row can be traced back to a measurement
-# instead of a recollection.
+# instead of a recollection. The phone's own per-attempt stage timings (from
+# scripts/phone-diagnostics.sh) attach to the same record with --phone-log.
 #
-#   scripts/field-run.sh start  cellular-to-home-nat
+#   scripts/field-run.sh start  cellular
 #   ... run the scenario on the phone ...
-#   scripts/field-run.sh finish cellular-to-home-nat --result pass \
-#       --phone "Direct 3 · Relay 0" --note "AT&T LTE, home router in NAT mode"
+#   scripts/field-run.sh finish cellular --result pass \
+#       --phone-log /tmp/phone-diag --since 2026-09-08T10:00:00Z \
+#       --note "carrier LTE, Wi-Fi off, 30 cold opens and 30 cycles"
 #
 # Results land in docs/field-runs/ as JSON, one file per run, and `finish`
-# prints the matrix row to paste into Phase 4.
+# prints the matrix row to paste into the field report.
 #
-# Nothing here uploads anything. The diagnostics bundle it reads is the
-# content-free one: switches, counts, and coarse event names, no addresses,
-# names, keys, or session content. The scenario note is written by whoever runs
-# it, so keep networks described in general terms rather than named.
+# Nothing here uploads anything. It reads the content-free local Remote Link
+# audit: coarse event names and opaque device identifiers, with no addresses,
+# keys, gateway credentials, or session content. The scenario note is written
+# by whoever runs it, so keep networks general rather than named.
 
 set -euo pipefail
 
@@ -34,25 +36,38 @@ usage:
   field-run.sh start  <scenario>
   field-run.sh finish <scenario> --result pass|fail|partial
                                  [--phone "<the phone's Paths so far row>"]
+                                 [--phone-log <dir or .jsonl pulled by
+                                               scripts/phone-diagnostics.sh pull>]
+                                 [--since <ISO 8601: ignore older phone attempts>]
                                  [--note "<what happened>"]
   field-run.sh matrix
 
-Scenarios are the six physical rows in docs/REMOTE_ACCESS_PHASE_4.md; run
+Scenarios are the rows of the Remote Link physical matrix; run
 `field-run.sh scenarios` for the list and what each one is looking for.
 EOF
     exit 2
 }
 
 # The scenario list is here rather than in the doc so the script can refuse a
-# typo. Each line is: id|title|what a pass looks like.
+# typo. Each line is: id|title|what a pass looks like. These are the rows of
+# the Remote Link physical matrix in docs/PLAN_REMOTE_RELAY_REPLACEMENT.md
+# section 9; the retired ICE rows stay readable in docs/field-runs/ history.
 scenarios() {
     cat <<'EOF'
-cellular-to-home-nat|Cellular to home NAT|Terminal opens off-LAN; the Mac counts a direct_reflexive connection and the phone shows Direct.
-symmetric-nat|Symmetric NAT|Terminal opens; the Mac counts a relay connection and the phone shows Relay. Failing to connect at all is a fail, not a relay.
-udp-blocked|Hotel or corporate Wi-Fi with UDP blocked|Terminal opens over TURN on TCP/TLS 443; the Mac counts a relay connection.
-wifi-to-cellular|Wi-Fi to cellular mid-terminal|The terminal survives the interface change, or reconnects without losing the session; a path migration is expected and acceptable.
-mac-sleep-wake|Mac sleep and wake|While asleep the phone says the Mac is asleep rather than showing a transport error; after wake the terminal reconnects.
-phone-background|Phone background and foreground|Returning to the app reconnects without re-pairing and without a stuck spinner.
+same-lan|Same LAN|Cold opens and reconnect cycles reach a usable gateway over the LAN entry point; p95 within the gate.
+cellular|Phone on cellular, Wi-Fi off|Cold opens and reconnect cycles reach a usable gateway through the relay on TCP 443; p95 within the gate.
+unrelated-wifi|Unrelated Wi-Fi|Same as cellular from a network that is not the Mac's, with the LAN attempt naturally absent.
+udp-blocked|UDP blocked, HTTPS allowed|Relay path measured with the diagnostics-only skip-LAN setting on a hotspot that drops non-DNS UDP.
+ipv6-only|IPv6-only (NAT64) network|Cold opens and reconnect cycles succeed; the actual client-to-relay family is recorded, not inferred.
+network-switch|Wi-Fi to cellular and back mid-session|Twenty switches; the owner reconnects without re-pairing, no terminal input replay, no automatic takeover.
+long-suspension|Long background suspension|Twenty background/foreground cycles after long suspensions recover within the explicit-event gate.
+mac-sleep-wake|Mac sleep and wake|Ten cycles; the phone shows the Mac offline while asleep and recovers after wake from the point networking is usable.
+relay-restart|Relay restart|Ten restarts; both endpoints re-admit through the same gateway without losing local sessions.
+helper-restart|Helper restart|Ten restarts; Desktop restarts the helper and the phone recovers without re-pairing.
+gateway-restart|Gateway restart|Ten restarts; discovery notices the new instance and re-bases sockets; no duplicate side effects.
+lease-and-outage|Lease expiry, renewal, and control-plane outage|One expiry, one normal renewal, and one control-plane outage; the link fails closed and recovers.
+soak|24-hour soak|Repeated streams plus a high-output workload; handles, tasks, sockets, and RSS return to baseline after streams close.
+cellular-to-home-nat|Cellular to home NAT (retired ICE row)|Historical; kept so the recorded baseline stays renderable.
 EOF
 }
 
@@ -70,8 +85,8 @@ require_scenario() {
 }
 
 diagnostics() {
-    if ! "$latch_bin" remote-access diagnostics 2>/dev/null; then
-        echo "cannot read diagnostics; set LATCH_BIN to the latch executable" >&2
+    if ! "$latch_bin" remote-access audit --json 2>/dev/null; then
+        echo "cannot read the Remote Link audit; set LATCH_BIN to the latch executable" >&2
         exit 1
     fi
 }
@@ -86,8 +101,7 @@ cmd_start() {
     echo
     scenarios | awk -F'|' -v id="$scenario" '$1 == id { print "looking for: " $3 }'
     echo
-    echo "On the phone, Settings > Linked computer > Reset path counters, then run"
-    echo "the scenario. Finish with:"
+    echo "Run the scenario on the phone, then finish with:"
     echo "  scripts/field-run.sh finish $scenario --result pass --phone \"...\" --note \"...\""
 }
 
@@ -95,12 +109,14 @@ cmd_finish() {
     local scenario="$1"
     shift
     require_scenario "$scenario"
-    local result="" phone="" note=""
+    local result="" phone="" note="" phone_log="" since=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --result) result="${2:-}"; shift 2 ;;
             --phone) phone="${2:-}"; shift 2 ;;
             --note) note="${2:-}"; shift 2 ;;
+            --phone-log) phone_log="${2:-}"; shift 2 ;;
+            --since) since="${2:-}"; shift 2 ;;
             *) usage ;;
         esac
     done
@@ -127,6 +143,8 @@ cmd_finish() {
     LATCH_PHONE="$phone" \
     LATCH_NOTE="$note" \
     LATCH_STAMP="$stamp" \
+    LATCH_PHONE_LOG="$phone_log" \
+    LATCH_PHONE_SINCE="$since" \
     python3 "$repo_root/scripts/field_run_delta.py" \
         "$baseline" "$runs_dir/.$scenario.after.json" >"$out"
 

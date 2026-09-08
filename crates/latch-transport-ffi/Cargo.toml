@@ -16,3 +16,8 @@ latch-transport = { path = "../latch-transport" }
 thiserror.workspace = true
 tokio.workspace = true
 uniffi.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+snow.workspace = true

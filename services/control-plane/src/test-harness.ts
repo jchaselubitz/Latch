@@ -5,9 +5,9 @@
  */
 
 import type { AddressInfo } from 'node:net';
+import { generateKeyPairSync } from 'node:crypto';
 
 import { loadConfig } from './config.ts';
-import type { TurnProvider } from './cloudflare-turn.ts';
 import type { Config } from './config.ts';
 import type { RequestLog } from './http/router.ts';
 import { createServer } from './server.ts';
@@ -19,7 +19,6 @@ export interface Harness {
   readonly baseUrl: string;
   /** Every request log the router emitted, for the privacy assertions. */
   readonly logs: RequestLog[];
-  readonly turn: FakeTurnProvider;
   /** Advances the harness clock by `seconds`. */
   advance(seconds: number): void;
   /** Current harness clock in unix seconds. */
@@ -32,32 +31,39 @@ export interface Harness {
   close(): Promise<void>;
 }
 
-export const CLOUDFLARE_TURN_KEY_ID = 'a'.repeat(32);
-export const CLOUDFLARE_TURN_API_TOKEN = 't'.repeat(48);
+export const OPERATOR_SECRET = 'operator-test-secret-'.padEnd(48, 'x');
+export const RELAY_SERVICE_TOKEN = 'relay-service-test-secret-'.padEnd(48, 'x');
+export const RELAY_INVALIDATION_SECRET = 'relay-invalidation-test-'.padEnd(48, 'x');
+const TEST_ADMISSION_PRIVATE_KEY = generateKeyPairSync('ed25519').privateKey.export({
+  format: 'pem', type: 'pkcs8',
+}).toString();
 
-export class FakeTurnProvider implements TurnProvider {
-  readonly revoked: string[] = [];
-  issued = 0;
-  async issue(_ttlSeconds: number) {
-    this.issued += 1;
-    return [
-      { urls: ['stun:stun.cloudflare.com:3478'] },
-      { urls: ['turn:turn.cloudflare.com:3478?transport=udp'], username: `turn-user-${this.issued}`, credential: `turn-password-${this.issued}-only-returned-to-device` },
-    ];
+import type { ApnsDelivery, ApnsOutcome, ApnsSender } from './apns.ts';
+
+/** Records deliveries and answers with a scripted outcome per token. */
+export class FakeApns implements ApnsSender {
+  readonly deliveries: ApnsDelivery[] = [];
+  readonly outcomes = new Map<string, ApnsOutcome>();
+
+  async send(delivery: ApnsDelivery): Promise<ApnsOutcome> {
+    this.deliveries.push(delivery);
+    return this.outcomes.get(delivery.token) ?? 'delivered';
   }
-  stunServers() { return [{ urls: ['stun:stun.cloudflare.com:3478'] }]; }
-  async revoke(username: string) { this.revoked.push(username); }
 }
 
-export async function startHarness(overrides: Record<string, string> = {}): Promise<Harness> {
+export async function startHarness(
+  overrides: Record<string, string> = {},
+  options: { apns?: ApnsSender | null } = {},
+): Promise<Harness> {
   const config = loadConfig({
     DATABASE_URL: 'postgres://unused/test',
-    CLOUDFLARE_TURN_KEY_ID,
-    CLOUDFLARE_TURN_API_TOKEN,
+    OPERATOR_SECRET,
+    RELAY_SERVICE_TOKEN,
+    RELAY_INVALIDATION_SECRET,
+    ADMISSION_PRIVATE_KEY_PEM: TEST_ADMISSION_PRIVATE_KEY,
     ...overrides,
   });
   const store = new MemoryStore();
-  const turn = new FakeTurnProvider();
   const logs: RequestLog[] = [];
   let clock = Date.UTC(2026, 0, 1, 12, 0, 0);
   const server = createServer({
@@ -65,8 +71,8 @@ export async function startHarness(overrides: Record<string, string> = {}): Prom
     store,
     now: () => clock,
     readiness: async () => ({ migrations: ['0001_initial.sql'] }),
-    turn,
     log: (entry) => logs.push(entry),
+    apns: options.apns ?? null,
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const { port } = server.address() as AddressInfo;
@@ -77,7 +83,6 @@ export async function startHarness(overrides: Record<string, string> = {}): Prom
     config,
     baseUrl,
     logs,
-    turn,
     advance(seconds) {
       clock += seconds * 1000;
     },
@@ -116,6 +121,15 @@ export interface EnrolledDevice {
   readonly token: string;
 }
 
+export async function createOwnerAccount(harness: Harness, label = 'Test') {
+  const invitation = await harness.request('POST', '/v1/operator/owner-invitations', {
+    token: OPERATOR_SECRET, body: {},
+  });
+  return harness.request('POST', '/v1/accounts/claim', {
+    body: { invitation: invitation.body.invitation, label },
+  });
+}
+
 /** Registers an account plus a host and a client device, and pairs them. */
 export async function enrollPair(
   harness: Harness,
@@ -126,7 +140,7 @@ export async function enrollPair(
   host: EnrolledDevice;
   client: EnrolledDevice;
 }> {
-  const account = await harness.request('POST', '/v1/accounts', { body: { label: 'Test' } });
+  const account = await createOwnerAccount(harness);
   const accountToken = account.body.accountToken as string;
   const host = await harness.request('POST', '/v1/devices', {
     token: accountToken,
@@ -145,22 +159,5 @@ export async function enrollPair(
     accountToken,
     host: { deviceId: host.body.deviceId, token: host.body.deviceToken },
     client: { deviceId: client.body.deviceId, token: client.body.deviceToken },
-  };
-}
-
-/** A candidate that is valid relative to the harness clock. */
-export function candidate(harness: Harness, address = '203.0.113.7:41234', lifetime = 60) {
-  return { address, expiresAt: harness.nowSeconds() + lifetime };
-}
-
-/** A fully described candidate for ICE signaling contract tests. */
-export function iceCandidate(harness: Harness, address = '203.0.113.7:41234', lifetime = 60) {
-  return {
-    ...candidate(harness, address, lifetime),
-    type: 'host',
-    priority: 2_130_706_431,
-    foundation: '1',
-    component: 1,
-    protocol: 'udp',
   };
 }

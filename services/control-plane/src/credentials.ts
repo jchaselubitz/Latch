@@ -12,7 +12,7 @@ const ID_BYTES = 16;
 const SECRET_BYTES = 32;
 
 /** Domain separation keeps a digest from being replayed across credential kinds. */
-export type CredentialKind = 'account' | 'device' | 'relay-ticket' | 'pairing';
+export type CredentialKind = 'account' | 'device' | 'relay-ticket' | 'pairing' | 'owner-invitation' | 'enrollment';
 
 export interface IssuedCredential {
   /** Returned to the caller exactly once. */

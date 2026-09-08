@@ -1,5 +1,98 @@
 import Foundation
 
+/// Which carrier the authenticated Remote Link selected.
+public enum RemotePath: String, Sendable, Equatable {
+    case local
+    case relay
+
+    public var label: String {
+        switch self {
+        case .local: return "Local network"
+        case .relay: return "Relay"
+        }
+    }
+
+    public var detail: String {
+        switch self {
+        case .local:
+            return "Your Mac was found on this network and reached directly."
+        case .relay:
+            return "Connected through Latch's encrypted relay."
+        }
+    }
+}
+
+/// Thread-safe bridge from the native transport to the observable app model.
+public final class RemotePathReporter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var current: RemotePath?
+    private var observer: (@Sendable (RemotePath?) -> Void)?
+    private var tallyObserver: (@Sendable (RemotePathTally) -> Void)?
+    private let metrics: any RemotePathMetricsStoring
+
+    public init(metrics: any RemotePathMetricsStoring = UserDefaultsRemotePathMetricsStore()) {
+        self.metrics = metrics
+    }
+
+    public var path: RemotePath? {
+        lock.lock()
+        defer { lock.unlock() }
+        return current
+    }
+
+    public var tally: RemotePathTally { metrics.load() }
+
+    public func observe(_ observer: @escaping @Sendable (RemotePath?) -> Void) {
+        lock.lock()
+        self.observer = observer
+        let path = current
+        lock.unlock()
+        observer(path)
+    }
+
+    public func observeTally(_ observer: @escaping @Sendable (RemotePathTally) -> Void) {
+        lock.lock()
+        tallyObserver = observer
+        lock.unlock()
+        observer(metrics.load())
+    }
+
+    public func report(_ path: RemotePath?) {
+        if let path { update { $0.record(path) } }
+        lock.lock()
+        guard path != current else {
+            lock.unlock()
+            return
+        }
+        current = path
+        let observer = self.observer
+        lock.unlock()
+        observer?(path)
+    }
+
+    public func reportFailure() {
+        update { $0.failures += 1 }
+    }
+
+    public func resetTally() {
+        update { $0 = RemotePathTally() }
+    }
+
+    public func clear() {
+        report(nil)
+    }
+
+    private func update(_ change: (inout RemotePathTally) -> Void) {
+        lock.lock()
+        var tally = metrics.load()
+        change(&tally)
+        metrics.save(tally)
+        let observer = tallyObserver
+        lock.unlock()
+        observer?(tally)
+    }
+}
+
 /// How the paired route has resolved on this phone, counted.
 ///
 /// The Mac keeps the authoritative counters in its audit trail, but the Mac
@@ -14,7 +107,7 @@ import Foundation
 public struct RemotePathTally: Sendable, Equatable, Codable {
     /// Channels opened over the local network.
     public var local: Int
-    /// Channels opened over a direct ICE path.
+    /// Historical baseline channels opened directly before Remote Link v1.
     public var direct: Int
     /// Channels opened through the relay.
     public var relay: Int
@@ -58,7 +151,6 @@ public struct RemotePathTally: Sendable, Equatable, Codable {
     mutating func record(_ path: RemotePath) {
         switch path {
         case .local: local += 1
-        case .direct: direct += 1
         case .relay: relay += 1
         }
     }

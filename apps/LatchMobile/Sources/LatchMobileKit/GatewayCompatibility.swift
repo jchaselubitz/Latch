@@ -127,12 +127,17 @@ public struct SessionSurface: Equatable, Sendable {
         self.terminalAdvertised = terminalAdvertised ?? terminal
     }
 
-    /// `nil` means unrestricted, and that is not an oversight: a manual
-    /// `latch serve` link sends no grant header at all, and `http.rs` grants
-    /// loopback requests `Grant::Control`. Only a paired device carries a
-    /// permission to narrow by.
+    /// A missing current grant fails closed. Every supported route is paired.
     public func restricted(to permission: DevicePermission?) -> SessionSurface {
-        guard let permission else { return self }
+        guard let permission else {
+            return SessionSurface(
+                chat: chat,
+                composer: false,
+                interactionControls: false,
+                terminal: false,
+                terminalAdvertised: terminalAdvertised
+            )
+        }
         // A terminal is a control surface: it sends raw bytes into the pane
         // and resizes the child. Observe and interact grants may not open one,
         // so it is cleared before the interact check below, which returns

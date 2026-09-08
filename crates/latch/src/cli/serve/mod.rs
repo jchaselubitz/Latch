@@ -8,6 +8,7 @@
 //! speaks plaintext HTTP, so the bearer token is only safe on loopback (or a
 //! tunnel to it). Binding a non-loopback address requires `--allow-remote`.
 
+pub mod attention;
 mod auth;
 #[allow(dead_code)] // Phase 0 generates the full v2 wire surface before the Hub consumes it.
 mod contract;
@@ -18,10 +19,6 @@ mod pty;
 pub(crate) mod routes;
 mod terminal;
 
-/// The paired-proxy suite drives the real router through the Noise tunnel.
-#[cfg(test)]
-pub(crate) use http::test_router;
-
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
@@ -29,6 +26,9 @@ use anyhow::{bail, Context};
 
 use crate::session::paths::LatchHome;
 
+pub use attention::{
+    acknowledge as acknowledge_attention, pending_events as pending_attention_events,
+};
 pub(crate) use auth::load_token;
 pub use auth::mint_token;
 

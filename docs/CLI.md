@@ -107,20 +107,19 @@ never exposes `latch serve` publicly:
 ```bash
 latch remote-access enable
 latch remote-access status --json
-latch remote-access pair create --json
 latch remote-access devices --json
 latch remote-access grant DEVICE_ID control
 latch remote-access revoke DEVICE_ID
-latch remote-access relay disable
-latch remote-access relay never       # also publish host candidates only
-latch remote-access diagnostics
 latch remote-access audit --json
 latch remote-access disable
 ```
 
 Permissions form a ladder: `observe`, `interact`, then `control`. Opening a
 terminal requires `control` and takes the session's exclusive terminal
-surface. `lan-serve`, `offer`, and `direct-probe` are helper and diagnostics
-surfaces; Latch Desktop normally supervises the helper for you. See
+surface. Enrollment, relay admission, WSS, authenticated LAN discovery, and
+link supervision belong to `latch-remote`; Latch Desktop normally supervises
+that helper for you. The ordinary `latch` process never opens an internet
+listener and accepts only authenticated logical streams at its fixed loopback
+adapter. See
 [Desktop](DESKTOP.md) for the supported user flow and
 [REMOTE_ACCESS_DESKTOP.md](REMOTE_ACCESS_DESKTOP.md) for its security boundary.

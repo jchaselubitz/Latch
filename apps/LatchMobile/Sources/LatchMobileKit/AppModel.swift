@@ -10,7 +10,6 @@ import Observation
 @Observable
 public final class AppModel {
     public enum LinkSource: Equatable, Sendable {
-        case manual
         case paired
     }
 
@@ -18,21 +17,61 @@ public final class AppModel {
         case unlinked
         case connecting
         case linked(GatewayCapabilities)
+        /// The link was up and is recovering on the coordinator's schedule.
+        /// Cached results stay on screen, marked stale; nothing new is fetched
+        /// until the link is ready again.
+        case interrupted(RemoteLinkState, GatewayCapabilities?)
+        /// The relay admitted this phone but the Mac is not there: asleep,
+        /// offline, or with remote access off. Retrying continues.
+        case macOffline(GatewayCapabilities?)
+        /// The control plane no longer recognises this pairing. No retry.
+        case revoked(String)
+        /// The Mac refused this phone's identity. Re-pair. No retry.
+        case pairingRequired(String)
         /// The computer answered, and this build cannot speak to it. Kept
         /// separate from `failed` because it is not a connection problem and
         /// must not be reported as one: the remedy is an update, on a named
         /// side, and the saved link stays valid.
         case incompatible(ProtocolMismatch)
         case failed(String)
+
+        /// Capabilities last discovered on this link, if any survive.
+        public var cachedCapabilities: GatewayCapabilities? {
+            switch self {
+            case .linked(let capabilities): return capabilities
+            case .interrupted(_, let capabilities), .macOffline(let capabilities): return capabilities
+            default: return nil
+            }
+        }
+
+        /// Whether the gateway is usable right now.
+        public var isUsable: Bool {
+            if case .linked = self { return true }
+            return false
+        }
     }
 
     public private(set) var linkState: LinkState = .unlinked
+    /// The link owner's latest immutable snapshot, for Settings.
+    public private(set) var linkSnapshot = RemoteLinkSnapshot()
+    /// The session list is from before the current interruption.
+    public private(set) var sessionsStale = false
+    /// Content-free stage timings from the most recent link and requests,
+    /// newest last, bounded.
+    public private(set) var recentStages: [LinkStageSample] = []
+    /// Whether this phone may keep retrying on its own. False in terminal
+    /// states so the UI can say what to do instead of showing a spinner.
+    public var canRetryAutomatically: Bool {
+        switch linkState {
+        case .revoked, .pairingRequired, .incompatible: return false
+        default: return true
+        }
+    }
     public private(set) var link: GatewayLink?
     public private(set) var gateway: LatchGateway?
     public private(set) var linkSource: LinkSource?
     public private(set) var sessions: [SessionSummary] = []
     /// The network path the paired route is running over, once one is open.
-    /// Nil for a manual link, which is whatever tunnel the person configured.
     public private(set) var remotePath: RemotePath?
     /// How this phone's paired connections have resolved, across launches.
     /// Read during a field run; it leaves the device only if a person reads it
@@ -88,29 +127,49 @@ public final class AppModel {
     private let presentationStore: any SessionPresentationStoring
     private let terminalSizeStore: any TerminalSizeStoring
     private let newSessionFolderStore: any NewSessionFolderStoring
-    private let storage: LinkStorage
     /// Where the transport writes the path it selected, so Settings can say
     /// whether this session is on the local network, direct, or relayed.
     private let pathReporter: RemotePathReporter
-    private let sessionFactory: @Sendable (GatewayLink) -> LatchGateway
-    private let pairedGatewayFactory: @Sendable (PairedDeviceRecord) async throws -> LatchGateway
+    /// Builds the gateway client over the capability-protected loopback
+    /// adapter. One per link generation; the adapter is stopped on suspend.
+    public typealias GatewayFactory = @Sendable (
+        PairedDeviceRecord, any AuthenticatedGatewayChannelProvider, LinkStageRecorder?
+    ) async throws -> LatchGateway
+    private let gatewayFactory: GatewayFactory
+    /// The one link owner. Screens never open connections.
+    public let coordinator: RemoteLinkCoordinator
+    private var coordinatorObservation: Task<Void, Never>?
     private var pairedDevice: PairedDeviceRecord?
-    /// Invalidates an in-flight paired connect when its process-local route is
-    /// torn down. A backgrounded factory must never resurrect a connection.
+    /// The loopback adapter behind the current gateway, stopped on suspend so
+    /// its capability dies with it.
+    private var transport: (any GatewayTransport)?
+    /// Which link generation discovery last ran for. Discovery runs once per
+    /// new authenticated link, never per screen.
+    private var discoveredGeneration = 0
+    /// The gateway instance discovery last saw, so a restarted gateway is
+    /// noticed and its per-instance state (conversation sockets) re-based.
+    private var gatewayInstanceID: String?
+    /// Invalidates an in-flight connect when its process-local route is torn
+    /// down. A backgrounded factory must never resurrect a connection.
     private var pairedConnectionGeneration = 0
+    private var diagnosticsOptions = RemoteLinkConnectOptions()
+    /// Armed only by the USB harness's launch argument; writes one
+    /// `cold_open` record for this process and then goes quiet.
+    public let coldOpen: ColdOpenRecorder
 
     public init(
-        storage: LinkStorage = KeychainLinkStorage(),
-        sessionFactory: @escaping @Sendable (GatewayLink) -> LatchGateway = { LatchGateway(link: $0) },
-        identityStore: any DeviceIdentityStoring = KeychainDeviceIdentityStore(),
+        linkConnector: (any RemoteLinkConnecting)? = nil,
+        gatewayFactory: GatewayFactory? = nil,
         pairedGatewayFactory: (@Sendable (PairedDeviceRecord) async throws -> LatchGateway)? = nil,
         pathReporter: RemotePathReporter = RemotePathReporter(),
         presentationStore: any SessionPresentationStoring = UserDefaultsSessionPresentationStore(),
         terminalSizeStore: any TerminalSizeStoring = UserDefaultsTerminalSizeStore(),
         newSessionFolderStore: any NewSessionFolderStoring = UserDefaultsNewSessionFolderStore(),
         terminalConnector: TerminalConnecting? = nil,
-        terminalUnlock: TerminalUnlock? = nil
+        terminalUnlock: TerminalUnlock? = nil,
+        coldOpen: ColdOpenRecorder? = nil
     ) {
+        self.coldOpen = coldOpen ?? ColdOpenRecorder()
         self.pathReporter = pathReporter
         self.terminalUnlock = terminalUnlock ?? TerminalUnlock()
         self.terminalConnector = terminalConnector
@@ -120,15 +179,23 @@ public final class AppModel {
         self.defaultNewSessionFolder = newSessionFolderStore.load()
         self.sessionPresentation = presentationStore.load()
         self.terminalSize = terminalSizeStore.load()
-        self.storage = storage
-        self.sessionFactory = sessionFactory
-        // The default route is the local network only. The app injects the
-        // full one — Bonjour, then presence and ICE — because the ICE stack
-        // lives in `LatchTransportNative`, which sits above this module.
-        self.pairedGatewayFactory = pairedGatewayFactory ?? PairedGatewayRoute.factory(
-            identityStore: identityStore,
-            pathReporter: pathReporter
-        )
+        // The native application injects the Rust Remote Link connector. The
+        // kit cannot silently fall back to a second transport stack; tests
+        // inject a fake connector and a stubbed gateway instead.
+        let connector: any RemoteLinkConnecting = linkConnector
+            ?? (pairedGatewayFactory != nil ? AlwaysReadyLinkConnector() : UnavailableLinkConnector())
+        self.coordinator = RemoteLinkCoordinator(connector: connector)
+        if let gatewayFactory {
+            self.gatewayFactory = gatewayFactory
+        } else if let pairedGatewayFactory {
+            self.gatewayFactory = { record, _, _ in try await pairedGatewayFactory(record) }
+        } else {
+            self.gatewayFactory = { record, provider, recorder in
+                LatchGateway(transport: try await RemoteLinkGatewayTransport.start(
+                    authenticatedProvider: provider, pairedDevice: record, recorder: recorder
+                ))
+            }
+        }
         pathReporter.observe { [weak self] path in
             Task { @MainActor in self?.remotePath = path }
         }
@@ -143,7 +210,7 @@ public final class AppModel {
             return SessionSurface(chat: false, composer: false, interactionControls: false)
         }
         return GatewayCompatibility.sessionSurface(for: capabilities)
-            .restricted(to: linkSource == .paired ? pairedDevice?.permission : nil)
+            .restricted(to: pairedDevice?.permission)
     }
 
     /// Where a tap on this session row goes.
@@ -163,10 +230,8 @@ public final class AppModel {
     }
 
     /// Directory data and process creation are control-granted operations.
-    /// A manual loopback link has the gateway's existing effective control
-    /// grant; only a paired record narrows this locally.
     private var hasNewSessionControlGrant: Bool {
-        linkSource != .paired || pairedDevice?.permission.permits(.control) == true
+        pairedDevice?.permission.permits(.control) == true
     }
 
     public var canBrowseNewSessionFolders: Bool {
@@ -217,24 +282,6 @@ public final class AppModel {
         defaultNewSessionFolder = nil
     }
 
-    /// Restores a saved link at launch and connects to it.
-    public func restore() async {
-        guard link == nil, let saved = try? storage.load() else { return }
-        await connect(to: saved, persist: false)
-    }
-
-    /// Links to a computer and runs discovery.
-    public func link(address: String, token: String) async {
-        do {
-            let link = try GatewayLink(address: address, token: token)
-            await connect(to: link, persist: true)
-        } catch let error as LatchError {
-            linkState = Self.linkFailure(error)
-        } catch {
-            linkState = .failed(error.localizedDescription)
-        }
-    }
-
     /// Clears the path counters.
     ///
     /// Unlinking deliberately does not: the counters describe this phone's
@@ -246,15 +293,20 @@ public final class AppModel {
 
     /// Forgets the computer and everything fetched from it.
     public func unlink() {
-        if linkSource == .manual {
-            try? storage.clear()
-        }
+        coordinatorObservation?.cancel()
+        coordinatorObservation = nil
+        Task { [coordinator] in await coordinator.stop() }
+        transport?.stop()
+        transport = nil
         link = nil
         gateway = nil
         linkSource = nil
         pairedDevice = nil
         pairedConnectionGeneration &+= 1
+        discoveredGeneration = 0
+        gatewayInstanceID = nil
         sessions = []
+        sessionsStale = false
         sessionsError = nil
         highlightedSessionID = nil
         conversationStores.values.forEach { $0.stop() }
@@ -367,14 +419,41 @@ public final class AppModel {
         if let existing = terminalSessions[session.id] { return existing }
         let id = session.id
         let connector = terminalConnector
-        let created = TerminalSession(sessionID: id) { cols, rows in
+        let created = TerminalSession(sessionID: id) { [weak self] cols, rows, resume in
             if let connector {
                 return try await connector(id, cols, rows)
             }
-            return try await gateway.openTerminal(sessionID: id, cols: cols, rows: rows)
+            // The gateway of the moment, not the one captured at creation: a
+            // resume after transport loss goes through the replacement link.
+            guard let current = await self?.gateway else {
+                throw LatchError.transport("Not linked to a computer.")
+            }
+            return try await current.openTerminal(sessionID: id, cols: cols, rows: rows, resume: resume)
         }
         terminalSessions[id] = created
         return created
+    }
+
+    /// After a link comes back: terminals whose attach was interrupted and
+    /// whose bounded resume capability is still valid are resumed; the
+    /// gateway refuses if anyone else has attached since. Every other
+    /// interrupted terminal stays put with a Reconnect button. Nothing typed
+    /// is replayed.
+    @discardableResult
+    public func resumeInterruptedTerminals() -> Int {
+        var resumed = 0
+        for terminal in terminalSessions.values where terminal.canResume {
+            if terminal.resume() { resumed += 1 }
+        }
+        return resumed
+    }
+
+    /// Transport loss under held terminals: they become interrupted rather
+    /// than silently closed, and the person is told input may be missing.
+    private func interruptTerminals() {
+        for terminal in terminalSessions.values where terminal.holdsSurface {
+            terminal.interrupt()
+        }
     }
 
     /// Reads the pane without attaching, so nothing is taken from the Mac.
@@ -491,27 +570,14 @@ public final class AppModel {
         terminalUnlock.lock()
     }
 
-    private func connect(to link: GatewayLink, persist: Bool) async {
-        linkState = .connecting
-        let gateway = sessionFactory(link)
-        await finishConnecting(
-            gateway: gateway,
-            link: link,
-            source: .manual,
-            pairedDevice: nil,
-            persist: persist
-        )
-    }
-
-    /// Establishes the paired LAN route. A manual link remains coequal and is
-    /// never replaced by pairing: it is the route that also works when no
-    /// control plane or Bonjour service exists.
+    /// Establishes the paired route: starts the one link owner for this
+    /// record, builds the capability-protected adapter and gateway, and lets
+    /// the owner's snapshots drive discovery and every later state.
     public func connectPairedDevice(_ record: PairedDeviceRecord?) async {
         guard let record, record.isActive else {
             if linkSource == .paired { unlink() }
             return
         }
-        guard linkSource != .manual else { return }
         // Keep the paired identity even if the current network route cannot
         // be established. It is the authority to retry on foreground, while
         // the listener and Noise sockets themselves are strictly ephemeral.
@@ -519,27 +585,37 @@ public final class AppModel {
         pairedConnectionGeneration &+= 1
         let generation = pairedConnectionGeneration
         linkState = .connecting
+        await coordinator.setOptions(diagnosticsOptions)
+        await coordinator.setProbe { [weak self] in
+            await self?.probeGateway() ?? false
+        }
         do {
-            let pairedGateway = try await pairedGatewayFactory(record)
-            // A manual link could have completed while Bonjour was browsing.
-            // It wins because it is the explicit route the person configured.
-            guard linkSource != .manual, generation == pairedConnectionGeneration else { return }
-            let pairedLink = await pairedGateway.gateway
-            await finishConnecting(
-                gateway: pairedGateway,
-                link: pairedLink,
-                source: .paired,
-                pairedDevice: record,
-                persist: false,
-                pairedConnectionGeneration: generation
-            )
+            transport?.stop()
+            let provider = CoordinatorChannelProvider(coordinator: coordinator)
+            let recorder: LinkStageRecorder = { [weak self] sample in
+                Task { @MainActor in self?.record(sample) }
+            }
+            let gateway = try await gatewayFactory(record, provider, recorder)
+            guard generation == pairedConnectionGeneration else { return }
+            self.gateway = gateway
+            self.link = await gateway.gateway
+            self.transport = nil
+            linkSource = .paired
         } catch let error as LatchError {
             linkState = Self.linkFailure(error)
-        } catch let error as NoiseTunnelError {
+            return
+        } catch let error as RemoteLinkTransportError {
             linkState = .failed(error.message)
+            return
         } catch {
             linkState = .failed(error.localizedDescription)
+            return
         }
+        observeCoordinator()
+        await coordinator.start(record: record)
+        // Callers get a settled answer: linked, or a typed reason it is not.
+        // Later changes keep arriving through the owner's snapshots.
+        await waitUntilSettled()
     }
 
     /// Applies a permission-only refresh without rebuilding a healthy route.
@@ -558,6 +634,11 @@ public final class AppModel {
               current.updating(permission: record.permission) == record
         else { return false }
         pairedDevice = record
+        // A downgrade during recovery closes what the lesser grant no longer
+        // covers before anything is fetched on the reconnected link.
+        if !record.permission.permits(.control) {
+            detachAllTerminals()
+        }
         return true
     }
 
@@ -591,54 +672,145 @@ public final class AppModel {
         return .failed(error.message)
     }
 
-    private func finishConnecting(
-        gateway: LatchGateway,
-        link: GatewayLink,
-        source: LinkSource,
-        pairedDevice: PairedDeviceRecord?,
-        persist: Bool,
-        pairedConnectionGeneration: Int? = nil
-    ) async {
+    // MARK: - Link owner
+
+    private func observeCoordinator() {
+        coordinatorObservation?.cancel()
+        let coordinator = self.coordinator
+        coordinatorObservation = Task { [weak self] in
+            for await snapshot in await coordinator.snapshots() {
+                guard !Task.isCancelled, let self else { return }
+                await self.apply(snapshot)
+            }
+        }
+    }
+
+    /// One place turns owner snapshots into screen state.
+    private func apply(_ snapshot: RemoteLinkSnapshot) async {
+        linkSnapshot = snapshot
+        coldOpen.observe(path: snapshot.path)
+        coldOpen.observe(snapshot.state)
+        switch snapshot.state {
+        case .ready:
+            if let timings = snapshot.timings {
+                record(LinkStageSample(stage: .admission, milliseconds: timings.admissionMs))
+                record(LinkStageSample(stage: .connect, milliseconds: timings.connectMs))
+                record(LinkStageSample(stage: .peerWait, milliseconds: timings.peerWaitMs))
+                record(LinkStageSample(stage: .authenticate, milliseconds: timings.authenticateMs))
+                record(LinkStageSample(stage: .linkReady, milliseconds: timings.linkReadyMs))
+            }
+            if let path = snapshot.path { pathReporter.report(path) }
+            if snapshot.generation != discoveredGeneration {
+                discoveredGeneration = snapshot.generation
+                await discoverOnFreshLink()
+            }
+        case .connecting(let attempt):
+            if attempt == 0, case .connecting = linkState { return }
+            if let capabilities = linkState.cachedCapabilities {
+                becomeInterrupted(.interrupted(snapshot.state, capabilities))
+            } else if !linkState.isUsable, linkState != .connecting {
+                linkState = .connecting
+            }
+        case .backoff:
+            if linkState.cachedCapabilities != nil || linkState.isUsable {
+                becomeInterrupted(.interrupted(snapshot.state, linkState.cachedCapabilities))
+            } else {
+                linkState = .interrupted(snapshot.state, nil)
+            }
+        case .macOffline:
+            becomeInterrupted(.macOffline(linkState.cachedCapabilities))
+        case .suspended:
+            becomeInterrupted(.interrupted(.suspended, linkState.cachedCapabilities))
+        case .revoked(let reason):
+            becomeInterrupted(.revoked(reason))
+            detachAllTerminals()
+        case .pairingRequired(let reason):
+            becomeInterrupted(.pairingRequired(reason))
+            detachAllTerminals()
+        case .disabled:
+            break
+        }
+    }
+
+    /// The link is not usable. Keep what was on screen, mark it stale, stop
+    /// the sockets that cannot survive, and turn held terminals into
+    /// interrupted ones (never silently closed, never replayed).
+    private func becomeInterrupted(_ state: LinkState) {
+        if linkState.isUsable {
+            sessionsStale = !sessions.isEmpty
+            pathReporter.clear()
+            conversationStores.values.forEach { $0.stop() }
+            interruptTerminals()
+        }
+        linkState = state
+    }
+
+    /// Discovery once per authenticated link. Capabilities may have changed
+    /// while the phone was away, and a restarted gateway instance re-bases
+    /// every conversation socket.
+    private func discoverOnFreshLink() async {
+        guard let gateway, let pairedDevice else { return }
+        let generation = pairedConnectionGeneration
         do {
+            let started = Date()
             let capabilities = try await gateway.discover()
-            guard pairedConnectionGeneration == nil
-                || pairedConnectionGeneration == self.pairedConnectionGeneration
-            else { return }
-            self.link = link
-            self.gateway = gateway
-            linkSource = source
+            record(LinkStageSample(stage: .discovery, milliseconds: Self.millis(since: started)))
+            guard generation == pairedConnectionGeneration else { return }
+            let instanceChanged = gatewayInstanceID != nil && gatewayInstanceID != capabilities.gatewayInstanceId
+            gatewayInstanceID = capabilities.gatewayInstanceId
             self.pairedDevice = pairedDevice
+            linkSource = .paired
             linkState = .linked(capabilities)
+            if let timings = linkSnapshot.timings {
+                record(LinkStageSample(
+                    stage: .applicationReady,
+                    milliseconds: timings.linkReadyMs + Self.millis(since: started)
+                ))
+            }
             conversationStores.values.forEach {
                 $0.reconnect(using: gateway, operationRetentionSeconds: capabilities.operationRetentionSeconds)
             }
-            if persist {
-                try? storage.save(link)
+            if instanceChanged {
+                // A new gateway process has no receipts from the old one in
+                // memory beyond its journal; sockets already re-based above.
+                highlightedSessionID = nil
             }
+            resumeInterruptedTerminals()
             await refreshSessions()
         } catch let error as LatchError {
-            // A saved control-plane URL must not stay as "the computer":
-            // restore would keep winning over pairing on every launch.
-            if error == .notAGateway, source == .manual {
-                try? storage.clear()
-                if let existing = self.pairedDevice {
-                    await connectPairedDevice(existing)
-                    if case .linked = linkState { return }
-                }
-            }
             linkState = Self.linkFailure(error)
         } catch {
             linkState = .failed(error.localizedDescription)
         }
     }
 
+    /// The owner's health probe for a link that looks alive after a network
+    /// change: one bounded discovery request.
+    private func probeGateway() async -> Bool {
+        guard let gateway else { return false }
+        return (try? await gateway.discover()) != nil
+    }
+
+    private func record(_ sample: LinkStageSample) {
+        coldOpen.observe(sample)
+        recentStages.append(sample)
+        if recentStages.count > 64 { recentStages.removeFirst(recentStages.count - 64) }
+    }
+
+    private static func millis(since date: Date) -> UInt64 {
+        UInt64(max(0, Date().timeIntervalSince(date) * 1000))
+    }
+
     /// Reloads the session list.
     public func refreshSessions() async {
-        guard let gateway else { return }
+        guard let gateway, linkState.isUsable else { return }
         isLoadingSessions = true
         defer { isLoadingSessions = false }
         do {
+            let started = Date()
             sessions = try await gateway.listSessions()
+            record(LinkStageSample(stage: .sessionList, milliseconds: Self.millis(since: started)))
+            sessionsStale = false
             sessionsError = nil
         } catch let error as LatchError {
             sessionsError = error.message
@@ -647,60 +819,73 @@ public final class AppModel {
         }
     }
 
-    /// Repeats discovery after the connection was interrupted.
+    /// Repeats discovery on a usable link, or cuts a backoff short.
     ///
-    /// The contract requires this before the app resumes application traffic
-    /// on a reconnected path: capabilities may have changed while the phone was
-    /// away, and carrying the old answers across would assume a feature the
-    /// gateway no longer offers.
+    /// The contract requires discovery before the app resumes application
+    /// traffic on a reconnected path; that happens automatically per link
+    /// generation. This is the person's "Check again".
     public func rediscover() async {
-        if linkSource == .paired, let pairedDevice {
-            // A paired transport owns a process-local listener and sockets;
-            // those cannot be assumed to survive backgrounding. Start a new
-            // route rather than rediscovering through a stale listener.
-            gateway = nil
-            link = nil
-            linkSource = nil
-            self.pairedDevice = nil
-            await connectPairedDevice(pairedDevice)
-            return
+        guard pairedDevice != nil else { return }
+        if linkState.isUsable {
+            await discoverOnFreshLink()
+        } else {
+            await coordinator.retryImmediately()
         }
-        guard let gateway, let link else { return }
-        await gateway.invalidateDiscovery()
-        await connect(to: link, persist: false)
     }
 
-    /// Releases a paired route before the app is suspended.
+    /// A real network path change. One immediate attempt through the same
+    /// owner: a backoff is cut short, a live link is probed and replaced if
+    /// the probe fails. No second retry loop.
+    public func networkPathChanged() async {
+        guard pairedDevice != nil else { return }
+        await coordinator.retryImmediately()
+    }
+
+    /// Releases the route before the app is suspended.
     ///
-    /// iOS may terminate the loopback listener, its TCP connection, and any
-    /// future ICE allocation while the app is in the background. Retaining a
-    /// linked state across that boundary would let UI code treat stale
-    /// capabilities as live. The paired record remains so `reconnectPaired`
-    /// can make a fresh route and repeat discovery on foreground.
+    /// The loopback adapter and its capability die here, the native link is
+    /// closed, and conversation sockets stop. The paired record remains so
+    /// `resumeAfterSuspension` can make a fresh adapter with a fresh
+    /// capability and repeat discovery on foreground.
     public func suspendPairedTransport() {
-        guard linkSource != .manual, pairedDevice != nil else { return }
+        guard pairedDevice != nil else { return }
         pairedConnectionGeneration &+= 1
+        let coordinator = self.coordinator
+        Task { await coordinator.suspend() }
+        transport?.stop()
+        transport = nil
+        if let gateway {
+            Task { await gateway.stopTransport() }
+        }
         gateway = nil
         link = nil
-        linkSource = nil
-        sessions = []
-        sessionsError = nil
         highlightedSessionID = nil
-        // The path belongs to the torn-down route. Leaving it on screen would
-        // report a live connection the phone no longer has.
         pathReporter.clear()
-        linkState = .unlinked
+        becomeInterrupted(.interrupted(.suspended, linkState.cachedCapabilities))
     }
 
-    /// Re-establishes a paired route after suspension or a path change.
-    /// Discovery is part of reconnection, not an optional refresh: the Mac's
-    /// capabilities and the granted permission may have changed while the
-    /// phone was away.
+    /// Re-establishes the route after suspension: a new adapter and
+    /// capability, then the same owner resumes and discovery follows.
     public func reconnectPairedTransport() async {
-        // A currently linked paired route is handled by `rediscover()`.
-        // This entry point is only for a route suspension/path teardown.
-        guard linkSource == nil, let pairedDevice else { return }
-        await connectPairedDevice(pairedDevice)
+        guard let pairedDevice else { return }
+        pairedConnectionGeneration &+= 1
+        let generation = pairedConnectionGeneration
+        do {
+            let provider = CoordinatorChannelProvider(coordinator: coordinator)
+            let recorder: LinkStageRecorder = { [weak self] sample in
+                Task { @MainActor in self?.record(sample) }
+            }
+            let gateway = try await gatewayFactory(pairedDevice, provider, recorder)
+            guard generation == pairedConnectionGeneration else { return }
+            self.gateway = gateway
+            self.link = await gateway.gateway
+            linkSource = .paired
+        } catch {
+            linkState = .failed(error.localizedDescription)
+            return
+        }
+        if coordinatorObservation == nil { observeCoordinator() }
+        await coordinator.resume()
     }
 
     /// The socket is intentionally stopped before suspension: iOS can reclaim
@@ -717,12 +902,128 @@ public final class AppModel {
     /// Restores a usable route and repeats discovery before any conversation
     /// socket is allowed to resume application traffic.
     public func resumeAfterSuspension() async {
-        if linkSource == nil, pairedDevice != nil {
+        guard pairedDevice != nil else { return }
+        if gateway == nil {
             await reconnectPairedTransport()
         } else {
-            await rediscover()
+            await coordinator.retryImmediately()
         }
+        // Discovery runs when the owner reports the link ready; conversation
+        // sockets resume only once that produced a usable gateway.
+        await waitUntilSettled()
         guard case .linked = linkState else { return }
         resumeConversations()
+    }
+
+    /// Waits for the current attempt to reach a usable or non-retrying state,
+    /// bounded so a caller never hangs on a Mac that is offline.
+    public func waitUntilSettled(timeout: Duration = .seconds(20)) async {
+        let deadline = Date().addingTimeInterval(
+            Double(timeout.components.seconds) + Double(timeout.components.attoseconds) / 1e18
+        )
+        while Date() < deadline {
+            switch linkState {
+            case .linked, .revoked, .pairingRequired, .incompatible, .failed, .macOffline, .unlinked:
+                return
+            case .connecting, .interrupted:
+                try? await Task.sleep(for: .milliseconds(25))
+            }
+        }
+    }
+
+    /// Diagnostics-only: whether the LAN attempt is skipped so the relay path
+    /// is the one measured. Applies from the next connection attempt.
+    public func setDiagnosticsSkipLAN(_ skip: Bool) async {
+        diagnosticsOptions.skipLAN = skip
+        coldOpen.observe(skipLAN: skip)
+        await coordinator.setOptions(diagnosticsOptions)
+    }
+}
+
+// MARK: - Diagnostics subject
+
+extension AppModel: DiagnosticsSubject {
+    public func diagnosticsRecoveryCycle(skipLAN: Bool) async throws -> (path: String?, stages: [LinkStageSample]) {
+        await setDiagnosticsSkipLAN(skipLAN)
+        let started = Date()
+        suspendPairedTransport()
+        let before = recentStages.count
+        await resumeAfterSuspension()
+        guard case .linked = linkState else {
+            throw LatchError.transport("The link did not become usable after the cycle.")
+        }
+        var stages = Array(recentStages.dropFirst(before))
+        stages.append(LinkStageSample(stage: .applicationReady, milliseconds: Self.millis(since: started)))
+        return (linkSnapshot.path?.rawValue, stages)
+    }
+
+    public func diagnosticsSessionList() async throws -> LinkStageSample {
+        guard let gateway else { throw LatchError.transport("Not linked to a computer.") }
+        let (list, sample) = try await measureStage(.sessionList) { try await gateway.listSessions() }
+        sessions = list
+        return sample
+    }
+
+    public func diagnosticsPreview() async throws -> LinkStageSample? {
+        guard let gateway, let session = sessions.first else { return nil }
+        let (_, sample) = try await measureStage(.preview) {
+            try await gateway.previewSession(sessionID: session.id, scrollbackLines: 0)
+        }
+        return sample
+    }
+
+    public func diagnosticsTerminalFirstOutput() async throws -> LinkStageSample? {
+        guard surface.terminal, terminalUnlock.isUnlocked,
+              let session = sessions.first(where: \.isRunning),
+              let terminal = terminalSession(for: session)
+        else { return nil }
+        defer { discardTerminal(for: session) }
+        let started = Date()
+        terminal.attach(cols: 80, rows: 24)
+        let deadline = Date().addingTimeInterval(10)
+        for await _ in terminal.output {
+            return LinkStageSample(stage: .terminalFirstOutput, milliseconds: Self.millis(since: started))
+        }
+        _ = deadline
+        throw LatchError.transport("No terminal output arrived.")
+    }
+}
+
+/// Bridges the loopback adapter's channel requests to the one link owner.
+final class CoordinatorChannelProvider: AuthenticatedGatewayChannelProvider, @unchecked Sendable {
+    private let coordinator: RemoteLinkCoordinator
+
+    init(coordinator: RemoteLinkCoordinator) { self.coordinator = coordinator }
+
+    func openGatewayChannel() async throws -> any AuthenticatedGatewayChannel {
+        try await coordinator.openGatewayChannel()
+    }
+}
+
+/// The kit's refusal to invent a transport: a build without the native
+/// connector fails clearly instead of pretending to connect.
+struct UnavailableLinkConnector: RemoteLinkConnecting {
+    func connect(record: PairedDeviceRecord, options: RemoteLinkConnectOptions) async throws -> any RemoteLinkConnection {
+        throw RemoteLinkFailure.authentication("This build does not include the native Remote Link transport.")
+    }
+}
+
+/// For tests that stub the gateway over HTTP and only need the owner to
+/// report a ready link that never drops.
+final class AlwaysReadyLinkConnector: RemoteLinkConnecting, @unchecked Sendable {
+    final class Connection: RemoteLinkConnection, @unchecked Sendable {
+        let path: RemotePath = .local
+        let grantRevision: UInt64 = 1
+        let timings = RemoteLinkStageTimings()
+        private let closed = AsyncStream<Void>.makeStream()
+        func openGatewayChannel() async throws -> any AuthenticatedGatewayChannel {
+            throw RemoteLinkTransportError.listenerUnavailable
+        }
+        func waitClosed() async { for await _ in closed.stream {} }
+        func close() async { closed.continuation.finish() }
+    }
+
+    func connect(record: PairedDeviceRecord, options: RemoteLinkConnectOptions) async throws -> any RemoteLinkConnection {
+        Connection()
     }
 }

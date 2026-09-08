@@ -1,131 +1,103 @@
-# Decision: remote-access transport and contract boundary
+# Remote-access transport decision
 
-**Status:** accepted; implementation lives in `crates/latch-transport` and is
-distributed to iOS as the owned `LatchTransportFFI.xcframework`.
+Date: 7 September 2026
 
 ## Decision
 
-Use a standards-based **WebRTC data-channel transport with ICE/STUN/TURN** for
-direct and relay connectivity. Both endpoints compile the same pinned Rust
-core rather than integrating unrelated platform stacks. TURN is used only as
-an opaque network relay. Latch adds endpoint-authenticated application
-encryption and binds it to the paired device identities before any `/v1` bytes
-are carried.
+Latch Remote Link uses outbound WebSocket Secure connections on TCP 443 for
+internet reachability. A separate opaque relay joins one Mac socket and one
+phone socket in a short-lived room and forwards bounded binary records. It
+does not receive account IDs, device IDs, endpoint keys, grants, gateway
+tokens, paths, session names, or application plaintext.
 
-The core composes `webrtc-ice`, `webrtc-dtls`, `webrtc-sctp`, and
-`webrtc-data` directly, below `RTCPeerConnection` and SDP. DTLS supplies the
-encryption SCTP requires but is not an identity boundary: its self-signed
-certificate is deliberately not the pairing pin. Noise XX runs above the one
-reliable ordered data channel and verifies the static key against
-`PairedDeviceRecord.mac.publicKey` before gateway traffic is sent.
+The same shared Rust core is compiled for macOS and iOS. It performs:
 
-Direct is still preferred, but relay is no longer withheld while a phone finds
-that out for itself. The original design gated TURN behind a recorded direct
-failure — the first ICE agent got STUN entries only, and a fresh agent with
-TURN credentials was only built after that attempt failed. In practice this
-made every genuinely off-LAN or symmetric-NAT phone pay a guaranteed failed
-attempt before the connection that was always going to be relayed could start,
-and it bought no stronger preference for direct paths: ICE already ranks host
-and server-reflexive candidate pairs above relayed ones by priority, so an
-agent handed both STUN and TURN credentials from the start still nominates a
-direct pair whenever one is reachable. The policy is now **prefer direct,
-allow relay from the start**: a client requests STUN and, when relay is not
-disabled, TURN credentials together and gathers one agent with both, and ICE's
-own pair priority is what keeps a reachable direct path from being displaced
-by a relayed one. `latch remote-access relay disable` remains a hard refusal
-at credential issuance, independent of this ordering change — it removes TURN
-from the offer entirely rather than de-prioritizing it. A relay-to-direct
-recovery or any other selected-pair path change still gates application
-traffic until capability discovery has run again.
+1. platform-trust-store TLS verification for WSS;
+2. a fresh `Noise_XX_25519_ChaChaPoly_BLAKE2s` handshake with pinned endpoint
+   static keys and an explicit Remote Link protocol binding;
+3. Yamux multiplexing inside the authenticated encrypted link; and
+4. bounded logical byte streams for the existing schema-first gateway.
 
-The Latch application layer depends only on the authenticated stream boundary
-below. It does not know whether the selected path is `local`, `direct`, or
-`relay`; a transport adapter exposes that path only as non-content diagnostic
-metadata.
+Both endpoints initiate outbound connections, so Remote Link requires no
+public Mac listener, port forwarding, or NAT traversal. An authenticated LAN
+carrier races the WSS carrier and uses the identical Noise/Yamux link. Direct
+internet optimization is deliberately deferred.
 
-```text
-paired identity + authorization
-             │
-             ▼
-AuthenticatedByteStream ── byte-preserving /v1 proxy ── loopback latch serve
-        local | direct | relay                         fixed destination only
-```
+## Ownership
 
-## Boundary contract
+`latch-transport` owns WSS, LAN transport, Noise, Yamux, record limits,
+cancellation, heartbeat, and link control. `latch-remote` drives that core,
+obtains fresh admissions and lease extensions, and bridges authenticated
+logical streams to the Mac authority.
 
-Before a stream is handed to the desktop proxy, an adapter must provide:
+The ordinary `latch` crate does not depend on `latch-transport`. It owns the
+Mac identity, exact per-device grants, audit records, and one supervised
+loopback gateway. It accepts only a peer key and grant revision already
+authenticated by the link core, strips client-supplied authority headers,
+inserts the current internal capability, and rejects routes outside the shared
+allowlist.
 
-- a mutually authenticated `peerId` derived from the paired public key;
-- the Mac-owned permission set (`observe`, `interact`, `control`);
-- an opaque `connectionId`, `transportMode`, and non-content diagnostics;
-- ordered, reliable bytes with backpressure, explicit close/error categories,
-  and bounded buffering;
-- immediate closure when the Mac revokes the peer; and
-- an endpoint encryption transcript bound to both device identities, the
-  connection role, and negotiated protocol version.
+On iOS, the Rust core is required through `latch-transport-ffi`. Swift exposes
+the existing `GatewayTransport` contract through a random 256-bit,
+loopback-only capability. A caller cannot choose a gateway host or bearer
+token.
 
-The proxy maps those permissions to the fixed gateway paths. It does not
-accept a target host, port, gateway token, or a claimed identity from stream
-payload. `control` is required for any terminal connection; `observe` and
-`interact` are refused the terminal route outright, because connecting takes
-the session's single surface from whatever holds it.
+## Enrollment and admission
 
-WebRTC data channels are message-oriented, so the adapter uses bounded
-length-prefixed records internally and presents ordered byte-stream semantics
-above that framing. This preserves the existing HTTP/WebSocket `/v1` surface
-without inventing a second terminal protocol.
+The control plane opens a five-minute enrollment and returns a service-visible
+admission code plus a separate 256-bit enrollment secret placed only in the QR
+payload. The endpoints mix the QR-only secret into the enrollment Noise
+prologue. Possessing or substituting the admission code without that secret
+cannot complete the handshake.
 
-## Alternatives considered
+After the encrypted endpoints derive the same comparison words, the Mac shows
+the phone name and proposed key. Owner approval atomically commits that exact
+key, permission, link room, and grant revision locally and in PostgreSQL.
+There is no anonymous account bootstrap: Desktop first exchanges an
+operator-minted, one-use owner invitation.
 
-| Alternative | Decision |
+Normal admission claims contain only an opaque room, role, purpose, generation,
+expiry, one-time ID, and resource limits. The relay redeems them with the
+control plane, accepts each once, and renews a room only from a signed
+lease-extension claim forwarded over the WSS control channel. Revocation and
+permission downgrades increment durable grant state and enqueue relay room
+invalidation.
+
+## Authorization
+
+Noise authentication proves the pinned device key; it does not grant an
+operation. Every logical stream is checked against the Mac's current record.
+Permissions remain `observe`, `interact`, and `control`. Terminal access
+requires `control` and takes the session's one human surface. A live
+downgrade or revocation closes any stream whose current route grant is no
+longer satisfied.
+
+## Rejected alternatives
+
+| Alternative | Reason |
 | --- | --- |
-| Expose `latch serve` with TLS | Rejected: bearer-token gateway remains an internal plaintext loopback hop and would make revocation/device authorization harder. |
-| SSH/VPN only | Retained as advanced fallback, rejected as the primary product because it requires user network configuration. |
-| Network.framework alone | Useful for local paths, but it does not provide the required interoperable ICE/TURN direct-connect path. |
-| Custom UDP/NAT traversal | Rejected: too much unaudited protocol and operational risk. |
-| WebRTC data channels | Chosen: mature ICE/STUN/TURN connectivity, native Apple support, direct path selection, and TURN fallback beneath a transport-neutral adapter. |
+| Public `latch serve` with TLS | Exposes a bearer gateway and weakens per-device revocation and fixed-destination enforcement. |
+| SSH or VPN as the primary product | Requires user-managed network configuration; remains an advanced local option. |
+| Custom UDP/NAT traversal | Adds protocol and operational risk without being required for reachability. |
+| Platform-specific cryptography or multiplexers | Creates divergent trust boundaries and wire behavior. |
+| Bundled TLS roots | Can drift from iOS/macOS trust policy; Remote Link uses platform verification. |
+| Mixed old/new compatibility | The owner approved a coordinated clean replacement and re-pairing. |
 
-## Canonical v1 contract
+## Operational consequences
 
-`schemas/remote-access/v1/` is the source of truth for additions to `/v1` and
-the private supervision handoff. The v1 bundle defines gateway discovery,
-readiness, terminal modes, send bodies, and idempotency-key syntax. The
-committed generator creates Rust and TypeScript representations; CI runs it in
-`--check` mode. Fixtures under `fixtures/remote-access/v1/` are wire examples,
-not implementation snapshots.
+The relay and control plane remain independent deployables. For this release,
+each runs exactly one always-awake replica. The hosting edge must preserve the
+WebSocket `Authorization` header and keep idle sockets longer than the
+15-second heartbeat.
 
-Compatibility rules:
-
-1. A v1 server never removes, renames, or changes the meaning of a documented
-   field, endpoint, WebSocket frame, close code, or accepted control mode.
-2. New optional behavior is additive and must be advertised by
-   `GET /v1/capabilities.features`; clients do not probe a failing endpoint to
-   infer it.
-3. A client receiving discovery 404 uses the existing terminal-only legacy
-   surface. A protocol major other than 1 is unsupported rather than guessed.
-4. `Idempotency-Key` is optional for compatibility and valid only for
-   `message` and `resolve`. A supplied key is scoped to the resolved session
-   and payload. Completed results are retained for ten minutes or 1,024 keys,
-   whichever limit is reached; duplicate in-flight calls wait for the original
-   result. The cache is intentionally in-memory and `gatewayInstanceId`
-   changes on a restart.
-5. There is no terminal `mode` parameter. Every terminal connection is a
-   control surface and requires the `control` grant.
-
-## Swift generation path
-
-The native iOS/macOS module should not hand-copy the TypeScript model. At the
-start of the native client objective, convert the JSON Schema bundle into the
-`components.schemas` section of an OpenAPI 3.1 document (retaining the exact
-canonical `$id` values), then run [Swift OpenAPI Generator](https://github.com/apple/swift-openapi-generator)
-for Codable client models. The adapter-facing stream types remain hand-written
-because they are platform transport interfaces, not HTTP documents. CI should
-compare the exported OpenAPI component schemas with `schemas/remote-access/v1/`
-and run the same fixture corpus through Swift `JSONDecoder`.
-
-## Service-level targets
-
-Phase 1 records connection attempts, selected path, reconnect time, relay
-latency, and crash-free sessions as aggregate non-content metrics. Pre-release
-targets are set only after the LAN/direct/relay network matrix has measured a
-representative baseline; no guessed SLO is treated as a product commitment.
+Deployed shape (8 September 2026): both services run on Railway in project
+`latch`, one replica each with app sleeping disabled; the control plane at
+`latch-production-7e52.up.railway.app` deploys from `main`, the relay at
+`latch-relay-production.up.railway.app` from `services/relay` on the same
+branch. Configuration, verification checks, and the deployment, revocation,
+key-rotation, incident, and rollback runbooks are in
+[REMOTE_LINK_OPERATIONS.md](REMOTE_LINK_OPERATIONS.md). The physical matrix
+and its measured results are in
+[REMOTE_ACCESS_FIELD_VERIFICATION.md](REMOTE_ACCESS_FIELD_VERIFICATION.md);
+this decision is implemented in source and locally verified, and is
+considered released only when that record's gates are met.

@@ -1,5 +1,8 @@
 # Field investigation: "ICE connectivity checks timed out" off the home network
 
+> Historical investigation preserved as baseline evidence. It does not
+> describe or validate the current Remote Link WSS transport.
+
 Mission coo:940, 2026-09-06. The phone on LTE could not reach the Mac; every
 attempt ended in `LatchTransportNative.TransportError.Failure(message:
 "WebRTC transport failed: ICE connectivity checks timed out")`. This is the

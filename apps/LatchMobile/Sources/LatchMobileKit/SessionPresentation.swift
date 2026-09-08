@@ -21,7 +21,7 @@ public enum SessionPresentation: String, CaseIterable, Codable, Sendable {
 
 /// Where the preferred session view is kept between launches.
 ///
-/// This mirrors `ControlPlaneAddressStoring` deliberately — protocol,
+/// This uses the same injectable storage shape as other public service addresses — protocol,
 /// `UserDefaults` for the app, in-memory for tests — because it is the same
 /// kind of thing: a preference, not a credential, and no new storage idiom
 /// should appear for it.

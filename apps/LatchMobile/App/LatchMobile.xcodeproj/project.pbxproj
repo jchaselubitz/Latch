@@ -33,6 +33,7 @@
 		ABCDEF0123456789ABCD001E /* PairingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingView.swift; sourceTree = "<group>"; };
 		ABCDEF0123456789ABCD001F /* QRScannerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRScannerView.swift; sourceTree = "<group>"; };
 		ABCDEF0123456789ABCD0014 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		ABCDEF0123456789ABCD0060 /* LatchMobile.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = LatchMobile.entitlements; sourceTree = "<group>"; };
 		ABCDEF0123456789ABCD001C /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		ABCDEF0123456789ABCD0030 /* SessionTerminalSurface.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionTerminalSurface.swift; sourceTree = "<group>"; };
 		ABCDEF0123456789ABCD0031 /* TerminalKeyBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalKeyBar.swift; sourceTree = "<group>"; };
@@ -79,6 +80,7 @@
 				ABCDEF0123456789ABCD0050 /* FolderPickerView.swift */,
 				ABCDEF0123456789ABCD001C /* Assets.xcassets */,
 				ABCDEF0123456789ABCD0014 /* Info.plist */,
+				ABCDEF0123456789ABCD0060 /* LatchMobile.entitlements */,
 			);
 			path = LatchMobile;
 			sourceTree = "<group>";
@@ -127,6 +129,11 @@
 				LastUpgradeCheck = 1600;
 				TargetAttributes = {
 					ABCDEF0123456789ABCD0002 = {
+						SystemCapabilities = {
+							com.apple.Push = {
+								enabled = 1;
+							};
+						};
 						CreatedOnToolsVersion = 16.0;
 					};
 				};
@@ -237,6 +244,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = LatchMobile/LatchMobile.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = X84RPB4674;
@@ -260,6 +268,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = LatchMobile/LatchMobile.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = X84RPB4674;

@@ -7,14 +7,16 @@
  * listener only reports ready once storage answers.
  */
 
+import { Http2ApnsSender } from './apns.ts';
 import { loadConfig } from './config.ts';
-import { CloudflareTurnProvider } from './cloudflare-turn.ts';
 import { appliedMigrations, loadMigrations, runMigrations } from './migrate.ts';
 import { createServer } from './server.ts';
+import { deliverRelayRevocations } from './revocation-worker.ts';
 import { PostgresStore } from './store/postgres.ts';
 
-/** Expired presence, offers, and tickets are swept on this interval. */
+/** Expired Remote Link enrollment and admission state is swept on this interval. */
 const PURGE_INTERVAL_MS = 60_000;
+const REVOCATION_INTERVAL_MS = 1_000;
 
 function log(message: string, fields: Record<string, unknown> = {}): void {
   process.stdout.write(`${JSON.stringify({ level: 'info', message, ...fields })}\n`);
@@ -27,9 +29,6 @@ async function main(): Promise<void> {
     poolSize: config.databasePoolSize,
     sslRejectUnauthorized: config.databaseSslRejectUnauthorized,
   });
-  const turn = config.cloudflareTurnKeyId && config.cloudflareTurnApiToken
-    ? new CloudflareTurnProvider(config.cloudflareTurnKeyId, config.cloudflareTurnApiToken)
-    : null;
 
   if (config.migrateOnBoot) {
     const files = await loadMigrations();
@@ -41,7 +40,7 @@ async function main(): Promise<void> {
     config,
     store,
     readiness: async () => ({ migrations: await appliedMigrations(store.pool) }),
-    turn,
+    apns: config.apns ? new Http2ApnsSender(config.apns) : null,
   });
 
   const purge = setInterval(() => {
@@ -51,18 +50,28 @@ async function main(): Promise<void> {
   }, PURGE_INTERVAL_MS);
   purge.unref();
 
+  const revocations = config.relayInvalidationSecret ? setInterval(() => {
+    void deliverRelayRevocations({
+      store, relayUrl: config.relayUrl, secret: config.relayInvalidationSecret!,
+    }).catch(() => process.stderr.write('{"level":"error","message":"relay revocation delivery failed"}\n'));
+  }, REVOCATION_INTERVAL_MS) : null;
+  revocations?.unref();
+
   server.listen(config.port, config.host, () => {
     log('listening', {
       port: config.port,
       environment: config.environment,
       release: config.releaseId,
-      relayConfigured: Boolean(turn),
+      relayConfigured: Boolean(config.admissionPrivateKeyPem && config.relayServiceToken),
+      apnsConfigured: Boolean(config.apns),
+      apnsEnvironment: config.apns?.environment ?? null,
     });
   });
 
   const shutdown = (signal: string): void => {
     log('shutting down', { signal });
     clearInterval(purge);
+    if (revocations) clearInterval(revocations);
     server.close(() => {
       void store.close().then(() => process.exit(0));
     });

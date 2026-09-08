@@ -1,5 +1,9 @@
 # Paired LAN Remote Access Prototype
 
+> Historical prototype. Current LAN access uses the same authenticated
+> Noise/Yamux link as WSS; see
+> [the transport decision](DECISION_REMOTE_ACCESS_TRANSPORT.md).
+
 Phase 1 adds a headless, desktop-side LAN prototype. It intentionally does
 not add the phone chat UI, Internet rendezvous, or relay fallback.
 

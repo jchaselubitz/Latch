@@ -1,5 +1,9 @@
 # Latch Remote Access Implementation Plan
 
+> Historical design for the retired transport. The supported implementation
+> is [Remote Link](DECISION_REMOTE_ACCESS_TRANSPORT.md); current objective
+> status is in [the replacement plan](PLAN_REMOTE_RELAY_REPLACEMENT.md).
+
 ## Status
 
 Proposed, and partly superseded.
@@ -576,4 +580,3 @@ before introducing Internet reachability and relay operations.
 - [Architecture rules](ARCHITECTURE_RULES.md)
 - [SSH setup](SSH_SETUP.md)
 - [xterm compatibility decision](DECISION_XTERM_COMPATIBILITY.md)
-

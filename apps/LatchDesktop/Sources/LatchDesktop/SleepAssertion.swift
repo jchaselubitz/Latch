@@ -1,5 +1,32 @@
 import Foundation
+import IOKit.ps
 import IOKit.pwr_mgt
+
+/// Whether the Mac is on external power. Keep-awake is opt-in *and* limited
+/// to a plugged-in Mac: a laptop on battery goes to sleep on its own schedule
+/// no matter what the phone is doing.
+protocol PowerSourceObserving: Sendable {
+    func isOnExternalPower() -> Bool
+}
+
+struct IOPSPowerSource: PowerSourceObserving {
+    func isOnExternalPower() -> Bool {
+        guard let type = IOPSGetProvidingPowerSourceType(nil)?.takeRetainedValue() else {
+            return false
+        }
+        return (type as String) == kIOPMACPowerKey
+    }
+}
+
+/// The keep-awake decision, as one pure function so it can be tested without
+/// IOKit. All three must hold: the owner opted in, the Mac is plugged in, and
+/// a phone is actually connected. A waiting relay socket alone never keeps
+/// the Mac awake.
+enum SleepPolicy {
+    static func shouldPreventSleep(keepAwake: Bool, externalPower: Bool, connectedPeers: Int) -> Bool {
+        keepAwake && externalPower && connectedPeers > 0
+    }
+}
 
 /// Keeps this Mac awake while a phone is actually connected to it.
 ///

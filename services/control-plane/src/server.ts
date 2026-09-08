@@ -9,8 +9,8 @@ import { createServer as createHttpServer } from 'node:http';
 import type { Server } from 'node:http';
 
 import { createRouter } from './api.ts';
+import type { ApnsSender } from './apns.ts';
 import type { Config } from './config.ts';
-import type { TurnProvider } from './cloudflare-turn.ts';
 import { createListener } from './http/router.ts';
 import type { RequestLog } from './http/router.ts';
 import type { Store } from './store/types.ts';
@@ -20,8 +20,9 @@ export interface ServerOptions {
   readonly store: Store;
   readonly now?: () => number;
   readonly readiness?: () => Promise<{ migrations: string[] }>;
-  readonly turn?: TurnProvider | null;
   readonly log?: (entry: RequestLog) => void;
+  /** Attention delivery; absent means notifications are best-effort disabled. */
+  readonly apns?: ApnsSender | null;
 }
 
 /** Structured request log. Deliberately free of identifiers and payloads. */
@@ -44,9 +45,9 @@ export function createServer(options: ServerOptions): Server {
     store: options.store,
     now: options.now ?? (() => Date.now()),
     readiness: options.readiness ?? (async () => ({ migrations: [] })),
-    turn: options.turn ?? null,
+    apns: options.apns ?? null,
   });
-  const server = createHttpServer(createListener(router, options.log ?? defaultLog));
+  const server = createHttpServer(createListener(router, options.log ?? defaultLog, options.config.trustProxy));
   // A slow or absent request line must not hold a connection open forever.
   server.headersTimeout = 10_000;
   server.requestTimeout = 20_000;

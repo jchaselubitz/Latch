@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  Generic attention alerts only. The payload is a fixed sentence; the phone
+	  fetches real state over the authenticated Remote Link after it opens.
+	  `development` matches a development-signed build and the control plane's
+	  APNS_ENVIRONMENT=sandbox; a TestFlight/App Store build is re-signed with
+	  `production` by Xcode automatically.
+	-->
+	<key>aps-environment</key>
+	<string>development</string>
+</dict>
+</plist>

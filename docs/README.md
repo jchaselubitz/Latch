@@ -20,9 +20,8 @@ More focused documentation:
 - [iTerm setup](ITERM_SETUP.md) and [SSH setup](SSH_SETUP.md)
 - [Remote access in Latch Desktop](REMOTE_ACCESS_DESKTOP.md) and the
   [remote-access threat model](REMOTE_ACCESS_THREAT_MODEL.md)
-- [Planned secure relay replacement](PLAN_REMOTE_RELAY_REPLACEMENT.md) —
-  implementation design and ordered objectives for Overlord coo:952; execution
-  follows verification of the current connection fix
+- [Secure relay replacement](PLAN_REMOTE_RELAY_REPLACEMENT.md) — implementation
+  record and remaining resilience/deployment objectives for Overlord coo:952
 - [Mobile session creation](FEATURE_MOBILE_SESSION_CREATION.md), its
   [implementation plan](PLAN_MOBILE_SESSION_CREATION.md), and the
   [field check](FIELD_CHECK_MOBILE_SESSION_CREATION.md) that is still to run

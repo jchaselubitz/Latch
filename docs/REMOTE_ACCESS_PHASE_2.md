@@ -1,5 +1,8 @@
 # Remote Access Phase 2: directory and direct-path rendezvous
 
+> Historical implementation record for the retired transport. The current
+> design is [Remote Link](DECISION_REMOTE_ACCESS_TRANSPORT.md).
+
 Phase 2 adds the control-plane boundary that sits in front of the paired
 transport. It remains deliberately unable to see Latch content, gateway bearer
 credentials, session names, or terminal data.

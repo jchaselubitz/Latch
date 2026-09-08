@@ -1,6 +1,5 @@
 import SwiftUI
 import AppKit
-import UniformTypeIdentifiers
 import CoreImage
 import CoreImage.CIFilterBuiltins
 
@@ -51,6 +50,12 @@ struct RemoteAccessSettingsView: View {
                         .textFieldStyle(.roundedBorder)
                     Button("Save") { controller.saveControlPlaneAddress() }
                 }
+                HStack {
+                    SecureField("One-use owner invitation", text: $controller.ownerInvitation)
+                        .textFieldStyle(.roundedBorder)
+                    Button("Use Invitation") { controller.saveOwnerInvitation() }
+                        .disabled(controller.ownerInvitation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
                 LabeledContent("Pairing codes") {
                     Text(controller.isControlPlaneConfigured ? "Carry this address" : "Carry no address")
                         .foregroundStyle(controller.isControlPlaneConfigured ? Color.secondary : Color.orange)
@@ -59,7 +64,7 @@ struct RemoteAccessSettingsView: View {
                 SettingsSectionHeader("Control Plane")
             } footer: {
                 SettingsFootnote(
-                    "A phone enrolls against this address after scanning a pairing code, so the code has to name it. Without one, the phone reports that the code does not say where to enroll and pairing has to be finished by entering the address on the phone by hand. This Mac registers only the pairing identifier and a digest of the one-time secret — never the secret, a key, or session content."
+                    "A new Mac also needs an operator-minted, one-use owner invitation. It is held only in memory and consumed during first enrollment. A phone enrolls against this address after scanning a pairing code; no session content or gateway credential reaches the control plane."
                 )
             }
 
@@ -104,31 +109,35 @@ struct RemoteAccessSettingsView: View {
             }
 
             Section {
-                Toggle("Allow encrypted relay fallback", isOn: Binding(
-                    get: { controller.status.relayEnabled },
-                    set: { enabled in Task { await controller.setRelayEnabled(enabled) } }
-                ))
-                .disabled(!controller.isEnabled || controller.status.neverRelay)
-
-                Toggle("Never use the relay", isOn: Binding(
-                    get: { controller.status.neverRelay },
-                    set: { never in Task { await controller.setNeverRelay(never) } }
-                ))
-                .disabled(!controller.isEnabled)
-
-                if controller.isPreventingSleep {
-                    LabeledContent("Sleep") {
-                        Text("Held awake for a connected phone")
-                            .foregroundStyle(.secondary)
+                LabeledContent("Internet path") { Text("Encrypted WSS relay") }
+                LabeledContent("Local path") { Text("Authenticated Remote Link") }
+                ForEach(controller.activeDevices) { device in
+                    if let directoryID = device.controlPlaneDeviceID,
+                       let link = controller.linkStatuses[directoryID] {
+                        LabeledContent(device.name) { Text(Self.label(link)) }
                     }
                 }
-
-                Button("Export Diagnostics…") { exportDiagnostics() }
             } header: {
                 SettingsSectionHeader("Connectivity")
             } footer: {
                 SettingsFootnote(
-                    "Turning the relay off keeps same-network and direct connections working. Never use the relay goes further: this Mac also stops publishing the addresses that a relayed path is found through, so a phone can only reach it on the same network or over a private network such as Tailscale. While a phone is connected, this Mac is kept from falling asleep on its idle timer — closing the lid or choosing Sleep still works. Diagnostics contain counts and switch states only — no names, addresses, keys, or session content — and are never uploaded."
+                    "Both paths use the same pinned Noise identity and bounded logical streams. The relay forwards opaque frames only; it never receives device keys, grants, gateway credentials, or session content. A waiting relay socket is not a connection; a phone is connected only once it has authenticated."
+                )
+            }
+
+            Section {
+                Toggle("Keep this Mac awake while a phone is connected", isOn: $controller.keepAwakeWhilePluggedIn)
+                LabeledContent("Power") {
+                    Text(controller.isOnExternalPower ? "Plugged in" : "On battery")
+                }
+                LabeledContent("Idle sleep") {
+                    Text(controller.isPreventingSleep ? "Prevented while connected" : "Not prevented")
+                }
+            } header: {
+                SettingsSectionHeader("Sleep")
+            } footer: {
+                SettingsFootnote(
+                    "Off by default. When on, Latch prevents idle sleep only while a phone is authenticated and this Mac is on external power. Closing the lid or choosing Sleep still sleeps the Mac, and an asleep Mac is reported to the phone as offline until it wakes."
                 )
             }
 
@@ -160,7 +169,9 @@ struct RemoteAccessSettingsView: View {
         )) { material in
             RemotePairingSheet(
                 material: material,
-                progress: controller.pairingProgress
+                progress: controller.pairingProgress,
+                approve: { controller.approveEnrollment() },
+                reject: { controller.rejectEnrollment() }
             ) { controller.dismissPairing() }
         }
         // A failed attempt shows no code at all, so it is raised here rather
@@ -180,21 +191,24 @@ struct RemoteAccessSettingsView: View {
         }
     }
 
-    private func exportDiagnostics() {
-        let panel = NSSavePanel()
-        panel.nameFieldStringValue = "latch-remote-access-diagnostics.json"
-        panel.allowedContentTypes = [.json]
-        panel.canCreateDirectories = true
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        Task { await controller.exportDiagnostics(to: url) }
-    }
-
     private var statusText: String {
         switch controller.phase {
         case .off: return "Off"
         case .starting: return "Starting…"
-        case .online(let listener): return "Online on \(listener)"
+        case .onlineRelay(let peers):
+            return peers == 0 ? "Waiting for a phone" : "Connected (\(peers) device\(peers == 1 ? "" : "s"))"
         case .failed(let message): return "Stopped — \(message)"
+        }
+    }
+
+    static func label(_ status: HelperLinkStatus) -> String {
+        switch status {
+        case .lanReady, .connecting: return "Connecting to relay"
+        case .waitingForPeer: return "Waiting for phone"
+        case .authenticating: return "Authenticating"
+        case .ready: return "Connected"
+        case .linkClosed: return "Disconnected"
+        case .offline: return "Relay unavailable"
         }
     }
 
@@ -202,7 +216,7 @@ struct RemoteAccessSettingsView: View {
         switch controller.phase {
         case .off: return .secondary
         case .starting: return .yellow
-        case .online: return .green
+        case .onlineRelay: return .green
         case .failed: return .red
         }
     }
@@ -323,8 +337,10 @@ private struct RemoteAuditList: View {
 /// The pairing sheet exists for as long as the one-time secret is valid. The
 /// secret is never written to disk by the app.
 private struct RemotePairingSheet: View {
-    let material: PairingMaterial
+    let material: RemoteEnrollmentMaterial
     let progress: RemotePairingProgress
+    let approve: () -> Void
+    let reject: () -> Void
     let dismiss: () -> Void
 
     /// The one-time document is rendered from the material already in memory.
@@ -339,7 +355,7 @@ private struct RemotePairingSheet: View {
             Text("Pair a Device")
                 .font(.title2)
                 .fontWeight(.semibold)
-            Text("Scan this with the device you are pairing. It works once and expires \(material.expiryDate, style: .relative) from now.")
+            Text("Scan this with the device you are pairing. Scanning alone grants nothing; approval happens after both screens show the same comparison code. It works once and expires \(material.expiryDate, style: .relative) from now.")
                 .fixedSize(horizontal: false, vertical: true)
             if let code = QRCode.image(for: document, side: 220) {
                 HStack {
@@ -373,9 +389,8 @@ private struct RemotePairingSheet: View {
         .frame(width: 460)
     }
 
-    /// What the sheet is waiting for. The enrolled case shows the phrase
-    /// because comparing it against the phone is the step that proves the
-    /// code was scanned by the phone in the room and not relayed elsewhere.
+    /// What the sheet is waiting for. The comparison is surfaced before the
+    /// exact key and grant are approved and committed.
     @ViewBuilder
     private var progressLabel: some View {
         switch progress {
@@ -388,23 +403,25 @@ private struct RemotePairingSheet: View {
             }
             .font(.caption)
             .foregroundStyle(.secondary)
-        case .unaddressed:
-            Label(
-                "This code does not say where to enroll. Set a control-plane address in Remote Access settings, or enter it on the phone by hand.",
-                systemImage: "exclamationmark.triangle"
-            )
-            .font(.caption)
-            .foregroundStyle(.orange)
+        case .comparing(let name, let permission, let code):
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Confirm \(name) requests \(permission.label), and check that the phone shows exactly:")
+                Text(code)
+                    .font(.system(.title3, design: .monospaced).weight(.semibold))
+                    .textSelection(.enabled)
+                HStack {
+                    Button("Reject", role: .destructive, action: reject)
+                    Spacer()
+                    Button("Approve This Device", action: approve)
+                        .keyboardShortcut(.defaultAction)
+                }
+            }
             .fixedSize(horizontal: false, vertical: true)
-        case .enrolled(let name, let phrase):
+        case .enrolled(let name):
             VStack(alignment: .leading, spacing: 4) {
                 Label("\(name) is paired.", systemImage: "checkmark.circle")
                     .foregroundStyle(.green)
-                if let phrase {
-                    Text("Check that the phone shows: \(phrase)")
-                        .font(.system(.callout, design: .monospaced))
-                        .textSelection(.enabled)
-                }
+                Text("The phone received its encrypted receipt after the local grant and service mirror completed.")
             }
             .font(.caption)
             .fixedSize(horizontal: false, vertical: true)

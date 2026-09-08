@@ -69,6 +69,9 @@ public enum TerminalCloseReason: String, Codable, Sendable {
     case slowClient = "slow_client"
     case sessionExited = "session_exited"
     case kernelError = "kernel_error"
+    /// The resume capability was stale, unknown, or another surface attached
+    /// meanwhile. Nothing was stolen; reattaching is a deliberate action.
+    case resumeRefused = "resume_refused"
 
     /// Application close code paired with this reason.
     public var closeCode: Int {
@@ -78,6 +81,7 @@ public enum TerminalCloseReason: String, Codable, Sendable {
         case .stolen: return 4409
         case .sessionExited: return 4410
         case .kernelError: return 4500
+        case .resumeRefused: return 4411
         }
     }
 
@@ -88,8 +92,22 @@ public enum TerminalCloseReason: String, Codable, Sendable {
     }
 
     private static let allCases: [TerminalCloseReason] = [
-        .detached, .stolen, .slowClient, .sessionExited, .kernelError
+        .detached, .stolen, .slowClient, .sessionExited, .kernelError, .resumeRefused
     ]
+}
+
+/// Text frame the gateway sends once the terminal surface is held by this
+/// socket, before any pane bytes.
+public struct TerminalAttachedFrame: Codable, Equatable, Sendable {
+    public var type: String
+    public var resumeCapability: String
+    public var resumeWindowSeconds: UInt64
+
+    public init(type: String = "attached", resumeCapability: String, resumeWindowSeconds: UInt64) {
+        self.type = type
+        self.resumeCapability = resumeCapability
+        self.resumeWindowSeconds = resumeWindowSeconds
+    }
 }
 
 public struct GatewayEndpoints: Codable, Equatable, Sendable {
@@ -416,6 +434,7 @@ public enum ConversationClientMessage: Encodable, Equatable, Sendable {
     case sendMessage(operationEpoch: String, operationId: String, text: String)
     case resolveRequest(operationEpoch: String, operationId: String, requestId: String, choice: String)
     case historyRequest(requestId: String, beforeOrdinal: UInt64, limit: Int)
+    case operationStatus(operationId: String)
 
     private enum CodingKeys: String, CodingKey {
         case type, generation, afterRevision, operationEpoch, operationId, text
@@ -445,6 +464,9 @@ public enum ConversationClientMessage: Encodable, Equatable, Sendable {
             try container.encode(requestId, forKey: .requestId)
             try container.encode(beforeOrdinal, forKey: .beforeOrdinal)
             try container.encode(limit, forKey: .limit)
+        case .operationStatus(let operationId):
+            try container.encode("operation_status", forKey: .type)
+            try container.encode(operationId, forKey: .operationId)
         }
     }
 }

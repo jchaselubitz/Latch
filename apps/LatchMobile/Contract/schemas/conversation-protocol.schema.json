@@ -67,7 +67,7 @@
       "properties": {
         "type": { "const": "operation_result" },
         "operationId": { "$ref": "#/$defs/operationId" },
-        "status": { "enum": ["accepted", "refused", "ambiguous"] },
+        "status": { "enum": ["accepted", "refused", "ambiguous", "unknown"] },
         "itemId": { "type": ["string", "null"], "maxLength": 256 },
         "reason": { "type": ["string", "null"], "maxLength": 4096 }
       },
@@ -124,6 +124,16 @@
         "operationId": { "$ref": "#/$defs/operationId" },
         "requestId": { "$ref": "#/$defs/requestId" },
         "choice": { "type": "string", "minLength": 1, "maxLength": 4096 }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "description": "Asks for the retained outcome of an operation this device submitted earlier, without resubmitting it. The gateway answers with operation_result; `unknown` means the receipt is no longer retained (or belongs to another device) and the client must treat the operation as needing review, never as new.",
+      "required": ["type", "operationId"],
+      "properties": {
+        "type": { "const": "operation_status" },
+        "operationId": { "$ref": "#/$defs/operationId" }
       },
       "additionalProperties": false
     },

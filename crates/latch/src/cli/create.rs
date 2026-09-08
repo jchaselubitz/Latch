@@ -5,10 +5,12 @@
 //! will use and which exists at M1 so launch secrets never travel in argv.
 
 use std::fs::{File, OpenOptions};
-use std::io;
-use std::os::unix::fs::OpenOptionsExt;
+use std::io::{self, Write};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
 
 use crate::cli::nesting::{self, NestingDecision, SESSION_ID_ENV};
 use crate::engine::{self, CreateRequest};
@@ -120,6 +122,9 @@ pub struct RemoteShellRequest {
     /// Absolute directory the shell starts in. Canonicalized by the caller and
     /// re-canonicalized here immediately before creation.
     pub cwd: PathBuf,
+    /// Opaque device that submitted the request, when it came through the
+    /// paired proxy. A request id is owned by the device that first used it.
+    pub device: Option<String>,
 }
 
 /// Why an idempotent remote creation could not produce a session.
@@ -127,8 +132,109 @@ pub struct RemoteShellRequest {
 pub enum RemoteShellError {
     /// The request id already named a session started somewhere else.
     RequestIdConflict,
+    /// The request id was first used by a different device.
+    DeviceConflict,
     /// Creation itself failed.
     Failed(anyhow::Error),
+}
+
+/// Durable acceptance for one request id, written before the launch is
+/// dispatched. A retry after a crash reads it back: the device and directory
+/// must match, and the actual session (metadata under the creation lock, then
+/// the daemon) remains the authority on whether anything started.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CreationReceipt {
+    /// The phone's idempotency key.
+    pub request_id: String,
+    /// Opaque device that owns the key, when proxied.
+    pub device: Option<String>,
+    /// Canonical directory the request named.
+    pub cwd: PathBuf,
+    /// Where the launch got to.
+    pub status: CreationReceiptStatus,
+    /// The session it produced, once it did.
+    pub session_id: Option<String>,
+    /// RFC 3339 acceptance time.
+    pub accepted_at: String,
+}
+
+/// Where a durably accepted creation got to.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CreationReceiptStatus {
+    /// Accepted durably; the launch may or may not have run.
+    Accepted,
+    /// The launch produced a session.
+    Created,
+    /// The launch failed before creating anything; the id may be retried.
+    Failed,
+}
+
+/// Receipts retained before the oldest are evicted. Older than this a phone
+/// has long since given up automatic retry of the id.
+const MAX_CREATION_RECEIPTS: usize = 512;
+
+fn receipts_dir(home: &LatchHome) -> PathBuf {
+    home.root().join("remote-shell-receipts")
+}
+
+fn receipt_path(home: &LatchHome, request_id: &str) -> PathBuf {
+    receipts_dir(home).join(format!("{request_id}.json"))
+}
+
+/// Reads the receipt for a request id, if one was ever accepted.
+pub fn read_receipt(home: &LatchHome, request_id: &str) -> anyhow::Result<Option<CreationReceipt>> {
+    let path = receipt_path(home, request_id);
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let bytes = std::fs::read(&path)?;
+    Ok(serde_json::from_slice(&bytes).ok())
+}
+
+fn write_receipt(home: &LatchHome, receipt: &CreationReceipt) -> anyhow::Result<()> {
+    let dir = receipts_dir(home);
+    std::fs::create_dir_all(&dir)?;
+    std::fs::set_permissions(
+        &dir,
+        std::fs::Permissions::from_mode(crate::session::paths::DIR_MODE),
+    )?;
+    let path = receipt_path(home, &receipt.request_id);
+    let temporary = dir.join(format!(".{}.tmp", receipt.request_id));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(FILE_MODE)
+        .open(&temporary)?;
+    file.write_all(&serde_json::to_vec(receipt)?)?;
+    file.sync_all()?;
+    std::fs::rename(&temporary, &path)?;
+    prune_receipts(&dir);
+    Ok(())
+}
+
+fn prune_receipts(dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut files: Vec<(std::time::SystemTime, PathBuf)> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("json"))
+        .filter_map(|path| {
+            let modified = std::fs::metadata(&path).ok()?.modified().ok()?;
+            Some((modified, path))
+        })
+        .collect();
+    if files.len() <= MAX_CREATION_RECEIPTS {
+        return;
+    }
+    files.sort();
+    for (_, path) in files.iter().take(files.len() - MAX_CREATION_RECEIPTS) {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 /// What an idempotent remote creation resolved to.
@@ -178,6 +284,19 @@ fn create_remote_shell_with(
         )));
     }
 
+    // The receipt is the device- and payload-scoped owner of this id. Only
+    // the device that first used the id may reuse it, and only for the same
+    // directory; anything else is a conflict, never a second launch.
+    let receipt = read_receipt(&request.home, &request.request_id).map_err(failed)?;
+    if let Some(receipt) = &receipt {
+        if receipt.device != request.device {
+            return Err(RemoteShellError::DeviceConflict);
+        }
+        if receipt.cwd != cwd {
+            return Err(RemoteShellError::RequestIdConflict);
+        }
+    }
+
     if let Some(existing) =
         find_remote_session(&request.home, &request.request_id).map_err(failed)?
     {
@@ -192,6 +311,20 @@ fn create_remote_shell_with(
         });
     }
 
+    // Durable acceptance precedes dispatch. Metadata is written before the
+    // daemon is spawned, so "accepted but no session" after a crash means
+    // nothing ran and the retry is safe; "accepted and a session exists" is
+    // answered by the lookup above.
+    let mut receipt = CreationReceipt {
+        request_id: request.request_id.clone(),
+        device: request.device.clone(),
+        cwd: cwd.clone(),
+        status: CreationReceiptStatus::Accepted,
+        session_id: None,
+        accepted_at: crate::engine::format_rfc3339(std::time::SystemTime::now()),
+    };
+    write_receipt(&request.home, &receipt).map_err(failed)?;
+
     let manifest = shell_manifest(ManifestOptions {
         cwd,
         size: REMOTE_INITIAL_SIZE,
@@ -203,14 +336,24 @@ fn create_remote_shell_with(
             ..DisplayMetadata::default()
         },
     });
-    let outcome = launch(CreateOptions {
+    let launched = launch(CreateOptions {
         home: request.home.clone(),
         manifest,
         // A remote creation starts a shell and nothing else: no attach client
         // is spawned, and no existing session's surface is touched.
         attach: false,
-    })
-    .map_err(RemoteShellError::Failed)?;
+    });
+    let outcome = match launched {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            receipt.status = CreationReceiptStatus::Failed;
+            let _ = write_receipt(&request.home, &receipt);
+            return Err(RemoteShellError::Failed(error));
+        }
+    };
+    receipt.status = CreationReceiptStatus::Created;
+    receipt.session_id = Some(outcome.id.to_string());
+    let _ = write_receipt(&request.home, &receipt);
     let meta = meta::read(&outcome.paths).map_err(failed)?;
     Ok(RemoteShellOutcome {
         id: outcome.id.to_string(),
@@ -398,6 +541,7 @@ mod tests {
             home: home.clone(),
             request_id: REQUEST_ID.to_owned(),
             cwd: cwd.to_owned(),
+            device: Some("phone-a".to_owned()),
         }
     }
 
@@ -525,6 +669,64 @@ mod tests {
             panic!("an unavailable directory must never launch a session")
         });
         assert!(matches!(result, Err(RemoteShellError::Failed(_))));
+    }
+
+    #[test]
+    fn a_request_id_is_owned_by_the_device_that_first_used_it() {
+        let (_temp, home, cwd) = home();
+        let first = create_remote_shell_with(request(&home, &cwd), stub_launch).unwrap();
+        let receipt = read_receipt(&home, REQUEST_ID).unwrap().unwrap();
+        assert_eq!(receipt.status, CreationReceiptStatus::Created);
+        assert_eq!(receipt.session_id.as_deref(), Some(first.id.as_str()));
+        assert_eq!(receipt.device.as_deref(), Some("phone-a"));
+
+        // The owner's retry is the earlier session, not a second shell.
+        let again = create_remote_shell_with(request(&home, &cwd), stub_launch).unwrap();
+        assert!(again.reused);
+        assert_eq!(again.id, first.id);
+
+        // Another device presenting the same id learns only that the id is
+        // foreign; nothing is created and the original session is not named.
+        let mut foreign = request(&home, &cwd);
+        foreign.device = Some("phone-b".to_owned());
+        assert!(matches!(
+            create_remote_shell_with(foreign, stub_launch),
+            Err(RemoteShellError::DeviceConflict)
+        ));
+        let mut local = request(&home, &cwd);
+        local.device = None;
+        assert!(matches!(
+            create_remote_shell_with(local, stub_launch),
+            Err(RemoteShellError::DeviceConflict)
+        ));
+        assert_eq!(home.session_ids().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn acceptance_is_durable_before_dispatch_and_a_failed_launch_is_retryable() {
+        let (_temp, home, cwd) = home();
+        let seen_receipt = Arc::new(Mutex::new(None));
+        let recorder = seen_receipt.clone();
+        let failed_home = home.clone();
+        let result = create_remote_shell_with(request(&home, &cwd), move |_| {
+            // The launch sees its own acceptance already on disk.
+            *recorder.lock().unwrap() = read_receipt(&failed_home, REQUEST_ID).unwrap();
+            anyhow::bail!("launch failed")
+        });
+        assert!(matches!(result, Err(RemoteShellError::Failed(_))));
+        let during = seen_receipt.lock().unwrap().clone().unwrap();
+        assert_eq!(during.status, CreationReceiptStatus::Accepted);
+        assert_eq!(during.session_id, None);
+        let after = read_receipt(&home, REQUEST_ID).unwrap().unwrap();
+        assert_eq!(after.status, CreationReceiptStatus::Failed);
+        assert!(home.session_ids().unwrap().is_empty());
+
+        // Nothing ran, so the same id may try again and produce one session.
+        let outcome = create_remote_shell_with(request(&home, &cwd), stub_launch).unwrap();
+        assert!(!outcome.reused);
+        let receipt = read_receipt(&home, REQUEST_ID).unwrap().unwrap();
+        assert_eq!(receipt.status, CreationReceiptStatus::Created);
+        assert_eq!(receipt.session_id.as_deref(), Some(outcome.id.as_str()));
     }
 
     #[test]

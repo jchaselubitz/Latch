@@ -56,14 +56,14 @@ public enum DevicePermission: String, Codable, CaseIterable, Equatable, Sendable
 /// The Mac this phone is paired with, as pinned at pairing time.
 public struct PairedMac: Codable, Equatable, Sendable {
     /// Opaque identifier the control plane uses for the Mac.
-    public let deviceId: String?
+    public let deviceId: String
     /// The pinned identity. Every later connection verifies the peer static
     /// key against this value; a mismatch is an impersonation, not a retry.
     public let publicKey: String
     /// Display name. Advisory only — the key is the identity.
     public let name: String?
 
-    public init(deviceId: String? = nil, publicKey: String, name: String? = nil) {
+    public init(deviceId: String, publicKey: String, name: String? = nil) {
         self.deviceId = deviceId
         self.publicKey = publicKey
         self.name = name
@@ -101,11 +101,11 @@ public struct PairedDeviceRecord: Codable, Equatable, Sendable {
     /// Whether the Mac has revoked this phone. A revoked record is kept rather
     /// than deleted so the app can say why it stopped working.
     public var revoked: Bool
-    /// The phrase both screens showed, kept so Settings can show it again.
-    public let phrase: String
+    /// The authenticated Noise transcript comparison confirmed on both endpoints.
+    public let comparison: String
     public let pairedAt: Date
     /// Where to reach the control plane for permission refresh and revocation.
-    public let controlPlane: URL?
+    public let controlPlane: URL
     /// Short-lived credential for control-plane calls. Never sent to a gateway.
     public var accessToken: String?
 
@@ -116,9 +116,9 @@ public struct PairedDeviceRecord: Codable, Equatable, Sendable {
         mac: PairedMac,
         permission: DevicePermission,
         revoked: Bool = false,
-        phrase: String,
+        comparison: String,
         pairedAt: Date = Date(),
-        controlPlane: URL? = nil,
+        controlPlane: URL,
         accessToken: String? = nil
     ) {
         self.deviceId = deviceId
@@ -127,7 +127,7 @@ public struct PairedDeviceRecord: Codable, Equatable, Sendable {
         self.mac = mac
         self.permission = permission
         self.revoked = revoked
-        self.phrase = phrase
+        self.comparison = comparison
         self.pairedAt = pairedAt
         self.controlPlane = controlPlane
         self.accessToken = accessToken
@@ -138,7 +138,7 @@ public struct PairedDeviceRecord: Codable, Equatable, Sendable {
 
     /// The bearer token signaling calls need. A pairing that never received
     /// one cannot reach the control plane and has to be made again.
-    func signalingAccessToken() throws -> String {
+    public func signalingAccessToken() throws -> String {
         guard let accessToken, !accessToken.isEmpty else {
             throw ControlPlaneError.rejected(
                 "This pairing has no control-plane credential. Pair again from a new code on your Mac."
@@ -147,17 +147,12 @@ public struct PairedDeviceRecord: Codable, Equatable, Sendable {
         return accessToken
     }
 
-    /// The Mac's control-plane id, which is the rendezvous target. A pairing
-    /// made without a control plane has none, and that is the manual
-    /// `latch serve` path rather than a crash.
-    func signalingMacDeviceId() throws -> String {
-        guard let deviceId = mac.deviceId, !deviceId.isEmpty else {
-            throw ControlPlaneError.manualLinkOnly
-        }
-        return deviceId
+    /// The Mac's control-plane id used for Remote Link admission.
+    public func signalingMacDeviceId() throws -> String {
+        mac.deviceId
     }
 
-    /// Applies a grant reported after pairing, including from rendezvous,
+    /// Applies a current grant reported by the Remote Link control plane,
     /// using the same unknown-value degrade as `PairingConfirmation.Device`.
     public func updating(permission: DevicePermission) -> PairedDeviceRecord {
         var next = self

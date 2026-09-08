@@ -28,15 +28,15 @@ public enum CameraPermission: Equatable, Sendable {
         case .denied:
             return """
             Latch needs the camera to read the pairing code on your Mac. \
-            Turn it on in Settings › Latch › Camera, or enter the code by hand.
+            Turn it on in Settings › Latch › Camera, or paste the Remote Link code.
             """
         case .restricted:
             return """
             Camera access is restricted on this phone, so the code cannot be scanned. \
-            Enter it by hand instead.
+            Paste the Remote Link code instead.
             """
         case .unavailable:
-            return "This device has no camera. Enter the pairing code by hand instead."
+            return "This device has no camera. Paste the Remote Link code instead."
         }
     }
 }
@@ -89,22 +89,48 @@ public struct StubCameraAuthorization: CameraAuthorizing {
     public func request() async -> CameraPermission { permission }
 }
 
-/// A validated code, waiting for the person to compare the phrase.
+/// A validated Remote Link enrollment code.
 public struct PairingProposal: Equatable, Sendable {
     public let payload: PairingPayload
-    /// The phrase derived from the transcript. The Mac shows the same words.
-    public let phrase: String
     /// This phone's identity, as it will be enrolled.
     public let devicePublicKey: String
 
     /// The Mac as the confirmation screen should name it.
     public var macDisplayName: String {
-        if let name = payload.macName, !name.isEmpty { return name }
-        return "Mac \(HexCoding.abbreviate(payload.macPublicKey))"
+        if !payload.macName.isEmpty { return payload.macName }
+        return "Mac \(HexCoding.abbreviate(payload.hostPublicKey))"
     }
 
     public var macFingerprint: String {
-        HexCoding.abbreviate(payload.macPublicKey)
+        HexCoding.abbreviate(payload.hostPublicKey)
+    }
+}
+
+/// Prepared native enrollment. The comparison is derived only after the WSS
+/// carrier and Noise XX transcript exist. The durable record arrives only
+/// after the Mac's explicit approval and encrypted receipt.
+public protocol RemoteEnrollmentSession: Sendable {
+    var comparison: String { get }
+    func awaitApprovedRecord() async throws -> PairedDeviceRecord
+    func close() async
+}
+
+public protocol RemoteEnrollmentProviding: Sendable {
+    func prepare(
+        payload: PairingPayload,
+        deviceName: String,
+        permission: DevicePermission
+    ) async throws -> any RemoteEnrollmentSession
+}
+
+public struct UnavailableRemoteEnrollmentProvider: RemoteEnrollmentProviding {
+    public init() {}
+    public func prepare(
+        payload: PairingPayload,
+        deviceName: String,
+        permission: DevicePermission
+    ) async throws -> any RemoteEnrollmentSession {
+        throw ControlPlaneError.rejected("This build does not include the native Remote Link enrollment provider.")
     }
 }
 
@@ -114,9 +140,11 @@ public enum PairingState: Equatable, Sendable {
     case idle
     /// The camera is live and no code has been accepted yet.
     case scanning
-    /// A code validated. The person compares the phrase and confirms.
+    /// A code validated. Connecting creates the authenticated comparison.
     case confirming(PairingProposal)
-    /// Talking to the control plane.
+    /// Noise authenticated; compare this transcript-derived code on the Mac.
+    case comparing(PairingProposal, String)
+    /// Completing encrypted enrollment.
     case enrolling
     /// Paired and usable.
     case paired(PairedDeviceRecord)
@@ -145,26 +173,12 @@ public final class PairingModel {
 
     /// What this phone asks to be called on the Mac's device list.
     public var deviceName: String
-    /// The control-plane address typed on this phone, for a pairing code that
-    /// does not carry one.
-    ///
-    /// A Mac that has no control plane configured produces a code with no
-    /// address in it, and that code is otherwise perfectly good: the secret,
-    /// the identity to pin, and the expiry are all there. Rather than making
-    /// that a dead end, the address can be supplied here once and is reused
-    /// for later codes.
-    public var manualControlPlane: String = ""
-
     private let identityStore: DeviceIdentityStoring
     private let deviceStore: PairedDeviceStoring
     private let camera: CameraAuthorizing
     private let clientFactory: @Sendable (URL) -> ControlPlaneClient
-    /// A build-time address to enroll against when the QR code does not carry
-    /// one and the person has not typed one either.
-    private let fallbackControlPlane: URL?
-    /// Where `manualControlPlane` survives between launches. It is not a
-    /// secret — it is a public service address — so it is not in the keychain.
-    private let addressStore: ControlPlaneAddressStoring
+    private let enrollmentProvider: any RemoteEnrollmentProviding
+    private var enrollmentSession: (any RemoteEnrollmentSession)?
     /// The last string the scanner handed over, so the same code re-read many
     /// times a second does not restart the flow or flash an error repeatedly.
     private var lastScanned: String?
@@ -174,16 +188,14 @@ public final class PairingModel {
         deviceStore: PairedDeviceStoring = KeychainPairedDeviceStore(),
         camera: CameraAuthorizing = SystemCameraAuthorization(),
         deviceName: String = "",
-        fallbackControlPlane: URL? = nil,
-        addressStore: ControlPlaneAddressStoring = UserDefaultsControlPlaneAddressStore(),
+        enrollmentProvider: any RemoteEnrollmentProviding = UnavailableRemoteEnrollmentProvider(),
         clientFactory: @escaping @Sendable (URL) -> ControlPlaneClient = { HTTPControlPlaneClient(baseURL: $0) }
     ) {
         self.identityStore = identityStore
         self.deviceStore = deviceStore
         self.camera = camera
         self.deviceName = deviceName
-        self.fallbackControlPlane = fallbackControlPlane
-        self.addressStore = addressStore
+        self.enrollmentProvider = enrollmentProvider
         self.clientFactory = clientFactory
     }
 
@@ -201,9 +213,6 @@ public final class PairingModel {
     public func restore() async {
         cameraPermission = camera.current()
         if deviceName.isEmpty { deviceName = Self.defaultDeviceName }
-        if manualControlPlane.isEmpty {
-            manualControlPlane = addressStore.load()?.absoluteString ?? ""
-        }
         do {
             identity = try identityStore.loadOrCreate()
         } catch let error as DeviceIdentityError {
@@ -233,6 +242,10 @@ public final class PairingModel {
 
     /// Leaves the flow without pairing.
     public func cancel() {
+        if let enrollmentSession {
+            Task { await enrollmentSession.close() }
+        }
+        enrollmentSession = nil
         lastScanned = nil
         if let record {
             state = record.revoked ? .revoked(record) : .paired(record)
@@ -254,7 +267,7 @@ public final class PairingModel {
         switch state {
         case .idle, .scanning, .failed:
             break
-        case .confirming, .enrolling, .paired, .revoked:
+        case .confirming, .comparing, .enrolling, .paired, .revoked:
             return
         }
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -269,10 +282,6 @@ public final class PairingModel {
             state = .confirming(
                 PairingProposal(
                     payload: payload,
-                    phrase: PairingPhrase.derive(
-                        payload: payload,
-                        devicePublicKey: identity.publicKey
-                    ),
                     devicePublicKey: identity.publicKey
                 )
             )
@@ -285,14 +294,12 @@ public final class PairingModel {
 
     // MARK: - Enrolling
 
-    /// Enrolls this phone after the person confirmed the phrase matches.
+    /// Opens the native WSS/Noise enrollment link.
     ///
-    /// Expiry is rechecked here rather than trusted from the scan: reading the
-    /// phrase takes time, and five minutes is short enough to lapse in the
-    /// middle of it.
+    /// Expiry is rechecked here rather than trusted from the scan.
     public func confirm(now: Date = Date()) async {
         guard case .confirming(let proposal) = state else { return }
-        guard let identity else {
+        guard identity != nil else {
             state = .failed("This phone has no device identity yet.")
             return
         }
@@ -306,64 +313,39 @@ public final class PairingModel {
             return
         }
 
-        guard let address = enrollmentAddress(for: proposal.payload) else {
-            state = .failed(ControlPlaneError.noAddress.message)
-            return
-        }
-        // A typed address is kept once it has been used: the next code from
-        // the same Mac will not carry one either.
-        if proposal.payload.controlPlane == nil {
-            addressStore.save(address)
-        }
-
         state = .enrolling
         isBusy = true
         defer { isBusy = false }
-
-        let enrollment = PairingEnrollment(
-            pairingId: proposal.payload.pairingId,
-            secret: proposal.payload.secret,
-            devicePublicKey: identity.publicKey,
-            deviceName: Self.enrollableName(deviceName),
-            phrase: proposal.phrase
-        )
         do {
-            let client = clientFactory(address)
-            let confirmation = try await client.enroll(
-                pairingId: proposal.payload.pairingId,
-                enrollment: enrollment
+            let session = try await enrollmentProvider.prepare(
+                payload: proposal.payload,
+                deviceName: Self.enrollableName(deviceName),
+                permission: .control
             )
-            // The pinned key is the point of pairing. A control plane that
-            // answers with a different Mac is either confused or in the
-            // middle, and either way this pairing does not continue.
-            guard
-                confirmation.mac.publicKey.lowercased() == proposal.payload.macPublicKey
-            else {
-                state = .failed(
-                    ControlPlaneError.identityMismatch(
-                        expected: proposal.payload.macPublicKey,
-                        received: confirmation.mac.publicKey
-                    ).message
-                )
-                return
-            }
-            let record = PairedDeviceRecord(
-                deviceId: confirmation.device.deviceId,
-                name: confirmation.device.name,
-                devicePublicKey: identity.publicKey,
-                mac: PairedMac(
-                    deviceId: confirmation.mac.deviceId,
-                    publicKey: proposal.payload.macPublicKey,
-                    name: confirmation.mac.name ?? proposal.payload.macName
-                ),
-                permission: confirmation.device.permission,
-                revoked: confirmation.device.revoked,
-                phrase: proposal.phrase,
-                controlPlane: address,
-                accessToken: confirmation.accessToken
-            )
+            enrollmentSession = session
+            state = .comparing(proposal, session.comparison)
+        } catch let error as ControlPlaneError {
+            state = .failed(error.message)
+        } catch let error as DeviceIdentityError {
+            state = .failed(error.message)
+        } catch {
+            state = .failed(error.localizedDescription)
+        }
+    }
+
+    /// Continues only after the person confirms the transcript code matches
+    /// the Mac. Persistence happens after the encrypted receipt and current
+    /// directory grant both verify in the native provider.
+    public func confirmComparison() async {
+        guard case .comparing = state, let enrollmentSession else { return }
+        state = .enrolling
+        isBusy = true
+        defer { isBusy = false }
+        do {
+            let record = try await enrollmentSession.awaitApprovedRecord()
             try deviceStore.save(record)
             self.record = record
+            self.enrollmentSession = nil
             state = record.revoked ? .revoked(record) : .paired(record)
         } catch let error as ControlPlaneError {
             state = .failed(error.message)
@@ -411,26 +393,6 @@ public final class PairingModel {
         "\u{2013}": "-", "\u{2014}": "-", "\u{2212}": "-",
     ]
 
-    // MARK: - Where to enroll
-
-    /// The address this payload should be enrolled against.
-    ///
-    /// The code wins when it names one: it was produced by the Mac being
-    /// paired with, and a typed address must never quietly redirect a scan
-    /// somewhere else. Only a code that is silent falls back to what the
-    /// person supplied, and then to the build's own default.
-    func enrollmentAddress(for payload: PairingPayload) -> URL? {
-        if let address = payload.controlPlane { return address }
-        return ControlPlaneAddress.parse(manualControlPlane) ?? fallbackControlPlane
-    }
-
-    /// Whether the confirmation screen has to ask for an address before the
-    /// person can pair.
-    public var needsControlPlaneAddress: Bool {
-        guard case .confirming(let proposal) = state else { return false }
-        return enrollmentAddress(for: proposal.payload) == nil
-    }
-
     // MARK: - Permission state and revocation
 
     /// Re-reads the device record from the control plane.
@@ -440,12 +402,11 @@ public final class PairingModel {
     /// returns to the foreground, in the same spirit as re-running gateway
     /// discovery: state that was decided elsewhere is not assumed to hold.
     public func refreshPermission() async {
-        guard let saved = record, let address = saved.controlPlane, let token = saved.accessToken
-        else { return }
+        guard let saved = record, let token = saved.accessToken else { return }
         isBusy = true
         defer { isBusy = false }
         do {
-            let confirmation = try await clientFactory(address)
+            let confirmation = try await clientFactory(saved.controlPlane)
                 .device(deviceId: saved.deviceId, accessToken: token)
             if confirmation.device.revoked {
                 // A server-confirmed revoke is terminal. Use the same path as
@@ -462,7 +423,7 @@ public final class PairingModel {
             state = updated.revoked ? .revoked(updated) : .paired(updated)
         } catch let error as ControlPlaneError {
             switch error {
-            case .rejected, .pairingUnavailable:
+            case .rejected:
                 // The control plane no longer recognizes this device or its
                 // token. That is a revocation from the phone's point of view,
                 // and saying so is more honest than leaving a paired screen
@@ -477,6 +438,38 @@ public final class PairingModel {
         }
     }
 
+    // MARK: - Attention notifications
+
+    /// The opaque APNs token iOS handed the app, hex encoded, kept so it can be
+    /// registered as soon as a pairing exists and re-registered if it changes.
+    public private(set) var pushToken: String?
+    /// Whether the control plane currently holds this phone's token.
+    public private(set) var pushRegistered = false
+
+    /// iOS delivered (or refreshed) the device token. Registration needs a
+    /// paired device credential; before one exists the token is only kept.
+    public func pushTokenReceived(_ token: Data) async {
+        let hex = token.map { String(format: "%02x", $0) }.joined()
+        guard hex != pushToken || !pushRegistered else { return }
+        pushToken = hex
+        pushRegistered = false
+        await registerPushIfPossible()
+    }
+
+    /// Registers the retained token with the paired device credential. Best
+    /// effort: a failure leaves `pushRegistered` false and the next foreground
+    /// tries again. Nothing else is sent.
+    public func registerPushIfPossible() async {
+        guard let pushToken, !pushRegistered, let saved = record, saved.isActive,
+              let token = saved.accessToken else { return }
+        do {
+            try await clientFactory(saved.controlPlane).registerPush(token: pushToken, accessToken: token)
+            pushRegistered = true
+        } catch {
+            pushRegistered = false
+        }
+    }
+
     /// Revokes this phone, from this phone.
     ///
     /// The local record and the device identity go first and unconditionally:
@@ -487,9 +480,13 @@ public final class PairingModel {
         guard let saved = record else { return }
         isBusy = true
         defer { isBusy = false }
-        if let address = saved.controlPlane, let token = saved.accessToken {
-            try? await clientFactory(address).revoke(deviceId: saved.deviceId, accessToken: token)
+        if let token = saved.accessToken {
+            // Revocation removes the registration server-side as well; this is
+            // the explicit half in case the revoke call itself fails.
+            try? await clientFactory(saved.controlPlane).unregisterPush(accessToken: token)
+            try? await clientFactory(saved.controlPlane).revoke(deviceId: saved.deviceId, accessToken: token)
         }
+        pushRegistered = false
         forget()
     }
 

@@ -1,6 +1,6 @@
 [package]
 name = "latch-transport"
-description = "Shared ICE/DTLS/SCTP remote transport for Latch desktop and iOS."
+description = "Shared Noise/Yamux WSS and LAN remote transport for Latch desktop and iOS."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,22 +8,28 @@ license.workspace = true
 publish.workspace = true
 repository.workspace = true
 
+[features]
+default = []
+# Enables only the explicit CA-injection seam used by composed integration
+# tests. Production callers always use the platform trust store.
+test-ca = []
+
 [dependencies]
-anyhow.workspace = true
-log = "0.4"
-sha2.workspace = true
 async-trait.workspace = true
-bytes.workspace = true
+futures.workspace = true
+native-tls.workspace = true
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+snow.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-webrtc-data.workspace = true
-webrtc-dtls.workspace = true
-webrtc-ice.workspace = true
-webrtc-sctp.workspace = true
-webrtc-util.workspace = true
-webrtc-util-legacy.workspace = true
+tokio-tungstenite.workspace = true
+tokio-util.workspace = true
+yamux.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
-# The TURN server used by the simulated-NAT tests. It is a dev dependency on
-# purpose: nothing shipped in this crate runs a relay, it only talks to one.
-turn = "=0.17.2"
+rcgen = "0.13.2"
+tokio-native-tls = "0.3.1"

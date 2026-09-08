@@ -1,17 +1,13 @@
 import LatchMobileKit
-import LatchTransportNative
 import SwiftUI
 
 /// The settings tab: linking this phone to a computer, and what that link can do.
 struct SettingsView: View {
     @Environment(AppModel.self) private var model
     @Environment(PairingModel.self) private var pairing
-    @AppStorage(NativeTransportDiagnostics.preferenceKey) private var iceDiagnosticsEnabled = false
-    @State private var diagnosticsError: String?
-    @State private var address = ""
-    @State private var token = ""
     @State private var confirmingUnlink = false
     @State private var choosingDefaultFolder = false
+    @Environment(DiagnosticsRunner.self) private var diagnostics
 
     var body: some View {
         NavigationStack {
@@ -19,39 +15,18 @@ struct SettingsView: View {
                 sessionViewSection
                 newSessionSection
                 remoteAccessSection
-                diagnosticsSection
 
                 switch model.linkState {
                 case .linked:
                     linkedSections
                 default:
-                    linkForm
+                    linkStatusSection
+                }
+                if pairing.record != nil {
+                    diagnosticsSection
                 }
             }
             .navigationTitle("Settings")
-        }
-    }
-
-    private var diagnosticsSection: some View {
-        Section {
-            Toggle("Record connection diagnostics", isOn: Binding(
-                get: { iceDiagnosticsEnabled },
-                set: { enabled in
-                    do {
-                        try NativeTransportDiagnostics.setEnabled(enabled)
-                        iceDiagnosticsEnabled = enabled
-                        diagnosticsError = nil
-                    } catch { diagnosticsError = error.localizedDescription }
-                }
-            ))
-            if FileManager.default.fileExists(atPath: NativeTransportDiagnostics.logURL.path) {
-                ShareLink("Share connection log", item: NativeTransportDiagnostics.logURL)
-            }
-            if let diagnosticsError { Text(diagnosticsError).foregroundStyle(.red) }
-        } header: {
-            Text("Connection diagnostics")
-        } footer: {
-            Text("Records network addresses and connection checks locally, up to 8 MB. Terminal content and passwords are excluded. Disable recording before sharing a completed test.")
         }
     }
 
@@ -147,9 +122,7 @@ struct SettingsView: View {
 
     // MARK: - Remote access
 
-    /// The pairing entry point. It sits alongside the gateway link rather than
-    /// replacing it: a tunnel to `latch serve` and a paired identity are two
-    /// different ways to reach the same computer, and this build supports both.
+    /// The sole Remote Link enrollment entry point.
     @ViewBuilder
     private var remoteAccessSection: some View {
         Section {
@@ -170,95 +143,106 @@ struct SettingsView: View {
         switch pairing.state {
         case .paired(let record): return record.mac.displayName
         case .revoked: return "Revoked"
-        case .confirming, .enrolling, .scanning: return "Pairing…"
+        case .confirming, .comparing, .enrolling, .scanning: return "Pairing…"
         case .idle, .failed: return "Not paired"
         }
     }
 
-    /// Pairing is the usual remote-access path. A typed `latch serve` tunnel
-    /// remains available, but it is easy to paste the Mac's control-plane URL
-    /// into this field by mistake — that service enrolls phones, it does not
-    /// list sessions.
-    private var manualLinkHeader: String {
-        if case .paired = pairing.state {
-            return "Optional latch serve tunnel"
-        }
-        return "Your computer"
-    }
+    // MARK: - Link owner
 
-    private var manualLinkFooter: String {
-        if case .paired(let record) = pairing.state {
-            return """
-            You're already paired with \(record.mac.displayName). That connection does \
-            not use this address. Only fill this in for a separate `latch serve` tunnel — \
-            never the control-plane URL from Mac Remote Access settings.
-            """
-        }
-        return """
-        Run `latch serve` on your computer and `latch serve token` for the token. \
-        The gateway listens on loopback only, so the address here is a tunnel to it — \
-        an SSH forward, a Tailscale address, or a reverse proxy that terminates TLS. \
-        This is not the control-plane URL shown in Mac Remote Access settings.
-        """
-    }
-
-    // MARK: - Not linked
-
+    /// The owner's typed state when the gateway is not usable, so a person
+    /// can tell "your Mac is asleep" from "pair again" without a debugger.
     @ViewBuilder
-    private var linkForm: some View {
+    private var linkStatusSection: some View {
         Section {
-            TextField("https://…", text: $address)
-                .textContentType(.URL)
-                .keyboardType(.URL)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-            SecureField("Gateway token", text: $token)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
+            LabeledContent("Connection", value: Self.describe(model.linkState))
+            if let detail = Self.detail(model.linkState) {
+                Text(detail).font(.footnote).foregroundStyle(.secondary)
+            }
+            if model.canRetryAutomatically, pairing.record != nil {
+                Button("Try now") { Task { await model.rediscover() } }
+            }
         } header: {
-            Text(manualLinkHeader)
-        } footer: {
-            Text(manualLinkFooter)
+            Text("Linked computer")
         }
+    }
 
+    static func describe(_ state: AppModel.LinkState) -> String {
+        switch state {
+        case .unlinked: return "Not connected"
+        case .connecting: return "Connecting…"
+        case .linked: return "Connected"
+        case .interrupted(.suspended, _): return "Reconnecting…"
+        case .interrupted(.backoff, _): return "Connection lost"
+        case .interrupted: return "Reconnecting…"
+        case .macOffline: return "Mac offline"
+        case .revoked: return "Unpaired"
+        case .pairingRequired: return "Pair again"
+        case .incompatible: return "Update needed"
+        case .failed: return "Failed"
+        }
+    }
+
+    static func detail(_ state: AppModel.LinkState) -> String? {
+        switch state {
+        case .interrupted(.backoff(_, _, let reason), _): return reason
+        case .macOffline: return "Your Mac is not connected to the relay. It may be asleep or have remote access turned off."
+        case .revoked(let reason), .pairingRequired(let reason), .failed(let reason): return reason
+        case .incompatible(let mismatch): return mismatch.detail
+        default: return nil
+        }
+    }
+
+    // MARK: - Diagnostics
+
+    /// Opt-in. Runs real suspend/resume cycles through the one link owner and
+    /// records content-free stage timings for the physical matrix.
+    @ViewBuilder
+    private var diagnosticsSection: some View {
+        @Bindable var diagnostics = diagnostics
         Section {
-            Button {
-                Task { await model.link(address: address, token: token) }
-            } label: {
-                if case .connecting = model.linkState {
-                    HStack {
-                        ProgressView()
-                        Text("Connecting…")
-                    }
-                } else {
-                    Text("Link this computer")
+            Toggle("Skip local network attempt", isOn: $diagnostics.settings.skipLANAttempt)
+                .onChange(of: diagnostics.settings.skipLANAttempt) { _, skip in
+                    Task { await model.setDiagnosticsSkipLAN(skip) }
+                }
+            Toggle("Include a terminal attach", isOn: $diagnostics.settings.includeTerminal)
+            Stepper("Cycles: \(diagnostics.settings.cycles)", value: $diagnostics.settings.cycles, in: 1...500)
+            if diagnostics.isRunning {
+                HStack {
+                    ProgressView()
+                    Text("Cycle \(diagnostics.attempts.count + 1) of \(diagnostics.settings.cycles)")
+                    Spacer()
+                    Button("Stop", role: .destructive) { diagnostics.cancel() }
+                }
+            } else {
+                Button("Run reconnect cycles") { diagnostics.run(subject: model) }
+                    .disabled(pairing.record == nil)
+            }
+            if !diagnostics.attempts.isEmpty {
+                LabeledContent("Succeeded", value: "\(diagnostics.successCount) of \(diagnostics.attempts.count)")
+                if let p95 = diagnostics.p95(.applicationReady) {
+                    LabeledContent("p95 to usable gateway", value: "\(p95) ms")
+                }
+                if let p95 = diagnostics.p95(.linkReady) {
+                    LabeledContent("p95 to link ready", value: "\(p95) ms")
+                }
+                if let location = diagnostics.location {
+                    LabeledContent("Saved as", value: location)
                 }
             }
-            .disabled(address.isEmpty || token.isEmpty || model.linkState == .connecting)
-        }
-
-        // A version disagreement is not a link problem, so it does not get the
-        // red "that failed" treatment. The computer is reachable; the person
-        // needs one specific update, and the row says which side it is on.
-        if case .incompatible(let mismatch) = model.linkState {
-            Section {
-                Label {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(mismatch.title).font(.footnote.weight(.medium))
-                        Text(mismatch.detail).font(.footnote).foregroundStyle(.secondary)
-                    }
-                } icon: {
-                    Image(systemName: mismatch.icon)
-                }
+            if let error = diagnostics.lastError {
+                Text(error).font(.footnote).foregroundStyle(.red)
             }
-        }
-
-        if case .failed(let reason) = model.linkState {
-            Section {
-                Label(reason, systemImage: "exclamationmark.triangle")
+            ForEach(model.recentStages.suffix(6).reversed(), id: \.self) { sample in
+                LabeledContent(sample.stage.rawValue, value: "\(sample.milliseconds) ms")
                     .font(.footnote)
-                    .foregroundStyle(.red)
             }
+        } header: {
+            Text("Diagnostics")
+        } footer: {
+            Text("""
+            Each cycle drops the secure connection the way backgrounding does, reconnects through the             same owner, lists sessions, and reads one preview. Timings are written to Files › Latch ›             latch-diagnostics and contain no session names, prompts, paths, or output. Skipping the             local network attempt measures the relay path from a network where your Mac is also nearby.
+            """)
         }
     }
 
@@ -267,27 +251,16 @@ struct SettingsView: View {
     @ViewBuilder
     private var linkedSections: some View {
         Section {
-            if model.linkSource == .paired {
-                LabeledContent("Connection", value: "Secure paired connection")
-                // Which way the bytes are going. The connection is the same
-                // pinned Noise session either way, so this is about speed and
-                // relay cost, not about how much to trust the link.
-                if let path = model.remotePath {
-                    LabeledContent("Path", value: path.label)
-                        .accessibilityHint(path.detail)
+            LabeledContent("Connection", value: "Secure paired connection")
+            if let path = model.remotePath {
+                LabeledContent("Path", value: path.label)
+                    .accessibilityHint(path.detail)
+            }
+            if let summary = model.remotePathTally.summary {
+                LabeledContent("Paths so far", value: summary)
+                Button("Reset path counters", role: .destructive) {
+                    model.resetRemotePathTally()
                 }
-                // How the paths have resolved so far. This is here rather than
-                // buried in a debug screen because it is what a person running
-                // the connection through real networks reads afterwards.
-                if let summary = model.remotePathTally.summary {
-                    LabeledContent("Paths so far", value: summary)
-                    Button("Reset path counters", role: .destructive) {
-                        model.resetRemotePathTally()
-                    }
-                }
-            } else {
-                LabeledContent("Address", value: model.link?.url.absoluteString ?? "")
-                    .lineLimit(1)
             }
             if let version = model.productVersion {
                 LabeledContent("Latch", value: version)
@@ -296,7 +269,7 @@ struct SettingsView: View {
         } header: {
             Text("Linked computer")
         } footer: {
-            if model.linkSource == .paired, let path = model.remotePath {
+            if let path = model.remotePath {
                 Text(path.detail)
             }
         }
@@ -330,25 +303,19 @@ struct SettingsView: View {
             Button("Check again") {
                 Task { await model.rediscover() }
             }
-            Button(model.linkSource == .paired ? "Disconnect" : "Unlink", role: .destructive) {
+            Button("Disconnect", role: .destructive) {
                 confirmingUnlink = true
             }
             .confirmationDialog(
-                model.linkSource == .paired ? "Disconnect from this Mac?" : "Unlink this computer?",
+                "Disconnect from this Mac?",
                 isPresented: $confirmingUnlink,
                 titleVisibility: .visible
             ) {
-                Button(model.linkSource == .paired ? "Disconnect" : "Unlink", role: .destructive) {
+                Button("Disconnect", role: .destructive) {
                     model.unlink()
-                    address = ""
-                    token = ""
                 }
             } message: {
-                Text(
-                    model.linkSource == .paired
-                        ? "This closes the current secure connection. Your pairing stays on this phone."
-                        : "The saved address and token are removed from this phone."
-                )
+                Text("This closes the current secure connection. Your pairing stays on this phone.")
             }
         }
     }

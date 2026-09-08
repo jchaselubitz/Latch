@@ -7,7 +7,7 @@ export const SOCKET_OPEN = 1;
 // two clients set to reconnect would trade it forever. Reattaching after a
 // steal is a decision for the person at the keyboard. Reconnecting is left to
 // transport-level drops, which carry no reasoned code.
-export const FATAL_CLOSE_CODES = new Set([1000, 1008, 4400, 4404, 4408, 4409, 4410, 4500]);
+export const FATAL_CLOSE_CODES = new Set([1000, 1008, 4400, 4404, 4408, 4409, 4410, 4411, 4500]);
 
 export function latchProtocols({ token }: { token: string }): string[] {
   return [`latch.v2.${token}`];

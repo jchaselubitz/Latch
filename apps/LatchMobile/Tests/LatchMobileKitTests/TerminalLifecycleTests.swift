@@ -60,14 +60,18 @@ final class TerminalLifecycleTests: XCTestCase {
         StubProtocol.stub(path: "/v2/capabilities", body: Self.capabilities)
         StubProtocol.stub(path: "/v2/sessions", body: Self.sessions)
         let model = AppModel(
-            storage: MemoryLinkStorage(),
-            sessionFactory: { LatchGateway(link: $0, session: StubProtocol.session()) },
+            pairedGatewayFactory: { _ in
+                LatchGateway(
+                    link: try GatewayLink(address: "https://mac.local:8787", token: "token"),
+                    session: StubProtocol.session()
+                )
+            },
             presentationStore: MemorySessionPresentationStore(),
             terminalSizeStore: MemoryTerminalSizeStore(),
             terminalConnector: { _, _, _ in FakeConnection() },
             terminalUnlock: TerminalUnlock(authenticator: authenticator, grace: 600)
         )
-        await model.link(address: "https://mac.local:8787", token: "token")
+        await model.connectPairedDevice(pairedRecord(permission: .control))
         return model
     }
 
@@ -211,8 +215,12 @@ final class TerminalLifecycleTests: XCTestCase {
         )
         StubProtocol.stub(path: "/v2/sessions", body: Self.sessions)
         let model = AppModel(
-            storage: MemoryLinkStorage(),
-            sessionFactory: { LatchGateway(link: $0, session: StubProtocol.session()) },
+            pairedGatewayFactory: { _ in
+                LatchGateway(
+                    link: try GatewayLink(address: "https://mac.local:8787", token: "token"),
+                    session: StubProtocol.session()
+                )
+            },
             presentationStore: MemorySessionPresentationStore(),
             terminalSizeStore: MemoryTerminalSizeStore(),
             terminalConnector: { _, _, _ in FakeConnection() },
@@ -221,7 +229,7 @@ final class TerminalLifecycleTests: XCTestCase {
                 grace: 600
             )
         )
-        await model.link(address: "https://mac.local:8787", token: "token")
+        await model.connectPairedDevice(pairedRecord(permission: .control))
 
         let session = try XCTUnwrap(model.sessions.first)
         XCTAssertFalse(model.surface.terminal)
@@ -230,6 +238,22 @@ final class TerminalLifecycleTests: XCTestCase {
         // this device is allowed to open.
         let opened = await model.unlockTerminal()
         XCTAssertFalse(opened)
+    }
+
+    private func pairedRecord(permission: DevicePermission) -> PairedDeviceRecord {
+        PairedDeviceRecord(
+            deviceId: "phone",
+            name: "Phone",
+            devicePublicKey: String(repeating: "11", count: 32),
+            mac: PairedMac(
+                deviceId: "mac",
+                publicKey: String(repeating: "22", count: 32),
+                name: "Mac"
+            ),
+            permission: permission,
+            comparison: "0123 4567 89ab cdef",
+            controlPlane: URL(string: "https://control.example")!
+        )
     }
 
     /// The Mac's grant says the phone *may* open a terminal. The owner check

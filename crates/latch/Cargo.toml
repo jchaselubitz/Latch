@@ -8,6 +8,11 @@ license.workspace = true
 publish.workspace = true
 repository.workspace = true
 
+[features]
+default = []
+# Makes the host proxy injectable only for the composed Remote Link test.
+remote-link-test = []
+
 [[bin]]
 name = "latch"
 path = "src/main.rs"
@@ -22,18 +27,16 @@ path = "src/lib.rs"
 # profile pointed at `latch`, every terminal window pays this cost.
 [dependencies]
 anyhow.workspace = true
-async-trait.workspace = true
 axum.workspace = true
 clap.workspace = true
 latchd = { path = "../latchd" }
 libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-snow.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-mdns-sd.workspace = true
-sha2.workspace = true
+x25519-dalek.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework.workspace = true

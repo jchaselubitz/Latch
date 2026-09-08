@@ -1,0 +1,20 @@
+{
+  "proposal": {
+    "type": "enrollment_proposal",
+    "version": 1,
+    "enrollmentId": "enr_fixture_00000001",
+    "provisionalDeviceId": "dev_fixture_00000001",
+    "controllerPublicKey": "2222222222222222222222222222222222222222222222222222222222222222",
+    "name": "Jake's iPhone",
+    "permission": "control"
+  },
+  "receipt": {
+    "type": "pairing_approved",
+    "version": 1,
+    "enrollmentId": "enr_fixture_00000001",
+    "hostPublicKey": "3333333333333333333333333333333333333333333333333333333333333333",
+    "controllerPublicKey": "2222222222222222222222222222222222222222222222222222222222222222",
+    "permission": "control",
+    "grantRevision": 1
+  }
+}

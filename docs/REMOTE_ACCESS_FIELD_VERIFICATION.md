@@ -1,169 +1,196 @@
-# Remote access field verification
+# Remote Link field verification
 
-Six things about the phone's remote terminal cannot be established by any test
-in this repository, because what they test is a network rather than a protocol:
-a carrier's CGNAT, a hotel's UDP filter, a Mac that actually sleeps, an iPhone
-that actually gets suspended. This document is how those six are run and
-recorded, so the corresponding rows in
-[REMOTE_ACCESS_PHASE_4.md](REMOTE_ACCESS_PHASE_4.md) can be traced to a
-measurement instead of to a recollection.
+This is the physical-device evidence record for Remote Link v1, the only
+supported remote transport. It defines how the plan's physical matrix
+([PLAN_REMOTE_RELAY_REPLACEMENT.md](PLAN_REMOTE_RELAY_REPLACEMENT.md)
+section 9) is executed as measured attempts, what the gates are, which build
+identities the numbers belong to, and the current state of each row. The
+retired ICE procedure and its four-run cellular baseline remain readable in
+git history and in `docs/field-runs/cellular-to-home-nat-20260907T095841Z.json`;
+nothing measured on that transport is release evidence for this one.
 
-What is simulated is listed here too, at the bottom, so it is clear which rows
-these runs are actually needed for.
+## Definitions and gates
 
-## What makes the result a measurement
+- **Cold open:** the app process launched from not-running to a usable
+  gateway (`applicationReady`: authenticated link plus `/v2/capabilities`).
+  Measured from the kernel's process start time by the app's own
+  `cold_open` record (stage `launch`).
+- **Foreground/reconnect cycle:** the link owner suspended and resumed the
+  way backgrounding does, followed by discovery, a session list, and a
+  preview; optionally a terminal attach to first pane byte. Measured by the
+  in-app diagnostics runner (`reconnect_cycle` records).
+- **Explicit recovery:** recovery after a foreground or network-restored
+  event. **Silent break:** a path that stopped carrying bytes without any
+  event; detected by the 45-second Noise dead-peer bound and the relay's
+  15-second ping.
 
-Both ends count paths now, and neither count contains content.
+| Gate | Threshold | Where it is measured |
+| --- | --- | --- |
+| Cold open to usable gateway | p95 ≤ 5 s on healthy tested networks | `launch` stage of `cold_open` records |
+| Explicit foreground/network-restored recovery | p95 ≤ 5 s | `applicationReady` stage of `reconnect_cycle` records |
+| Silent-break recovery | ≤ 60 s | manual rows (network switch, relay restart) with the Mac audit timestamps |
+| Eligible attempts eventually succeed | no re-pairing, no manual app restart | `succeeded` per record; refusals (revoked/offline) counted separately |
+| Duplicate side effects, plaintext leaks, stale grants, automatic takeover | none | manual rows plus the Mac audit and gateway receipts |
+| Local grant enforcement | within the documented 250 ms check | revoke-during-stream row |
+| Soak | 24 h; handles, tasks, sockets, RSS return to baseline after streams close | Mac-side counters recorded before and after |
 
-**On the Mac.** `latch remote-access diagnostics` gained a `pathSelection`
-block. It is derived from the bounded audit trail and counts authorized
-connections by route:
+Counts required per network: at least 30 cold opens and 30 reconnect
+cycles on same LAN, cellular, unrelated Wi-Fi, UDP-blocked/HTTPS-allowed,
+and IPv6-only (NAT64); separately 20 network switches, 20 long-suspension
+foreground cycles, 10 Mac sleep/wake cycles, 10 each relay/helper/gateway
+restarts, one lease expiry, one normal renewal, and one control-plane outage.
 
-| Route | Meaning |
+## Tooling
+
+Phone side, driven from the Mac over USB (no taps):
+
+```sh
+scripts/phone-diagnostics.sh cold-opens 30 --wait 25 [--skip-lan]
+scripts/phone-diagnostics.sh cycles 30 [--skip-lan] [--terminal] [--pause 2]
+scripts/phone-diagnostics.sh pull /tmp/phone-diag
+scripts/phone-diagnostics.sh summary /tmp/phone-diag --since <ISO8601> --label "Cellular"
+```
+
+`cold-opens` terminates and relaunches the app with `xcrun devicectl`
+(`--terminate-existing`, so every iteration starts from not-running) and the
+launch argument `-latchDiagnosticsColdOpen 1`, which arms the app's
+`ColdOpenRecorder` to append one line to `Documents/latch-diagnostics/cold-opens.jsonl`
+on the first usable gateway or on the first state that ends the attempt
+(Mac offline, revoked, pairing required, third failed connect). A launch that
+produced no line within the wait is counted as a failure by the harness's
+window. `cycles` launches the app with `-latchDiagnosticsCycles N` so the
+in-app runner starts without a tap and writes `run-<stamp>.jsonl`; the
+diagnostics-only `-latchDiagnosticsSkipLAN 1` selects the relay entry point
+on networks where the Mac is also visible locally. Records contain stage
+names, milliseconds, `local`/`relay`, and outcome; never a session, prompt,
+path, or output.
+
+The plan named an XCUITest harness for cold opens. The delivered harness
+launches the real app process over USB with `devicectl` instead: it is the
+same real launch from not-running, it needs no UI-test runner installed on
+the phone, and the app records the measurement itself rather than a test
+process timing a screen. This substitution is recorded in the plan's
+Objective 3 record.
+
+Mac side:
+
+```sh
+scripts/field-run.sh start <scenario>
+# run the phone harness and any manual steps
+scripts/field-run.sh finish <scenario> --result pass|fail|partial \
+  --phone-log /tmp/phone-diag --since <ISO8601> --note "<network, in general terms>"
+scripts/field-run.sh matrix
+```
+
+`start`/`finish` diff the Mac's content-free Remote Link audit (stream
+opens/closes and coarse events) and embed the phone summary (attempt counts,
+failure stages, p50/p95/max per stage) in one JSON record under
+`docs/field-runs/`. `scenarios` lists the rows.
+
+Terminal input/output, conversation sends and approvals, preview, and the
+takeover/replay rules are exercised by hand in a recorded subset per
+network; the record's note says what was done and which attempts were
+automated.
+
+## Network recipes
+
+- **Same LAN:** phone on the Mac's Wi-Fi. Both entry points are reachable;
+  run one set with the LAN attempt and one with `--skip-lan` so the relay
+  path is measured from here as well.
+- **Cellular:** Wi-Fi off on the phone, USB still attached for the harness.
+  Record the carrier only as "carrier LTE/5G".
+- **Unrelated Wi-Fi:** any network that is not the Mac's; the LAN attempt
+  is naturally absent.
+- **UDP blocked, HTTPS allowed:** a Mac or router hotspot with a firewall
+  rule dropping UDP other than DNS (`pf`: `block out proto udp to any port
+  != 53`) and the phone on that hotspot with `--skip-lan`.
+- **IPv6-only:** macOS Internet Sharing → "Create NAT64 Network" with the
+  phone joined to it. The relay hostname's A/AAAA answers (section 2 of the
+  operations doc) decide whether the client-to-relay leg is native IPv6 or
+  NAT64; record the actual family observed from the phone's `path` and the
+  relay's connection log, never inferred from the relay address.
+- **Network switch:** open a terminal on Wi-Fi, toggle Wi-Fi off and on;
+  count each direction as one switch.
+- **Long suspension:** background the app for ≥ 10 minutes between
+  foregrounds; iOS will have suspended it.
+- **Mac sleep/wake:** `pmset sleepnow`, wait ≥ 2 minutes, wake; the phone
+  must show the Mac offline while asleep.
+- **Restarts:** relay via Railway `restart-service`; helper via Desktop
+  Remote Access off/on (or `kill` of `latch-remote`, which Desktop
+  relaunches); gateway via `kill` of the supervised `latch serve` child.
+- **Lease and outage:** hold a link past 10 minutes (renewal), block the
+  Mac's route to the control plane for > 10 minutes (expiry), and stop the
+  Railway control plane for two minutes (outage), observing fail-closed
+  admission and recovery.
+
+## Installed identities for this record
+
+| Component | Identity |
 | --- | --- |
-| `lan` | The authenticated TCP listener on this network accepted it. |
-| `direct_host` | ICE nominated a host pair — same network, or a tunnel interface such as a tailnet. |
-| `direct_reflexive` | ICE nominated a reflexive pair — a hole was punched through at least one NAT. |
-| `relay` | ICE nominated a relayed pair — the bytes take the TURN detour. |
-| `unknown` | A stream arrived without a route observation. Counted rather than dropped, so an instrumentation gap cannot quietly flatter the direct rate. |
+| Source | commit of the Objective 3 delivery (recorded when committed) |
+| Mac payload | version, and SHA-256 of `latch`, `latch-remote`, `latchd` from the signed archive (recorded at install) |
+| Desktop | `/Applications/Latch.app` `CFBundleShortVersionString` (recorded at install) |
+| Phone | `dev.cooperativ.latch.mobile` 0.1.0 (1), development-signed with the team profile, built with Xcode 27 beta against the iOS 27.0 SDK; executable and `LatchTransportFFI` SHA-256 recorded at install. **Interim build has no `aps-environment` entitlement** (see outstanding) |
+| Control plane | `release` from `GET /health/ready` |
+| Relay | Railway deployment id |
 
-Alongside them, `iceAnswers` and `iceAnswersConnected` give the connect rate a
-denominator: an answer that never nominated a pair is a failure, and a run that
-counts one relay after nine dead attempts must not read as "100% relayed, all
-healthy".
+## Results
 
-Two properties of these counters matter when reading a run. They are recorded
-**after** the Noise handshake and authorization, so a stream that never proved a
-paired identity never moves them — anything that can open a socket must not be
-able to move the rate. And they live in the audit trail, which is bounded to
-1,024 events or 512 KiB, so a long-lived Mac ages the oldest rows out; the
-counters describe the retained window, not all time. `field-run.sh` reports a
-negative delta as negative rather than clamping it to zero, because "the
-evidence rolled over" and "nothing happened" need different responses.
+No Remote Link matrix row has been run yet. The table is regenerated by
+`scripts/field-run.sh matrix` from `docs/field-runs/` and pasted here after
+each run; until a row has a record it reads "not yet run".
 
-**On the phone.** Settings → Linked computer shows a **Paths so far** row —
-`Local 4 · Direct 12 · Relay 3 · Failed 1` — with a **Reset path counters**
-button. This counts every channel the phone opened, not every time the
-indicator changed: a route that opens four channels over the relay relayed four
-times, and deduplicating that would make a relay-only network read as a single
-blip. Failures include a Mac that presence said was asleep, so a phone that
-never reached its Mac at all cannot show a clean record.
+| Scenario | Automated attempts | Manual subset | Result |
+| --- | --- | --- | --- |
+| Same LAN | not yet run | not yet run | — |
+| Cellular | not yet run | not yet run | — |
+| Unrelated Wi-Fi | not yet run | not yet run | — |
+| UDP blocked, HTTPS allowed | not yet run | not yet run | — |
+| IPv6-only (NAT64) | not yet run | not yet run | — |
+| Network switches (20) | — | not yet run | — |
+| Long suspensions (20) | not yet run | not yet run | — |
+| Mac sleep/wake (10) | — | not yet run | — |
+| Relay/helper/gateway restarts (10 each) | — | not yet run | — |
+| Lease expiry, renewal, control-plane outage | — | not yet run | — |
+| Real APNs attention delivery | — | blocked: no APNs key, no push entitlement in the interim build | — |
+| 24-hour soak with high output | — | not yet run | — |
 
-The phone's counters never leave the phone; the Mac's never leave the Mac
-unless someone exports the (content-free) diagnostics bundle themselves.
+## Outstanding before this record is complete
 
-## Before the first run
-
-A field run needs a build that has an ICE responder on both ends. Check the
-Mac's helper first — a helper that predates this work has no `--ice-server`
-flag and publishes no ICE credentials, and the phone will fall back to Bonjour
-and then fail, which looks like a network result and is not one:
-
-```
-latch-remote --help | grep ice-server   # must print the flag
-cat ~/.latch/remote-access/runtime/lan-ready.json  # must carry ufrag/candidates
-```
-
-If either is missing, build and install the current helper, then toggle Remote
-Access off and on in the desktop app so it is relaunched. Relaunching is not
-optional and cannot be scripted around: the helper reads the Mac identity from
-the Keychain, which prompts, and the prompt needs a session with a window
-server — launching it from a headless shell blocks forever.
-
-Then check that the desktop app launched the helper for the internet and not
-just the LAN, and that the control plane is still accepting its presence:
-
-```
-ps -o args= -p "$(pgrep -x latch-remote)"        # must include --ice-server stun:…
-latch remote-access status --json | grep -c srflx # at least one reflexive candidate
-```
-
-A helper with no `--ice-server` was launched by a desktop build that predates
-mission `coo:897`, or with no control plane configured; a helper with the flag
-but no `srflx` candidate could not reach the STUN server from this network.
-The Remote Access settings pane shows the last presence error, if any, at the
-bottom; "expiresAt must be within 90 seconds" there means the desktop build
-predates the lifetime fix. The control plane should be running a build with
-the long-polled `GET /v1/rendezvous?wait=` — an older one still works, with
-offers reaching the Mac up to two seconds later.
-
-Also confirm, on the Mac's Remote Access settings, that the phone being tested
-has **Allow terminal** switched on. Without it the phone resolves no terminal
-route at all, which is a permission result rather than a transport one.
-
-## Running one scenario
-
-```
-scripts/field-run.sh scenarios              # the six, and what a pass looks like
-scripts/field-run.sh start cellular-to-home-nat
-# on the phone: Settings > Reset path counters, then run the scenario
-scripts/field-run.sh finish cellular-to-home-nat --result pass \
-    --phone "Direct 3 · Relay 0" \
-    --note "LTE, home router in NAT mode, terminal responsive"
-```
-
-`start` snapshots the Mac's diagnostics; `finish` snapshots them again, writes
-the delta to `docs/field-runs/<scenario>-<timestamp>.json`, and prints the
-matrix row. `scripts/field-run.sh matrix` regenerates the whole table from the
-recorded runs, keeping the most recent run per scenario — a scenario re-run
-after a fix should not leave its failure standing beside the pass.
-
-Describe networks in general terms in `--note`. The run files are committed;
-"hotel Wi-Fi, UDP blocked outbound" is the useful part, and the venue is not.
-
-## The six scenarios
-
-**Cellular to home NAT.** Phone on cellular with Wi-Fi off, Mac on a home
-router. The terminal should open and the Mac should count a
-`direct_reflexive` connection. A `relay` here is not a failure of the run but
-is the more expensive answer, and is worth noting alongside the carrier — some
-carrier CGNATs are effectively symmetric.
-
-**Symmetric NAT.** A network whose NAT allocates a new external port per
-destination. The expected result is a `relay` connection, and *failing to
-connect at all is a fail, not a relay* — the whole point of allowing relay
-candidates from the first attempt is that this case still works. If the network
-under test cannot be confirmed symmetric, say so in the note rather than
-claiming the row.
-
-**Hotel or corporate Wi-Fi with UDP blocked.** The expected result is a relay
-connection over TURN on TCP/TLS 443. If nothing connects, capture whether the
-network also intercepts TLS, which is a different problem from UDP filtering.
-
-**Wi-Fi to cellular mid-terminal.** Open a terminal on Wi-Fi, then disable
-Wi-Fi while watching it. The session should survive or reconnect without
-re-pairing. A path migration is expected; the phone's counters will show a
-second connection, and the Settings Path row should change to match.
-
-**Mac sleep and wake.** With the terminal idle, let the Mac sleep. The phone
-should say *"Your Mac is asleep or Latch is not running."* rather than showing a
-transport error — that sentence is the whole point of the row. After wake, a
-reconnect should succeed without re-pairing. (Holding a power assertion while a
-phone is connected is objective coo:856.0q9v and is not part of this row.)
-
-**Phone background and foreground.** Background the app for several minutes,
-then return. It should reconnect without a stuck spinner and without
-re-pairing. Note whether the terminal surface was still held on the Mac, since
-iOS may have suspended the app without the Mac noticing.
+1. The phone build with the push entitlement needs the owner: sign in to
+   Xcode with the Apple ID for team `X84RPB4674`, enable Push Notifications
+   on the App ID `dev.cooperativ.latch.mobile`, create an APNs
+   authentication key, and place `APNS_KEY_ID`, `APNS_TEAM_ID`,
+   `APNS_PRIVATE_KEY_PEM`, `APNS_TOPIC`, `APNS_ENVIRONMENT=sandbox` in the
+   control-plane secret store. Until then the interim build is installed
+   without `aps-environment` and the APNs row cannot run.
+2. Re-pairing is a physical step: Desktop → Pair a Device, scan on the
+   phone (or paste the code), compare the words, approve on the Mac.
+3. Wi-Fi off for the cellular rows, joining the hotspot and NAT64 networks,
+   the Mac sleep cycles, and the manual terminal/approval subsets need a
+   person at the phone; the harness is run from the Mac while they are.
 
 ## What is already measured, and where
 
-These do not need a field run; they are named here so the field rows are not
-asked to re-prove them.
+These do not need a field run; they are named so the rows are not asked to
+re-prove them.
 
-- **A symmetric NAT forces the relay, and a cone NAT does not.**
-  `crates/latch-transport/src/rtc/nat_tests.rs` builds a virtual WAN, two LANs
-  behind configurable NATs, and a real in-process TURN server. With
-  port-restricted cone NATs on both sides the nominated pair is reflexive; with
-  symmetric NATs on both sides it is relayed, and records round-trip over it.
-  This establishes that the transport picks the right path for a given NAT
-  pair. It establishes nothing about what any particular carrier does.
-- **The ICE path carries the same Noise session as the LAN path.**
-  `crates/latch-remote/tests/ice_peer_stream.rs` drives an approved offer
-  through a real agent to a `PeerStream`, and asserts the route reaches it.
-- **A revoked device or a withdrawn terminal grant closes a live stream.**
-  Rust proxy tests in `crates/latch/src/cli/remote_access.rs`.
-- **Route order, LAN fall-through, and the sleeping-Mac sentence.**
-  `apps/LatchMobile/Tests/LatchMobileKitTests/PairedRouteTests.swift`.
-- **The counters themselves.** `RemotePathMetricsTests.swift` on the phone and
-  `path_metrics_separate_direct_from_relay_and_stay_content_free` on the Mac.
+- **Composed real-socket WSS through both authenticated endpoints to the
+  gateway**, on IPv4 and IPv6 with real TLS:
+  `crates/latch-remote/tests/remote_link_composed.rs`.
+- **Relay kill and re-admission through the same gateway, controller
+  replacement, the Mac-offline bound, and foreign-thread close with a
+  blocked writer:** `crates/latch-remote/tests/remote_link_recovery.rs`.
+- **Keepalive, dead-peer detection, closed-signal, cancel-safe LAN
+  framing:** `crates/latch-transport` unit tests.
+- **Terminal resume capability, refusal without takeover, no input replay;
+  Hub operation scoping and epoch rotation; creation receipts; attention
+  spool:** `crates/latch` tests.
+- **Single-use tickets, generation replacement, lease extension, room
+  invalidation, backpressure bound:** `services/relay/src/server.test.ts`.
+- **Enrollment atomicity, admission races, revocation outbox, push token
+  lifecycle, migration 0007 retirement:** `services/control-plane` suite in
+  memory and on disposable PostgreSQL.
+- **The coordinator's states, backoff, foreground/network triggers, and
+  discovery per generation; the cold-open recorder and launch options:**
+  `apps/LatchMobile/Tests/LatchMobileKitTests`.

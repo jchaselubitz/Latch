@@ -8,7 +8,7 @@ import UIKit
 /// Pairing this phone with a Mac, and what the pairing looks like afterwards.
 ///
 /// Every state on this screen is a security decision the person has to be able
-/// to read: which Mac, which phrase, what this phone may do, and how to take
+/// to read: which Mac, which transcript comparison, what this phone may do, and how to take
 /// it back. `PairingModel` already resolves each failure to a sentence, so the
 /// view shows what it is given rather than inventing its own wording.
 struct PairingView: View {
@@ -24,7 +24,9 @@ struct PairingView: View {
             case .scanning:
                 scanningSections(name: $model.deviceName)
             case .confirming(let proposal):
-                confirmingSections(proposal, address: $model.manualControlPlane)
+                confirmingSections(proposal)
+            case .comparing(let proposal, let code):
+                comparisonSections(proposal, code: code)
             case .enrolling:
                 busySection("Pairing with your Mac…")
             case .paired(let record):
@@ -129,29 +131,10 @@ struct PairingView: View {
         }
     }
 
-    // MARK: - Confirming the phrase
+    // MARK: - Confirming the scanned Mac
 
     @ViewBuilder
-    private func confirmingSections(
-        _ proposal: PairingProposal,
-        address: Binding<String>
-    ) -> some View {
-        Section {
-            Text(proposal.phrase)
-                .font(.title2.monospaced())
-                .fontWeight(.semibold)
-                .frame(maxWidth: .infinity, alignment: .center)
-                .padding(.vertical, 8)
-                .accessibilityLabel("Pairing phrase: \(proposal.phrase)")
-        } header: {
-            Text("Check these words match your Mac")
-        } footer: {
-            Text("""
-            Your Mac is showing the same words. If they are different, do not continue — \
-            something is between this phone and your Mac.
-            """)
-        }
-
+    private func confirmingSections(_ proposal: PairingProposal) -> some View {
         Section {
             LabeledContent("Mac", value: proposal.macDisplayName)
             LabeledContent("Identity", value: proposal.macFingerprint)
@@ -159,33 +142,38 @@ struct PairingView: View {
             LabeledContent("This phone", value: model.deviceName)
         }
 
-        // A code from a Mac with no control plane configured is complete in
-        // every other way, so it asks for the missing address here rather than
-        // failing after the phrase has already been checked.
-        if model.needsControlPlaneAddress {
-            Section {
-                TextField("https://…", text: address)
-                    .textContentType(.URL)
-                    .keyboardType(.URL)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-            } header: {
-                Text("Where to enroll")
-            } footer: {
-                Text("""
-                This code does not say where to enroll. Enter your Latch control-plane \
-                address — the same one set in Remote Access on your Mac. It is remembered \
-                for next time.
-                """)
-            }
-        }
-
         Section {
-            Button("The words match — pair this phone") {
+            Button("Connect securely") {
                 Task { await model.confirm() }
             }
-            .disabled(model.isBusy || model.needsControlPlaneAddress)
-            Button("They do not match", role: .destructive) { model.cancel() }
+            .disabled(model.isBusy)
+            Button("Cancel", role: .cancel) { model.cancel() }
+        } footer: {
+            Text("This starts an encrypted Remote Link. Nothing is granted until you compare the code that appears next.")
+        }
+    }
+
+    @ViewBuilder
+    private func comparisonSections(_ proposal: PairingProposal, code: String) -> some View {
+        Section {
+            Text(code)
+                .font(.title2.monospaced())
+                .fontWeight(.semibold)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.vertical, 8)
+                .accessibilityLabel("Enrollment comparison code: \(code)")
+        } header: {
+            Text("Check this code matches your Mac")
+        } footer: {
+            Text("The code binds this phone's exact key, requested permission, and encrypted handshake. Reject on both devices if it differs.")
+        }
+        Section {
+            LabeledContent("Mac", value: proposal.macDisplayName)
+            LabeledContent("Access requested", value: DevicePermission.control.label)
+            Button("The codes match — wait for Mac approval") {
+                Task { await model.confirmComparison() }
+            }
+            Button("Codes do not match", role: .destructive) { model.cancel() }
         }
     }
 
@@ -211,7 +199,7 @@ struct PairingView: View {
             LabeledContent("Name", value: record.mac.displayName)
             LabeledContent("Identity", value: record.mac.shortFingerprint)
                 .monospaced()
-            LabeledContent("Confirmed with", value: record.phrase)
+            LabeledContent("Confirmed with", value: record.comparison)
                 .font(.footnote.monospaced())
             LabeledContent("Paired", value: record.pairedAt.formatted(date: .abbreviated, time: .shortened))
         } header: {

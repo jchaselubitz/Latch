@@ -1,0 +1,18 @@
+{
+  "iss": "https://control.latch.invalid",
+  "aud": "latch-relay",
+  "kid": "fixture-key",
+  "roomId": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "role": "controller",
+  "purpose": "session",
+  "jti": "ticket_fixture_0001",
+  "generation": 4,
+  "nbf": 1788768000,
+  "exp": 1788768060,
+  "limits": {
+    "maxStreams": 32,
+    "streamWindowBytes": 262144,
+    "totalBufferBytes": 8388608,
+    "recordBytes": 65535
+  }
+}

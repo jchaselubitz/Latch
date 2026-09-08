@@ -99,12 +99,10 @@ final class SessionRouteTests: XCTestCase {
         XCTAssertFalse(advertised.restricted(to: .interact).terminal)
     }
 
-    func testAControlPhoneAndAManualLinkResolveATerminal() {
+    func testAControlPhoneResolvesATerminalAndMissingGrantFailsClosed() {
         let advertised = GatewayCompatibility.sessionSurface(for: capabilities(terminal: true))
         XCTAssertTrue(advertised.restricted(to: .control).terminal)
-        // A manual `latch serve` link sends no grant header, and http.rs
-        // grants loopback requests Grant::Control.
-        XCTAssertTrue(advertised.restricted(to: nil).terminal)
+        XCTAssertFalse(advertised.restricted(to: nil).terminal)
     }
 
     /// The refusal screens have to tell a grant apart from an old Mac, so the

@@ -98,6 +98,12 @@ impl Projection {
     pub fn operation_epoch(&self) -> OperationEpoch {
         self.operation_epoch.clone()
     }
+    /// Replaces the epoch every queued operation id is minted against. The
+    /// generation and revision are untouched: subscribers re-base, they do not
+    /// reset.
+    pub fn rotate_operation_epoch(&mut self, epoch: OperationEpoch) {
+        self.operation_epoch = epoch;
+    }
     pub fn apply_connector(
         &mut self,
         mutation: ConnectorMutation,

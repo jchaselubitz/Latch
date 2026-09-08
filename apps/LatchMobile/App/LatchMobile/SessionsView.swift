@@ -30,6 +30,36 @@ struct SessionsView: View {
                     )
                 case .linked:
                     sessionList
+                case .interrupted(let link, let capabilities):
+                    if capabilities != nil, !model.sessions.isEmpty {
+                        // Cached rows stay readable and are marked stale;
+                        // nothing is fetched until the owner reports ready.
+                        sessionList
+                    } else {
+                        MessageView(
+                            icon: "arrow.triangle.2.circlepath",
+                            title: Self.interruptedTitle(link),
+                            detail: Self.interruptedDetail(link)
+                        )
+                    }
+                case .macOffline:
+                    MessageView(
+                        icon: "laptopcomputer.slash",
+                        title: "Your Mac is offline",
+                        detail: "It may be asleep, disconnected, or have remote access turned off. This phone keeps checking; wake the Mac to continue."
+                    )
+                case .revoked(let reason):
+                    MessageView(
+                        icon: "xmark.shield",
+                        title: "This phone was unpaired",
+                        detail: reason
+                    )
+                case .pairingRequired(let reason):
+                    MessageView(
+                        icon: "qrcode",
+                        title: "Pair again",
+                        detail: reason
+                    )
                 }
             }
             .navigationTitle("Sessions")
@@ -134,10 +164,42 @@ struct SessionsView: View {
                 await model.refreshSessions()
             }
             .overlay(alignment: .top) {
-                if let error = model.sessionsError {
+                if model.sessionsStale {
+                    BannerView(text: Self.staleBanner(model.linkState))
+                } else if let error = model.sessionsError {
                     BannerView(text: error)
                 }
             }
+        }
+    }
+
+    static func interruptedTitle(_ link: RemoteLinkState) -> String {
+        switch link {
+        case .suspended: return "Reconnecting"
+        case .connecting: return "Connecting"
+        case .backoff: return "Connection lost"
+        default: return "Reconnecting"
+        }
+    }
+
+    static func interruptedDetail(_ link: RemoteLinkState) -> String {
+        switch link {
+        case .backoff(_, let nextRetryAt, let reason):
+            let seconds = max(0, Int(nextRetryAt.timeIntervalSinceNow.rounded()))
+            return "\(reason) Trying again in \(seconds)s."
+        case .connecting(let attempt) where attempt > 0:
+            return "Trying again (attempt \(attempt + 1))."
+        default:
+            return "Restoring the secure connection to your Mac."
+        }
+    }
+
+    static func staleBanner(_ state: AppModel.LinkState) -> String {
+        switch state {
+        case .macOffline: return "Your Mac is offline. This list is from before it went away."
+        case .interrupted(.suspended, _): return "Reconnecting…"
+        case .interrupted(.backoff(_, _, _), _): return "Connection lost. Showing the last known sessions."
+        default: return "Reconnecting. Showing the last known sessions."
         }
     }
 
@@ -325,11 +387,11 @@ private struct UnlinkedView: View {
 
     private var detail: String {
         guard let pairedMac else {
-            return "Open Settings to point this app at a `latch serve` gateway."
+            return "Open Settings and pair this phone with your Mac."
         }
         return """
-        Looking for \(pairedMac) on this network. Keep the Mac's Remote Access enabled, or \
-        add a `latch serve` gateway in Settings instead.
+        Looking for \(pairedMac) over authenticated Remote Link. Keep Remote Access enabled \
+        on the Mac and check that the control plane is reachable.
         """
     }
 }

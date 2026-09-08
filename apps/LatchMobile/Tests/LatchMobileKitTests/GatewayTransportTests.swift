@@ -3,6 +3,19 @@ import XCTest
 @testable import LatchMobileKit
 
 final class GatewayTransportTests: XCTestCase {
+    func testGatewayRetainsItsCapabilityTransportForItsFullLifetime() async {
+        var transport: RetainedGatewayTransport? = RetainedGatewayTransport()
+        weak let retained = transport
+        var gateway: LatchGateway? = LatchGateway(transport: transport!)
+        transport = nil
+
+        XCTAssertNotNil(retained)
+        _ = await gateway?.gateway
+        gateway = nil
+        for _ in 0..<10 where retained != nil { await Task.yield() }
+        XCTAssertNil(retained)
+    }
+
     func testListenerConnectionsWaitUntilTheTransportHandlerIsInstalled() {
         let router = DeferredConnectionHandler<Int>()
         let received = LockedConnectionValues()
@@ -14,90 +27,49 @@ final class GatewayTransportTests: XCTestCase {
         XCTAssertEqual(received.values, [1, 2])
     }
 
-    func testBonjourIdentityHintIsOptionalButAnExplicitMismatchIsSkipped() {
-        let pin = String(repeating: "a", count: 64)
-
-        XCTAssertTrue(
-            BonjourMacDiscovery.shouldAttempt(advertisedIdentityKey: pin, normalizedPin: pin)
+    func testLoopbackCapabilityIsRequiredAndStrippedBeforeForwarding() throws {
+        var validator = TunnelRequestValidator(expectedCapability: "local-secret")
+        XCTAssertNil(try validator.append(Data(
+            "GET /v2/capabilities HTTP/1.1\r\nHost: loop".utf8
+        )))
+        let first = try XCTUnwrap(try validator.append(Data(
+            "back\r\nAuthorization: Bearer local-secret\r\n\r\nbody".utf8
+        )))
+        XCTAssertEqual(
+            String(data: first, encoding: .utf8),
+            "GET /v2/capabilities HTTP/1.1\r\nHost: loopback\r\n\r\nbody"
         )
-        XCTAssertTrue(
-            BonjourMacDiscovery.shouldAttempt(advertisedIdentityKey: nil, normalizedPin: pin),
-            "Noise authenticates a result whose TXT metadata has not arrived yet"
-        )
-        XCTAssertFalse(
-            BonjourMacDiscovery.shouldAttempt(
-                advertisedIdentityKey: String(repeating: "b", count: 64),
-                normalizedPin: pin
-            )
-        )
-    }
-
-    func testRelayIsAllowedFromTheFirstAttemptButNeedsARelayServer() async throws {
-        let policy = RemoteTransportPolicy()
-        let stun = IceServer(urls: ["stun:stun.example:3478"])
-        let turn = IceServer(
-            urls: ["stun:stun.example:3478", "turns:relay.example:5349?transport=tcp"],
-            username: "device",
-            credential: "secret"
-        )
-        XCTAssertFalse(stun.isTurn)
-        XCTAssertTrue(turn.isTurn)
-        do {
-            try await policy.authorizeRelayAttempt(servers: [stun])
-            XCTFail("a STUN-only list was accepted as a relay attempt")
-        } catch {
-            XCTAssertEqual(error as? RemoteTransportPolicyError, .missingTurnServer)
-        }
-        try await policy.authorizeRelayAttempt(servers: [stun, turn])
-    }
-
-    func testPathChangeRequiresCapabilityRediscoveryOnlyOnChange() async {
-        let policy = RemoteTransportPolicy()
-        let firstRelay = await policy.recordSelectedPath(.relay)
-        let sameRelay = await policy.recordSelectedPath(.relay)
-        let changedToDirect = await policy.recordSelectedPath(.direct)
-        let sameDirect = await policy.recordSelectedPath(.direct)
-        XCTAssertFalse(firstRelay)
-        XCTAssertFalse(sameRelay)
-        XCTAssertTrue(changedToDirect)
-        XCTAssertFalse(sameDirect)
-    }
-
-    func testManualTransportPreservesTheEnteredLink() throws {
-        let link = try GatewayLink(address: "https://gateway.example", token: "manual-token")
-        let transport = HTTPSGatewayTransport(link: link)
-        XCTAssertEqual(transport.gatewayLink, link)
-    }
-
-    func testTunnelRequestWaitsForACompleteHeaderThenForwardsItOnce() throws {
-        var validator = TunnelRequestValidator()
-        XCTAssertNil(try validator.append(Data("GET /v2/capabilities HTTP/1.1\r\nHost: loop".utf8)))
-        let first = try XCTUnwrap(try validator.append(Data("back\r\n\r\nbody".utf8)))
-        XCTAssertEqual(String(data: first, encoding: .utf8), "GET /v2/capabilities HTTP/1.1\r\nHost: loopback\r\n\r\nbody")
         XCTAssertEqual(
             try validator.append(Data("later request bytes".utf8)),
-            Data("later request bytes".utf8),
-            "a completed loopback connection does not buffer a second request"
+            Data("later request bytes".utf8)
         )
     }
 
-    func testTunnelRejectsAuthorizationBeforeOpeningANoiseSession() throws {
-        var validator = TunnelRequestValidator()
-        XCTAssertThrowsError(
-            try validator.append(Data("GET / HTTP/1.1\r\nAuthorization: Bearer secret\r\n\r\n".utf8))
-        ) { error in
-            XCTAssertEqual(error as? NoiseTunnelError, .callerSuppliedCredential)
+    func testLoopbackRejectsMissingWrongDuplicateAndProxyCredentials() {
+        let requests = [
+            "GET / HTTP/1.1\r\nHost: loopback\r\n\r\n",
+            "GET / HTTP/1.1\r\nAuthorization: Bearer wrong\r\n\r\n",
+            "GET / HTTP/1.1\r\nAuthorization: Bearer local-secret\r\nAuthorization: Bearer local-secret\r\n\r\n",
+            "GET / HTTP/1.1\r\nAuthorization: Bearer local-secret\r\npRoXy-AuThOrIzAtIoN: Basic secret\r\n\r\n"
+        ]
+        for request in requests {
+            var validator = TunnelRequestValidator(expectedCapability: "local-secret")
+            XCTAssertThrowsError(try validator.append(Data(request.utf8))) { error in
+                XCTAssertEqual(error as? RemoteLinkTransportError, .invalidCapability)
+            }
         }
     }
 
-    func testTunnelRejectsProxyAuthorizationCaseInsensitively() throws {
-        var validator = TunnelRequestValidator()
-        XCTAssertThrowsError(
-            try validator.append(Data("GET / HTTP/1.1\r\npRoXy-AuThOrIzAtIoN: Basic secret\r\n\r\n".utf8))
-        ) { error in
-            XCTAssertEqual(error as? NoiseTunnelError, .callerSuppliedCredential)
-        }
+    func testRemoteLinkBonjourTypeIsStable() {
+        XCTAssertEqual(BonjourMacDiscovery.serviceType, "_latch-remote._tcp")
     }
+}
+
+private final class RetainedGatewayTransport: GatewayTransport, @unchecked Sendable {
+    let gatewayLink = GatewayLink(
+        url: URL(string: "http://127.0.0.1:1")!,
+        token: "retained-capability"
+    )
 }
 
 private final class LockedConnectionValues: @unchecked Sendable {

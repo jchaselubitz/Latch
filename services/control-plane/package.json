@@ -1,7 +1,7 @@
 {
   "name": "@latch/control-plane",
   "version": "0.1.0",
-  "description": "Latch cloud control plane: accounts, devices, pairing directory, presence, rendezvous, and relay-ticket authorization.",
+  "description": "Latch Remote Link control plane: enrollment, grants, relay admission, leases, and revocation delivery.",
   "license": "UNLICENSED",
   "private": true,
   "type": "module",

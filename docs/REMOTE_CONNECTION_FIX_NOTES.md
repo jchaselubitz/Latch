@@ -1,5 +1,8 @@
 # Remote connection fixes — 6 September 2026
 
+> Historical baseline fixes for the retired transport. These results establish
+> the archived comparison only; they are not Remote Link release evidence.
+
 Base: `5dbbb6887b5cf4d4831802f7e53aa8642ede785c`.
 
 ## Evidence and scope
