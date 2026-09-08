@@ -1,0 +1,96 @@
+{
+  "schemaVersion": 2,
+  "scenario": "cellular",
+  "title": "Phone on cellular, Wi-Fi off",
+  "result": "pass",
+  "phone": "",
+  "note": "Phone on cellular (German 1&1 SIM), Wi-Fi off, VPN off, USB-driven harness; phone build 5c14bf11..., Mac payload 0.2609081113.0. 30 reconnect cycles and 30 real cold opens, all over the relay, all succeeded. The owner also verified a terminal manually with Wi-Fi off. Reconnect cycles include the old link's bounded close over cellular, which is most of the gap to the cold-open figure.",
+  "recordedAt": "20260908T115122Z",
+  "macDelta": {
+    "streamsOpened": -5,
+    "streamsClosed": -9,
+    "events": {
+      "link_authenticating": 12,
+      "link_connecting": 14,
+      "link_lan_ready": -18,
+      "link_link_closed": 5,
+      "link_ready": -13,
+      "link_waiting_for_peer": 27,
+      "remote_link_stream_closed": -9,
+      "remote_link_stream_opened": -5
+    }
+  },
+  "phoneLog": "cellular",
+  "phoneSummary": {
+    "cold_open": {
+      "attempts": 30,
+      "failed": 0,
+      "failureStages": {},
+      "first": "2026-09-08T11:41:41Z",
+      "last": "2026-09-08T11:50:18Z",
+      "paths": {
+        "relay": 30
+      },
+      "skippedLAN": 0,
+      "stages": {
+        "applicationReady": {
+          "max": 1597,
+          "p50": 1009,
+          "p95": 1162,
+          "samples": 30
+        },
+        "launch": {
+          "max": 4219,
+          "p50": 3597,
+          "p95": 3789,
+          "samples": 30
+        },
+        "linkReady": {
+          "max": 1352,
+          "p50": 824,
+          "p95": 986,
+          "samples": 30
+        }
+      },
+      "succeeded": 30
+    },
+    "reconnect_cycle": {
+      "attempts": 30,
+      "failed": 0,
+      "failureStages": {},
+      "first": "2026-09-08T11:38:24Z",
+      "last": "2026-09-08T11:41:15Z",
+      "paths": {
+        "relay": 30
+      },
+      "skippedLAN": 0,
+      "stages": {
+        "applicationReady": {
+          "max": 3513,
+          "p50": 3357,
+          "p95": 3493,
+          "samples": 30
+        },
+        "linkReady": {
+          "max": 792,
+          "p50": 785,
+          "p95": 792,
+          "samples": 4
+        },
+        "preview": {
+          "max": 340,
+          "p50": 206,
+          "p95": 282,
+          "samples": 30
+        },
+        "sessionList": {
+          "max": 1087,
+          "p50": 228,
+          "p95": 268,
+          "samples": 30
+        }
+      },
+      "succeeded": 30
+    }
+  }
+}

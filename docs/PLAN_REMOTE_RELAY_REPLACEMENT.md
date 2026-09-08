@@ -704,9 +704,14 @@ situations rather than the full matrix. State at the pause:
   LAN / 1500 ms relay; explicit recovery p95 429 ms LAN / 1030 ms relay),
   relay restarts (p95 1.8 s), helper restarts (p95 2.6 s), gateway restarts
   (p95 2.5 s), lease renewal, pairing (3 s to first served request).
-- Not measured, in the order the owner's help is needed: the manual
-  terminal/conversation/preview subset; cellular with Wi-Fi off (30 cold
-  opens and 30 cycles, automated once Wi-Fi is off); 20 Wi-Fi/cellular
+- Added after the pause, with the owner present: the manual terminal check
+  on the same LAN and on cellular (which exposed and fixed the FFI stream
+  lock), and the cellular rows: 30/30 cold opens p95 3.8 s, 30/30 cycles
+  p95 3.5 s, all over the relay. The common situations (home Wi-Fi over
+  LAN, away over cellular through the relay) are therefore measured and
+  inside the gates.
+- Not measured, in the order the owner's help is needed: the conversation
+  send/approval and preview manual checks; 20 Wi-Fi/cellular
   switches; 20 long-suspension foreground cycles (harness
   `scratchpad matrix/suspensions.sh` pattern: bring Settings forward, wait,
   bring Latch back; not yet run); 10 Mac sleep/wake cycles; unrelated

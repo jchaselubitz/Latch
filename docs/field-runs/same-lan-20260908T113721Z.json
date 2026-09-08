@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 2,
+  "scenario": "same-lan",
+  "title": "Same LAN",
+  "result": "pass",
+  "phone": "",
+  "note": "Manual subset on the same LAN after the FFI stream fix: the owner opened a session terminal, typed pwd, and the correct directory printed. The first attempt exposed that keystrokes and the create request body never reached the Mac (single stream lock held across reads; fixed, regression added). Automated rows for this network are in the two earlier same-lan records.",
+  "recordedAt": "20260908T113721Z",
+  "macDelta": {
+    "streamsOpened": 2,
+    "streamsClosed": 0,
+    "events": {
+      "link_link_closed": -2,
+      "remote_link_stream_opened": 2
+    }
+  }
+}

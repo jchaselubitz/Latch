@@ -160,6 +160,17 @@ exposed that the LAN carrier was never used:
   gateway p50 385 / p95 474 / max 543 ms (link ready p95 103, discovery
   complete p95 175).
 
+**Cellular, 8 September 2026** (`docs/field-runs/cellular-*.json`, Wi-Fi
+off, VPN off, USB-driven): 30 reconnect cycles, all succeeded, resume to
+usable gateway p50 3357 / p95 3493 / max 3513 ms (link ready p95 792,
+session list p95 268, preview p95 282); 30 real cold opens, all succeeded,
+launch to usable gateway p50 3597 / p95 3789 / max 4219 ms (link ready p95
+986, discovery complete p95 1162). The owner verified a terminal by hand
+with Wi-Fi off. The cycle figure is larger than the cold-open link figure
+because it includes closing the previous link over cellular within its
+bounded drain; that is the explicit-event recovery as the user experiences
+it and is what the gate measures.
+
 Restart rows, 8 September 2026, same LAN, phone recovering on its own with
 the app in front and the content-free trace on (recovery is measured on the
 phone from its first `connecting` after the loss to the next applied
@@ -190,8 +201,8 @@ no link interruption.
 
 | Scenario | Automated attempts | Manual subset | Result |
 | --- | --- | --- | --- |
-| Same LAN | LAN path: 30 cold opens 30/30, p95 474 ms; 30 cycles 30/30, p95 429 ms. Relay path: 30 cold opens 30/30, p95 1500 ms; 60 cycles 60/60, p95 1030 ms | not yet run | gates met on both carriers |
-| Cellular | not yet run | not yet run | — |
+| Same LAN | LAN path: 30 cold opens 30/30, p95 474 ms; 30 cycles 30/30, p95 429 ms. Relay path: 30 cold opens 30/30, p95 1500 ms; 60 cycles 60/60, p95 1030 ms | terminal `pwd` verified by the owner (after the stream-lock fix) | gates met on both carriers |
+| Cellular (Wi-Fi off) | 30 cold opens 30/30, p95 3789 ms (max 4219); 30 cycles 30/30, p95 3493 ms; all relay | terminal `pwd` verified by the owner | gates met |
 | Unrelated Wi-Fi | not yet run | not yet run | — |
 | UDP blocked, HTTPS allowed | not yet run | not yet run | — |
 | IPv6-only (NAT64) | not yet run | not yet run | — |
