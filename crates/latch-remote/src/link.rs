@@ -860,25 +860,22 @@ fn advertise_lan(
     Ok(daemon)
 }
 
-/// Addresses of interfaces a phone on the same network can reach: no
-/// loopback, no link-local, and none of the tunnel/peer-to-peer interfaces
-/// (`utun*`, `awdl*`, `llw*`, `ap*`, `anri*`) that carry other traffic. IPv4
-/// first so the common case connects on the first try.
+/// Addresses of interfaces a phone on the same network can reach: `en*`
+/// only (no loopback, link-local, tunnel, peer-to-peer, or VM bridge
+/// interfaces). IPv4 first so the common case connects on the first try.
 fn lan_addresses() -> Vec<String> {
     let mut v4 = Vec::new();
     let mut v6 = Vec::new();
     if let Ok(interfaces) = if_addrs::get_if_addrs() {
         for interface in interfaces {
             let name = interface.name.as_str();
-            if interface.is_loopback()
-                || name.starts_with("utun")
-                || name.starts_with("awdl")
-                || name.starts_with("llw")
-                || name.starts_with("ap")
-                || name.starts_with("anri")
-                || name.starts_with("gif")
-                || name.starts_with("stf")
-            {
+            // Only Ethernet/Wi-Fi style interfaces (`en*`) are candidates: VM and
+            // container bridges (`bridge*`, `vmenet*`, `vnic*`) and tunnels
+            // publish addresses a phone on the Wi-Fi cannot reach, and every
+            // unreachable address costs the phone a connect bound on each
+            // reconnect (seen in the field: two bridge addresses added two
+            // seconds to every helper-restart recovery).
+            if interface.is_loopback() || !name.starts_with("en") {
                 continue;
             }
             match interface.ip() {

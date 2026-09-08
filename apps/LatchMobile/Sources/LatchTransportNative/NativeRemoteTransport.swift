@@ -352,11 +352,17 @@ public final class NativeRemoteLinkConnector: RemoteLinkConnecting, @unchecked S
     /// Tries the published LAN targets in order and keeps the first link that
     /// authenticates. Sequential on purpose: two LAN links to the same Mac
     /// would replace each other there.
+    /// The whole LAN phase, across every published target, is bounded so a
+    /// Mac whose LAN listener just moved (helper restart) or whose published
+    /// addresses are stale costs at most this before the relay is tried.
+    static let lanPhaseBudget: Duration = .milliseconds(1500)
+
     static func connectFirstLanTarget(
         _ targets: [RemoteLinkLanTarget], privateKey: Data, publicKey: Data, pin: Data, revision: UInt64
     ) async -> RemoteLink? {
+        let deadline = ContinuousClock.now + lanPhaseBudget
         for target in targets.prefix(6) {
-            if Task.isCancelled { return nil }
+            if Task.isCancelled || ContinuousClock.now >= deadline { return nil }
             LinkTrace.shared.mark("connector.lan.begin")
             do {
                 let link = try await RemoteLink.connectLan(

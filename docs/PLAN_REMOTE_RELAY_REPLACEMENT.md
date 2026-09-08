@@ -637,6 +637,14 @@ shared checkout. Material facts and design changes against sections 8–11:
   resets the schedule; a genuine crash loop still climbs it. Unit test on
   the schedule function; the rows were rerun with the fixed Desktop and
   restarts spaced beyond the healthy-uptime bound.
+- **Helper-restart recovery shape.** With the fixed Desktop and restarts 75 s
+  apart, each helper restart recovered in 3.9–4.3 s on the LAN path. The
+  phone's trace showed where the time went: the Mac had published two VM
+  bridge addresses (`bridge*`/`vmenet*`) the phone cannot reach, each
+  costing a one-second connect bound before the relay was tried. Published
+  addresses are now `en*` interfaces only and the phone's whole LAN phase
+  is bounded to 1.5 s, so a restarted helper (whose LAN listener moved to a
+  new port) costs at most that before the relay carries the reconnect.
 - **Mac-side link lifecycle is now audited.** To diagnose the above, the
   helper's status transitions (`lan_ready`, `connecting`, `waiting_for_peer`,
   `authenticating`, `ready` with carrier, `link_closed` with reason,
