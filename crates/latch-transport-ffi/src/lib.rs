@@ -177,8 +177,10 @@ impl RemoteLink {
             });
         }
         let started = std::time::Instant::now();
+        // One second: a LAN connect is milliseconds, but the target may be a
+        // `.local` name whose resolution takes longer than that.
         let stream = tokio::time::timeout(
-            std::time::Duration::from_millis(300),
+            std::time::Duration::from_millis(1000),
             tokio::net::TcpStream::connect((host.as_str(), port)),
         )
         .await
@@ -188,7 +190,7 @@ impl RemoteLink {
         })?;
         let connect_ms = started.elapsed().as_millis() as u64;
         let link = tokio::time::timeout(
-            std::time::Duration::from_millis(300),
+            std::time::Duration::from_millis(1000),
             SecureLink::establish(
                 LanRecordIo::new(stream),
                 CoreLinkConfig {

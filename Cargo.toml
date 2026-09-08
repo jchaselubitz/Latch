@@ -11,7 +11,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2609080746.0"
+version = "0.2609080913.0"
 edition = "2021"
 rust-version = "1.85"
 license = "UNLICENSED"
@@ -37,6 +37,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-uti
 uniffi = { version = "0.32.0", features = ["tokio"] }
 uniffi-cli = { package = "uniffi", version = "0.32.0", features = ["cli"] }
 mdns-sd = "0.11"
+if-addrs = "0.13"
 sha2 = "0.10"
 security-framework = "3"
 futures = "0.3"

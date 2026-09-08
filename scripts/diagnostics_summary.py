@@ -62,10 +62,19 @@ def percentile(values: list[int], fraction: float) -> int | None:
 
 
 def stage_ms(attempt: dict, stage: str) -> int | None:
-    for sample in attempt.get("stages", []):
-        if sample.get("stage") == stage and sample.get("outcome") == "ok":
-            return int(sample["milliseconds"])
-    return None
+    """The largest successful sample for a stage within one attempt.
+
+    A reconnect cycle records `applicationReady` twice: the app model's
+    figure (link attempt to discovery) and the runner's figure measured from
+    the resume event itself, which includes the suspend/resume overhead. The
+    gate is measured from the explicit event, so the larger one counts.
+    """
+    values = [
+        int(sample["milliseconds"])
+        for sample in attempt.get("stages", [])
+        if sample.get("stage") == stage and sample.get("outcome") == "ok"
+    ]
+    return max(values) if values else None
 
 
 def summarise(attempts: list[dict]) -> dict:

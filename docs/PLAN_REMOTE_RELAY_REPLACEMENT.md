@@ -592,6 +592,42 @@ shared checkout. Material facts and design changes against sections 8–11:
   transition queued behind it. Discovery now runs as a generation-guarded
   task and state transitions apply immediately. Regression: a hung request
   from the previous link no longer keeps the next link from becoming usable.
+- **Demonstrated failure of the LAN carrier.** Every one of the 90 same-LAN
+  attempts went over the relay although phone and Mac were on the same
+  subnet and the Mac advertised `_latch-remote._tcp` on its Wi-Fi interface.
+  The phone's browser was created with `NWBrowser.Descriptor.bonjour`, whose
+  results carry no TXT record, while the LAN target is read entirely from
+  the TXT record (`identityKey`, `linkVersion`, `lanHost`, `lanPort`); every
+  discovered Mac was therefore filtered out as "no LAN peer". The descriptor
+  is now `bonjourWithTXTRecord`. Diagnosing this added a diagnostics-only
+  `preferLAN` option (launch argument `-latchDiagnosticsPreferLAN 1`) that
+  runs the browse and LAN attempt before the relay attempt so the LAN
+  carrier can be measured by itself, and lengthened the browse window in the
+  ordinary race to 1.5 s, which costs nothing when the relay wins first
+  because the winner cancels the browse. With the descriptor fixed the LAN
+  attempt then failed at its 300 ms connect bound because the target was
+  the `.local` name, whose resolution on the phone outlasts the bound and
+  also yields the Mac's loopback and tunnel addresses; the helper now
+  publishes its shareable interface addresses (IPv4 first, no loopback,
+  link-local, or tunnel interfaces) in the TXT record as `lanAddrs`, the
+  phone tries those before the name, sequentially so two LAN links can never
+  replace each other on the Mac, and the LAN connect and handshake bounds
+  are one second each. Measured with LAN preferred: 5 of 5 cycles over the
+  LAN with the link ready in 43 ms (p50). The browse then also returns on
+  the first matching Mac instead of at the end of its window, so the LAN
+  attempt starts early enough to beat the relay's half-second connect.
+- **Design change: LAN then relay, not a race.** Once the LAN attempt could
+  win, the losing relay attempt exposed the hazard of racing two links to
+  one Mac: a Rust connect in flight cannot be cancelled from Swift, the
+  relay attempt finished its handshake about 400 ms later, the Mac replaced
+  the fresh LAN link with it (newest link wins there), and the phone then
+  closed the loser and had nothing (4 of 5 cycles failed). The connector now
+  browses for the Mac for a bounded 400 ms window that returns on the first
+  match, tries the published LAN addresses if the Mac is there, and only
+  otherwise requests a relay admission. Off the LAN the bound is the whole
+  cost; on the LAN the link is ready in under 100 ms. Section 1's
+  "LAN carrier races the WSS carrier" is superseded by this; the transport
+  decision document says so.
 - **Mac-side link lifecycle is now audited.** To diagnose the above, the
   helper's status transitions (`lan_ready`, `connecting`, `waiting_for_peer`,
   `authenticating`, `ready` with carrier, `link_closed` with reason,

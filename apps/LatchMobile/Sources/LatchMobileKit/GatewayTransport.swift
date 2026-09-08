@@ -426,24 +426,43 @@ public final class BonjourMacDiscovery: @unchecked Sendable {
         guard pin.count == 64, pin.allSatisfy({ $0.isHexDigit }) else { return [] }
         let parameters = NWParameters.tcp
         parameters.includePeerToPeer = true
-        let browser = NWBrowser(for: .bonjour(type: Self.serviceType, domain: nil), using: parameters)
+        // `.bonjour` results carry no TXT record, and every target below is
+        // read from the TXT record, so that descriptor discarded every Mac it
+        // found (seen in the field as "no LAN peer" on the Mac's own Wi-Fi).
+        let browser = NWBrowser(for: .bonjourWithTXTRecord(type: Self.serviceType, domain: nil), using: parameters)
         let collector = RemoteLinkLanTargetCollector()
         browser.browseResultsChangedHandler = { results, _ in
-            let targets = results.compactMap { result -> RemoteLinkLanTarget? in
+            let targets = results.flatMap { result -> [RemoteLinkLanTarget] in
                 guard case let .bonjour(record) = result.metadata,
                       record["identityKey"]?.lowercased() == pin,
                       record["linkVersion"] == "1",
                       let host = record["lanHost"], !host.isEmpty,
                       let portText = record["lanPort"],
                       let port = UInt16(portText), port != 0
-                else { return nil }
-                return RemoteLinkLanTarget(host: host, port: port)
+                else { return [] }
+                // The Mac's concrete addresses come first (IPv4 before IPv6,
+                // as published); the `.local` name is the last resort because
+                // resolving it can outlast the LAN connect bound.
+                let addresses = (record["lanAddrs"] ?? "")
+                    .split(separator: ",")
+                    .map { String($0).trimmingCharacters(in: .whitespaces) }
+                    .filter { !$0.isEmpty && $0.count <= 45 }
+                return (addresses + [host]).map { RemoteLinkLanTarget(host: $0, port: port) }
             }
             Task { await collector.replace(with: targets) }
         }
         browser.start(queue: DispatchQueue(label: "dev.cooperativ.latch.remote-link-bonjour"))
         defer { browser.cancel() }
-        try? await Task.sleep(for: duration)
+        // Return on the first matching Mac rather than at the end of the
+        // window: the LAN attempt has to start early enough to beat the
+        // relay's roughly half-second connect, and a found Mac does not get
+        // more found by waiting. The window is the bound for "not here".
+        let deadline = ContinuousClock.now + duration
+        while ContinuousClock.now < deadline, !Task.isCancelled {
+            let found = await collector.values
+            if !found.isEmpty { return found }
+            try? await Task.sleep(for: .milliseconds(20))
+        }
         return await collector.values
     }
 }

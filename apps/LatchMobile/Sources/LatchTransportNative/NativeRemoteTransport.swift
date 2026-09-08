@@ -222,9 +222,9 @@ private final class NativeRemoteEnrollmentSession: RemoteEnrollmentSession, @unc
 
 /// Establishes one authenticated link over the shared Rust core: verifies the
 /// current control-plane directory entry against the locally pinned Mac
-/// identity, then races the LAN and relay entry points of the same protocol
-/// under one owner, keeping whichever authenticates first. Lease renewal lives
-/// inside the connection so it dies with the link.
+/// identity, then tries the LAN entry point of the protocol before the relay,
+/// under one owner. Lease renewal lives inside the connection so it dies with
+/// the link.
 public final class NativeRemoteLinkConnector: RemoteLinkConnecting, @unchecked Sendable {
     private let identityStore: any DeviceIdentityStoring
     private let pathReporter: RemotePathReporter
@@ -268,73 +268,59 @@ public final class NativeRemoteLinkConnector: RemoteLinkConnecting, @unchecked S
         let peerWaitMs = UInt64(max(1, options.peerWait.components.seconds)) * 1000
         let pathReporter = self.pathReporter
 
-        let result = await withTaskGroup(of: NativeLinkAttempt.self) { group in
-            if !options.skipLAN {
-                group.addTask {
-                    do {
-                        guard let target = await BonjourMacDiscovery()
-                            .remoteLinkTargets(matching: record.mac.publicKey, for: .milliseconds(250))
-                            .first
-                        else { return .failed(RemoteLinkFailure.transient("no LAN peer")) }
-                        LinkTrace.shared.mark("connector.lan.begin")
-                        let link = try await RemoteLink.connectLan(
-                            host: target.host, port: target.port, purpose: .session, role: .controller,
-                            localPrivateKey: privateKey, localPublicKey: publicKey,
-                            expectedRemotePublicKey: pin, enrollmentId: nil, enrollmentSecret: nil,
-                            grantRevision: revision
-                        )
-                        LinkTrace.shared.mark("connector.lan.end")
-                        if Task.isCancelled {
-                            try? await link.close()
-                            return .failed(RemoteLinkFailure.transient("cancelled"))
-                        }
-                        return .connected(link, .local, admissionMs: 0)
-                    } catch {
-                        return .failed(Self.classify(error))
-                    }
-                }
+        // LAN first, then the relay: not a race. A Rust connect cannot be
+        // cancelled from Swift once it is in flight, and two links from the
+        // same phone replace each other on the Mac, so a losing attempt that
+        // finished its handshake a moment later would tear down the winner.
+        // The browse returns on the first matching Mac and is bounded for the
+        // "not here" case; that bound is the only cost off the LAN.
+        if !options.skipLAN {
+            let targets = await BonjourMacDiscovery()
+                .remoteLinkTargets(matching: record.mac.publicKey, for: Self.lanBrowseWindow)
+            LinkTrace.shared.mark(targets.isEmpty ? "connector.bonjour.none" : "connector.bonjour.found")
+            if !targets.isEmpty, let link = await Self.connectFirstLanTarget(
+                targets, privateKey: privateKey, publicKey: publicKey, pin: pin, revision: revision
+            ) {
+                pathReporter.report(.local)
+                let stage = link.stageTimings()
+                return NativeRemoteLinkConnection(
+                    link: link, path: .local, revision: revision,
+                    timings: LatchMobileKit.RemoteLinkStageTimings(
+                        admissionMs: 0, connectMs: stage.connectMs,
+                        peerWaitMs: stage.peerWaitMs, authenticateMs: stage.authenticateMs
+                    ),
+                    signaling: signaling, accessToken: accessToken
+                )
             }
-            group.addTask {
-                do {
-                    let admissionStarted = Date()
-                    LinkTrace.shared.mark("connector.admission.begin")
-                    let admission = try await signaling.relayAdmission(for: record)
-                    LinkTrace.shared.mark("connector.admission.end")
-                    let admissionMs = UInt64(max(0, Date().timeIntervalSince(admissionStarted) * 1000))
-                    guard admission.version == 1 else {
-                        return .failed(RemoteLinkFailure.transient("unsupported relay admission"))
-                    }
-                    LinkTrace.shared.mark("connector.wss.begin")
-                    let link = try await RemoteLink.connectWss(
-                        url: admission.relayUrl.absoluteString, admission: admission.admission,
-                        purpose: .session, role: .controller,
-                        localPrivateKey: privateKey, localPublicKey: publicKey,
-                        expectedRemotePublicKey: pin, enrollmentId: nil, enrollmentSecret: nil,
-                        grantRevision: revision, peerWaitMs: peerWaitMs
-                    )
-                    LinkTrace.shared.mark("connector.wss.end")
-                    if Task.isCancelled {
-                        try? await link.close()
-                        return .failed(RemoteLinkFailure.transient("cancelled"))
-                    }
-                    return .connected(link, .relay, admissionMs: admissionMs)
-                } catch {
-                    return .failed(Self.classify(error))
-                }
+        }
+
+        let result: NativeLinkAttempt
+        do {
+            let admissionStarted = Date()
+            LinkTrace.shared.mark("connector.admission.begin")
+            let admission = try await signaling.relayAdmission(for: record)
+            LinkTrace.shared.mark("connector.admission.end")
+            let admissionMs = UInt64(max(0, Date().timeIntervalSince(admissionStarted) * 1000))
+            guard admission.version == 1 else {
+                throw RemoteLinkFailure.transient("unsupported relay admission")
             }
-            var failures: [RemoteLinkFailure] = []
-            for await attempt in group {
-                switch attempt {
-                case .connected:
-                    // Whichever authenticated first wins; the other attempt is
-                    // cancelled and joined before any stream opens.
-                    group.cancelAll()
-                    return attempt
-                case .failed(let failure):
-                    failures.append(failure)
-                }
+            LinkTrace.shared.mark("connector.wss.begin")
+            let link = try await RemoteLink.connectWss(
+                url: admission.relayUrl.absoluteString, admission: admission.admission,
+                purpose: .session, role: .controller,
+                localPrivateKey: privateKey, localPublicKey: publicKey,
+                expectedRemotePublicKey: pin, enrollmentId: nil, enrollmentSecret: nil,
+                grantRevision: revision, peerWaitMs: peerWaitMs
+            )
+            LinkTrace.shared.mark("connector.wss.end")
+            if Task.isCancelled {
+                try? await link.close()
+                result = .failed(RemoteLinkFailure.transient("cancelled"))
+            } else {
+                result = .connected(link, .relay, admissionMs: admissionMs)
             }
-            return .failed(Self.worst(of: failures))
+        } catch {
+            result = .failed(Self.classify(error))
         }
         guard case let .connected(link, path, admissionMs) = result else {
             pathReporter.reportFailure()
@@ -356,6 +342,37 @@ public final class NativeRemoteLinkConnector: RemoteLinkConnecting, @unchecked S
             signaling: signaling,
             accessToken: accessToken
         )
+    }
+
+    /// How long the phone waits for a matching Mac to appear in the Bonjour
+    /// browse before going to the relay. The browse returns early on the
+    /// first match; this is the bound for the Mac not being on this network.
+    static let lanBrowseWindow: Duration = .milliseconds(400)
+
+    /// Tries the published LAN targets in order and keeps the first link that
+    /// authenticates. Sequential on purpose: two LAN links to the same Mac
+    /// would replace each other there.
+    static func connectFirstLanTarget(
+        _ targets: [RemoteLinkLanTarget], privateKey: Data, publicKey: Data, pin: Data, revision: UInt64
+    ) async -> RemoteLink? {
+        for target in targets.prefix(6) {
+            if Task.isCancelled { return nil }
+            LinkTrace.shared.mark("connector.lan.begin")
+            do {
+                let link = try await RemoteLink.connectLan(
+                    host: target.host, port: target.port, purpose: .session, role: .controller,
+                    localPrivateKey: privateKey, localPublicKey: publicKey,
+                    expectedRemotePublicKey: pin, enrollmentId: nil, enrollmentSecret: nil,
+                    grantRevision: revision
+                )
+                LinkTrace.shared.mark("connector.lan.end")
+                return link
+            } catch {
+                LinkTrace.shared.mark("connector.lan.failed")
+                if case .authentication = Self.classify(error) { return nil }
+            }
+        }
+        return nil
     }
 
     /// The failure worth reporting when both entry points failed: an

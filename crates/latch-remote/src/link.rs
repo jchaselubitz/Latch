@@ -847,12 +847,58 @@ fn advertise_lan(
             ("linkVersion".to_owned(), "1".to_owned()),
             ("lanHost".to_owned(), format!("{instance}.local")),
             ("lanPort".to_owned(), port.to_string()),
+            // Concrete addresses of the interfaces a phone can share, IPv4
+            // first. Resolving the `.local` name on the phone took longer
+            // than the LAN connect bound in the field, and the name also
+            // resolves to loopback and tunnel addresses the phone cannot use.
+            ("lanAddrs".to_owned(), lan_addresses().join(",")),
         ]),
     )?
     .enable_addr_auto();
     let daemon = ServiceDaemon::new()?;
     daemon.register(service)?;
     Ok(daemon)
+}
+
+/// Addresses of interfaces a phone on the same network can reach: no
+/// loopback, no link-local, and none of the tunnel/peer-to-peer interfaces
+/// (`utun*`, `awdl*`, `llw*`, `ap*`, `anri*`) that carry other traffic. IPv4
+/// first so the common case connects on the first try.
+fn lan_addresses() -> Vec<String> {
+    let mut v4 = Vec::new();
+    let mut v6 = Vec::new();
+    if let Ok(interfaces) = if_addrs::get_if_addrs() {
+        for interface in interfaces {
+            let name = interface.name.as_str();
+            if interface.is_loopback()
+                || name.starts_with("utun")
+                || name.starts_with("awdl")
+                || name.starts_with("llw")
+                || name.starts_with("ap")
+                || name.starts_with("anri")
+                || name.starts_with("gif")
+                || name.starts_with("stf")
+            {
+                continue;
+            }
+            match interface.ip() {
+                std::net::IpAddr::V4(ip) => {
+                    if !ip.is_link_local() && !ip.is_unspecified() {
+                        v4.push(ip.to_string());
+                    }
+                }
+                std::net::IpAddr::V6(ip) => {
+                    let link_local = (ip.segments()[0] & 0xffc0) == 0xfe80;
+                    if !link_local && !ip.is_unspecified() {
+                        v6.push(ip.to_string());
+                    }
+                }
+            }
+        }
+    }
+    v4.extend(v6);
+    v4.truncate(8);
+    v4
 }
 
 async fn shutdown_signal() -> anyhow::Result<()> {

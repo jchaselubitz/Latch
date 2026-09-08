@@ -24,6 +24,7 @@ clap.workspace = true
 latch = { path = "../latch" }
 latch-transport = { path = "../latch-transport" }
 mdns-sd.workspace = true
+if-addrs.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

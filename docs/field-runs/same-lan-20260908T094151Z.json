@@ -1,0 +1,87 @@
+{
+  "schemaVersion": 2,
+  "scenario": "same-lan",
+  "title": "Same LAN",
+  "result": "pass",
+  "phone": "",
+  "note": "Same LAN over the LAN carrier after the Bonjour/TXT, published-address, and LAN-then-relay fixes: phone 192.168.0.108, Mac 192.168.0.160, VPN off, USB-driven. 30 reconnect cycles and 30 real cold opens, all over the LAN entry (path local), all succeeded. Mac-side counters were not captured for this run (baseline consumed by the earlier relay-path record); the Mac audit trail holds the link events. Automated attempts only; manual subset still to be recorded. Phone build 51dca3ed..., Mac helper locally signed build of 0.2609080913.0 with lanAddrs.",
+  "recordedAt": "20260908T094151Z",
+  "macDelta": {
+    "streamsOpened": 0,
+    "streamsClosed": 0,
+    "events": {}
+  },
+  "phoneLog": "same-lan2",
+  "phoneSummary": {
+    "cold_open": {
+      "attempts": 30,
+      "failed": 0,
+      "failureStages": {},
+      "first": "2026-09-08T09:34:00Z",
+      "last": "2026-09-08T09:41:09Z",
+      "paths": {
+        "local": 30
+      },
+      "skippedLAN": 0,
+      "stages": {
+        "applicationReady": {
+          "max": 188,
+          "p50": 75,
+          "p95": 175,
+          "samples": 30
+        },
+        "launch": {
+          "max": 543,
+          "p50": 385,
+          "p95": 474,
+          "samples": 30
+        },
+        "linkReady": {
+          "max": 126,
+          "p50": 36,
+          "p95": 103,
+          "samples": 30
+        }
+      },
+      "succeeded": 30
+    },
+    "reconnect_cycle": {
+      "attempts": 30,
+      "failed": 0,
+      "failureStages": {},
+      "first": "2026-09-08T09:31:29Z",
+      "last": "2026-09-08T09:32:41Z",
+      "paths": {
+        "local": 30
+      },
+      "skippedLAN": 0,
+      "stages": {
+        "applicationReady": {
+          "max": 461,
+          "p50": 357,
+          "p95": 429,
+          "samples": 30
+        },
+        "linkReady": {
+          "max": 127,
+          "p50": 58,
+          "p95": 127,
+          "samples": 3
+        },
+        "preview": {
+          "max": 49,
+          "p50": 24,
+          "p95": 46,
+          "samples": 30
+        },
+        "sessionList": {
+          "max": 122,
+          "p50": 24,
+          "p95": 115,
+          "samples": 30
+        }
+      },
+      "succeeded": 30
+    }
+  }
+}

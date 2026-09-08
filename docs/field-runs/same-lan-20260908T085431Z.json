@@ -1,0 +1,95 @@
+{
+  "schemaVersion": 2,
+  "scenario": "same-lan",
+  "title": "Same LAN",
+  "result": "pass",
+  "phone": "",
+  "note": "Phone on the Mac's home Wi-Fi (both endpoints behind the same Telekom address), VPN off, USB-driven harness. 30 reconnect cycles with the LAN attempt allowed, 30 relay-only, 30 real cold opens: all succeeded. Every attempt authenticated over the relay; the LAN entry never won the race on this network (investigated separately). Automated attempts only; the manual terminal/approval subset is recorded in a later same-lan run. Phone build 14b544aa..., Mac payload 0.2609080746.0 with the locally signed audit-instrumented helper.",
+  "recordedAt": "20260908T085431Z",
+  "macDelta": {
+    "streamsOpened": 253,
+    "streamsClosed": 238,
+    "events": {
+      "link_authenticating": 123,
+      "link_connecting": 81,
+      "link_link_closed": 82,
+      "link_ready": 81,
+      "link_waiting_for_peer": 81,
+      "remote_link_stream_closed": 238,
+      "remote_link_stream_opened": 253
+    }
+  },
+  "phoneLog": "same-lan",
+  "phoneSummary": {
+    "cold_open": {
+      "attempts": 30,
+      "failed": 0,
+      "failureStages": {},
+      "first": "2026-09-08T08:44:34Z",
+      "last": "2026-09-08T08:53:07Z",
+      "paths": {
+        "relay": 30
+      },
+      "skippedLAN": 0,
+      "stages": {
+        "applicationReady": {
+          "max": 811,
+          "p50": 621,
+          "p95": 733,
+          "samples": 30
+        },
+        "launch": {
+          "max": 1617,
+          "p50": 923,
+          "p95": 1500,
+          "samples": 30
+        },
+        "linkReady": {
+          "max": 613,
+          "p50": 497,
+          "p95": 574,
+          "samples": 30
+        }
+      },
+      "succeeded": 30
+    },
+    "reconnect_cycle": {
+      "attempts": 60,
+      "failed": 0,
+      "failureStages": {},
+      "first": "2026-09-08T08:37:53Z",
+      "last": "2026-09-08T08:42:43Z",
+      "paths": {
+        "relay": 60
+      },
+      "skippedLAN": 30,
+      "stages": {
+        "applicationReady": {
+          "max": 1231,
+          "p50": 769,
+          "p95": 1030,
+          "samples": 60
+        },
+        "linkReady": {
+          "max": 1037,
+          "p50": 560,
+          "p95": 1037,
+          "samples": 8
+        },
+        "preview": {
+          "max": 444,
+          "p50": 157,
+          "p95": 344,
+          "samples": 60
+        },
+        "sessionList": {
+          "max": 342,
+          "p50": 109,
+          "p95": 265,
+          "samples": 60
+        }
+      },
+      "succeeded": 60
+    }
+  }
+}

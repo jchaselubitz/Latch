@@ -20,8 +20,15 @@ The same shared Rust core is compiled for macOS and iOS. It performs:
 
 Both endpoints initiate outbound connections, so Remote Link requires no
 public Mac listener, port forwarding, or NAT traversal. An authenticated LAN
-carrier races the WSS carrier and uses the identical Noise/Yamux link. Direct
-internet optimization is deliberately deferred.
+carrier uses the identical Noise/Yamux link and is tried first: the phone
+browses for its paired Mac for a bounded window (returning on the first
+match), connects to the Mac's published LAN addresses if it is there, and
+goes to the relay otherwise. The two carriers are deliberately not raced:
+a connect in flight in the Rust core cannot be cancelled from Swift, and two
+links from the same phone replace each other on the Mac, so a losing
+attempt that finished a moment later would tear down the winner (observed
+in the field on 8 September 2026). Direct internet optimization is
+deliberately deferred.
 
 ## Ownership
 
