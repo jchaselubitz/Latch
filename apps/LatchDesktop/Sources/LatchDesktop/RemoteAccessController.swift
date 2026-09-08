@@ -33,6 +33,15 @@ final class RemoteAccessController: ObservableObject {
 
     static let keepAwakeKey = "remoteAccessKeepAwakeWhilePluggedIn"
     private static let restartDelays: [UInt64] = [1, 2, 5, 10, 30]
+    /// A helper that stayed up this long before exiting was not crash-looping;
+    /// its next restart starts the schedule over. Without this, every helper
+    /// exit over the app's lifetime climbed the schedule and a tenth restart
+    /// waited the full 30 s (seen in the field on 8 September 2026).
+    static let healthyHelperUptime: TimeInterval = 60
+
+    static func nextRestartAttempt(after uptime: TimeInterval, previous: Int) -> Int {
+        uptime >= healthyHelperUptime ? 0 : min(previous + 1, restartDelays.count - 1)
+    }
     private static let powerPollInterval: Duration = .seconds(30)
     /// Directory re-check while no phone is linked.
     static let idleLinkPollInterval: Duration = .seconds(20)
@@ -126,6 +135,7 @@ final class RemoteAccessController: ObservableObject {
             var attempt = 0
             while !Task.isCancelled {
                 guard let self else { return }
+                let startedAt = Date()
                 do {
                     let assignments = try await self.remoteLinkAssignments()
                     guard !Task.isCancelled else { return }
@@ -183,12 +193,12 @@ final class RemoteAccessController: ObservableObject {
                         if let firstError { throw firstError }
                     }
                     guard !Task.isCancelled else { return }
-                    attempt = min(attempt + 1, Self.restartDelays.count - 1)
+                    attempt = Self.nextRestartAttempt(after: Date().timeIntervalSince(startedAt), previous: attempt)
                 } catch {
                     guard !Task.isCancelled else { return }
                     self.phase = .failed(error.localizedDescription)
                     self.errorMessage = error.localizedDescription
-                    attempt = min(attempt + 1, Self.restartDelays.count - 1)
+                    attempt = Self.nextRestartAttempt(after: Date().timeIntervalSince(startedAt), previous: attempt)
                 }
                 try? await Task.sleep(for: .seconds(Self.restartDelays[attempt]))
             }

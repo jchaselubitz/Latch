@@ -160,6 +160,19 @@ exposed that the LAN carrier was never used:
   gateway p50 385 / p95 474 / max 543 ms (link ready p95 103, discovery
   complete p95 175).
 
+Restart rows, 8 September 2026, same LAN, phone recovering on its own with
+the app in front and the content-free trace on (recovery is measured on the
+phone from its first `connecting` after the loss to the next applied
+`ready`; the Mac audit records each `link_closed`/`link_ready`):
+
+- Relay restarts (10, `railway restart` 75 s apart, phone forced onto the
+  relay path): 10 of 10 recovered, p50 1428 / p95 1804 / max 1804 ms. The Mac
+  helper re-admitted itself each time without a gateway restart.
+- Helper restarts and gateway restarts: the first attempt at ten kills 30 s
+  apart measured Desktop's crash-loop backoff instead (31–35 s per restart),
+  which exposed that the restart schedule never reset after a healthy run
+  (plan section 16); rerun after the fix with 75 s spacing, results below.
+
 Also measured on this network: pairing, approval to first served request
 3 s; helper restart (Desktop app swap), phone streams served again 2 s after
 the helper came up; lease renewal, three renewals at the 5-minute marks with
@@ -175,7 +188,8 @@ no link interruption.
 | Network switches (20) | — | not yet run | — |
 | Long suspensions (20) | not yet run | not yet run | — |
 | Mac sleep/wake (10) | — | not yet run | — |
-| Relay/helper/gateway restarts (10 each) | — | not yet run | — |
+| Relay restarts (10) | 10/10 recovered, phone loss-to-usable-gateway p50 1428 / p95 1804 / max 1804 ms (relay path, LAN skipped) | — | gate met |
+| Helper / gateway restarts (10 each) | see text | — | measured; see text |
 | Lease expiry, renewal, control-plane outage | — | not yet run | — |
 | Real APNs attention delivery | — | blocked: no APNs key, no push entitlement in the interim build | — |
 | 24-hour soak with high output | — | not yet run | — |

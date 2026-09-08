@@ -628,6 +628,15 @@ shared checkout. Material facts and design changes against sections 8–11:
   cost; on the LAN the link is ready in under 100 ms. Section 1's
   "LAN carrier races the WSS carrier" is superseded by this; the transport
   decision document says so.
+- **Demonstrated defect in the helper restart schedule.** The first
+  helper-restart and gateway-restart rows (ten kills each, 30 s apart)
+  recovered in 31–35 s per restart: Desktop's restart delay schedule
+  (1, 2, 5, 10, 30 s) climbed on every helper exit over the app's lifetime
+  and never came back down, so after five exits every restart waited the
+  full 30 s. A helper that stayed up for at least 60 s before exiting now
+  resets the schedule; a genuine crash loop still climbs it. Unit test on
+  the schedule function; the rows were rerun with the fixed Desktop and
+  restarts spaced beyond the healthy-uptime bound.
 - **Mac-side link lifecycle is now audited.** To diagnose the above, the
   helper's status transitions (`lan_ready`, `connecting`, `waiting_for_peer`,
   `authenticating`, `ready` with carrier, `link_closed` with reason,
