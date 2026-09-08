@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 2,
+  "scenario": "relay-restart",
+  "title": "Relay restart",
+  "result": "pass",
+  "phone": "",
+  "note": "10 relay restarts (railway restart, 75 s apart) with the phone forced onto the relay path: 10/10 recovered, phone loss-to-usable-gateway p50 1428 / p95 1804 / max 1804 ms; the helper re-admitted itself each time without a gateway restart. Recovery measured from the phone's content-free stage trace (first connecting after the loss to the next applied ready).",
+  "recordedAt": "20260908T112007Z",
+  "macDelta": {
+    "streamsOpened": 0,
+    "streamsClosed": 0,
+    "events": {}
+  }
+}

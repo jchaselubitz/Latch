@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 2,
+  "scenario": "lease-and-outage",
+  "title": "Lease expiry, renewal, and control-plane outage",
+  "result": "partial",
+  "phone": "",
+  "note": "Normal lease renewal observed: three renewals at the 5-minute marks with no link interruption. Control-plane outage: railway restart of the control plane produced no unready health sample at 2-second polling and no link event on the Mac (the existing relay link was unaffected), so it is not evidence of a real outage; lease expiry needs the Mac cut off from the control plane for more than 10 minutes and was not run.",
+  "recordedAt": "20260908T112008Z",
+  "macDelta": {
+    "streamsOpened": 0,
+    "streamsClosed": 0,
+    "events": {}
+  }
+}

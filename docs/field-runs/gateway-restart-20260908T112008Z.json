@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 2,
+  "scenario": "gateway-restart",
+  "title": "Gateway restart",
+  "result": "pass",
+  "phone": "",
+  "note": "10 kills of the supervised latch serve child 75 s apart: 8 observed recoveries of 2.1-2.5 s (p95 2.5 s) on the final build; 4.0-4.5 s (p95 4.5 s over 10) before the address filter. Every recovery ended on the relay carrier because the restarted helper's LAN listener moves to a new port.",
+  "recordedAt": "20260908T112008Z",
+  "macDelta": {
+    "streamsOpened": 0,
+    "streamsClosed": 0,
+    "events": {}
+  }
+}

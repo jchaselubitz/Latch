@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 2,
+  "scenario": "helper-restart",
+  "title": "Helper restart",
+  "result": "pass",
+  "phone": "",
+  "note": "10 helper kills 75 s apart on the fixed Desktop (restart schedule resets after 60 s uptime) with en*-only published LAN addresses and the 1.5 s LAN-phase budget: recoveries 2.2-2.6 s (p95 2.6 s). Earlier runs: 31-35 s per restart when kills were 30 s apart (crash-loop backoff, schedule never reset; fixed) and 4.0-4.3 s before the address filter.",
+  "recordedAt": "20260908T112007Z",
+  "macDelta": {
+    "streamsOpened": 0,
+    "streamsClosed": 0,
+    "events": {}
+  }
+}

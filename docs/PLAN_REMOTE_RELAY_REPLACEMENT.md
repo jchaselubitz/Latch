@@ -677,3 +677,28 @@ Operations, runbooks, and the cost model are in
 and results table are in `docs/REMOTE_ACCESS_FIELD_VERIFICATION.md`. The
 physical matrix, soak, and APNs delivery require the owner at the phone and
 are recorded there as they run.
+
+### Objective 3 stopping point (8 September 2026, 11:30 UTC)
+
+The owner asked for a stopping point that covers the common network
+situations rather than the full matrix. State at the pause:
+
+- Final coordinated release installed: Mac payload and Desktop
+  `0.2609081113.0` (hashes in the field report), phone build `c7c25fa3…`
+  without the push entitlement. Release tag pushed; the CI-built archives
+  and the notarized Desktop archive are on the GitHub release.
+- Measured and passing: same LAN on both carriers (cold open p95 474 ms
+  LAN / 1500 ms relay; explicit recovery p95 429 ms LAN / 1030 ms relay),
+  relay restarts (p95 1.8 s), helper restarts (p95 2.6 s), gateway restarts
+  (p95 2.5 s), lease renewal, pairing (3 s to first served request).
+- Not measured, in the order the owner's help is needed: the manual
+  terminal/conversation/preview subset; cellular with Wi-Fi off (30 cold
+  opens and 30 cycles, automated once Wi-Fi is off); 20 Wi-Fi/cellular
+  switches; 20 long-suspension foreground cycles (harness
+  `scratchpad matrix/suspensions.sh` pattern: bring Settings forward, wait,
+  bring Latch back; not yet run); 10 Mac sleep/wake cycles; unrelated
+  Wi-Fi, UDP-blocked hotspot, and NAT64 rows; lease expiry (needs the Mac
+  cut off from the control plane for >10 minutes); a real control-plane
+  outage; APNs (owner's Apple developer steps); the 24-hour soak with
+  resource baselines; deletion of the retired TURN variables and the
+  Cloudflare key (deferred until the cutover is accepted).

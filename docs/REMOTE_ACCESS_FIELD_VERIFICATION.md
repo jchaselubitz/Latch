@@ -127,10 +127,10 @@ automated.
 
 | Component | Identity |
 | --- | --- |
-| Source | `main` at the Objective 3 cutover commit `0e5d4c5` plus the follow-up commit carrying the fixes below |
-| Mac payload | `0.2609080625.0`, Developer ID signed and notarized: `latch` `3501b38a…a68e92`, `latch-remote` `8e6900a8…46d5b5`, `latchd` `e8a903fd…1ebbb9` (full hashes in plan section 16) |
-| Desktop | `/Applications/Latch.app` `0.2609080625.0`, executable `6cb882f1…f6df66`, notarized and stapled |
-| Phone | `dev.cooperativ.latch.mobile` 0.1.0 (1), development-signed with the team profile, built with Xcode 27 beta against the iOS 27.0 SDK; executable and `LatchTransportFFI` SHA-256 recorded at install. **Interim build has no `aps-environment` entitlement** (see outstanding) |
+| Source | `main`, final commit of the Objective 3 session (see plan section 16) |
+| Mac payload | `0.2609081113.0`, Developer ID signed and notarized: `latch` `8bb10b62…7eafd2`, `latch-remote` `b47716c5…676d01`, `latchd` `21b00361…4422f` |
+| Desktop | `/Applications/Latch.app` `0.2609081113.0`, executable `ea5d6f42…7224`, notarized and stapled |
+| Phone | `dev.cooperativ.latch.mobile` 0.1.0 (1), development-signed with the team profile, executable `c7c25fa3…f6594` (final measured build; earlier rows name their build). **No `aps-environment` entitlement** (see outstanding) |
 | Control plane | `release` `0e5d4c547f7c4c45ab9cc0129fb33422334671c9`, 7 migrations, `relayConfigured: true`, `apnsConfigured: false` |
 | Relay | Railway service `latch-relay`, deployment `43ee28fe-57f6-44cb-aa9b-67a6530708bf` from the same commit |
 
@@ -171,7 +171,17 @@ phone from its first `connecting` after the loss to the next applied
 - Helper restarts and gateway restarts: the first attempt at ten kills 30 s
   apart measured Desktop's crash-loop backoff instead (31–35 s per restart),
   which exposed that the restart schedule never reset after a healthy run
-  (plan section 16); rerun after the fix with 75 s spacing, results below.
+  (plan section 16). Rerun after that fix with 75 s spacing: 4.0–4.5 s per
+  recovery (helper p95 4.3 s over 6 observed losses, the phone having been
+  backgrounded for four of the kills; gateway p95 4.5 s over 10), the time
+  going into one-second connect bounds on two unreachable bridge addresses
+  the Mac had published. Rerun again with `en*`-only addresses and the
+  1.5 s LAN-phase budget: helper restarts recovered in 2.2–2.6 s (p95 2.6 s)
+  and gateway restarts in 2.1–2.5 s (p95 2.5 s over 8 observed). Every
+  recovery ended on the relay carrier because
+  the restarted helper's LAN listener moves to a new port and the phone's
+  cached Bonjour record still names the old one; the next LAN attempt after
+  the record refreshes returns to the LAN.
 
 Also measured on this network: pairing, approval to first served request
 3 s; helper restart (Desktop app swap), phone streams served again 2 s after
@@ -189,8 +199,8 @@ no link interruption.
 | Long suspensions (20) | not yet run | not yet run | — |
 | Mac sleep/wake (10) | — | not yet run | — |
 | Relay restarts (10) | 10/10 recovered, phone loss-to-usable-gateway p50 1428 / p95 1804 / max 1804 ms (relay path, LAN skipped) | — | gate met |
-| Helper / gateway restarts (10 each) | see text | — | measured; see text |
-| Lease expiry, renewal, control-plane outage | — | not yet run | — |
+| Helper / gateway restarts (10 each) | helper p95 2.6 s, gateway p95 2.5 s on the final build | — | silent-break gate met |
+| Lease expiry, renewal, control-plane outage | renewal: 3 renewals at the 5-minute marks, no interruption; control-plane restart: no observable unavailability at 2 s polling, link unaffected | — | renewal met; expiry and a real outage not yet run |
 | Real APNs attention delivery | — | blocked: no APNs key, no push entitlement in the interim build | — |
 | 24-hour soak with high output | — | not yet run | — |
 
