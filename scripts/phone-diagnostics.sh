@@ -49,7 +49,7 @@ launch() {
     local out
     out="$(mktemp)"
     xcrun devicectl device process launch --device "$dev" --terminate-existing \
-        --json-output "$out" "$bundle" "$@" >/dev/null
+        --json-output "$out" "$bundle" -- "$@" >/dev/null
     python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["result"]["process"]["processIdentifier"])' "$out"
     rm -f "$out"
 }

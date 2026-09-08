@@ -249,6 +249,24 @@ pub fn authorize_enrollment(
     Ok(result)
 }
 
+/// Records one content-free Remote Link lifecycle event from the helper
+/// (`link_ready`, `link_closed`, ...) so `latch remote-access audit` shows
+/// the link's own stage transitions next to the stream events. `detail` is
+/// a fixed vocabulary word such as a carrier name or close reason.
+pub fn record_link_status(home: &LatchHome, status: &str, detail: &str) -> anyhow::Result<()> {
+    let ok = |value: &str| {
+        !value.is_empty()
+            && value.len() <= 32
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+    };
+    if !ok(status) || !ok(detail) {
+        bail!("link status and detail must be short lowercase identifiers");
+    }
+    audit(&Paths::new(home), &format!("link_{status}"), None, detail)
+}
+
 /// Lists retained controller records without secrets.
 pub fn list_devices(home: &LatchHome) -> anyhow::Result<Vec<DeviceSummary>> {
     let store: DeviceStore = read_json_or_default(&Paths::new(home).devices())?;

@@ -153,6 +153,12 @@ public final class AppModel {
     /// down. A backgrounded factory must never resurrect a connection.
     private var pairedConnectionGeneration = 0
     private var diagnosticsOptions = RemoteLinkConnectOptions()
+    /// The owner's suspension in flight. Suspension is requested from a
+    /// synchronous scene-phase handler, so it runs as a task; every resume
+    /// waits for it first. Without that a fast background/foreground (or a
+    /// diagnostics cycle) could resume the old supervisor and then have the
+    /// late suspension tear the fresh link down with nobody left to retry.
+    private var pendingSuspension: Task<Void, Never>?
     /// Armed only by the USB harness's launch argument; writes one
     /// `cold_open` record for this process and then goes quiet.
     public let coldOpen: ColdOpenRecorder
@@ -582,6 +588,7 @@ public final class AppModel {
         // be established. It is the authority to retry on foreground, while
         // the listener and Noise sockets themselves are strictly ephemeral.
         pairedDevice = record
+        await settleSuspension()
         pairedConnectionGeneration &+= 1
         let generation = pairedConnectionGeneration
         linkState = .connecting
@@ -687,6 +694,7 @@ public final class AppModel {
 
     /// One place turns owner snapshots into screen state.
     private func apply(_ snapshot: RemoteLinkSnapshot) async {
+        LinkTrace.shared.mark("app.apply.\(RemoteLinkCoordinator.traceWord(snapshot.state))")
         linkSnapshot = snapshot
         coldOpen.observe(path: snapshot.path)
         coldOpen.observe(snapshot.state)
@@ -702,7 +710,13 @@ public final class AppModel {
             if let path = snapshot.path { pathReporter.report(path) }
             if snapshot.generation != discoveredGeneration {
                 discoveredGeneration = snapshot.generation
-                await discoverOnFreshLink()
+                // Discovery is network work. It must not run inline here: the
+                // owner's snapshots are applied one after another, and a
+                // discovery (or session refresh) that outlives its link, for
+                // example one cut off by a suspend, would hold every later
+                // state transition hostage until the request timed out. The
+                // generation guards inside discard a stale result.
+                Task { [weak self] in await self?.discoverOnFreshLink() }
             }
         case .connecting(let attempt):
             if attempt == 0, case .connecting = linkState { return }
@@ -749,6 +763,8 @@ public final class AppModel {
     /// while the phone was away, and a restarted gateway instance re-bases
     /// every conversation socket.
     private func discoverOnFreshLink() async {
+        LinkTrace.shared.mark("app.discovery.begin")
+        defer { LinkTrace.shared.mark("app.discovery.end") }
         guard let gateway, let pairedDevice else { return }
         let generation = pairedConnectionGeneration
         do {
@@ -849,9 +865,14 @@ public final class AppModel {
     /// capability and repeat discovery on foreground.
     public func suspendPairedTransport() {
         guard pairedDevice != nil else { return }
+        LinkTrace.shared.mark("app.suspend")
         pairedConnectionGeneration &+= 1
         let coordinator = self.coordinator
-        Task { await coordinator.suspend() }
+        let previous = pendingSuspension
+        pendingSuspension = Task {
+            await previous?.value
+            await coordinator.suspend()
+        }
         transport?.stop()
         transport = nil
         if let gateway {
@@ -868,6 +889,7 @@ public final class AppModel {
     /// capability, then the same owner resumes and discovery follows.
     public func reconnectPairedTransport() async {
         guard let pairedDevice else { return }
+        await settleSuspension()
         pairedConnectionGeneration &+= 1
         let generation = pairedConnectionGeneration
         do {
@@ -903,6 +925,10 @@ public final class AppModel {
     /// socket is allowed to resume application traffic.
     public func resumeAfterSuspension() async {
         guard pairedDevice != nil else { return }
+        LinkTrace.shared.mark("app.resume.begin")
+        defer { LinkTrace.shared.mark("app.resume.end") }
+        await settleSuspension()
+        LinkTrace.shared.mark("app.resume.suspensionSettled")
         if gateway == nil {
             await reconnectPairedTransport()
         } else {
@@ -913,6 +939,15 @@ public final class AppModel {
         await waitUntilSettled()
         guard case .linked = linkState else { return }
         resumeConversations()
+    }
+
+    /// Lets an in-flight suspension finish before the owner is resumed, so
+    /// suspend and resume always apply in the order they were requested.
+    private func settleSuspension() async {
+        if let pendingSuspension {
+            await pendingSuspension.value
+            if self.pendingSuspension == pendingSuspension { self.pendingSuspension = nil }
+        }
     }
 
     /// Waits for the current attempt to reach a usable or non-retrying state,

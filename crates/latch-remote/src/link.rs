@@ -187,6 +187,10 @@ impl HostStatus {
     }
 }
 
+/// The home the helper serves, so status transitions can also land in the
+/// Mac's content-free audit trail for field evidence.
+static AUDIT_HOME: std::sync::OnceLock<LatchHome> = std::sync::OnceLock::new();
+
 fn emit_status(status: HostStatus, extra: serde_json::Value) {
     let mut value = serde_json::json!({ "type": "status", "version": 1, "status": status.name() });
     if let (Some(object), Some(more)) = (value.as_object_mut(), extra.as_object()) {
@@ -195,6 +199,14 @@ fn emit_status(status: HostStatus, extra: serde_json::Value) {
         }
     }
     let _ = emit_json(&value);
+    if let Some(home) = AUDIT_HOME.get() {
+        let detail = extra
+            .get("reason")
+            .or_else(|| extra.get("carrier"))
+            .and_then(|item| item.as_str())
+            .unwrap_or("ok");
+        let _ = latch::cli::remote_access::record_link_status(home, status.name(), detail);
+    }
 }
 
 /// One authenticated link ready to serve, with the carrier it arrived on.
@@ -215,6 +227,7 @@ pub fn serve_remote_link(
     config: RemoteLinkHostConfig,
 ) -> anyhow::Result<()> {
     config.validate()?;
+    let _ = AUDIT_HOME.set(home.clone());
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;

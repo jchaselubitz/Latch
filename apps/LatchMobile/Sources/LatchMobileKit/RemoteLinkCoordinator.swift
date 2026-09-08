@@ -264,6 +264,7 @@ public actor RemoteLinkCoordinator {
 
     /// Foreground: one immediate attempt on the same owner.
     public func resume() async {
+        LinkTrace.shared.mark("coordinator.resume")
         guard let record else { return }
         if supervisor == nil {
             attempts = 0
@@ -363,11 +364,13 @@ public actor RemoteLinkCoordinator {
         while !Task.isCancelled, let record {
             publish(RemoteLinkSnapshot(state: .connecting(attempt: attempts), generation: snapshot.generation))
             let outcome: Result<any RemoteLinkConnection, Error>
+            LinkTrace.shared.mark("coordinator.connect.begin")
             do {
                 outcome = .success(try await connector.connect(record: record, options: options))
             } catch {
                 outcome = .failure(error)
             }
+            LinkTrace.shared.mark("coordinator.connect.end")
             if Task.isCancelled { return }
             switch outcome {
             case .success(let link):
@@ -432,7 +435,22 @@ public actor RemoteLinkCoordinator {
         }
     }
 
+    static func traceWord(_ state: RemoteLinkState) -> String {
+        switch state {
+        case .disabled: return "disabled"
+        case .connecting(let attempt): return "connecting.\(attempt)"
+        case .ready: return "ready"
+        case .backoff(let attempt, _, _): return "backoff.\(attempt)"
+        case .macOffline: return "macOffline"
+        case .suspended: return "suspended"
+        case .revoked: return "revoked"
+        case .pairingRequired: return "pairingRequired"
+        }
+    }
+
     private func stopSupervisor() async {
+        LinkTrace.shared.mark("coordinator.stop.begin")
+        defer { LinkTrace.shared.mark("coordinator.stop.end") }
         supervisor?.cancel()
         supervisor = nil
         fireRetry()
@@ -444,6 +462,7 @@ public actor RemoteLinkCoordinator {
     }
 
     private func publish(_ next: RemoteLinkSnapshot) {
+        LinkTrace.shared.mark("coordinator.\(Self.traceWord(next.state)).gen\(next.generation)")
         snapshot = next
         for observer in observers.values {
             observer.yield(next)

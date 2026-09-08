@@ -247,7 +247,9 @@ public final class NativeRemoteLinkConnector: RemoteLinkConnecting, @unchecked S
         let signaling = signalingFactory(record.controlPlane)
         let accessToken = try record.signalingAccessToken()
         let macDeviceID = try record.signalingMacDeviceId()
+        LinkTrace.shared.mark("connector.directory.begin")
         let directory = try await signaling.remoteLinks(accessToken: accessToken)
+        LinkTrace.shared.mark("connector.directory.end")
         guard let descriptor = directory.first(where: { $0.peerDeviceId == macDeviceID }),
               descriptor.version == 1,
               descriptor.peerPublicKey == record.mac.publicKey,
@@ -274,12 +276,14 @@ public final class NativeRemoteLinkConnector: RemoteLinkConnecting, @unchecked S
                             .remoteLinkTargets(matching: record.mac.publicKey, for: .milliseconds(250))
                             .first
                         else { return .failed(RemoteLinkFailure.transient("no LAN peer")) }
+                        LinkTrace.shared.mark("connector.lan.begin")
                         let link = try await RemoteLink.connectLan(
                             host: target.host, port: target.port, purpose: .session, role: .controller,
                             localPrivateKey: privateKey, localPublicKey: publicKey,
                             expectedRemotePublicKey: pin, enrollmentId: nil, enrollmentSecret: nil,
                             grantRevision: revision
                         )
+                        LinkTrace.shared.mark("connector.lan.end")
                         if Task.isCancelled {
                             try? await link.close()
                             return .failed(RemoteLinkFailure.transient("cancelled"))
@@ -293,11 +297,14 @@ public final class NativeRemoteLinkConnector: RemoteLinkConnecting, @unchecked S
             group.addTask {
                 do {
                     let admissionStarted = Date()
+                    LinkTrace.shared.mark("connector.admission.begin")
                     let admission = try await signaling.relayAdmission(for: record)
+                    LinkTrace.shared.mark("connector.admission.end")
                     let admissionMs = UInt64(max(0, Date().timeIntervalSince(admissionStarted) * 1000))
                     guard admission.version == 1 else {
                         return .failed(RemoteLinkFailure.transient("unsupported relay admission"))
                     }
+                    LinkTrace.shared.mark("connector.wss.begin")
                     let link = try await RemoteLink.connectWss(
                         url: admission.relayUrl.absoluteString, admission: admission.admission,
                         purpose: .session, role: .controller,
@@ -305,6 +312,7 @@ public final class NativeRemoteLinkConnector: RemoteLinkConnecting, @unchecked S
                         expectedRemotePublicKey: pin, enrollmentId: nil, enrollmentSecret: nil,
                         grantRevision: revision, peerWaitMs: peerWaitMs
                     )
+                    LinkTrace.shared.mark("connector.wss.end")
                     if Task.isCancelled {
                         try? await link.close()
                         return .failed(RemoteLinkFailure.transient("cancelled"))
@@ -478,8 +486,10 @@ private final class NativeRemoteLinkConnection: RemoteLinkConnection, @unchecked
     }
 
     func close() async {
+        LinkTrace.shared.mark("link.close.begin")
         leaseTask.cancel()
         try? await link.close()
+        LinkTrace.shared.mark("link.close.end")
     }
 }
 

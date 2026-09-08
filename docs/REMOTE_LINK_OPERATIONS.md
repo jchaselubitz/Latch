@@ -126,7 +126,10 @@ settings show sleeping; check both after any settings change.
    present, and `apnsConfigured` when APNs is.
 5. Endpoints: install the coordinated Mac payload (`scripts/install-cli.sh`
    or a local `scripts/release-cli.sh` archive) and the notarized Desktop
-   app, then the phone build. Desktop supervises `latch-remote`; quit and
+   app, then the phone build. Never install an unsigned `latch-remote` or
+   `latch`: the Keychain grants the Mac identity only to the code signature
+   the item trusts, and an unsigned helper blocks on the Keychain prompt
+   before it starts its gateway (seen during cutover diagnosis). Desktop supervises `latch-remote`; quit and
    relaunch Desktop after replacing the binaries so the helper it supervises
    is the new one. Existing `latchd` sessions keep running on the already
    loaded daemon image.

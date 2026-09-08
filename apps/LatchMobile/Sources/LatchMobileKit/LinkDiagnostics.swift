@@ -580,3 +580,44 @@ public struct DiagnosticsLaunchOptions: Equatable, Sendable {
         )
     }
 }
+
+
+/// Content-free stage trace for the physical matrix: fixed words with
+/// milliseconds since process start, appended to
+/// `Documents/latch-diagnostics/trace.log` while a diagnostics launch argument
+/// is present. Never a session, prompt, path, address, key, or output.
+public final class LinkTrace: @unchecked Sendable {
+    public static let shared = LinkTrace()
+    private let lock = NSLock()
+    private let enabled: Bool
+    private let url: URL?
+    private let origin = ProcessLaunch.date
+
+    init(enabled: Bool = DiagnosticsLaunchOptions.current.autoRuns || DiagnosticsLaunchOptions.current.recordColdOpen) {
+        self.enabled = enabled
+        if enabled, let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
+            let directory = documents.appendingPathComponent("latch-diagnostics", isDirectory: true)
+            try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            url = directory.appendingPathComponent("trace.log")
+        } else {
+            url = nil
+        }
+    }
+
+    /// `word` must come from a fixed vocabulary; callers never pass data.
+    public func mark(_ word: String) {
+        guard enabled, let url else { return }
+        let elapsed = Int(Date().timeIntervalSince(origin) * 1000)
+        let line = Data("\(elapsed) \(word)\n".utf8)
+        lock.withLock {
+            if !FileManager.default.fileExists(atPath: url.path) {
+                FileManager.default.createFile(atPath: url.path, contents: nil)
+            }
+            if let handle = try? FileHandle(forWritingTo: url) {
+                defer { try? handle.close() }
+                _ = try? handle.seekToEnd()
+                try? handle.write(contentsOf: line)
+            }
+        }
+    }
+}

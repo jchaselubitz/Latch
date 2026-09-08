@@ -14,7 +14,12 @@ final class StubProtocol: URLProtocol {
     static func stub(method: String, path: String, status: Int = 200, body: String) {
         lock.withLock { replies["\(method) \(path)"] = Reply(status: status, body: body) }
     }
-    static func reset() { lock.withLock { replies = [:]; seen = [] } }
+    /// Paths whose first `count` requests never complete: the request stays
+    /// open until the session is invalidated, like a request cut off by a
+    /// stopped loopback adapter.
+    nonisolated(unsafe) private static var hangs: [String: Int] = [:]
+    static func hang(path: String, count: Int = 1) { lock.withLock { hangs[path] = count } }
+    static func reset() { lock.withLock { replies = [:]; seen = []; hangs = [:] } }
     static var requests: [(method: String, path: String, query: String?, headers: [String: String], body: String)] {
         lock.withLock { seen }
     }
@@ -41,6 +46,12 @@ final class StubProtocol: URLProtocol {
             Self.seen.append((request.httpMethod ?? "GET", path, query, request.allHTTPHeaderFields ?? [:], String(decoding: body, as: UTF8.self)))
         }
         let method = request.httpMethod ?? "GET"
+        let hanging: Bool = Self.lock.withLock {
+            guard let remaining = Self.hangs[path], remaining > 0 else { return false }
+            Self.hangs[path] = remaining - 1
+            return true
+        }
+        if hanging { return }
         let found = Self.lock.withLock { Self.replies["\(method) \(path)"] ?? Self.replies[path] }
             ?? Reply(status: 404, body: #"{"error":"not found"}"#)
         let response = HTTPURLResponse(

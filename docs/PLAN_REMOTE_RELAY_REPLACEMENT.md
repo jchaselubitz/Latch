@@ -567,6 +567,41 @@ shared checkout. Material facts and design changes against sections 8–11:
   which the composed tests had not exercised because their links stayed open
   after the last write. Fixing it required a new XCFramework and phone build
   as well as a new Mac payload.
+- **Demonstrated failure in the first reconnect cycles.** With pairing
+  working, the diagnostics runner's suspend/resume cycles failed or took
+  17–20 s although the Mac's audit showed the relay link ready again within a
+  second of every suspend. `suspendPairedTransport` (a synchronous
+  scene-phase handler) dispatched `coordinator.suspend()` as a detached task
+  while `resumeAfterSuspension` called `coordinator.resume()` immediately;
+  when the suspension ran second, resume had only probed the old supervisor
+  and the late suspension then closed the fresh link and left the owner
+  suspended, so the phone sat until its 20-second settle bound. The app
+  model now records the pending suspension and every resume, reconnect, and
+  connect awaits it first, so suspend and resume apply in request order.
+  Regression: an immediate resume after suspend reconnects once on the same
+  owner and is linked within the settle bound. A fast background/foreground
+  had the same race.
+- **Demonstrated failure in the reconnect cycles, second cause.** With the
+  ordering fixed, the phone's own trace (a content-free stage trace written
+  under `Documents/latch-diagnostics/trace.log` while a diagnostics launch
+  argument is present) showed the coordinator publishing `ready` 470 ms after
+  every resume while the app model never applied it. The owner's snapshots
+  are consumed by one `for await` loop that awaited `apply`, and
+  `apply(.ready)` awaited discovery and the session refresh inline; a refresh
+  cut off by the suspend hung on the stopped loopback adapter, so every later
+  transition queued behind it. Discovery now runs as a generation-guarded
+  task and state transitions apply immediately. Regression: a hung request
+  from the previous link no longer keeps the next link from becoming usable.
+- **Mac-side link lifecycle is now audited.** To diagnose the above, the
+  helper's status transitions (`lan_ready`, `connecting`, `waiting_for_peer`,
+  `authenticating`, `ready` with carrier, `link_closed` with reason,
+  `offline`) are recorded in the content-free audit trail as `link_*`
+  events, so `latch remote-access audit` and `scripts/field-run.sh` show the
+  link's own stages next to the stream events. Operational note recorded in
+  the runbook: a helper binary must be Developer ID signed before it is
+  installed, because the Keychain grants the Mac identity only to the
+  signature the item trusts; an unsigned diagnostic build blocked on the
+  Keychain prompt and never started its gateway.
 - **Demonstrated fix.** The new Desktop polled `GET /v1/remote-links` every
   two seconds while no phone was linked (observed in the control-plane request
   log after install); the idle re-check is now 20 seconds and enrollment

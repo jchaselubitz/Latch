@@ -165,6 +165,76 @@ final class AppModelRecoveryTests: XCTestCase {
         second.stop()
     }
 
+    func testAnImmediateResumeAfterSuspendReconnectsInsteadOfBeingUndoneByTheLateSuspension() async throws {
+        // The diagnostics runner (and a fast background/foreground) suspends
+        // and resumes in the same tick. In the field the detached suspension
+        // ran after resume: resume only probed the old supervisor, the late
+        // suspension then closed the fresh link and left the owner suspended,
+        // and the phone sat for 20 seconds with a ready link on the Mac.
+        StubProtocol.reset()
+        StubProtocol.stub(path: "/v2/capabilities", body: Self.capabilities)
+        StubProtocol.stub(path: "/v2/sessions", body: Self.sessions)
+        let connector = ScriptedConnector([.connect(.relay), .connect(.relay), .connect(.relay)])
+        let model = AppModel(
+            linkConnector: connector,
+            gatewayFactory: { _, _, _ in Self.stubGateway() },
+            presentationStore: MemorySessionPresentationStore(),
+            terminalSizeStore: MemoryTerminalSizeStore()
+        )
+        await model.connectPairedDevice(record())
+        await waitForLinked(model)
+        let first = try XCTUnwrap(connector.latest)
+
+        let started = Date()
+        model.suspendPairedTransport()
+        await model.resumeAfterSuspension()
+        XCTAssertLessThan(Date().timeIntervalSince(started), 5, "resume must not wait out the settle bound")
+        guard case .linked = model.linkState else { return XCTFail("expected linked, got \(model.linkState)") }
+        XCTAssertTrue(first.closedByOwner, "the suspended link was closed, not left racing the new one")
+        XCTAssertEqual(connector.connections.count, 2, "exactly one reconnect on the same owner")
+        XCTAssertFalse(connector.connections[1].isClosed, "the fresh link is the live one")
+
+        // And a second immediate cycle behaves the same way.
+        model.suspendPairedTransport()
+        await model.resumeAfterSuspension()
+        guard case .linked = model.linkState else { return XCTFail("expected linked after the second cycle") }
+        XCTAssertEqual(connector.connections.count, 3)
+        model.unlink()
+    }
+
+    func testAHungRequestFromThePreviousLinkDoesNotBlockTheNextLinkFromBecomingUsable() async throws {
+        // In the field the diagnostics cycle suspended while the first link's
+        // session refresh was in flight; the request hung on the stopped
+        // adapter and, because the owner's snapshots were applied one after
+        // another and discovery ran inline, every later state transition
+        // queued behind it. The Mac showed the new link ready within a
+        // second while the phone reported nothing for 20 seconds.
+        StubProtocol.reset()
+        StubProtocol.stub(path: "/v2/capabilities", body: Self.capabilities)
+        StubProtocol.stub(path: "/v2/sessions", body: Self.sessions)
+        StubProtocol.hang(path: "/v2/sessions", count: 1)
+        let connector = ScriptedConnector([.connect(.relay), .connect(.relay)])
+        let model = AppModel(
+            linkConnector: connector,
+            gatewayFactory: { _, _, _ in Self.stubGateway() },
+            presentationStore: MemorySessionPresentationStore(),
+            terminalSizeStore: MemoryTerminalSizeStore()
+        )
+        await model.connectPairedDevice(record())
+        await waitForLinked(model)
+        // The first refresh is now hanging. Cycle the link underneath it.
+        try? await Task.sleep(for: .milliseconds(100))
+        let started = Date()
+        model.suspendPairedTransport()
+        await model.resumeAfterSuspension()
+        XCTAssertLessThan(Date().timeIntervalSince(started), 5, "the new link must not wait behind the old request")
+        guard case .linked = model.linkState else { return XCTFail("expected linked, got \(model.linkState)") }
+        XCTAssertEqual(connector.connections.count, 2)
+        for _ in 0..<100 where model.sessions.isEmpty { try? await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(model.sessions.count, 1, "the second link's refresh answers")
+        model.unlink()
+    }
+
     func testPermissionDowngradeDuringRecoveryClosesTheTerminalBeforeAnythingIsFetched() async throws {
         StubProtocol.reset()
         StubProtocol.stub(path: "/v2/capabilities", body: Self.capabilities)
