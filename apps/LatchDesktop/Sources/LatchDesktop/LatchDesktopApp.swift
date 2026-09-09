@@ -106,7 +106,7 @@ struct LatchDesktopApp: App {
 
     private static let menuBarImage: NSImage = {
         guard let url = Bundle.main.url(
-            forResource: "latch-menubar-template@2x",
+            forResource: "latch-glyph@2x",
             withExtension: "png"
         ), let image = NSImage(contentsOf: url) else {
             return NSImage(systemSymbolName: "rectangle.stack", accessibilityDescription: "Latch")
