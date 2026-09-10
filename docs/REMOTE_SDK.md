@@ -23,8 +23,10 @@ available `sessions`, `terminal`, `preview`, `conversation`,
 require `protocolVersion: 2`; v1 has been removed and is not negotiated,
 probed, or adapted.
 
-`@latch/client` supports session listing, inspection, discovery, and terminal
-attachment. The terminal socket is
+`@latch/client` supports session listing, inspection, discovery, stopping, and
+terminal attachment. Its `GatewayEndpoints` type is generated from the
+canonical discovery schema, so the optional keys are exactly the routes a
+gateway may predate. The terminal socket is
 `WS /v2/sessions/{id}/terminal`; the token is carried by the `latch.v2.*`
 subprotocol.
 
@@ -143,6 +145,27 @@ screen is still readable. There is no remote removal route; erasing a session
 stays a decision made at the Mac. Repeating a stop is safe — a session that
 has already exited answers the same way — which is what lets a client retry a
 request whose response it never saw.
+
+This is the one stop operation, reached from wherever a caller can reach Latch.
+`latch stop SESSION --json` on the Mac, `client.stopSession({ sessionId })`
+against a loopback or tunneled gateway, and the paired proxy a phone speaks
+through all run the same engine stop and answer the same `StopReport`, so an
+integration such as Overlord's mission panel reads one shape whether it is
+sitting on the Mac or not. `stopSession` consults discovery before posting and
+refuses with its own `stop_unsupported` code when `endpoints.stopSession` is
+absent, so an old gateway's bare 404 on the path is never read as the session
+being gone.
+
+Every gateway failure is `{ "error": <code>, "reason": <text> }`, and
+`LatchGatewayError.code` carries the code. Branch on it, not on the text:
+
+| Code | Status | Meaning |
+| --- | --- | --- |
+| `session_not_found` | 404 | Latch has no session by that id or name. |
+| `session_ambiguous` | 409 | A name matched more than one session; use the id. |
+| `session_still_running` | 409 | The pane survived SIGTERM and SIGKILL. |
+| `request_id_conflict` | 409 | A creation request id was reused with a different `cwd`. |
+| `request_failed` | any | The answer carried no more specific code. |
 
 There is no `@latch/chat-react`, `@latch/harness-schema`, remote React SDK
 example, event cursor, transcript reducer, HTTP send endpoint, compatibility

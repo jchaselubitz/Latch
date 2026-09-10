@@ -869,6 +869,7 @@ fn a_gateway_stop_ends_the_shell_keeps_its_record_and_repeats_safely() {
 
         let (status, missing) = gateway_post(&gateway, "/v2/sessions/ses_gone/stop", "");
         assert_eq!(status, 404, "{missing}");
+        assert_eq!(missing["error"], "session_not_found");
 
         h.remove(&id);
     });

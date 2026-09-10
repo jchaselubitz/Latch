@@ -309,7 +309,29 @@ pub struct TerminalAttachedFrame {
     ).stdout
 
 
-def typescript_source(schema_digest: str) -> str:
+def typescript_endpoints(capabilities: dict) -> str:
+    """Emit `GatewayEndpoints` from the discovery schema rather than by hand.
+
+    A key the schema lists as required is always present; every other route is
+    optional because a gateway that predates it omits the key, and a client must
+    read that omission as unavailable rather than as false-by-default.
+    """
+    endpoints = capabilities["properties"]["endpoints"]
+    required = set(endpoints["required"])
+    names = list(endpoints["properties"])
+    fields = "".join(
+        f"  {name}{'' if name in required else '?'}: boolean;\n" for name in names
+    )
+    union = " | ".join(f"'{name}'" for name in names)
+    return (
+        "/** Routes the gateway serves. An absent key means the gateway predates\n"
+        " * that route: treat it as unavailable, never as false-by-default. */\n"
+        f"export type GatewayEndpoints = {{\n{fields}}};\n"
+        f"export type GatewayEndpointName = {union};\n"
+    )
+
+
+def typescript_source(schema_digest: str, capabilities: dict) -> str:
     return f'''// Generated from schemas/remote-access/v2/*.schema.json; do not edit by hand.
 // Canonical schema set SHA-256: {schema_digest}
 ''' + '''
@@ -337,16 +359,17 @@ export type GatewayReadiness = {
   protocolVersion: 2;
   gatewayInstanceId: string;
 };
-'''
+''' + typescript_endpoints(capabilities)
 
 
 def main() -> None:
-    for name in SCHEMA_NAMES:
-        load(name)
+    documents = {name: load(name) for name in SCHEMA_NAMES}
     schema_digest = contract_digest()
     outputs = {
         RUST: rust_source(schema_digest),
-        TYPESCRIPT: typescript_source(schema_digest),
+        TYPESCRIPT: typescript_source(
+            schema_digest, documents["gateway-capabilities.schema.json"]
+        ),
     }
     if sys.argv[1:] == ["--check"]:
         stale = [path for path, source in outputs.items() if not path.is_file() or path.read_text() != source]

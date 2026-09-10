@@ -25,3 +25,15 @@ export type GatewayReadiness = {
   protocolVersion: 2;
   gatewayInstanceId: string;
 };
+/** Routes the gateway serves. An absent key means the gateway predates
+ * that route: treat it as unavailable, never as false-by-default. */
+export type GatewayEndpoints = {
+  sessions: boolean;
+  preview?: boolean;
+  terminal: boolean;
+  conversation: boolean;
+  browseDirectories?: boolean;
+  createSession?: boolean;
+  stopSession?: boolean;
+};
+export type GatewayEndpointName = 'sessions' | 'preview' | 'terminal' | 'conversation' | 'browseDirectories' | 'createSession' | 'stopSession';

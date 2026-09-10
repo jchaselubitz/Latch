@@ -1,7 +1,12 @@
-import type { GatewayFeatures, TerminalCloseReason } from './generated.ts';
+import type { GatewayEndpoints, GatewayFeatures, TerminalCloseReason } from './generated.ts';
 import { TERMINAL_CLOSE_CODES } from './generated.ts';
 
-export type { GatewayFeatures, TerminalCloseReason } from './generated.ts';
+export type {
+  GatewayEndpointName,
+  GatewayEndpoints,
+  GatewayFeatures,
+  TerminalCloseReason
+} from './generated.ts';
 export { TERMINAL_CLOSE_CODES } from './generated.ts';
 
 /// The reason behind one observed close code, or undefined when the gateway
@@ -51,6 +56,20 @@ export type InspectReport = {
   attached?: number;
 };
 
+/**
+ * The answer to a stop, whether it came from `latch stop --json` on the Mac or
+ * from `POST /v2/sessions/{id}/stop` through a gateway: the same document, so
+ * an integration reads one shape wherever it reached Latch from.
+ */
+export type StopReport = {
+  /** Session that was asked to stop. */
+  id: string;
+  /** State after the request was delivered: `exited`, or `running` when the process survived SIGKILL. */
+  state: string;
+  /** False when the pane was still live after the escalation window. */
+  stopped: boolean;
+};
+
 export type TerminalState = 'connecting' | 'open' | 'reconnecting' | 'closed';
 export type TerminalCloseInfo = {
   code: number;
@@ -80,7 +99,7 @@ export type GatewayCapabilities = {
     selfUpdate: boolean;
     extensions: string[];
   };
-  endpoints: { sessions: boolean; terminal: boolean; conversation: boolean };
+  endpoints: GatewayEndpoints;
   features: GatewayFeatures;
   gatewayInstanceId: string;
   operationRetentionSeconds: number;
@@ -90,5 +109,18 @@ export type LatchClient = {
   listSessions(): Promise<ListReport>;
   inspectSession(options: { sessionId: string }): Promise<InspectReport>;
   gatewayCapabilities(): Promise<GatewayCapabilities>;
+  /**
+   * Ends one session's hosted process, leaving its record and dead pane in
+   * place. This is `latch stop` reached through the gateway: the same graceful
+   * SIGTERM-then-SIGKILL the CLI runs, with no signal, force flag, or timeout
+   * to choose, and the same `StopReport` back. It requires the `control` grant.
+   *
+   * Discovery is consulted first: a gateway that does not advertise
+   * `endpoints.stopSession` is refused with the `stop_unsupported` code rather
+   * than asked, so an old gateway's 404 is never mistaken for a session that
+   * is gone. Repeating a stop is safe, which is what lets a caller retry a
+   * request whose answer it never saw.
+   */
+  stopSession(options: { sessionId: string }): Promise<StopReport>;
   attachTerminal(options: { sessionId: string; cols?: number; rows?: number }): TerminalHandle;
 };

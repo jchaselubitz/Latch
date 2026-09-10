@@ -789,10 +789,21 @@ fn map_engine_error(error: anyhow::Error) -> ApiError {
         .chain()
         .find_map(|cause| cause.downcast_ref::<SessionLookupError>())
     {
+        // Stable codes, because a client reaching the Mac through a gateway
+        // has nothing else to branch on: `latch stop --json` reports "no such
+        // session" with an exit status, and this is the same fact on the wire.
         if lookup.is_absent() {
-            return ApiError::new(StatusCode::NOT_FOUND, "session not found");
+            return ApiError::coded(
+                StatusCode::NOT_FOUND,
+                "session_not_found",
+                "session not found",
+            );
         }
-        return ApiError::new(StatusCode::CONFLICT, "session name is ambiguous");
+        return ApiError::coded(
+            StatusCode::CONFLICT,
+            "session_ambiguous",
+            "session name is ambiguous",
+        );
     }
     ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
 }
@@ -823,6 +834,7 @@ mod tests {
             .into(),
         );
         assert_eq!(mapped.status, StatusCode::NOT_FOUND);
+        assert_eq!(mapped.code, "session_not_found");
         assert_eq!(mapped.message, "session not found");
         assert!(!mapped.message.contains("secret-name"));
     }
@@ -1034,6 +1046,10 @@ mod tests {
         )
         .await;
         assert_eq!(status, 404);
+        // The code is what a client branches on: a bare 404 from a gateway
+        // that never had the route carries no `error` at all, and this must
+        // never be mistaken for it.
+        assert_eq!(payload["error"], "session_not_found");
         assert_eq!(payload["reason"], "session not found");
         assert!(!payload["reason"].to_string().contains("ses_missing"));
     }

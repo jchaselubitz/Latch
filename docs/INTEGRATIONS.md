@@ -109,6 +109,24 @@ Never read, write, or infer state from `~/.latch`. Do not use a private kernel
 or tmux server as an integration API. Use the CLI's JSON output and process
 exit status instead.
 
+### Stopping from somewhere other than the Mac
+
+`latch stop` is a CLI on the Mac that hosts the session, which is enough for a
+desktop bridge running there. When the integration's process is somewhere
+else — a hosted web app, a tunnel, or a phone — the same operation is served by
+the gateway as `POST /v2/sessions/{id}/stop`, and `@latch/client` exposes it
+as `stopSession`. It is the same graceful SIGTERM-then-SIGKILL stop, it answers
+the same `StopReport` (`{ id, state, stopped }`), it requires the `control`
+grant, and it is advertised as `endpoints.stopSession` in discovery. A
+gateway that predates the route omits the key; the client refuses before
+asking rather than mistaking a bare 404 for a session that is gone.
+
+Stopping is not removing: the record and dead pane stay, and there is no
+remote removal route. Erasing a session is a decision made at the Mac with
+`latch remove`. Repeating a stop is safe, so a caller that never saw the
+answer may simply ask again. The wire details, error codes, and the client's
+contract are in [REMOTE_SDK.md](REMOTE_SDK.md).
+
 ## Remote and embedded clients
 
 For a client that connects to a local or tunneled gateway, first query
@@ -118,6 +136,10 @@ WebSocket subprotocol. It requires the `control` grant and takes the session's
 only terminal surface. A client must supply a terminal size before the steal
 commits and must not blindly reconnect after a `stolen` close: reconnecting
 would take the session back from the person who just claimed it.
+
+`POST /v2/sessions/{id}/stop` is the lifecycle verb the gateway serves beside
+the terminal, so a remote client can end a session it can see without a shell
+on the Mac; see the stop section above.
 
 The private workspace packages `@latch/client` and `@latch/terminal-react`
 provide the gateway and React terminal seams for repository development. Their
@@ -138,6 +160,9 @@ persistent terminal; Overlord remains responsible for its `ovld protocol
 attach`, `update`, and `deliver` lifecycle.
 
 Use `latch attach` as the terminal fallback. Do not route terminal bytes
-through the Overlord backend. The historical design and the exact ownership
-boundary are retained in
+through the Overlord backend. The "End terminal session" action in a mission
+panel is `latch stop SESSION --json` when Overlord's desktop bridge is on the
+Mac and `stopSession` through the gateway when it is not; both answer the same
+report, and Latch Mobile ends the same session the same way. The historical
+design and the exact ownership boundary are retained in
 [planning/OVERLORD_INTEGRATION.md](../planning/OVERLORD_INTEGRATION.md).
