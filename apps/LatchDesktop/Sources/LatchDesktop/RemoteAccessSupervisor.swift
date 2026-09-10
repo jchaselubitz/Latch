@@ -208,11 +208,13 @@ final class RemoteAccessSupervisor: @unchecked Sendable {
         let captured = Task.detached(priority: .utility) {
             reader.readDataToEndOfFile()
         }
+        let eventReader = HelperLineReader(handle: events.fileHandleForReading)
+        defer { eventReader.stop() }
         let writer = HelperCommandWriter(handle: input.fileHandleForWriting)
         let renewal = Task.detached(priority: .utility) { [renewLease, requestAdmission, onStatus] in
             var lease: Task<Void, Never>?
             defer { lease?.cancel() }
-            for try await line in events.fileHandleForReading.bytes.lines {
+            for await line in eventReader.lines {
                 switch Self.parseEvent(line) {
                 case .status(let status)?:
                     onStatus?(status)
@@ -241,6 +243,7 @@ final class RemoteAccessSupervisor: @unchecked Sendable {
             }
         }
         renewal.cancel()
+        eventReader.stop()
         try? input.fileHandleForWriting.close()
         try? events.fileHandleForReading.close()
 
@@ -412,10 +415,12 @@ final class RemoteEnrollmentSupervisor: @unchecked Sendable {
         process.standardOutput = output
         process.standardError = diagnostics
         lock.withLock { self.process = process }
+        let eventReader = HelperLineReader(handle: output.fileHandleForReading)
+        defer { eventReader.stop() }
         do {
             try process.run()
             try write(configuration, to: input.fileHandleForWriting)
-            for try await line in output.fileHandleForReading.bytes.lines {
+            for await line in eventReader.lines {
                 guard let data = line.data(using: .utf8) else { continue }
                 let envelope = try JSONDecoder().decode(Envelope.self, from: data)
                 guard envelope.version == 1 else {
