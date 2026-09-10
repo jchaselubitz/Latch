@@ -7,6 +7,12 @@ struct SessionsView: View {
     @Environment(PairingModel.self) private var pairing
     @State private var creatingSession = false
     @State private var explainingGrant = false
+    /// The session a Stop tap is asking about. Ending someone's work is not
+    /// undoable, so it is always confirmed by name first.
+    @State private var stopping: SessionSummary?
+    /// Set when Stop was tapped on a Mac that serves the route but has not
+    /// granted this phone control, so the reason can be said out loud.
+    @State private var explainingStopGrant = false
 
     var body: some View {
         NavigationStack {
@@ -45,8 +51,8 @@ struct SessionsView: View {
                 case .macOffline:
                     MessageView(
                         icon: "laptopcomputer.slash",
-                        title: "Your Mac is offline",
-                        detail: "It may be asleep, disconnected, or have remote access turned off. This phone keeps checking; wake the Mac to continue."
+                        title: "Mac unavailable through the relay",
+                        detail: "This phone could not find your Mac on the relay. It may be asleep, disconnected, or have remote access turned off. This phone keeps checking; wake the Mac to continue."
                     )
                 case .revoked(let reason):
                     MessageView(
@@ -74,6 +80,38 @@ struct SessionsView: View {
                 Button("OK", role: .cancel) {}
             } message: {
                 Text(model.newSessionUnavailableExplanation ?? "")
+            }
+            .alert(
+                "This phone can't stop a session",
+                isPresented: $explainingStopGrant
+            ) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(model.sessionStopUnavailableExplanation ?? "")
+            }
+            // A stop ends whatever the session was doing on the Mac, so the
+            // name is repeated back before anything is sent.
+            .confirmationDialog(
+                stopping.map { "Stop \($0.displayName)?" } ?? "Stop this session?",
+                isPresented: Binding(
+                    get: { stopping != nil },
+                    set: { if !$0 { stopping = nil } }
+                ),
+                titleVisibility: .visible,
+                presenting: stopping
+            ) { session in
+                Button("Stop session", role: .destructive) {
+                    stopping = nil
+                    Task { await model.stopSession(session) }
+                }
+                Button("Cancel", role: .cancel) { stopping = nil }
+            } message: { session in
+                Text(
+                    """
+                    Whatever is running in \(session.directoryName) on your Mac ends. The session \
+                    itself stays in this list so you can still read what it left behind.
+                    """
+                )
             }
         }
         .task { await refreshPermission() }
@@ -137,7 +175,8 @@ struct SessionsView: View {
                         SessionRow(
                             session: session,
                             route: route,
-                            isHighlighted: session.id == model.highlightedSessionID
+                            isHighlighted: session.id == model.highlightedSessionID,
+                            isStopping: model.stoppingSessionIDs.contains(session.id)
                         )
                     }
                     .id(session.id)
@@ -146,6 +185,12 @@ struct SessionsView: View {
                             ? Color.accentColor.opacity(0.15)
                             : nil
                     )
+                    // Both affordances, deliberately: the swipe is the fast
+                    // path people already expect from a list, and the long
+                    // press is the one that is discoverable without knowing
+                    // the swipe is there.
+                    .swipeActions(edge: .trailing) { stopButton(for: session) }
+                    .contextMenu { stopButton(for: session) }
                 }
                 // A created session is pointed at, not opened. Attaching would
                 // take the surface from the Mac, and creation never asked for
@@ -173,6 +218,35 @@ struct SessionsView: View {
         }
     }
 
+    /// The Stop control for one row, or nothing at all.
+    ///
+    /// Shown whenever the Mac serves the route and the session is still live,
+    /// and left tappable without the grant so the alert can say what to change
+    /// on the Mac — the same bargain the New session button makes.
+    @ViewBuilder
+    private func stopButton(for session: SessionSummary) -> some View {
+        if model.advertisesSessionStop, session.isRunning {
+            Button(role: .destructive) {
+                if model.canStopSessions {
+                    stopping = session
+                } else {
+                    explainingStopGrant = true
+                }
+            } label: {
+                Label(
+                    model.stoppingSessionIDs.contains(session.id) ? "Stopping…" : "Stop",
+                    systemImage: "stop.circle"
+                )
+            }
+            .disabled(model.stoppingSessionIDs.contains(session.id))
+            .accessibilityHint(
+                model.canStopSessions
+                    ? "Ends what is running in this session on your Mac"
+                    : "Unavailable until this phone has control of your Mac"
+            )
+        }
+    }
+
     static func interruptedTitle(_ link: RemoteLinkState) -> String {
         switch link {
         case .suspended: return "Reconnecting"
@@ -196,7 +270,7 @@ struct SessionsView: View {
 
     static func staleBanner(_ state: AppModel.LinkState) -> String {
         switch state {
-        case .macOffline: return "Your Mac is offline. This list is from before it went away."
+        case .macOffline: return "Your Mac is not reachable through the relay. This list is from before it went away."
         case .interrupted(.suspended, _): return "Reconnecting…"
         case .interrupted(.backoff(_, _, _), _): return "Connection lost. Showing the last known sessions."
         default: return "Reconnecting. Showing the last known sessions."
@@ -293,6 +367,10 @@ private struct SessionRow: View {
     let route: SessionRoute
     /// True for the session this phone just created, briefly after creation.
     var isHighlighted = false
+    /// True while this phone is waiting for the Mac to stop this session. The
+    /// Mac waits out its own grace period first, so the wait is long enough
+    /// that a row saying nothing would read as a tap that did nothing.
+    var isStopping = false
 
     var body: some View {
         HStack(spacing: 12) {
@@ -317,7 +395,11 @@ private struct SessionRow: View {
 
             Spacer(minLength: 8)
 
-            if let idle = session.idleMs {
+            if isStopping {
+                Text("Stopping…")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            } else if let idle = session.idleMs {
                 Text(Self.idleLabel(milliseconds: idle))
                     .font(.caption2)
                     .foregroundStyle(.tertiary)

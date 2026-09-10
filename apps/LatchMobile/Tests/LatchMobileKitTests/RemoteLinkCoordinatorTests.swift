@@ -263,6 +263,16 @@ final class RemoteLinkCoordinatorTests: XCTestCase {
         await coordinator.stop()
     }
 
+    /// The owner-facing sentence for this failure must claim only what the
+    /// phone observed -- that it could not find the Mac on the relay -- and
+    /// never assert that the Mac itself has no internet connection.
+    func testMacOfflineMessageClaimsOnlyWhatTheRelayObserved() {
+        let message = RemoteLinkFailure.macOffline.message
+        XCTAssertTrue(message.contains("could not find your Mac on the relay"), message)
+        XCTAssertFalse(message.lowercased().contains("your mac is offline"), message)
+        XCTAssertTrue(RemoteLinkFailure.macOffline.isRetryable)
+    }
+
     func testSuspendClosesTheLinkAndResumeReconnectsAsANewGeneration() async {
         let connector = ScriptedConnector([.connect(.relay), .connect(.relay)])
         let coordinator = RemoteLinkCoordinator(connector: connector)

@@ -82,6 +82,12 @@ public final class AppModel {
     /// The session most recently created from the folder browser. The view may
     /// highlight it without treating creation as permission to open or attach.
     public private(set) var highlightedSessionID: String?
+
+    /// Sessions this phone has asked the Mac to stop and has not yet heard
+    /// back about. A stop can take several seconds — the Mac waits out its own
+    /// grace period before escalating — so the rows have to be able to say
+    /// that the request is in flight rather than look ignored.
+    public private(set) var stoppingSessionIDs: Set<String> = []
     /// Session stores are retained here rather than by a navigation view, so a
     /// pushed chat can reconnect from its cached revision instead of replaying
     /// the conversation after every back-navigation.
@@ -315,6 +321,7 @@ public final class AppModel {
         sessionsStale = false
         sessionsError = nil
         highlightedSessionID = nil
+        stoppingSessionIDs = []
         conversationStores.values.forEach { $0.stop() }
         conversationStores = [:]
         detachAllTerminals()
@@ -414,6 +421,73 @@ public final class AppModel {
 
     public func clearNewSessionHighlight() {
         highlightedSessionID = nil
+    }
+
+    /// Whether the linked Mac serves the stop route at all, independent of
+    /// this phone's grant. A Mac that predates the route advertises nothing,
+    /// and there is then no control to show and nothing to explain.
+    public var advertisesSessionStop: Bool {
+        guard case .linked(let capabilities) = linkState else { return false }
+        return GatewayCompatibility.supports(endpoint: .stopSession, capabilities: capabilities)
+    }
+
+    /// Whether this phone may stop a session right now. Ending what is running
+    /// is a control operation, held to the same grant as the terminal.
+    public var canStopSessions: Bool {
+        advertisesSessionStop && pairedDevice?.permission.permits(.control) == true
+    }
+
+    /// Why the advertised stop control cannot be used, or nil when it can.
+    /// Only a grant can hold it back once the route exists.
+    public var sessionStopUnavailableExplanation: String? {
+        guard advertisesSessionStop, !canStopSessions else { return nil }
+        return """
+        This phone does not currently have control of this Mac. Open Latch on your Mac, find \
+        this phone under Remote Access, and set it to Control.
+        """
+    }
+
+    /// Asks the Mac to stop one session, then re-reads the list.
+    ///
+    /// Stopping is not removing: the Mac keeps the session's record and its
+    /// dead pane, so the row stays and turns `exited` rather than vanishing.
+    /// Any terminal this phone holds for the session is dropped first — the
+    /// surface is about to end underneath it, and a connection kept past that
+    /// only produces a socket close nobody is watching.
+    ///
+    /// The request is safe to repeat, so a lost response costs a retry and
+    /// nothing else. Returns whether the Mac confirmed the stop.
+    @discardableResult
+    public func stopSession(_ session: SessionSummary) async -> Bool {
+        guard let gateway, canStopSessions else {
+            // Reached when the grant or the link changed between the row
+            // offering Stop and the confirmation coming back, so the reason
+            // has to name which of the two it was.
+            sessionsError = sessionStopUnavailableExplanation
+                ?? (linkState.isUsable
+                    ? "This Mac cannot stop sessions from a phone. Update Latch on the Mac."
+                    : "This phone is not connected to your Mac right now.")
+            return false
+        }
+        // A second tap on a row already waiting is not a second stop.
+        guard stoppingSessionIDs.insert(session.id).inserted else { return false }
+        defer { stoppingSessionIDs.remove(session.id) }
+        discardTerminal(for: session)
+        do {
+            _ = try await gateway.stopSession(sessionID: session.id)
+            sessionsError = nil
+            await refreshSessions()
+            return true
+        } catch {
+            let failure = (error as? LatchError)?.message ?? error.localizedDescription
+            // The stop may still have landed before the answer was lost, so
+            // the list is re-read either way rather than left showing a stale
+            // row. The reason the stop failed is restored afterwards: a clean
+            // refresh must not quietly clear the only account of it.
+            await refreshSessions()
+            sessionsError = failure
+            return false
+        }
     }
 
     /// Returns the one terminal connection for this session, or nil when this

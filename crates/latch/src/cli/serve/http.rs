@@ -36,7 +36,7 @@ use super::ServeOptions;
 use crate::cli::attach::SessionLookupError;
 use crate::cli::create::{self, RemoteShellError, RemoteShellRequest};
 use crate::cli::json::{CapabilitiesReport, CreateReport, CreatedSession};
-use crate::cli::manage::{self, InspectOptions, ListOptions};
+use crate::cli::manage::{self, InspectOptions, ListOptions, StopRequest};
 use crate::conversation::ConversationHub;
 use crate::session::paths::{LatchHome, DIR_MODE, FILE_MODE};
 
@@ -198,6 +198,7 @@ fn register(router: Router<AppState>, spec: RouteSpec) -> Router<AppState> {
         RouteId::Directories => router.route(spec.pattern, get(browse_directories)),
         RouteId::Session => router.route(spec.pattern, get(inspect_session)),
         RouteId::Preview => router.route(spec.pattern, get(preview_session)),
+        RouteId::StopSession => router.route(spec.pattern, post(stop_session)),
         RouteId::Terminal => router.route(spec.pattern, get(terminal_ws)),
         RouteId::Conversation => router.route(spec.pattern, get(conversation_ws)),
     }
@@ -355,6 +356,7 @@ struct GatewayEndpoints {
     conversation: bool,
     browse_directories: bool,
     create_session: bool,
+    stop_session: bool,
 }
 
 async fn gateway_capabilities(State(state): State<AppState>) -> Response {
@@ -367,6 +369,7 @@ async fn gateway_capabilities(State(state): State<AppState>) -> Response {
             conversation: true,
             browse_directories: true,
             create_session: true,
+            stop_session: true,
         },
         features: GatewayFeatures {
             exclusive_terminal: true,
@@ -540,6 +543,45 @@ async fn inspect_session(
             .await
             .map_err(|_| internal("inspect session"))?
             .map_err(map_engine_error)?;
+    Ok(Json(report).into_response())
+}
+
+/// Stops one session's hosted process, leaving its dead pane in place.
+///
+/// This is `latch stop` reached from a paired device, and it is deliberately
+/// the *graceful* form: the engine sends SIGTERM, waits, and escalates to
+/// SIGKILL on its own. There is no caller-controlled signal, no force flag,
+/// and no removal — a remote device may end what is running, not erase the
+/// record of it. Removing a session stays a decision made at the Mac.
+///
+/// The route is idempotent: stopping a session that has already exited is the
+/// same successful answer, which is what lets a phone retry a request whose
+/// response it never saw.
+async fn stop_session(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, ApiError> {
+    let home = state.home.clone();
+    let report = tokio::task::spawn_blocking(move || {
+        manage::stop(StopRequest {
+            home,
+            session: id,
+            force: false,
+        })
+    })
+    .await
+    .map_err(|_| internal("stop session"))?
+    .map_err(map_engine_error)?;
+    // The engine escalates to SIGKILL before answering, so a live pane here
+    // survived both signals. Saying so as a stable code keeps the phone from
+    // reporting a stop that did not happen.
+    if !report.stopped {
+        return Err(ApiError::coded(
+            StatusCode::CONFLICT,
+            "session_still_running",
+            "the session did not stop",
+        ));
+    }
     Ok(Json(report).into_response())
 }
 
@@ -765,7 +807,7 @@ mod tests {
 
     #[test]
     fn every_registered_handler_comes_from_the_shared_route_table() {
-        assert_eq!(ROUTES.len(), 8);
+        assert_eq!(ROUTES.len(), 9);
         let mut ids = ROUTES.iter().map(|route| route.id).collect::<Vec<_>>();
         ids.sort_by_key(|id| *id as u8);
         ids.dedup();
@@ -794,10 +836,12 @@ mod tests {
             conversation: true,
             browse_directories: true,
             create_session: true,
+            stop_session: true,
         })
         .unwrap();
         assert_eq!(value["browseDirectories"], true);
         assert_eq!(value["createSession"], true);
+        assert_eq!(value["stopSession"], true);
     }
 
     #[test]
@@ -851,13 +895,23 @@ mod tests {
         grant: Option<&str>,
         body: &str,
     ) -> (u16, serde_json::Value) {
+        send(harness, "POST", "/v2/sessions", grant, body).await
+    }
+
+    async fn send(
+        harness: &Harness,
+        method: &str,
+        target: &str,
+        grant: Option<&str>,
+        body: &str,
+    ) -> (u16, serde_json::Value) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let grant = grant.map_or_else(String::new, |grant| {
             format!("{DEVICE_GRANT_HEADER}: {grant}\r\n")
         });
         let request = format!(
-            "POST /v2/sessions HTTP/1.1\r\nHost: gateway\r\nAuthorization: Bearer gateway-token\r\nContent-Type: application/json\r\nConnection: close\r\n{grant}Content-Length: {}\r\n\r\n{body}",
+            "{method} {target} HTTP/1.1\r\nHost: gateway\r\nAuthorization: Bearer gateway-token\r\nContent-Type: application/json\r\nConnection: close\r\n{grant}Content-Length: {}\r\n\r\n{body}",
             body.len()
         );
         let mut stream = tokio::net::TcpStream::connect(harness.address)
@@ -944,6 +998,60 @@ mod tests {
         assert_eq!(status, 413);
         assert_eq!(payload["error"], "invalid_request");
         assert!(harness.home.session_ids().unwrap().is_empty());
+    }
+
+    /// Ending what is running on the Mac is a control operation. An observing
+    /// or interacting phone must not reach it, and the refusal has to happen
+    /// before the engine is asked anything.
+    #[tokio::test]
+    async fn stopping_is_refused_below_the_control_grant() {
+        let harness = harness().await;
+        for grant in ["observe", "interact"] {
+            let (status, _) = send(
+                &harness,
+                "POST",
+                "/v2/sessions/ses_missing/stop",
+                Some(grant),
+                "",
+            )
+            .await;
+            assert_eq!(status, 403, "{grant} must not stop sessions");
+        }
+    }
+
+    /// A stale list is the ordinary case for a phone: the row it tapped may
+    /// already be gone. That answers 404, not an internal error, and it never
+    /// echoes the name back.
+    #[tokio::test]
+    async fn stopping_an_unknown_session_is_a_plain_not_found() {
+        let harness = harness().await;
+        let (status, payload) = send(
+            &harness,
+            "POST",
+            "/v2/sessions/ses_missing/stop",
+            Some("control"),
+            "",
+        )
+        .await;
+        assert_eq!(status, 404);
+        assert_eq!(payload["reason"], "session not found");
+        assert!(!payload["reason"].to_string().contains("ses_missing"));
+    }
+
+    /// The route table is method-scoped, so a read of the same path is not a
+    /// route at all. Nothing about a session can be ended by fetching a URL.
+    #[tokio::test]
+    async fn a_get_on_the_stop_path_is_not_a_route() {
+        let harness = harness().await;
+        let (status, _) = send(
+            &harness,
+            "GET",
+            "/v2/sessions/ses_missing/stop",
+            Some("control"),
+            "",
+        )
+        .await;
+        assert_eq!(status, 404);
     }
 
     #[test]

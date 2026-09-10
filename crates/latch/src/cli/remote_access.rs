@@ -1196,6 +1196,29 @@ mod tests {
             "internal-token",
         )
         .is_err());
+
+        // Stopping a session travels the same table as every other route: an
+        // interacting phone is refused it, and a controlling one reaches it
+        // with the grant stamped on by the proxy rather than by the phone.
+        assert!(authorize_and_inject(
+            b"POST /v2/sessions/ses_1/stop HTTP/1.1\r\nHost: latch\r\n\r\n".to_vec(),
+            DevicePermission::Interact,
+            "phone-local-id",
+            "internal-token",
+        )
+        .is_err());
+        let (stop, required) = authorize_and_inject(
+            b"POST /v2/sessions/ses_1/stop HTTP/1.1\r\nHost: latch\r\n\r\n".to_vec(),
+            DevicePermission::Control,
+            "phone-local-id",
+            "internal-token",
+        )
+        .unwrap();
+        assert_eq!(required, DevicePermission::Control);
+        assert!(String::from_utf8(stop)
+            .unwrap()
+            .to_ascii_lowercase()
+            .contains("x-latch-device-grant: control"));
     }
 
     #[test]

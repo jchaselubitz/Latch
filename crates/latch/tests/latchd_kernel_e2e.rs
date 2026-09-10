@@ -837,6 +837,43 @@ fn a_gateway_creation_starts_one_unattached_shell_and_is_idempotent() {
     });
 }
 
+#[test]
+fn a_gateway_stop_ends_the_shell_keeps_its_record_and_repeats_safely() {
+    with_kernel("gateway-stop", |h| {
+        let gateway = start_gateway(h);
+        let id = h.create("printf 'ready\\n'; sleep 60");
+        h.wait_visible(&id, "ready");
+
+        let (status, stopped) = gateway_post(&gateway, &format!("/v2/sessions/{id}/stop"), "");
+        assert_eq!(status, 200, "{stopped}");
+        assert_eq!(stopped["id"], json!(id));
+        assert_eq!(stopped["state"], "exited");
+        assert_eq!(stopped["stopped"], true);
+        assert_eq!(h.inspect(&id)["state"], "exited");
+
+        // Stopping is not removing. The dead pane and its record stay for
+        // whoever wants to read what the session left behind, and only the
+        // Mac may throw that away.
+        assert_eq!(
+            h.json(&["list", "--json"])["sessions"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // The answer a phone never received, asked for again.
+        let (status, again) = gateway_post(&gateway, &format!("/v2/sessions/{id}/stop"), "");
+        assert_eq!(status, 200, "{again}");
+        assert_eq!(again["state"], "exited");
+
+        let (status, missing) = gateway_post(&gateway, "/v2/sessions/ses_gone/stop", "");
+        assert_eq!(status, 404, "{missing}");
+
+        h.remove(&id);
+    });
+}
+
 // -------------------------------------------------------------- control plane
 
 #[test]

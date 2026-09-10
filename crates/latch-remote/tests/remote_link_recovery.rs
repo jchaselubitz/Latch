@@ -16,7 +16,7 @@ use latch::cli::remote_access::{
 };
 use latch::session::paths::LatchHome;
 use latch_transport::link::{
-    LinkConfig, LinkPurpose, LinkRole, LinkTimings, SecureLink, Service, WssRecordIo,
+    LinkConfig, LinkError, LinkPurpose, LinkRole, LinkTimings, SecureLink, Service, WssRecordIo,
 };
 use openssl::{pkcs12::Pkcs12, pkey::PKey, stack::Stack, x509::X509};
 use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair};
@@ -77,6 +77,15 @@ fn test_certificates(subject: &str) -> (TlsAcceptor, String) {
 enum Fault {
     /// Drop both sockets abruptly, like a relay restart.
     KillRoom,
+    /// Set the host socket aside without closing it and never touch it again:
+    /// the stranded-path case. No FIN, no RST, no close frame, no traffic --
+    /// exactly what an endpoint sees when the network silently stops
+    /// delivering a connection it still believes is ESTABLISHED.
+    StrandHost,
+    /// Keep the host socket in the room but send it nothing except WebSocket
+    /// pings, as the production relay does every fifteen seconds while a room
+    /// waits. This is a healthy idle carrier, not a stranded one.
+    PingHost,
 }
 
 type Socket =
@@ -150,7 +159,13 @@ impl HarnessRelay {
             let mut host: Option<(String, Socket)> = None;
             let mut controller: Option<(String, Socket)> = None;
             let mut lease = 0_u32;
+            // Sockets held open and never polled again. Dropping them would
+            // close the TCP connection, which is the one thing a stranded
+            // path never does.
+            let mut stranded: Vec<Socket> = Vec::new();
+            let mut ping_interval: Option<Duration> = None;
             loop {
+                let ping = ping_interval;
                 tokio::select! {
                     Some((bearer, mut socket)) = sockets_rx.recv() => {
                         let is_host = bearer.starts_with("host");
@@ -181,7 +196,23 @@ impl HarnessRelay {
                             host = None;
                             controller = None;
                         }
+                        Fault::StrandHost => {
+                            if let Some((_, socket)) = host.take() {
+                                stranded.push(socket);
+                            }
+                        }
+                        Fault::PingHost => ping_interval = Some(Duration::from_millis(50)),
                     },
+                    () = async {
+                        match ping {
+                            Some(interval) => tokio::time::sleep(interval).await,
+                            None => std::future::pending().await,
+                        }
+                    } => {
+                        if let Some((_, socket)) = host.as_mut() {
+                            let _ = socket.send(Message::Ping(Vec::new().into())).await;
+                        }
+                    }
                     message = async {
                         match host.as_mut() {
                             Some((_, socket)) => socket.next().await,
@@ -591,6 +622,104 @@ async fn a_controller_alone_in_the_room_learns_the_mac_is_offline_within_its_bou
         Err(latch_transport::link::LinkError::PeerUnavailable)
     ));
     assert!(started.elapsed() < Duration::from_secs(2));
+}
+
+/// The reported cellular failure: the helper's relay socket stops delivering
+/// while it waits for the phone, and no close frame can reach it to say so.
+/// The wait must end on a local bound and hand the caller back to the
+/// admission loop, and a fresh admission must then pair normally.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_silently_stranded_relay_socket_ends_its_wait_and_a_fresh_admission_pairs() {
+    let relay = HarnessRelay::start().await;
+    let endpoints = endpoints();
+    let (mut host_records, _control) =
+        WssRecordIo::connect_with_test_ca(&relay.url, "host-stranded", relay.ca.as_bytes())
+            .await
+            .unwrap();
+    // The production bound is forty-five seconds of relay silence; the same
+    // code path is exercised here in milliseconds.
+    host_records.set_inactivity_timeout(Some(Duration::from_millis(400)));
+    relay.faults.send(Fault::StrandHost).await.unwrap();
+    let started = std::time::Instant::now();
+    let outcome = tokio::time::timeout(Duration::from_secs(10), host_records.wait_for_peer(None))
+        .await
+        .expect("the pre-authentication wait never returned");
+    assert!(
+        matches!(outcome, Err(LinkError::Timeout)),
+        "a stranded carrier must end the wait with a timeout, got {outcome:?}"
+    );
+    // Bounded, not merely eventual: well inside the ten-second rescue above
+    // even when the whole suite is competing for cores.
+    assert!(started.elapsed() < Duration::from_secs(5));
+
+    // Recovery is a fresh admission on a new socket, which is what the helper
+    // asks Desktop for. The phone then reaches the Mac through it.
+    let controller_key = hex(&endpoints.controller_keys.public);
+    let gateway_address = slow_gateway("recovered-ok", Duration::from_millis(10)).await;
+    let (host, controller) =
+        establish_pair(&relay, &endpoints, "host-fresh", "controller-fresh").await;
+    let serving = serve_streams(
+        host.clone(),
+        endpoints.home.clone(),
+        controller_key,
+        gateway_address,
+    );
+    let response = request(&controller)
+        .await
+        .expect("request over the re-admitted link");
+    assert!(response.ends_with("recovered-ok"));
+    controller.close().await;
+    host.close().await;
+    let _ = tokio::time::timeout(Duration::from_secs(3), serving).await;
+}
+
+/// The other half of the bound: an idle host whose relay is merely quiet --
+/// no phone, but pings still arriving -- must keep the socket it has. A bound
+/// that counted "no peer yet" as silence would churn admissions all day.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_idle_host_that_still_hears_relay_pings_keeps_waiting_on_the_same_socket() {
+    let relay = HarnessRelay::start().await;
+    let endpoints = endpoints();
+    let (mut host_records, _control) =
+        WssRecordIo::connect_with_test_ca(&relay.url, "host-idle", relay.ca.as_bytes())
+            .await
+            .unwrap();
+    // Twenty-four ping periods, so only genuine silence can expire this: a
+    // loaded scheduler delaying a ping must not be mistaken for a dead path.
+    host_records.set_inactivity_timeout(Some(Duration::from_millis(1200)));
+    relay.faults.send(Fault::PingHost).await.unwrap();
+    let waiting = tokio::spawn(async move {
+        host_records
+            .wait_for_peer(None)
+            .await
+            .map(|()| host_records)
+    });
+    // Past the bound twice over: pings alone must hold the wait open.
+    tokio::time::sleep(Duration::from_millis(2600)).await;
+    assert!(
+        !waiting.is_finished(),
+        "relay pings are proof of liveness; the wait must not expire"
+    );
+
+    // And the socket is still usable: the phone joins and authenticates on it.
+    let (mut controller_records, _) =
+        WssRecordIo::connect_with_test_ca(&relay.url, "controller-idle", relay.ca.as_bytes())
+            .await
+            .unwrap();
+    controller_records
+        .wait_for_peer(Some(Duration::from_secs(15)))
+        .await
+        .expect("the phone was not reported to the room");
+    let host_records = tokio::time::timeout(Duration::from_secs(15), waiting)
+        .await
+        .expect("the host wait did not resolve once the phone arrived")
+        .unwrap()
+        .expect("the idle host socket was discarded");
+    let host = SecureLink::establish(host_records, endpoints.host_config());
+    let controller = SecureLink::establish(controller_records, endpoints.controller_config());
+    let (host, controller) = tokio::try_join!(host, controller).unwrap();
+    controller.close().await;
+    host.close().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

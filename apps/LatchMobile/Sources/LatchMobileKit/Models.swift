@@ -163,6 +163,30 @@ public struct SessionPreview: Decodable, Equatable, Sendable {
     }
 }
 
+/// `POST /v2/sessions/{id}/stop` — the `latch stop` report.
+///
+/// Like the session list, this is an existing CLI report reused on the wire
+/// rather than a gateway document of its own, so its keys are already the
+/// single words both conventions spell the same way.
+public struct SessionStopReport: Decodable, Equatable, Sendable {
+    /// The session the Mac resolved and stopped, which is the canonical id
+    /// even when the request named the session some other way.
+    public let id: String
+    /// The session's state afterwards, `"exited"` for a stop that took.
+    public let state: String
+    /// False only when the pane outlived both signals the Mac sends. The
+    /// gateway refuses that case before it reaches here, so a decoded report
+    /// with `stopped == false` means a Mac that answers differently than this
+    /// build expects.
+    public let stopped: Bool
+
+    public init(id: String, state: String, stopped: Bool) {
+        self.id = id
+        self.state = state
+        self.stopped = stopped
+    }
+}
+
 /// `GET /v2/sessions`.
 public struct ListReport: Decodable, Equatable, Sendable {
     public let sessions: [SessionSummary]

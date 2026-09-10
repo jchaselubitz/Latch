@@ -382,8 +382,8 @@ public final class NativeRemoteLinkConnector: RemoteLinkConnecting, @unchecked S
     }
 
     /// The failure worth reporting when both entry points failed: an
-    /// authentication refusal beats "no LAN peer", and "Mac offline" beats a
-    /// generic transport error.
+    /// authentication refusal beats "no LAN peer", and "Mac unavailable
+    /// through the relay" beats a generic transport error.
     static func worst(of failures: [RemoteLinkFailure]) -> RemoteLinkFailure {
         if let authentication = failures.first(where: { if case .authentication = $0 { return true }; return false }) {
             return authentication

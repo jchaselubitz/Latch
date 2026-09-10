@@ -13,8 +13,8 @@ use latch::cli::remote_access::{
 };
 use latch::session::paths::LatchHome;
 use latch_transport::link::{
-    LanRecordIo, LinkConfig, LinkPurpose, LinkRole, LinkStageTimings, LinkTimings, RelayStatus,
-    SecureLink, Service, WssControl, WssRecordIo,
+    LanRecordIo, LinkConfig, LinkError, LinkPurpose, LinkRole, LinkStageTimings, LinkTimings,
+    RelayStatus, SecureLink, Service, WssControl, WssRecordIo,
 };
 use mdns_sd::{ServiceDaemon, ServiceInfo};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -516,15 +516,20 @@ async fn run_wss_acceptor(
         let control = Arc::new(control);
         *current_control.lock().await = Some(control.clone());
         emit_status(HostStatus::WaitingForPeer, serde_json::json!({}));
-        // Unbounded: the relay closes the socket at lease expiry if Desktop
-        // stops renewing, and that closure is what ends this wait.
-        if records.wait_for_peer(None).await.is_err() {
+        // No wait bound: an absent phone is normal and is waited out for as
+        // long as the relay keeps talking. What is bounded is relay silence.
+        // The relay closes the socket at lease expiry if Desktop stops
+        // renewing, but a path that silently discards traffic can never
+        // deliver that close, so the carrier's own inactivity bound is what
+        // ends the wait and sends us back for a fresh admission.
+        if let Err(error) = records.wait_for_peer(None).await {
             *current_control.lock().await = None;
-            emit_status(
-                HostStatus::Offline,
-                serde_json::json!({ "reason": "socket_closed" }),
-            );
-            request_admission("socket_closed");
+            let reason = match error {
+                LinkError::Timeout => "relay_silent",
+                _ => "socket_closed",
+            };
+            emit_status(HostStatus::Offline, serde_json::json!({ "reason": reason }));
+            request_admission(reason);
             continue;
         }
         let peer_wait_ms = started.elapsed().as_millis() as u64 - connect_ms;

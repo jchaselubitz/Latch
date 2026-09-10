@@ -66,6 +66,14 @@ showing actions. A missing or stale grant fails closed. Terminal access
 requires `control` plus iOS device-owner authentication and takes the
 session's exclusive terminal surface.
 
+Stopping a session is a `control` action as well, and the one the app always
+confirms by name first. The Sessions list offers **Stop** on a running row by
+swipe or long press, sends `POST /v2/sessions/{id}/stop` with no options, and
+marks the row while it waits — the Mac's graceful stop takes several seconds
+before it escalates. Stopping is not removing: the session stays in the list
+as `exited` with what it left on screen still readable, and removal remains a
+decision made at the Mac.
+
 The phone exposes its loopback adapter only on `127.0.0.1`, protects it with
 a fresh random 256-bit capability, validates the first HTTP request within a
 bounded header budget, and lets the Rust provider choose the remote stream.
@@ -80,7 +88,8 @@ that looks alive is probed with a bounded discovery and replaced if the probe
 fails), and stops for anything a retry cannot change: authentication failure
 (`pairingRequired`) or a control plane that no longer knows the pairing
 (`revoked`). A relay that admits the phone without the Mac present is shown as
-`macOffline` and retried. Discovery runs once per authenticated link; cached
+`macOffline` -- worded for the owner as the Mac being unavailable through the
+relay, which is the only thing observed -- and retried. Discovery runs once per authenticated link; cached
 session rows stay on screen marked stale while the link is down.
 
 Backgrounding releases everything: the loopback adapter and its random

@@ -28,6 +28,8 @@ public struct RemoteLinkStageTimings: Equatable, Sendable, Codable {
 /// retry cannot change.
 public enum RemoteLinkFailure: Error, Equatable, Sendable {
     /// The relay admitted this phone but the Mac never joined within the wait.
+    /// That is a statement about the relay room, not about the Mac's own
+    /// internet connection, and the wording says only what was observed.
     case macOffline
     /// Pin, purpose, or protocol validation failed. Re-pairing is required.
     case authentication(String)
@@ -39,7 +41,7 @@ public enum RemoteLinkFailure: Error, Equatable, Sendable {
     public var message: String {
         switch self {
         case .macOffline:
-            return "Your Mac is not connected to the relay. It may be asleep, offline, or have remote access turned off."
+            return "This phone could not find your Mac on the relay. It may be asleep, offline, or have remote access turned off."
         case .authentication(let detail):
             return "Your Mac refused this phone's identity: \(detail) Pair again from a new code."
         case .revoked(let detail):
@@ -101,7 +103,8 @@ public enum RemoteLinkState: Equatable, Sendable {
     /// Waiting to retry a retryable failure.
     case backoff(attempt: Int, nextRetryAt: Date, reason: String)
     /// The relay admitted this phone but the Mac is not there. Retrying
-    /// continues on the backoff schedule; the label is the honest one.
+    /// continues on the backoff schedule; the label claims only that the Mac
+    /// was unavailable through the relay, never that it is offline.
     case macOffline(nextRetryAt: Date)
     /// The app is in the background; nothing is held.
     case suspended

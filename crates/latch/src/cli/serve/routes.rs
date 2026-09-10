@@ -61,6 +61,7 @@ pub(crate) enum RouteId {
     Directories,
     Session,
     Preview,
+    StopSession,
     Terminal,
     Conversation,
 }
@@ -112,6 +113,15 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
         pattern: "/v2/sessions/{id}/preview",
         method: "GET",
         required_grant: Grant::Observe,
+    },
+    // Stopping is a write against the hosted process, so it sits at the same
+    // grant as taking the terminal: a device that may not send bytes into the
+    // pane may not end what is running in it either.
+    RouteSpec {
+        id: RouteId::StopSession,
+        pattern: "/v2/sessions/{id}/stop",
+        method: "POST",
+        required_grant: Grant::Control,
     },
     RouteSpec {
         id: RouteId::Terminal,
@@ -192,6 +202,12 @@ mod tests {
             route_for("POST", "/v2/sessions").map(|(_, grant)| grant),
             Some(Grant::Control)
         );
+        assert_eq!(
+            route_for("POST", "/v2/sessions/ses_1/stop").map(|(_, grant)| grant),
+            Some(Grant::Control)
+        );
+        // Stopping is a POST and nothing else: a GET must not end a session.
+        assert!(route_for("GET", "/v2/sessions/ses_1/stop").is_none());
         assert!(route_for("POST", "/v2/sessions/ses_1/conversation").is_none());
     }
 }

@@ -124,6 +124,26 @@ path supplied by the caller, and does not attach — the new session appears in
 `GET /v2/sessions` with no surface taken from anyone. The response is the
 existing `CreateReport`.
 
+`POST /v2/sessions/{id}/stop` ends one session's hosted process. It requires
+the `control` grant — a device that may not type into the pane may not end
+what is running in it either — and is advertised as `endpoints.stopSession`,
+absent on a gateway that predates it.
+
+The request has no body: there is no signal, force flag, or timeout to choose.
+The Mac runs the same graceful stop `latch stop` does, sending SIGTERM,
+waiting out its grace period, and escalating to SIGKILL on its own, so the
+route can take several seconds to answer. The response is the existing
+`StopReport` — `{ id, state, stopped }` — and a pane that survived both signals
+is refused as `session_still_running` rather than reported as a stop that
+happened.
+
+Stopping is not removing. The session's record and its dead pane stay, so the
+session remains in `GET /v2/sessions` as `exited` and whatever it left on
+screen is still readable. There is no remote removal route; erasing a session
+stays a decision made at the Mac. Repeating a stop is safe — a session that
+has already exited answers the same way — which is what lets a client retry a
+request whose response it never saw.
+
 There is no `@latch/chat-react`, `@latch/harness-schema`, remote React SDK
 example, event cursor, transcript reducer, HTTP send endpoint, compatibility
 mode, or v1 fallback. Consumers needing a conversation UI should implement the

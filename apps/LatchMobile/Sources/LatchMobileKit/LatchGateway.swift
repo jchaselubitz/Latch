@@ -114,6 +114,22 @@ public actor LatchGateway {
         return try await request(method: "POST", path: "/v2/sessions", body: body)
     }
 
+    /// Stops one session on the Mac, leaving its record and dead pane behind.
+    ///
+    /// This ends what is running, which is why it sits at the control grant
+    /// alongside the terminal: a device that may not type into the pane may
+    /// not end what is in it either. The gateway sends SIGTERM and escalates
+    /// on its own, so there is no signal, force flag, or removal to choose
+    /// here — the phone asks for a stop and is told what happened.
+    ///
+    /// It is safe to repeat: a session that has already exited answers the
+    /// same way, so a request whose response was lost can simply be sent
+    /// again.
+    public func stopSession(sessionID: String) async throws -> SessionStopReport {
+        try await require(.stopSession)
+        return try await request(method: "POST", path: "/v2/sessions/\(sessionID)/stop")
+    }
+
     /// Reads the session's live pane once, without attaching.
     ///
     /// This is the only terminal-shaped call an observing device may make. It

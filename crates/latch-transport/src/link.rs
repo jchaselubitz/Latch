@@ -40,6 +40,20 @@ pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 pub const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 /// A link that receives nothing for this long is dead, whatever the socket says.
 pub const DEAD_PEER_TIMEOUT: Duration = Duration::from_secs(45);
+/// Silence bound on a relay carrier, applied from the moment it is connected
+/// rather than from the moment it is authenticated. The relay pings every 15
+/// seconds, so a carrier that delivers nothing at all for three ping periods
+/// is on a path that is silently discarding traffic: ESTABLISHED, but dead.
+/// Before this bound existed an endpoint waiting for its peer could sit on
+/// such a socket indefinitely, because no close frame could ever reach it.
+pub const RELAY_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(45);
+/// Bound on the relay connect: TCP, TLS, and the WebSocket upgrade together.
+pub const RELAY_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+/// Bound on handing one record or control frame to the relay carrier. A write
+/// that cannot drain within this bound is on the same kind of stranded path.
+/// Expiry drops a partly written frame, so it is always fatal to the carrier:
+/// every caller ends the link on a send error rather than writing again.
+pub const RELAY_WRITE_TIMEOUT: Duration = Duration::from_secs(20);
 
 const NOISE_PATTERN: &str = "Noise_XX_25519_ChaChaPoly_BLAKE2s";
 const DUPLEX_BUFFER_BYTES: usize = 256 * 1024;
@@ -246,7 +260,9 @@ pub enum LinkError {
     #[error("remote-link operation timed out")]
     Timeout,
     /// The relay never reported the opposite endpoint within the wait bound.
-    #[error("the paired endpoint is not connected to the relay")]
+    /// This says nothing about the peer's own connectivity: it was not
+    /// reachable through the relay, which is all the relay can report.
+    #[error("the paired endpoint was not reachable through the relay")]
     PeerUnavailable,
     /// The link has closed.
     #[error("remote link is closed")]
@@ -278,6 +294,9 @@ pub struct WssRecordIo {
     pending: std::collections::VecDeque<Vec<u8>>,
     /// Set once the relay reported the opposite role present.
     peer_ready: bool,
+    /// Silence bound applied to every carrier read and write. `None` disables
+    /// it; production always keeps a bound.
+    inactivity: Option<Duration>,
 }
 
 /// Relay-only control events. They are untrusted reachability/lease metadata
@@ -351,13 +370,17 @@ impl WssRecordIo {
             .map_err(|_| LinkError::Configuration("invalid admission header"))?;
         request.headers_mut().insert(AUTHORIZATION, value);
         #[cfg(feature = "test-ca")]
-        let connection = if connector.is_some() {
-            connect_async_tls_with_config(request, None, false, connector).await
-        } else {
-            connect_async(request).await
-        };
+        let connection = timeout(RELAY_CONNECT_TIMEOUT, async {
+            if connector.is_some() {
+                connect_async_tls_with_config(request, None, false, connector).await
+            } else {
+                connect_async(request).await
+            }
+        })
+        .await;
         #[cfg(not(feature = "test-ca"))]
-        let connection = connect_async(request).await;
+        let connection = timeout(RELAY_CONNECT_TIMEOUT, connect_async(request)).await;
+        let connection = connection.map_err(|_| LinkError::Timeout)?;
         let (socket, _) = connection.map_err(|error| LinkError::Io(error.to_string()))?;
         let (outbound, control) = mpsc::channel(4);
         let (status_send, statuses) = mpsc::channel(8);
@@ -368,6 +391,7 @@ impl WssRecordIo {
                 statuses: status_send,
                 pending: std::collections::VecDeque::new(),
                 peer_ready: false,
+                inactivity: Some(RELAY_INACTIVITY_TIMEOUT),
             },
             WssControl {
                 outbound,
@@ -381,11 +405,21 @@ impl WssRecordIo {
         self.peer_ready
     }
 
+    /// Overrides the carrier silence bound. Tests shorten it to exercise the
+    /// same recovery path in milliseconds; `None` removes the bound entirely
+    /// and is only for a carrier whose peer is known to send nothing.
+    pub fn set_inactivity_timeout(&mut self, limit: Option<Duration>) {
+        self.inactivity = limit;
+    }
+
     /// Waits until the relay reports the opposite role present, so the
     /// handshake deadline starts only when both peers exist. `limit` bounds
-    /// the wait; `None` waits until the socket closes (the lease deadline
-    /// enforced by the relay still bounds it). Binary records that arrive
-    /// meanwhile are retained in order for the handshake.
+    /// the total wait; `None` waits for as long as the relay keeps the carrier
+    /// audibly alive. Either way the carrier silence bound applies, so a peer
+    /// that never arrives is waited out indefinitely while a relay that goes
+    /// silent fails with [`LinkError::Timeout`] instead of stranding the
+    /// caller. Binary records that arrive meanwhile are retained in order for
+    /// the handshake.
     pub async fn wait_for_peer(&mut self, limit: Option<Duration>) -> Result<(), LinkError> {
         if self.peer_ready {
             return Ok(());
@@ -412,13 +446,31 @@ impl WssRecordIo {
     /// sending queued control messages first.
     async fn next_frame(&mut self) -> Result<Frame, LinkError> {
         loop {
+            // The bound is re-armed on every iteration, so any inbound traffic
+            // counts as liveness: a relay ping the loop discards is still
+            // proof the path delivers, and only total silence expires.
+            let deadline = self
+                .inactivity
+                .map(|limit| tokio::time::Instant::now() + limit);
             let message = tokio::select! {
                 Some(control) = self.control.recv() => {
-                    self.socket.send(Message::Text(control.into())).await
-                        .map_err(|error| LinkError::Io(error.to_string()))?;
+                    let send = self.socket.send(Message::Text(control.into()));
+                    match self.inactivity {
+                        Some(_) => timeout(RELAY_WRITE_TIMEOUT, send)
+                            .await
+                            .map_err(|_| LinkError::Timeout)?,
+                        None => send.await,
+                    }
+                    .map_err(|error| LinkError::Io(error.to_string()))?;
                     continue;
                 }
                 message = self.socket.next() => message,
+                () = async {
+                    match deadline {
+                        Some(deadline) => tokio::time::sleep_until(deadline).await,
+                        None => std::future::pending().await,
+                    }
+                }, if deadline.is_some() => return Err(LinkError::Timeout),
             };
             let Some(message) = message else {
                 return Ok(Frame::Closed);
@@ -509,10 +561,14 @@ impl RecordIo for WssRecordIo {
         if record.len() > MAX_RECORD_BYTES {
             return Err(LinkError::Limit("record is larger than 65535 bytes"));
         }
-        self.socket
-            .send(Message::Binary(record.into()))
-            .await
-            .map_err(|error| LinkError::Io(error.to_string()))
+        let send = self.socket.send(Message::Binary(record.into()));
+        match self.inactivity {
+            Some(_) => timeout(RELAY_WRITE_TIMEOUT, send)
+                .await
+                .map_err(|_| LinkError::Timeout)?,
+            None => send.await,
+        }
+        .map_err(|error| LinkError::Io(error.to_string()))
     }
 
     async fn recv_record(&mut self) -> Result<Option<Vec<u8>>, LinkError> {

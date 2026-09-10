@@ -20,8 +20,10 @@ pub enum TransportError {
     #[error("the transport is not ready for this operation")]
     InvalidState,
     /// The relay admitted this endpoint but the paired peer never arrived
-    /// within the wait bound. The Mac is offline, asleep, or not yet re-admitted.
-    #[error("the paired Mac is not connected to the relay")]
+    /// within the wait bound. That is all this observes: the Mac may be
+    /// asleep, not yet re-admitted, or simply slower than the bound. It is
+    /// not evidence that the Mac has no internet connection.
+    #[error("the paired Mac was not reachable through the relay")]
     PeerUnavailable,
     /// Peer authentication, pin, purpose, or protocol validation failed.
     /// Automatic retry must stop until pairing state changes.

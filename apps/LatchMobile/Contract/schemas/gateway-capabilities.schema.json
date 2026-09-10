@@ -30,7 +30,8 @@
         "terminal": { "type": "boolean" },
         "conversation": { "type": "boolean" },
         "browseDirectories": { "type": "boolean", "description": "Browse canonical host directories at the control grant. Absence means unavailable." },
-        "createSession": { "type": "boolean", "description": "Create a standard host shell at the control grant. Absence means unavailable." }
+        "createSession": { "type": "boolean", "description": "Create a standard host shell at the control grant. Absence means unavailable." },
+        "stopSession": { "type": "boolean", "description": "Stop one running session at the control grant. Absence means unavailable." }
       },
       "additionalProperties": false
     },

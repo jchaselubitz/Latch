@@ -175,7 +175,7 @@ struct SettingsView: View {
         case .interrupted(.suspended, _): return "Reconnecting…"
         case .interrupted(.backoff, _): return "Connection lost"
         case .interrupted: return "Reconnecting…"
-        case .macOffline: return "Mac offline"
+        case .macOffline: return "Mac unavailable"
         case .revoked: return "Unpaired"
         case .pairingRequired: return "Pair again"
         case .incompatible: return "Update needed"
@@ -186,7 +186,7 @@ struct SettingsView: View {
     static func detail(_ state: AppModel.LinkState) -> String? {
         switch state {
         case .interrupted(.backoff(_, _, let reason), _): return reason
-        case .macOffline: return "Your Mac is not connected to the relay. It may be asleep or have remote access turned off."
+        case .macOffline: return "This phone could not find your Mac on the relay. It may be asleep, offline, or have remote access turned off."
         case .revoked(let reason), .pairingRequired(let reason), .failed(let reason): return reason
         case .incompatible(let mismatch): return mismatch.detail
         default: return nil
@@ -338,6 +338,7 @@ struct SettingsView: View {
         case .conversation: return "Conversation"
         case .browseDirectories: return "Folder browser"
         case .createSession: return "Session creation"
+        case .stopSession: return "Session stop"
         }
     }
 

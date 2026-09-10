@@ -120,6 +120,7 @@ public struct GatewayEndpoints: Codable, Equatable, Sendable {
     public var conversation: Bool
     public var browseDirectories: Bool
     public var createSession: Bool
+    public var stopSession: Bool
 
     public init(
         sessions: Bool = false,
@@ -127,7 +128,8 @@ public struct GatewayEndpoints: Codable, Equatable, Sendable {
         terminal: Bool = false,
         conversation: Bool = false,
         browseDirectories: Bool = false,
-        createSession: Bool = false
+        createSession: Bool = false,
+        stopSession: Bool = false
     ) {
         self.sessions = sessions
         self.preview = preview
@@ -135,6 +137,7 @@ public struct GatewayEndpoints: Codable, Equatable, Sendable {
         self.conversation = conversation
         self.browseDirectories = browseDirectories
         self.createSession = createSession
+        self.stopSession = stopSession
     }
 
     // Hand-written so an older Mac, whose document has no `preview` key at
@@ -149,6 +152,7 @@ public struct GatewayEndpoints: Codable, Equatable, Sendable {
         conversation = try container.decode(Bool.self, forKey: .conversation)
         browseDirectories = try container.decodeIfPresent(Bool.self, forKey: .browseDirectories) ?? false
         createSession = try container.decodeIfPresent(Bool.self, forKey: .createSession) ?? false
+        stopSession = try container.decodeIfPresent(Bool.self, forKey: .stopSession) ?? false
     }
 }
 
@@ -159,6 +163,7 @@ public enum GatewayEndpointsName: String, CaseIterable, Sendable {
     case conversation
     case browseDirectories
     case createSession
+    case stopSession
 }
 
 public extension GatewayEndpoints {
@@ -170,6 +175,7 @@ public extension GatewayEndpoints {
         case .conversation: return conversation
         case .browseDirectories: return browseDirectories
         case .createSession: return createSession
+        case .stopSession: return stopSession
         }
     }
 }
