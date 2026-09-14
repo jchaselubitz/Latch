@@ -49,6 +49,49 @@ final class ModelTests: XCTestCase {
         XCTAssertEqual(report.sessions.map(\.state), SessionState.allCases)
     }
 
+    func testOtherLiveIDsSkipTheKeptSessionAndNonRunningRows() throws {
+        let sessions = try [
+            sessionSummary(id: "keep", state: "running"),
+            sessionSummary(id: "live-a", state: "running"),
+            sessionSummary(id: "exited", state: "exited"),
+            sessionSummary(id: "lost", state: "lost"),
+            sessionSummary(id: "live-b", state: "running")
+        ]
+        XCTAssertEqual(
+            SessionSummary.otherLiveIDs(in: sessions, keeping: "keep"),
+            ["live-a", "live-b"]
+        )
+    }
+
+    func testOtherLiveIDsAreEmptyWhenNothingElseIsRunning() throws {
+        let sessions = try [
+            sessionSummary(id: "keep", state: "running"),
+            sessionSummary(id: "exited", state: "exited")
+        ]
+        XCTAssertEqual(SessionSummary.otherLiveIDs(in: sessions, keeping: "keep"), [])
+    }
+
+    func testOtherLiveIDsKeepAnExitedRowAndStopTheRest() throws {
+        let sessions = try [
+            sessionSummary(id: "keep-exited", state: "exited"),
+            sessionSummary(id: "live", state: "running")
+        ]
+        XCTAssertEqual(
+            SessionSummary.otherLiveIDs(in: sessions, keeping: "keep-exited"),
+            ["live"]
+        )
+    }
+
+    private func sessionSummary(id: String, state: String) throws -> SessionSummary {
+        try JSONDecoder().decode(
+            SessionSummary.self,
+            from: Data("""
+            {"id":"\(id)","name":"\(id)","state":"\(state)","cwd":"/tmp",\
+            "command_label":"zsh","created_at":"2026-08-10T00:00:00Z"}
+            """.utf8)
+        )
+    }
+
     func testMissingRequiredStateIsRejected() {
         let data = Data("""
         {"sessions":[{"id":"ses_1","name":"demo","cwd":"/tmp",\

@@ -74,6 +74,14 @@ struct SessionSummary: Codable, Identifiable, Hashable, Sendable {
         if hours < 24 { return "\(hours)h idle" }
         return "\(hours / 24)d idle"
     }
+
+    /// Live sessions "Stop Other Sessions" would end while keeping `keptID`.
+    ///
+    /// Exited and lost rows are left alone; only running children are stopped.
+    /// Order follows the list so confirmation and the subsequent stop calls match.
+    static func otherLiveIDs(in sessions: [SessionSummary], keeping keptID: String) -> [String] {
+        sessions.filter { $0.id != keptID && $0.state.isLive }.map(\.id)
+    }
 }
 
 struct ListReport: Codable, Sendable {

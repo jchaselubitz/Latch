@@ -347,6 +347,15 @@ final class SessionStore: ObservableObject {
         }
     }
 
+    /// Live session ids "Stop Other Sessions" would end, leaving `id` as-is.
+    func otherLiveSessionIDs(keeping id: String) -> [String] {
+        SessionSummary.otherLiveIDs(in: sessions, keeping: id)
+    }
+
+    func stopOthers(keeping id: String, force: Bool) async {
+        await stopSessions(otherLiveSessionIDs(keeping: id), force: force)
+    }
+
     func rename(_ id: String, to name: String) async {
         do { _ = try await client.rename(id, to: name); await refresh() }
         catch {

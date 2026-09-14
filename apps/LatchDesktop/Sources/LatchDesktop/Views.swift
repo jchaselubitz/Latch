@@ -17,6 +17,7 @@ struct SessionsView: View {
                     .tag(session.id)
                     .contextMenu {
                         let canOpen = session.state.isAttachable && store.canAttachSessions
+                        let otherLiveIDs = store.otherLiveSessionIDs(keeping: session.id)
                         Button("Open in \(store.preferredTerminal.rawValue)") {
                             Task { await store.open(session.id) }
                         }
@@ -27,12 +28,20 @@ struct SessionsView: View {
                             sessionID: session.id,
                             isEnabled: canOpen
                         )
+                        Divider()
                         if session.state.isLive {
-                            Divider()
                             Button("Stop…", role: .destructive) {
                                 pendingStop = stopTargets(for: session)
                             }
                         }
+                        Button("Stop Other Sessions…", role: .destructive) {
+                            pendingStop = PendingStopRequest(
+                                sessionIDs: otherLiveIDs,
+                                keepingID: session.id,
+                                keepingName: session.name
+                            )
+                        }
+                        .disabled(otherLiveIDs.isEmpty)
                     }
             }
             .searchable(text: $store.search, prompt: "Search sessions")
@@ -139,17 +148,9 @@ struct SessionsView: View {
             isPresented: pendingStopBinding,
             titleVisibility: .visible
         ) {
-            if let pendingStop {
-                Button("Stop", role: .destructive) {
-                    let ids = pendingStop.sessionIDs
-                    self.pendingStop = nil
-                    Task { await store.stopSessions(ids, force: false) }
-                }
-                Button("Force Stop", role: .destructive) {
-                    let ids = pendingStop.sessionIDs
-                    self.pendingStop = nil
-                    Task { await store.stopSessions(ids, force: true) }
-                }
+            if pendingStop != nil {
+                Button("Stop", role: .destructive) { confirmPendingStop(force: false) }
+                Button("Force Stop", role: .destructive) { confirmPendingStop(force: true) }
             }
             Button("Cancel", role: .cancel) { pendingStop = nil }
         } message: {
@@ -184,6 +185,10 @@ struct SessionsView: View {
 
     private var pendingStopTitle: String {
         guard let pendingStop else { return "Stop Session" }
+        if pendingStop.keepingName != nil {
+            let count = pendingStop.sessionIDs.count
+            return count == 1 ? "Stop the other session?" : "Stop \(count) other sessions?"
+        }
         if pendingStop.sessionIDs.count == 1,
            let name = store.sessions.first(where: { $0.id == pendingStop.sessionIDs[0] })?.name {
             return "Stop \(name)?"
@@ -192,6 +197,9 @@ struct SessionsView: View {
     }
 
     private var pendingStopMessage: String {
+        if let keepingName = pendingStop?.keepingName {
+            return "Stopping ends every live session except \(keepingName). Each final screen is retained for later inspection."
+        }
         if pendingStop?.sessionIDs.count == 1 {
             return "Stopping ends the child process but retains its final screen for later inspection."
         }
@@ -206,6 +214,20 @@ struct SessionsView: View {
             ids = session.state.isLive ? [session.id] : []
         }
         return PendingStopRequest(sessionIDs: ids)
+    }
+
+    private func confirmPendingStop(force: Bool) {
+        guard let pendingStop else { return }
+        let ids = pendingStop.sessionIDs
+        let keepingID = pendingStop.keepingID
+        self.pendingStop = nil
+        Task {
+            if let keepingID {
+                await store.stopOthers(keeping: keepingID, force: force)
+            } else {
+                await store.stopSessions(ids, force: force)
+            }
+        }
     }
 
     private func handleMenuRequests() {
@@ -248,6 +270,15 @@ private struct SidebarFooter: View {
 private struct PendingStopRequest: Identifiable {
     let id = UUID()
     let sessionIDs: [String]
+    /// When set, confirmation is "stop others"; the named session is left running.
+    let keepingID: String?
+    let keepingName: String?
+
+    init(sessionIDs: [String], keepingID: String? = nil, keepingName: String? = nil) {
+        self.sessionIDs = sessionIDs
+        self.keepingID = keepingID
+        self.keepingName = keepingName
+    }
 }
 
 private struct MultiSessionSelectionView: View {
