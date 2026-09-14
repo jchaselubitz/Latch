@@ -46,12 +46,17 @@ pub struct ServeOptions {
     pub latch_bin: PathBuf,
     /// Permit a non-loopback bind (plaintext HTTP; token in the clear).
     pub allow_remote: bool,
+    /// Stop when the supervising helper exits, including after a crash.
+    pub exit_with_parent: bool,
 }
 
 /// Mints a token if needed, then serves until interrupted.
 pub fn serve(options: ServeOptions) -> anyhow::Result<()> {
     refuse_non_loopback(&options)?;
     options.home.ensure()?;
+    if options.exit_with_parent {
+        install_parent_watchdog()?;
+    }
     if !options.token_file.is_file() {
         let token = mint_token(&options.token_file)?;
         eprintln!(
@@ -64,6 +69,30 @@ pub fn serve(options: ServeOptions) -> anyhow::Result<()> {
         .build()
         .context("cannot start the serve runtime")?;
     runtime.block_on(http::run(options))
+}
+
+/// A graceful HTTP shutdown can wait indefinitely for an existing WebSocket.
+/// Parent loss means the dedicated supervisor was killed, so this watchdog
+/// terminates the gateway process outright and lets the kernel release the
+/// Conversation Hub advisory lock for the replacement owner.
+#[cfg(unix)]
+fn install_parent_watchdog() -> anyhow::Result<()> {
+    let parent = unsafe { libc::getppid() };
+    std::thread::Builder::new()
+        .name("latch-gateway-parent".into())
+        .spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            if unsafe { libc::getppid() } != parent {
+                std::process::exit(0);
+            }
+        })
+        .context("cannot start gateway parent watchdog")?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn install_parent_watchdog() -> anyhow::Result<()> {
+    Ok(())
 }
 
 fn refuse_non_loopback(options: &ServeOptions) -> anyhow::Result<()> {

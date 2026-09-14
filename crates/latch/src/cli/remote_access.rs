@@ -9,6 +9,7 @@ use std::collections::VecDeque;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::net::SocketAddr;
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -418,6 +419,7 @@ fn gateway_args(token: &Path, ready: &Path) -> Vec<std::ffi::OsString> {
         token.as_os_str().to_owned(),
         "--ready-file".into(),
         ready.as_os_str().to_owned(),
+        "--exit-with-parent".into(),
     ]
 }
 
@@ -438,32 +440,61 @@ pub struct AuthenticatedGateway {
     peer_public_key: String,
     grant_revision: u64,
     token: PathBuf,
-    address: SocketAddr,
     stream_limit: Arc<Semaphore>,
     streams: Arc<AtomicUsize>,
 }
 
-/// Owns the fixed loopback gateway child for one authenticated physical link.
-pub struct AuthenticatedGatewayOwner {
-    gateway: AuthenticatedGateway,
+/// Owns the one fixed loopback gateway shared by every authenticated Remote
+/// Link. A separate advisory lock prevents two supervisors from rotating the
+/// shared token while the Conversation Hub's own cache lock remains the final
+/// writer-exclusion authority.
+pub struct SharedGatewayOwner {
+    paths: Paths,
     child: Child,
+    _owner_lock: GatewayOwnerLock,
 }
 
-impl AuthenticatedGatewayOwner {
-    /// Starts one fixed loopback gateway for an authenticated physical link.
-    pub async fn start(
-        home: &LatchHome,
-        latch_bin: &Path,
-        peer_public_key: &str,
-        grant_revision: u64,
-    ) -> anyhow::Result<Self> {
+struct GatewayOwnerLock {
+    file: fs::File,
+}
+
+impl GatewayOwnerLock {
+    fn acquire(path: &Path) -> anyhow::Result<Self> {
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .mode(FILE_MODE)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)
+            .with_context(|| format!("cannot open {}", path.display()))?;
+        let locked = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if locked != 0 {
+            bail!("another Remote Link gateway supervisor is already running");
+        }
+        file.set_permissions(fs::Permissions::from_mode(FILE_MODE))?;
+        file.set_len(0)?;
+        writeln!(&file, "{}", std::process::id())?;
+        file.sync_data()?;
+        Ok(Self { file })
+    }
+}
+
+impl Drop for GatewayOwnerLock {
+    fn drop(&mut self) {
+        let _ = unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
+
+impl SharedGatewayOwner {
+    /// Starts the sole fixed loopback gateway for this Latch home.
+    pub async fn start(home: &LatchHome, latch_bin: &Path) -> anyhow::Result<Self> {
         let paths = Paths::new(home);
         ensure_enabled(&paths)?;
-        let device = current_device(&paths, peer_public_key, grant_revision)?;
-        if device.revoked {
-            bail!("revoked controller");
-        }
         ensure_private_directory(&paths.runtime())?;
+        let owner_lock =
+            GatewayOwnerLock::acquire(&paths.runtime().join("remote-link-gateway-owner.lock"))?;
         let ready = paths.runtime().join("remote-link-gateway-ready.json");
         let token = paths.runtime().join("remote-link-gateway.token");
         let child = start_gateway(latch_bin, &token, &ready).await?;
@@ -476,22 +507,10 @@ impl AuthenticatedGatewayOwner {
             bail!("supervised gateway was not loopback-bound");
         }
         Ok(Self {
-            gateway: AuthenticatedGateway {
-                paths,
-                peer_public_key: peer_public_key.to_owned(),
-                grant_revision,
-                token,
-                address,
-                stream_limit: Arc::new(Semaphore::new(MAX_LINK_STREAMS)),
-                streams: Arc::new(AtomicUsize::new(0)),
-            },
+            paths,
             child,
+            _owner_lock: owner_lock,
         })
-    }
-
-    /// Returns a cloneable proxy handle for independent logical streams.
-    pub fn gateway(&self) -> AuthenticatedGateway {
-        self.gateway.clone()
     }
 
     /// Waits for unexpected gateway termination.
@@ -507,10 +526,45 @@ impl AuthenticatedGatewayOwner {
     pub async fn close(&mut self) {
         let _ = self.child.kill().await;
         let _ = self.child.wait().await;
+        let _ = fs::remove_file(self.paths.runtime().join("remote-link-gateway-ready.json"));
+        let _ = fs::remove_file(self.paths.runtime().join("remote-link-gateway.token"));
     }
 }
 
 impl AuthenticatedGateway {
+    /// Creates a per-device authority handle for the shared gateway. The
+    /// readiness address and bearer are deliberately resolved for every new
+    /// stream so a gateway restart does not require healthy links to restart.
+    pub async fn connect(
+        home: &LatchHome,
+        peer_public_key: &str,
+        grant_revision: u64,
+    ) -> anyhow::Result<Self> {
+        let paths = Paths::new(home);
+        ensure_enabled(&paths)?;
+        let device = current_device(&paths, peer_public_key, grant_revision)?;
+        if device.revoked {
+            bail!("revoked controller");
+        }
+        let ready = paths.runtime().join("remote-link-gateway-ready.json");
+        let readiness = wait_readiness(&ready).await?;
+        let address: SocketAddr = readiness
+            .address
+            .parse()
+            .context("invalid gateway address")?;
+        if !address.ip().is_loopback() {
+            bail!("shared gateway was not loopback-bound");
+        }
+        Ok(Self {
+            token: paths.runtime().join("remote-link-gateway.token"),
+            paths,
+            peer_public_key: peer_public_key.to_owned(),
+            grant_revision,
+            stream_limit: Arc::new(Semaphore::new(MAX_LINK_STREAMS)),
+            streams: Arc::new(AtomicUsize::new(0)),
+        })
+    }
+
     /// Proxies one logical stream after rechecking current local authority.
     pub async fn proxy<S>(&self, stream: S) -> anyhow::Result<()>
     where
@@ -521,6 +575,15 @@ impl AuthenticatedGateway {
             .clone()
             .try_acquire_owned()
             .map_err(|_| anyhow!("Remote Link stream capacity exceeded"))?;
+        let readiness: Readiness =
+            read_json(&self.paths.runtime().join("remote-link-gateway-ready.json"))?;
+        let address: SocketAddr = readiness
+            .address
+            .parse()
+            .context("invalid gateway address")?;
+        if !address.ip().is_loopback() {
+            bail!("shared gateway was not loopback-bound");
+        }
         let token = load_token(&self.token)?;
         proxy_authenticated_stream(
             stream,
@@ -528,7 +591,7 @@ impl AuthenticatedGateway {
             &self.peer_public_key,
             self.grant_revision,
             &token,
-            self.address,
+            address,
             &self.streams,
         )
         .await
@@ -1227,6 +1290,63 @@ mod tests {
         let paths = Paths::new(&home);
         fs::write(paths.devices(), b"not-json").unwrap();
         assert!(current_device(&paths, &key, 1).is_err());
+    }
+
+    #[test]
+    fn shared_gateway_owner_lock_is_exclusive_and_recovers_after_owner_exit() {
+        let directory = tempfile::tempdir().unwrap();
+        let lock_path = directory.path().join("remote-link-gateway-owner.lock");
+
+        // This is the same advisory lock held by the process that owns the
+        // one Conversation Hub child. A competing supervisor must fail while
+        // it is live, while a stale pathname after an abnormal process exit
+        // must not block a replacement owner.
+        let owner = GatewayOwnerLock::acquire(&lock_path).unwrap();
+        assert!(GatewayOwnerLock::acquire(&lock_path).is_err());
+        drop(owner);
+        GatewayOwnerLock::acquire(&lock_path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn revoking_one_device_does_not_remove_another_devices_shared_gateway_authority() {
+        let (_directory, home, first_key) = enrolled_home(DevicePermission::Control);
+        let second_secret = StaticSecret::from([8_u8; 32]);
+        let second_key = hex_encode(PublicKey::from(&second_secret).as_bytes());
+        let second = authorize_enrollment(
+            &home,
+            &format!("enr_{}", "3".repeat(32)),
+            &second_key,
+            "Second test phone",
+            DevicePermission::Observe,
+            &format!("dev_{}", "4".repeat(32)),
+        )
+        .unwrap();
+        let paths = Paths::new(&home);
+        write_bytes_atomic(
+            &paths.runtime().join("remote-link-gateway-ready.json"),
+            b"{\"address\":\"127.0.0.1:1\"}\n",
+        )
+        .unwrap();
+
+        // Both device helpers can resolve the one shared ready document.
+        AuthenticatedGateway::connect(&home, &first_key, 1)
+            .await
+            .unwrap();
+        AuthenticatedGateway::connect(&home, &second_key, 1)
+            .await
+            .unwrap();
+
+        let first_device_id = list_devices(&home).unwrap()[0].device_id.clone();
+        revoke(&home, &first_device_id).unwrap();
+
+        // The revoked helper can no longer acquire an authority handle, but
+        // revocation does not disturb the independently authenticated peer.
+        assert!(AuthenticatedGateway::connect(&home, &first_key, 1)
+            .await
+            .is_err());
+        AuthenticatedGateway::connect(&home, &second_key, second.grant_revision)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

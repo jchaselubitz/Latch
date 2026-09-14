@@ -9,7 +9,8 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context};
 use latch::cli::remote_access::{
-    authorize_enrollment, remote_link_identity, AuthenticatedGatewayOwner, DevicePermission,
+    authorize_enrollment, remote_link_identity, AuthenticatedGateway, DevicePermission,
+    SharedGatewayOwner,
 };
 use latch::session::paths::LatchHome;
 use latch_transport::link::{
@@ -217,44 +218,56 @@ struct EstablishedLink {
     timings: LinkStageTimings,
 }
 
-/// Runs one host pair and owns every task from WSS/LAN through the fixed
-/// loopback gateway. The gateway child lives for the whole process; links
-/// come and go underneath it. Returning always closes the link, child, and
-/// stream tasks.
-pub fn serve_remote_link(
-    home: LatchHome,
-    latch_bin: PathBuf,
-    config: RemoteLinkHostConfig,
-) -> anyhow::Result<()> {
+/// Runs one host pair and owns its WSS/LAN carriers, authenticated link, and
+/// stream tasks. The loopback gateway has an independent shared owner, so
+/// returning here never terminates another device or the Conversation Hub.
+pub fn serve_remote_link(home: LatchHome, config: RemoteLinkHostConfig) -> anyhow::Result<()> {
     config.validate()?;
     let _ = AUDIT_HOME.set(home.clone());
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
     match config.purpose {
-        LinkPurpose::Session => runtime.block_on(run_session(home, latch_bin, config)),
+        LinkPurpose::Session => runtime.block_on(run_session(home, config)),
         LinkPurpose::Enrollment => runtime.block_on(run_enrollment(home, config)),
     }
+}
+
+/// Owns the sole loopback Conversation Hub gateway independently of every
+/// device link. Desktop learns only that it is ready; the address and bearer
+/// remain in the owner-only runtime directory and are consumed by Rust.
+pub fn serve_shared_gateway(home: LatchHome, latch_bin: PathBuf) -> anyhow::Result<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async move {
+        let mut owner = SharedGatewayOwner::start(&home, &latch_bin).await?;
+        emit_json(&serde_json::json!({
+            "type": "gateway_ready", "version": 1,
+        }))?;
+        let mut ipc = ipc_reader("latch-remote-gateway-ipc")?;
+        let result = tokio::select! {
+            result = owner.wait() => result,
+            signal = shutdown_signal() => signal,
+            _ = ipc.recv() => Ok(()),
+        };
+        owner.close().await;
+        result
+    })
 }
 
 /// Bound on how long a LAN peer may take to authenticate once it connects.
 const LAN_AUTHENTICATION_LIMIT: Duration = Duration::from_secs(10);
 
-async fn run_session(
-    home: LatchHome,
-    latch_bin: PathBuf,
-    config: RemoteLinkHostConfig,
-) -> anyhow::Result<()> {
+async fn run_session(home: LatchHome, config: RemoteLinkHostConfig) -> anyhow::Result<()> {
     let mut ipc = ipc_reader("latch-remote-ipc")?;
     let identity = remote_link_identity(&home)?;
     let local_private = decode_key(&identity.private_key)?;
     let local_public = decode_key(&identity.public_key)?;
     let peer_public_key = config.peer_public_key.as_deref().expect("validated");
     let peer_public = decode_key(peer_public_key)?;
-    let mut gateway =
-        AuthenticatedGatewayOwner::start(&home, &latch_bin, peer_public_key, config.grant_revision)
-            .await?;
-    let gateway_handle = gateway.gateway();
+    let gateway_handle =
+        AuthenticatedGateway::connect(&home, peer_public_key, config.grant_revision).await?;
     let listener = tokio::net::TcpListener::bind(&config.lan_bind)
         .await
         .context("cannot bind Remote Link LAN listener")?;
@@ -405,11 +418,14 @@ async fn run_session(
                     }
                 }
             }
-            result = gateway.wait() => break result,
             Some(result) = streams.join_next(), if !streams.is_empty() => {
+                // A single request can fail because the shared gateway is
+                // restarting or because that request lost authority. Neither
+                // condition is a link failure, so keep healthy device links
+                // and their other streams alive.
                 if let Err(error) = result {
-                    if !error.is_cancelled() {
-                        break Err(anyhow!("Remote Link stream task failed: {error}"));
+                    if error.is_panic() {
+                        break Err(anyhow!("Remote Link stream task panicked: {error}"));
                     }
                 }
             }
@@ -482,7 +498,6 @@ async fn run_session(
     wss_acceptor.abort();
     let _ = lan_acceptor.await;
     let _ = wss_acceptor.await;
-    gateway.close().await;
     result
 }
 

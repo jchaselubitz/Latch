@@ -1,5 +1,9 @@
 import Foundation
 
+protocol RemoteAccessProcess: AnyObject, Sendable {
+    func stop()
+}
+
 /// Why the app refused to start, or could not keep running, the helper.
 enum RemoteAccessSupervisorError: LocalizedError, Equatable {
     case forbiddenArgument(String)
@@ -54,17 +58,130 @@ struct RemoteLinkHostConfiguration: Encodable, Equatable, Sendable {
         self.enrollmentId = enrollmentId
         self.enrollmentSecret = enrollmentSecret
     }
+
+    func replacingAdmission(_ admission: RemoteLinkAdmission) -> Self {
+        Self(
+            version: version,
+            purpose: purpose,
+            relayUrl: admission.relayURL,
+            admission: admission.admission,
+            peerPublicKey: peerPublicKey,
+            grantRevision: grantRevision,
+            enrollmentId: enrollmentId,
+            enrollmentSecret: enrollmentSecret
+        )
+    }
+
+    func hasSameAuthority(as other: Self) -> Bool {
+        version == other.version
+            && purpose == other.purpose
+            && relayUrl == other.relayUrl
+            && peerPublicKey == other.peerPublicKey
+            && grantRevision == other.grantRevision
+            && enrollmentId == other.enrollmentId
+    }
 }
 
-/// Launches and babysits the authenticated remote-access helper.
+/// Owns the one helper process that owns the shared loopback gateway. Desktop
+/// receives only a content-free readiness event; it never reads the gateway
+/// address or bearer from the helper's private runtime state.
+final class RemoteGatewaySupervisor: RemoteAccessProcess, @unchecked Sendable {
+    typealias ReadinessHandler = @Sendable () -> Void
+
+    private let executableURL: URL
+    private let latchExecutableURL: URL
+    private let lock = NSLock()
+    private var process: Process?
+    private var stoppedIntentionally = false
+
+    init(executableURL: URL) {
+        latchExecutableURL = executableURL
+        self.executableURL = executableURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("latch-remote")
+    }
+
+    static func arguments(latchExecutable: String = "/usr/local/bin/latch") -> [String] {
+        ["--gateway-serve", "--latch-bin", latchExecutable]
+    }
+
+    func run(onReady: @escaping ReadinessHandler) async throws {
+        guard FileManager.default.isExecutableFile(atPath: executableURL.path) else {
+            throw RemoteAccessSupervisorError.helperMissing(executableURL)
+        }
+        let process = Process()
+        let diagnostics = Pipe()
+        let input = Pipe()
+        let events = Pipe()
+        process.executableURL = executableURL
+        process.arguments = Self.arguments(latchExecutable: latchExecutableURL.path)
+        process.standardInput = input
+        process.standardOutput = events
+        process.standardError = diagnostics
+        let exited = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in exited.signal() }
+        lock.withLock {
+            stoppedIntentionally = false
+            self.process = process
+        }
+        do {
+            try process.run()
+        } catch {
+            lock.withLock { self.process = nil }
+            throw error
+        }
+        let captured = Task.detached(priority: .utility) {
+            diagnostics.fileHandleForReading.readDataToEndOfFile()
+        }
+        let reader = HelperLineReader(handle: events.fileHandleForReading)
+        let readiness = Task.detached(priority: .utility) {
+            for await line in reader.lines {
+                guard let data = line.data(using: .utf8),
+                      let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      object["type"] as? String == "gateway_ready",
+                      object["version"] as? Int == 1 else { continue }
+                onReady()
+            }
+        }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            DispatchQueue.global(qos: .utility).async {
+                exited.wait()
+                continuation.resume()
+            }
+        }
+        readiness.cancel()
+        reader.stop()
+        try? input.fileHandleForWriting.close()
+        let intentional = lock.withLock {
+            let intentional = stoppedIntentionally
+            self.process = nil
+            return intentional
+        }
+        guard !intentional else { return }
+        let bounded = await captured.value.suffix(4_096)
+        throw RemoteAccessSupervisorError.exited(
+            status: process.terminationStatus,
+            diagnostic: String(decoding: bounded, as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+    }
+
+    func stop() {
+        let running = lock.withLock { () -> Process? in
+            stoppedIntentionally = true
+            return process
+        }
+        guard let running, running.isRunning else { return }
+        running.terminate()
+    }
+}
+
+/// Launches and babysits one authenticated device-link helper.
 ///
-/// The dedicated `latch-remote` helper is the only process the app
-/// starts for remote access. The helper — not this app — supervises the
-/// plaintext `latch serve` gateway on an ephemeral loopback port with a
-/// per-launch bearer token it mints itself. Keeping that split means the
-/// desktop never holds the gateway credential and has no code path that could
-/// bind the gateway anywhere but loopback.
-final class RemoteAccessSupervisor: @unchecked Sendable {
+/// The helper owns only one phone's WSS/LAN link. A separate Rust helper owns
+/// the shared plaintext gateway, so this process can exit without disturbing
+/// any other phone or the Conversation Hub cache authority.
+final class RemoteAccessSupervisor: RemoteAccessProcess, @unchecked Sendable {
     /// Arguments that would either point the helper at the plaintext gateway
     /// or let that gateway be published off-host. None of them are ever
     /// produced by this app, and a caller-supplied vector containing one is
@@ -86,7 +203,6 @@ final class RemoteAccessSupervisor: @unchecked Sendable {
     }
 
     private let executableURL: URL
-    private let latchExecutableURL: URL
     private var configuration: RemoteLinkHostConfiguration?
     private let renewLease: LeaseRenewal
     private let requestAdmission: AdmissionRequest?
@@ -102,7 +218,6 @@ final class RemoteAccessSupervisor: @unchecked Sendable {
         requestAdmission: AdmissionRequest? = nil,
         onStatus: StatusHandler? = nil
     ) {
-        latchExecutableURL = executableURL
         self.executableURL = executableURL
             .deletingLastPathComponent()
             .appendingPathComponent("latch-remote")
@@ -145,10 +260,8 @@ final class RemoteAccessSupervisor: @unchecked Sendable {
     /// Exposed for tests: the guarantee that the desktop app never publishes
     /// `latch serve` is only as good as what it actually execs.
     ///
-    static func arguments(
-        latchExecutable: String = "/usr/local/bin/latch"
-    ) throws -> [String] {
-        let arguments = ["--link-serve", "--latch-bin", latchExecutable]
+    static func arguments() throws -> [String] {
+        let arguments = ["--link-serve"]
         if let forbidden = arguments.first(where: { forbiddenArguments.contains($0) }) {
             throw RemoteAccessSupervisorError.forbiddenArgument(forbidden)
         }
@@ -162,7 +275,7 @@ final class RemoteAccessSupervisor: @unchecked Sendable {
     /// Starts the helper and resolves when it exits. Throws immediately if the
     /// launch itself is unsafe or fails.
     func run() async throws {
-        let arguments = try Self.arguments(latchExecutable: latchExecutableURL.path)
+        let arguments = try Self.arguments()
         let encoded = try lock.withLock { () throws -> Data in
             guard let configuration else {
                 throw RemoteAccessSupervisorError.exited(status: -1, diagnostic: "Remote Link admission was already consumed.")
@@ -289,7 +402,8 @@ final class RemoteAccessSupervisor: @unchecked Sendable {
 
     /// Fetches a fresh single-use admission for the helper's next relay socket,
     /// with bounded backoff while the control plane is unreachable. The helper
-    /// keeps its gateway and LAN listener alive throughout.
+    /// keeps its LAN listener alive and the independent shared gateway is
+    /// unaffected throughout.
     private static func readmit(requestAdmission: AdmissionRequest, writer: HelperCommandWriter) async {
         let delays: [UInt64] = [1, 2, 5, 10, 15]
         var attempt = 0
@@ -350,7 +464,7 @@ final class HelperCommandWriter: @unchecked Sendable {
 /// receipt. The helper itself commits the Mac-local grant; Desktop can only
 /// answer the visible owner decision and attest that the service mirror
 /// returned the identical grant.
-final class RemoteEnrollmentSupervisor: @unchecked Sendable {
+final class RemoteEnrollmentSupervisor: RemoteAccessProcess, @unchecked Sendable {
     private struct Envelope: Decodable { let type: String; let version: Int }
     private struct Committed: Decodable {
         let type: String
@@ -381,13 +495,11 @@ final class RemoteEnrollmentSupervisor: @unchecked Sendable {
     }
 
     private let executableURL: URL
-    private let latchExecutableURL: URL
     private let configuration: RemoteLinkHostConfiguration
     private let lock = NSLock()
     private var process: Process?
 
     init(executableURL: URL, configuration: RemoteLinkHostConfiguration) {
-        latchExecutableURL = executableURL
         self.executableURL = executableURL
             .deletingLastPathComponent()
             .appendingPathComponent("latch-remote")
@@ -408,9 +520,7 @@ final class RemoteEnrollmentSupervisor: @unchecked Sendable {
         let output = Pipe()
         let diagnostics = Pipe()
         process.executableURL = executableURL
-        process.arguments = try RemoteAccessSupervisor.arguments(
-            latchExecutable: latchExecutableURL.path
-        )
+        process.arguments = try RemoteAccessSupervisor.arguments()
         process.standardInput = input
         process.standardOutput = output
         process.standardError = diagnostics

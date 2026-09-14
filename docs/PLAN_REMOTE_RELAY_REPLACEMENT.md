@@ -720,3 +720,27 @@ situations rather than the full matrix. State at the pause:
   outage; APNs (owner's Apple developer steps); the 24-hour soak with
   resource baselines; deletion of the retired TURN variables and the
   Cloudflare key (deferred until the cutover is accepted).
+
+## 17. Shared Conversation Hub gateway ownership
+
+Objective `coo:1006.ak0q` supersedes Objective 2's per-helper gateway
+ownership. Desktop now supervises one dedicated `latch-remote --gateway-serve`
+process and one independent link helper per active pairing. The gateway owner
+alone starts `latch serve`; device helpers dynamically resolve its private
+readiness and token files for each new stream. Desktop and phones receive
+neither value.
+
+The gateway owner and each device link have separate bounded restart loops.
+One link exit therefore affects only that device, while a gateway exit is
+reported as a shared failure and recovered without replacing healthy Noise
+links. Reconciliation compares the pinned device key and grant revision and
+stops only assignments whose authority changed or disappeared. The existing
+stream proxy remains the enforcement point: it resolves the authenticated key
+to the current local device record before forwarding and rechecks revision,
+permission, and revocation every 250 ms while the stream is open.
+
+The Remote Link gateway-owner lock and the Conversation Hub cache lock are
+both kernel advisory locks. Stale PID text after a crash is harmless. The
+gateway child watches its supervisor parent, and Desktop's termination registry
+contains the gateway, device, and enrollment helpers, so normal shutdown and
+parent crashes do not leave a cache-owning process behind.

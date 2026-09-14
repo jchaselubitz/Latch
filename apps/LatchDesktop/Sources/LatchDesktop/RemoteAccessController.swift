@@ -53,6 +53,13 @@ final class RemoteAccessController: ObservableObject {
     private var powerWatch: Task<Void, Never>?
     private var attention: Task<Void, Never>?
     private var supervision: Task<Void, Never>?
+    private var gatewaySupervision: Task<Void, Never>?
+    private var gatewaySupervisor: RemoteGatewaySupervisor?
+    private var gatewayReady = false
+    private var activeAssignments: [String: RemoteLinkAssignment] = [:]
+    private var linkSupervisions: [String: Task<Void, Never>] = [:]
+    private var linkSupervisors: [String: RemoteAccessSupervisor] = [:]
+    private var linkGenerations: [String: UUID] = [:]
     private var enrollmentWatch: Task<Void, Never>?
     private var enrollmentHelper: RemoteEnrollmentSupervisor?
     private var enrollmentDecision: CheckedContinuation<Bool, Never>?
@@ -126,88 +133,206 @@ final class RemoteAccessController: ObservableObject {
     }
 
     private func startSupervision() {
-        guard supervision == nil else { return }
+        guard supervision == nil, gatewaySupervision == nil else { return }
         phase = .starting
         startAttentionForwarding()
         startPowerWatch()
+        startAssignmentSupervision()
+    }
+
+    /// The gateway has its own lifecycle because it is shared infrastructure,
+    /// not a child resource of any phone. A gateway crash is visible at the
+    /// aggregate level and retried with bounded backoff without tearing down
+    /// authenticated device links.
+    private func startGatewaySupervision() {
+        guard gatewaySupervision == nil else { return }
         let executableURL = client.executableURL
-        supervision = Task { [weak self] in
+        gatewaySupervision = Task { [weak self] in
             var attempt = 0
             while !Task.isCancelled {
                 guard let self else { return }
                 let startedAt = Date()
+                let supervisor = RemoteGatewaySupervisor(executableURL: executableURL)
+                self.gatewaySupervisor = supervisor
+                Self.supervisorRegistry.register(supervisor)
                 do {
-                    let assignments = try await self.remoteLinkAssignments()
-                    guard !Task.isCancelled else { return }
-                    if assignments.isEmpty {
-                        // Nothing to supervise until a phone is enrolled;
-                        // enrollment restarts this loop immediately, so the
-                        // idle re-check only has to notice a link created
-                        // elsewhere. Two seconds here was a request every
-                        // two seconds against the directory for every
-                        // unpaired Mac.
-                        self.phase = .onlineRelay(peers: 0)
-                        attempt = 0
-                        try await Task.sleep(for: Self.idleLinkPollInterval)
-                        continue
+                    try await supervisor.run { [weak self] in
+                        Task { @MainActor in self?.recordGatewayReady(from: supervisor) }
                     }
-                    self.linkStatuses = [:]
-                    let supervisors = assignments.map { assignment in
-                        RemoteAccessSupervisor(
-                            executableURL: executableURL,
-                            configuration: assignment.configuration,
-                            renewLease: { [weak self] leaseID in
-                                guard let self else { throw CancellationError() }
-                                return try await self.controlPlane.renewRemoteLinkLease(leaseID)
-                            },
-                            requestAdmission: { [weak self] in
-                                guard let self else { throw CancellationError() }
-                                return try await self.controlPlane.freshRelayAdmission(peerDeviceID: assignment.peerDeviceID)
-                            },
-                            onStatus: { [weak self] status in
-                                Task { @MainActor in self?.recordLinkStatus(status, for: assignment.peerDeviceID) }
-                            }
-                        )
-                    }
-                    self.phase = .onlineRelay(peers: 0)
-                    supervisors.forEach(Self.supervisorRegistry.register)
-                    defer {
-                        supervisors.forEach {
-                            $0.stop()
-                            Self.supervisorRegistry.remove($0)
-                        }
-                    }
-                    try await withThrowingTaskGroup(of: Void.self) { group in
-                        supervisors.forEach { supervisor in
-                            group.addTask { try await supervisor.run() }
-                        }
-                        var firstError: Error?
-                        do {
-                            _ = try await group.next()
-                        } catch {
-                            firstError = error
-                        }
-                        supervisors.forEach { $0.stop() }
-                        group.cancelAll()
-                        while !group.isEmpty { _ = try? await group.next() }
-                        if let firstError { throw firstError }
-                    }
-                    guard !Task.isCancelled else { return }
-                    attempt = Self.nextRestartAttempt(after: Date().timeIntervalSince(startedAt), previous: attempt)
                 } catch {
-                    guard !Task.isCancelled else { return }
-                    self.phase = .failed(error.localizedDescription)
-                    self.errorMessage = error.localizedDescription
-                    attempt = Self.nextRestartAttempt(after: Date().timeIntervalSince(startedAt), previous: attempt)
+                    guard !Task.isCancelled else {
+                        Self.supervisorRegistry.remove(supervisor)
+                        return
+                    }
+                    self.gatewayReady = false
+                    self.phase = .failed("Shared Conversation Hub gateway stopped: \(error.localizedDescription). Retrying…")
                 }
+                Self.supervisorRegistry.remove(supervisor)
+                if self.gatewaySupervisor === supervisor { self.gatewaySupervisor = nil }
+                guard !Task.isCancelled else { return }
+                self.gatewayReady = false
+                attempt = Self.nextRestartAttempt(
+                    after: Date().timeIntervalSince(startedAt), previous: attempt
+                )
                 try? await Task.sleep(for: .seconds(Self.restartDelays[attempt]))
             }
         }
     }
 
+    private func recordGatewayReady(from supervisor: RemoteGatewaySupervisor) {
+        guard gatewaySupervisor === supervisor else { return }
+        gatewayReady = true
+        phase = .onlineRelay(peers: connectedPeers)
+    }
+
+    /// Discovers the desired assignments and reconciles only the links whose
+    /// device identity or grant revision changed. Existing healthy links are
+    /// never grouped under another device's failure.
+    private func startAssignmentSupervision() {
+        guard supervision == nil else { return }
+        supervision = Task { [weak self] in
+            var attempt = 0
+            while !Task.isCancelled {
+                guard let self else { return }
+                var discovered = false
+                do {
+                    let assignments = try await self.remoteLinkAssignments()
+                    guard !Task.isCancelled else { return }
+                    self.reconcile(assignments)
+                    attempt = 0
+                    discovered = true
+                    if self.gatewayReady { self.phase = .onlineRelay(peers: self.connectedPeers) }
+                } catch {
+                    guard !Task.isCancelled else { return }
+                    self.errorMessage = error.localizedDescription
+                    attempt = min(attempt + 1, Self.restartDelays.count - 1)
+                }
+                let delay: Duration
+                if discovered, !activeAssignments.isEmpty {
+                    // Assignment-changing owner actions cancel this task and
+                    // reconcile immediately. Avoid continuously consuming
+                    // otherwise-unused single-use admissions while links run.
+                    delay = .seconds(24 * 60 * 60)
+                } else if discovered {
+                    delay = Self.idleLinkPollInterval
+                } else {
+                    delay = .seconds(Self.restartDelays[attempt])
+                }
+                try? await Task.sleep(for: delay)
+            }
+        }
+    }
+
+    private func reconcile(_ assignments: [RemoteLinkAssignment]) {
+        let desired = Dictionary(uniqueKeysWithValues: assignments.map { ($0.peerDeviceID, $0) })
+        if desired.isEmpty {
+            stopGatewaySupervision()
+            phase = .onlineRelay(peers: 0)
+        } else {
+            startGatewaySupervision()
+        }
+        for peerID in Array(activeAssignments.keys) {
+            guard let current = activeAssignments[peerID] else { continue }
+            guard let next = desired[peerID], current.hasSameAuthority(as: next) else {
+                stopLink(peerID)
+                continue
+            }
+        }
+        for (peerID, assignment) in desired where activeAssignments[peerID] == nil {
+            startLink(assignment)
+        }
+    }
+
+    private func startLink(_ assignment: RemoteLinkAssignment) {
+        let peerID = assignment.peerDeviceID
+        activeAssignments[peerID] = assignment
+        linkSupervisions[peerID] = Task { [weak self] in
+            guard let self else { return }
+            await self.superviseLink(assignment)
+        }
+    }
+
+    private func superviseLink(_ assignment: RemoteLinkAssignment) async {
+        let peerID = assignment.peerDeviceID
+        var configuration = assignment.configuration
+        var attempt = 0
+        while !Task.isCancelled, activeAssignments[peerID]?.hasSameAuthority(as: assignment) == true {
+            while !gatewayReady, !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            guard !Task.isCancelled else { return }
+            let startedAt = Date()
+            let generation = UUID()
+            linkGenerations[peerID] = generation
+            let supervisor = RemoteAccessSupervisor(
+                executableURL: client.executableURL,
+                configuration: configuration,
+                renewLease: { [weak self] leaseID in
+                    guard let self else { throw CancellationError() }
+                    return try await self.controlPlane.renewRemoteLinkLease(leaseID)
+                },
+                requestAdmission: { [weak self] in
+                    guard let self else { throw CancellationError() }
+                    return try await self.controlPlane.freshRelayAdmission(peerDeviceID: peerID)
+                },
+                onStatus: { [weak self] status in
+                    Task { @MainActor in
+                        self?.recordLinkStatus(status, for: peerID, generation: generation)
+                    }
+                }
+            )
+            linkSupervisors[peerID] = supervisor
+            Self.supervisorRegistry.register(supervisor)
+            do {
+                try await supervisor.run()
+            } catch {
+                guard !Task.isCancelled else {
+                    Self.supervisorRegistry.remove(supervisor)
+                    return
+                }
+                linkStatuses[peerID] = .offline
+                if gatewayReady { phase = .onlineRelay(peers: connectedPeers) }
+            }
+            Self.supervisorRegistry.remove(supervisor)
+            if linkSupervisors[peerID] === supervisor { linkSupervisors[peerID] = nil }
+            guard !Task.isCancelled else { return }
+            attempt = Self.nextRestartAttempt(
+                after: Date().timeIntervalSince(startedAt), previous: attempt
+            )
+            try? await Task.sleep(for: .seconds(Self.restartDelays[attempt]))
+            guard !Task.isCancelled else { return }
+            while !Task.isCancelled {
+                if let admission = try? await controlPlane.freshRelayAdmission(peerDeviceID: peerID) {
+                    configuration = configuration.replacingAdmission(admission)
+                    break
+                }
+                linkStatuses[peerID] = .offline
+                try? await Task.sleep(for: .seconds(Self.restartDelays[attempt]))
+            }
+        }
+    }
+
+    private func stopLink(_ peerID: String) {
+        linkSupervisors.removeValue(forKey: peerID)?.stop()
+        linkSupervisions.removeValue(forKey: peerID)?.cancel()
+        activeAssignments.removeValue(forKey: peerID)
+        linkStatuses.removeValue(forKey: peerID)
+        linkGenerations.removeValue(forKey: peerID)
+    }
+
+    private func stopGatewaySupervision() {
+        gatewaySupervision?.cancel()
+        gatewaySupervision = nil
+        gatewaySupervisor?.stop()
+        gatewaySupervisor = nil
+        gatewayReady = false
+    }
+
     private func remoteLinkAssignments() async throws -> [RemoteLinkAssignment] {
         guard controlPlane.isConfigured, let publicKey = status.publicKey else { return [] }
-        return try await controlPlane.remoteLinkAssignments(publicKey: publicKey, macName: Self.macName)
+        return try await controlPlane.remoteLinkAssignments(
+            publicKey: publicKey, macName: Self.macName, retaining: activeAssignments
+        )
     }
 
     /// One helper reported where its link is. Connected peers drive both the
@@ -218,6 +343,15 @@ final class RemoteAccessController: ObservableObject {
             phase = .onlineRelay(peers: connectedPeers)
         }
         applySleepPolicy()
+    }
+
+    private func recordLinkStatus(
+        _ status: HelperLinkStatus,
+        for peerDeviceID: String,
+        generation: UUID
+    ) {
+        guard linkGenerations[peerDeviceID] == generation else { return }
+        recordLinkStatus(status, for: peerDeviceID)
     }
 
     /// Recomputes the sleep assertion from current facts. Idempotent, and
@@ -265,15 +399,21 @@ final class RemoteAccessController: ObservableObject {
         attention = Task { await forwarder.run() }
     }
 
-    private func restartSupervision() {
+    private func restartSupervision(clearLinks: Bool = false) {
         guard status.enabled else { return }
-        stopSupervision()
-        startSupervision()
+        if clearLinks {
+            for peerID in Array(activeAssignments.keys) { stopLink(peerID) }
+        }
+        supervision?.cancel()
+        supervision = nil
+        startAssignmentSupervision()
     }
 
     private func stopSupervision() {
         supervision?.cancel()
         supervision = nil
+        stopGatewaySupervision()
+        for peerID in Array(activeAssignments.keys) { stopLink(peerID) }
         attention?.cancel()
         attention = nil
         powerWatch?.cancel()
@@ -314,7 +454,7 @@ final class RemoteAccessController: ObservableObject {
             let current = controlPlane.address?.absoluteString
             if current != previous {
                 try controlPlane.forgetEnrollment()
-                restartSupervision()
+                restartSupervision(clearLinks: true)
             }
             controlPlaneAddress = current ?? ""
             errorMessage = nil
@@ -354,12 +494,14 @@ final class RemoteAccessController: ObservableObject {
                 )
             )
             enrollmentHelper = helper
+            Self.supervisorRegistry.register(helper)
             pendingPairing = material
             pairingProgress = .waiting
             pairingFailure = nil
             errorMessage = nil
             enrollmentWatch = Task { [weak self, helper] in
                 guard let self else { return }
+                defer { Self.supervisorRegistry.remove(helper) }
                 do {
                     try await helper.run(
                         decide: { [weak self] proposal in
@@ -395,7 +537,10 @@ final class RemoteAccessController: ObservableObject {
     func dismissPairing() {
         enrollmentDecision?.resume(returning: false)
         enrollmentDecision = nil
-        enrollmentHelper?.stop()
+        if let enrollmentHelper {
+            enrollmentHelper.stop()
+            Self.supervisorRegistry.remove(enrollmentHelper)
+        }
         enrollmentHelper = nil
         if let enrollmentID = pendingPairing?.enrollmentID {
             Task { [controlPlane] in await controlPlane.cancelRemoteEnrollment(enrollmentID) }
@@ -480,19 +625,19 @@ final class RemoteAccessController: ObservableObject {
 
 final class SupervisorRegistry: @unchecked Sendable {
     private let lock = NSLock()
-    private var supervisors: [RemoteAccessSupervisor] = []
+    private var supervisors: [any RemoteAccessProcess] = []
 
-    func register(_ supervisor: RemoteAccessSupervisor) {
+    func register(_ supervisor: any RemoteAccessProcess) {
         lock.lock(); defer { lock.unlock() }
         supervisors.append(supervisor)
     }
 
-    func remove(_ supervisor: RemoteAccessSupervisor) {
+    func remove(_ supervisor: any RemoteAccessProcess) {
         lock.lock(); defer { lock.unlock() }
-        supervisors.removeAll { $0 === supervisor }
+        supervisors.removeAll { ($0 as AnyObject) === (supervisor as AnyObject) }
     }
 
-    func drain() -> [RemoteAccessSupervisor] {
+    func drain() -> [any RemoteAccessProcess] {
         lock.lock(); defer { lock.unlock() }
         let current = supervisors
         supervisors.removeAll()

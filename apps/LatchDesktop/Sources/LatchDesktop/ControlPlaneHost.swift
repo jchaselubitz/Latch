@@ -160,6 +160,11 @@ enum ControlPlaneLabel {
 struct RemoteLinkAssignment: Equatable, Sendable {
     let peerDeviceID: String
     let configuration: RemoteLinkHostConfiguration
+
+    func hasSameAuthority(as other: Self) -> Bool {
+        peerDeviceID == other.peerDeviceID
+            && configuration.hasSameAuthority(as: other.configuration)
+    }
 }
 
 /// Relay URL and single-use admission for one WSS socket.
@@ -571,13 +576,27 @@ final class ControlPlaneHost {
 
     /// One helper launch per current pairing, with the peer's directory id so
     /// the helper can be re-admitted after its relay socket closes.
-    func remoteLinkAssignments(publicKey: String, macName: String) async throws -> [RemoteLinkAssignment] {
+    func remoteLinkAssignments(
+        publicKey: String,
+        macName: String,
+        retaining current: [String: RemoteLinkAssignment] = [:]
+    ) async throws -> [RemoteLinkAssignment] {
         guard let address else { throw ControlPlaneHostError.notConfigured }
         let credentials = try await enrollment(publicKey: publicKey, name: macName)
         let api = apiFactory(address)
         let links = try await api.remoteLinks(deviceToken: credentials.deviceToken)
         var assignments: [RemoteLinkAssignment] = []
         for link in links where link.version == 1 && link.grantRevision > 0 {
+            if let existing = current[link.peerDeviceId],
+               existing.configuration.purpose == "session",
+               existing.configuration.peerPublicKey == link.peerPublicKey,
+               existing.configuration.grantRevision == link.grantRevision {
+                // Its helper already consumed this assignment's admission.
+                // Retain the authority identity without minting and then
+                // discarding another single-use relay ticket.
+                assignments.append(existing)
+                continue
+            }
             let admission = try await api.relayAdmission(
                 deviceToken: credentials.deviceToken, peerDeviceID: link.peerDeviceId
             )

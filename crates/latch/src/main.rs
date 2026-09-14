@@ -277,6 +277,10 @@ enum Command {
         /// contains the gateway token.
         #[arg(long, value_name = "PATH")]
         ready_file: Option<String>,
+        /// Exit when the process that launched this gateway disappears.
+        /// Internal to the Remote Link supervisor.
+        #[arg(long, hide = true)]
+        exit_with_parent: bool,
         #[command(subcommand)]
         command: Option<ServeCommand>,
     },
@@ -691,6 +695,7 @@ fn dispatch(command: Option<Command>) -> Result<()> {
             allow_remote,
             token_file,
             ready_file,
+            exit_with_parent,
             command,
         }) => {
             let home = LatchHome::from_env()?;
@@ -711,6 +716,7 @@ fn dispatch(command: Option<Command>) -> Result<()> {
                     ready_file: ready_file.map(std::path::PathBuf::from),
                     latch_bin: std::env::current_exe().context("cannot locate the latch binary")?,
                     allow_remote,
+                    exit_with_parent,
                 }),
             }
         }

@@ -41,11 +41,13 @@ from Settings or a terminal to diagnose the complete CLI payload.
 ## Remote access
 
 **Settings → Remote Access** enables the paired-device service. Latch Desktop
-starts and supervises one outbound Remote Link for each paired phone. The
-helper races an authenticated LAN connection with outbound WSS on TCP 443,
-then carries Noise-encrypted Yamux streams to a short-lived, loopback-only
-`latch serve` gateway. The app never holds the gateway bearer token or makes
-that plaintext gateway public.
+starts and supervises one outbound Remote Link helper for each paired phone,
+plus one shared Conversation Hub gateway owner. Device helpers independently
+race authenticated LAN connections with outbound WSS on TCP 443, then carry
+Noise-encrypted Yamux streams to the same loopback-only `latch serve` process.
+One device reconnecting or failing does not restart its peers or the gateway.
+The app never holds the gateway bearer token or makes that plaintext gateway
+public.
 
 To pair a phone, configure the control plane with an operator-minted one-use
 owner invitation, turn Remote Access on, and select **Pair a Device**. Scan the

@@ -13,7 +13,7 @@ final class RemoteAccessTests: XCTestCase {
 
     func testHelperLaunchNeverPublishesThePlaintextGatewayOrAdmission() throws {
         let arguments = try RemoteAccessSupervisor.arguments()
-        XCTAssertEqual(arguments, ["--link-serve", "--latch-bin", "/usr/local/bin/latch"])
+        XCTAssertEqual(arguments, ["--link-serve"])
         XCTAssertFalse(arguments.contains("serve"))
         XCTAssertFalse(arguments.contains("--allow-remote"))
         XCTAssertFalse(arguments.contains("--token-file"))
@@ -23,6 +23,36 @@ final class RemoteAccessTests: XCTestCase {
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
         XCTAssertEqual(object["admission"] as? String, "signed-secret-admission")
         XCTAssertEqual(object["grantRevision"] as? Int, 7)
+    }
+
+    func testSharedGatewayLaunchExposesNoBearerOrListenerArguments() {
+        let arguments = RemoteGatewaySupervisor.arguments()
+        XCTAssertEqual(arguments, ["--gateway-serve", "--latch-bin", "/usr/local/bin/latch"])
+        XCTAssertFalse(arguments.contains("--bind"))
+        XCTAssertFalse(arguments.contains("--token-file"))
+        XCTAssertFalse(arguments.contains("--allow-remote"))
+    }
+
+    func testAssignmentIdentityIgnoresDisposableAdmissionButTracksGrantRevision() {
+        let first = RemoteLinkAssignment(peerDeviceID: "dev_phone", configuration: configuration)
+        let readmitted = RemoteLinkAssignment(
+            peerDeviceID: "dev_phone",
+            configuration: configuration.replacingAdmission(RemoteLinkAdmission(
+                relayURL: "wss://relay.example/v1/connect", admission: "fresh-ticket"
+            ))
+        )
+        XCTAssertTrue(first.hasSameAuthority(as: readmitted))
+
+        let changedGrant = RemoteLinkAssignment(
+            peerDeviceID: "dev_phone",
+            configuration: RemoteLinkHostConfiguration(
+                relayUrl: "wss://relay.example/v1/connect",
+                admission: "fresh-ticket",
+                peerPublicKey: String(repeating: "a", count: 64),
+                grantRevision: 8
+            )
+        )
+        XCTAssertFalse(first.hasSameAuthority(as: changedGrant))
     }
 
     func testStatusDecodesOnlyLocalAuthorityState() throws {

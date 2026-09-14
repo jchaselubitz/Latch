@@ -25,11 +25,12 @@ using; a Terminal tab may flash briefly so Command-T can run.
 
 ## Remote access
 
-Settings → Remote Access turns on a paired-phone gateway: the app spawns a
-helper that owns outbound WSS connections to the opaque relay and an
-authenticated LAN entry point. The helper establishes one pinned Noise XX
-link per paired phone, multiplexes bounded logical streams with Yamux, and
-forwards only authorized streams to a loopback-only `latch serve` gateway. Each
+Settings → Remote Access turns on a paired-phone gateway: the app spawns one
+shared gateway owner and one independently supervised link helper per active
+pairing. Each link helper owns its outbound WSS connection to the opaque relay
+and authenticated LAN entry point, establishes one pinned Noise XX link,
+multiplexes bounded logical streams with Yamux, and forwards only authorized
+streams to the single loopback-only `latch serve` gateway. Each
 paired device's row separates two decisions — a base Observe/Interact picker
 and an explicit "Allow terminal" switch mapped to the `control` permission —
 new pairings begin with both Control and terminal access enabled, and a change
