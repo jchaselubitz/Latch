@@ -158,6 +158,12 @@ pub struct OpenReport {
     /// decode.
     #[serde(default)]
     pub behavior: String,
+    /// Whether the viewer was asked to open without taking keyboard focus.
+    ///
+    /// Defaulted on read so reports written before the setting existed still
+    /// decode.
+    #[serde(default)]
+    pub background: bool,
 }
 
 /// `latch rename --json`.

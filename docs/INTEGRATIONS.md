@@ -102,7 +102,9 @@ latch open SESSION --with iterm --as window --json
 
 An integration that owns the viewer preference should pass `--as window` or
 `--as tab` explicitly instead of depending on the user's `open.behavior`
-setting. `latch open` currently supports iTerm; Latch Desktop manages its own
+setting. The same applies to focus: pass `--background` or `--foreground`
+(0.2609181007.0 and later) rather than depending on `open.background`. The
+JSON report echoes the result as `background`. `latch open` currently supports iTerm; Latch Desktop manages its own
 terminal choices through its native UI.
 
 Never read, write, or infer state from `~/.latch`. Do not use a private kernel

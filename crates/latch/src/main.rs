@@ -111,6 +111,15 @@ enum Command {
         /// Desktop) pass it here instead of relying on the stored default.
         #[arg(long = "as", value_name = "SHAPE")]
         open_as: Option<String>,
+        /// Open the viewer without bringing it to the front.
+        ///
+        /// Without this or `--foreground`, `open.background` in
+        /// `~/.latch/config.toml` decides, then foreground.
+        #[arg(long, conflicts_with = "foreground")]
+        background: bool,
+        /// Bring the viewer to the front, overriding `open.background`.
+        #[arg(long)]
+        foreground: bool,
         /// Emit machine-readable JSON.
         #[arg(long)]
         json: bool,
@@ -443,14 +452,22 @@ fn dispatch(command: Option<Command>) -> Result<()> {
             session,
             with,
             open_as,
+            background,
+            foreground,
             json,
         }) => {
             let behavior = open_as.as_deref().map(OpenBehavior::parse).transpose()?;
+            let background = match (background, foreground) {
+                (true, _) => Some(true),
+                (_, true) => Some(false),
+                _ => None,
+            };
             let report = open::open(OpenRequest {
                 home: LatchHome::from_env()?,
                 session,
                 viewer: with,
                 behavior,
+                background,
             })?;
             if json {
                 println!("{}", serde_json::to_string(&report)?);

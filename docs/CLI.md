@@ -35,6 +35,16 @@ latch config open.behavior
 latch config                         # print all non-secret preferences
 ```
 
+Add `--background` to open the viewer without bringing iTerm to the front
+(Latch never sends `activate`, and returns focus to the application that was
+frontmost). `--foreground` forces the opposite. With neither flag,
+`open.background` (`true` or `false`) decides, and the default is foreground:
+
+```bash
+latch open SESSION --with iterm --background
+latch config open.background true
+```
+
 ## Manage sessions
 
 ```bash

@@ -73,6 +73,21 @@ impl OpenBehavior {
     }
 }
 
+/// The config key holding the default for opening a viewer without focus.
+pub const OPEN_BACKGROUND_KEY: &str = "open.background";
+
+/// Parses a stored `open.background` value.
+///
+/// A malformed value is an error for the same reason a malformed
+/// `open.behavior` is: a typo should surface where it can be fixed.
+pub fn parse_background(value: &str) -> anyhow::Result<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "yes" | "on" | "1" => Ok(true),
+        "false" | "no" | "off" | "0" => Ok(false),
+        other => bail!("unsupported value `{other}`; expected `true` or `false`"),
+    }
+}
+
 /// A request to open one session in a local terminal viewer.
 #[derive(Debug, Clone)]
 pub struct OpenRequest {
@@ -84,6 +99,9 @@ pub struct OpenRequest {
     pub viewer: String,
     /// Caller-stated shape; `None` defers to the stored preference.
     pub behavior: Option<OpenBehavior>,
+    /// Caller-stated focus: `Some(true)` opens the viewer without bringing it
+    /// to the front. `None` defers to `open.background`, then to foreground.
+    pub background: Option<bool>,
 }
 
 /// How far a viewer open got before this command returned.
@@ -115,6 +133,7 @@ struct ViewerRequest<'a> {
     id: &'a SessionId,
     paths: &'a SessionPaths,
     behavior: OpenBehavior,
+    background: bool,
 }
 
 /// Opens a terminal viewer attached to a session without changing that
@@ -132,6 +151,10 @@ pub fn open(request: OpenRequest) -> anyhow::Result<OpenReport> {
         Some(behavior) => behavior,
         None => configured_behavior(&request.home)?,
     };
+    let background = match request.background {
+        Some(background) => background,
+        None => configured_background(&request.home)?,
+    };
     let id = manage::resolve_existing(&request.home, &request.session)?;
     let paths = request.home.session(&id);
     timing::record(&paths, "open.resolve", watch.lap(), None);
@@ -144,6 +167,7 @@ pub fn open(request: OpenRequest) -> anyhow::Result<OpenReport> {
         id: &id,
         paths: &paths,
         behavior,
+        background,
     }) {
         Ok(arrival) => arrival,
         Err(error) => {
@@ -159,6 +183,7 @@ pub fn open(request: OpenRequest) -> anyhow::Result<OpenReport> {
         opened: true,
         pending: arrival == ViewerArrival::Pending,
         behavior: behavior.as_str().to_owned(),
+        background,
     })
 }
 
@@ -172,34 +197,70 @@ fn configured_behavior(home: &LatchHome) -> anyhow::Result<OpenBehavior> {
     }
 }
 
+/// Reads the stored focus default; absent means foreground.
+fn configured_background(home: &LatchHome) -> anyhow::Result<bool> {
+    match manage::config_value(home, OPEN_BACKGROUND_KEY)? {
+        Some(value) => parse_background(&value).with_context(|| {
+            format!(
+                "`{OPEN_BACKGROUND_KEY}` in {}",
+                home.config_file().display()
+            )
+        }),
+        None => Ok(false),
+    }
+}
+
 /// The AppleScript run for each shape.
 ///
 /// iTerm can create a tab directly, but only in a window that exists; a first
 /// launch has none, so the tab script opens a window in that case rather than
 /// failing after the session is already running.
+///
+/// A background open never sends `activate`, but iTerm still takes focus when
+/// it creates a window, so the script notes the frontmost application first
+/// and hands focus back afterwards. `path to frontmost application` is a
+/// Standard Additions call and needs no System Events permission; the restore
+/// is wrapped in `try` because the window already exists by then and a refused
+/// `activate` must not turn a successful open into a failure.
 #[cfg(any(target_os = "macos", test))]
-fn iterm_script(behavior: OpenBehavior) -> &'static str {
-    match behavior {
-        OpenBehavior::NewWindow => {
-            "on run argv\n\
-             tell application \"iTerm\"\n\
-             activate\n\
-             create window with default profile command (item 1 of argv)\n\
-             end tell\n\
-             end run"
-        }
+fn iterm_script(behavior: OpenBehavior, background: bool) -> String {
+    let create = match behavior {
+        OpenBehavior::NewWindow => "create window with default profile command (item 1 of argv)\n",
         OpenBehavior::NewTab => {
-            "on run argv\n\
-             tell application \"iTerm\"\n\
-             activate\n\
-             if (count of windows) is 0 then\n\
+            "if (count of windows) is 0 then\n\
              create window with default profile command (item 1 of argv)\n\
              else\n\
              tell current window to create tab with default profile command (item 1 of argv)\n\
+             end if\n"
+        }
+    };
+    if background {
+        format!(
+            "on run argv\n\
+             set previousApp to missing value\n\
+             try\n\
+             set previousApp to (path to frontmost application as text)\n\
+             end try\n\
+             tell application \"iTerm\"\n\
+             {create}\
+             end tell\n\
+             try\n\
+             if previousApp is not missing value and \
+             (path to frontmost application as text) is not previousApp then\n\
+             tell application previousApp to activate\n\
              end if\n\
+             end try\n\
+             end run"
+        )
+    } else {
+        format!(
+            "on run argv\n\
+             tell application \"iTerm\"\n\
+             activate\n\
+             {create}\
              end tell\n\
              end run"
-        }
+        )
     }
 }
 
@@ -227,7 +288,7 @@ fn open_iterm(request: ViewerRequest<'_>) -> anyhow::Result<ViewerArrival> {
         .ok();
     let mut child = Command::new("osascript")
         .arg("-e")
-        .arg(iterm_script(request.behavior))
+        .arg(iterm_script(request.behavior, request.background))
         // Passing the command as an argv item avoids interpolating session ids
         // or executable paths into AppleScript source.
         .arg(&command)
@@ -337,7 +398,7 @@ mod tests {
     /// `create tab` alone cannot: it targets `current window`.
     #[test]
     fn the_tab_script_still_opens_a_window_when_iterm_has_none() {
-        let script = iterm_script(OpenBehavior::NewTab);
+        let script = iterm_script(OpenBehavior::NewTab, false);
 
         assert!(
             script.contains("if (count of windows) is 0 then"),
@@ -355,7 +416,7 @@ mod tests {
 
     #[test]
     fn the_window_script_never_creates_a_tab() {
-        let script = iterm_script(OpenBehavior::NewWindow);
+        let script = iterm_script(OpenBehavior::NewWindow, false);
 
         assert!(!script.contains("create tab"), "{script}");
         assert!(
@@ -364,14 +425,55 @@ mod tests {
         );
     }
 
+    /// A background open must never raise iTerm, and must hand focus back to
+    /// whatever was frontmost; a foreground open keeps today's `activate`.
+    #[test]
+    fn a_background_script_never_activates_iterm_and_restores_focus() {
+        for behavior in [OpenBehavior::NewWindow, OpenBehavior::NewTab] {
+            let foreground = iterm_script(behavior, false);
+            assert!(
+                foreground.contains("tell application \"iTerm\"\nactivate\n"),
+                "{foreground}"
+            );
+
+            let background = iterm_script(behavior, true);
+            assert!(
+                !background.contains("tell application \"iTerm\"\nactivate"),
+                "{background}"
+            );
+            assert!(
+                background.contains("set previousApp to (path to frontmost application as text)"),
+                "{background}"
+            );
+            assert!(
+                background.contains("tell application previousApp to activate"),
+                "{background}"
+            );
+            assert!(!background.contains("System Events"), "{background}");
+        }
+    }
+
+    #[test]
+    fn the_background_preference_parses_strictly() {
+        for value in ["true", " YES ", "on", "1"] {
+            assert!(super::parse_background(value).unwrap());
+        }
+        for value in ["false", "No", "off", "0"] {
+            assert!(!super::parse_background(value).unwrap());
+        }
+        assert!(super::parse_background("sometimes").is_err());
+    }
+
     /// Both scripts read the attach command from `argv`, never from interpolated
     /// AppleScript source; a session id must not be able to become script text.
     #[test]
     fn neither_script_interpolates_the_attach_command() {
         for behavior in [OpenBehavior::NewWindow, OpenBehavior::NewTab] {
-            let script = iterm_script(behavior);
-            assert!(script.starts_with("on run argv\n"), "{script}");
-            assert!(script.contains("(item 1 of argv)"), "{script}");
+            for background in [false, true] {
+                let script = iterm_script(behavior, background);
+                assert!(script.starts_with("on run argv\n"), "{script}");
+                assert!(script.contains("(item 1 of argv)"), "{script}");
+            }
         }
     }
 
@@ -494,6 +596,7 @@ mod tests {
             id: &id,
             paths: &paths,
             behavior: super::OpenBehavior::NewWindow,
+            background: false,
         })
         .expect_err("iTerm is macOS-only");
 
@@ -536,6 +639,7 @@ mod tests {
             session: id.to_string(),
             viewer: "iterm".to_owned(),
             behavior: Some(super::OpenBehavior::NewWindow),
+            background: None,
         })
         .expect_err("iTerm is macOS-only");
 
