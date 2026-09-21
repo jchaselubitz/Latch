@@ -24,6 +24,9 @@ use super::super::{
 const MAX_RECORD_BYTES: usize = 1024 * 1024;
 const MAX_READ_BYTES: usize = 2 * 1024 * 1024;
 
+#[cfg(test)]
+mod geometry_tests;
+
 /// The connector a session's persisted harness marker selects, or `None` when
 /// the session has no conversation connector and never will.
 ///

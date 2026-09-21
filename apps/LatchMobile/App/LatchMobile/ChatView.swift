@@ -8,13 +8,17 @@ import SwiftUI
 /// This file owns the session lifecycle and the terminal fallbacks. What the
 /// conversation looks like lives in `Conversation/`, and how wire items become
 /// turns lives in `ConversationProjection`.
+///
+/// Opening a conversation observes the session; it does not take it. No
+/// terminal socket is opened, the PTY is not resized, and the owner check is
+/// not raised: sends and answers travel through the Hub, which validates them
+/// against the screen at the last moment. The terminal is taken only by the
+/// explicit toolbar link (docs/DECISION_CONVERSATION_GEOMETRY.md).
 struct ChatView: View {
     let session: SessionSummary
 
     @Environment(AppModel.self) private var appModel
     @State private var store: ConversationStore?
-    @State private var claimedTerminal: TerminalSession?
-    @State private var terminalDrain: Task<Void, Never>?
     @FocusState private var composerFocused: Bool
 
     /// Nil until the store exists; the toolbar then shows the Hub-derived
@@ -48,7 +52,8 @@ struct ChatView: View {
                     } label: {
                         Image(systemName: "terminal")
                     }
-                    .accessibilityLabel("Open terminal")
+                    .accessibilityLabel("Take terminal")
+                    .accessibilityHint("Opens the live terminal here and detaches it from your Mac.")
                 }
             }
         }
@@ -56,31 +61,6 @@ struct ChatView: View {
             guard store == nil else { return }
             store = appModel.conversationStore(for: session)
             store?.start()
-            await claimSessionSurface()
-        }
-        .onDisappear {
-            terminalDrain?.cancel()
-            terminalDrain = nil
-            if claimedTerminal != nil {
-                appModel.discardTerminal(for: session)
-                claimedTerminal = nil
-            }
-        }
-    }
-
-    /// Opening a live chat is an explicit choice to continue that session on
-    /// this phone. Claim its exclusive terminal surface as well, and drain the
-    /// repaint stream even though chat renders from the Conversation Hub; a
-    /// socket whose output nobody reads would eventually be evicted as slow.
-    private func claimSessionSurface() async {
-        guard claimedTerminal == nil,
-              let terminal = await appModel.claimTerminalForChat(for: session)
-        else { return }
-        claimedTerminal = terminal
-        terminalDrain = Task {
-            for await _ in terminal.output {
-                if Task.isCancelled { return }
-            }
         }
     }
 
@@ -114,9 +94,9 @@ struct ChatView: View {
             ContentUnavailableView {
                 Label(title, systemImage: "terminal")
             } description: {
-                Text(detail + " The session's terminal can be opened here instead.")
+                Text(detail + " You can take the session's terminal here instead; that detaches it from your Mac.")
             } actions: {
-                NavigationLink("Open terminal") {
+                NavigationLink("Take terminal") {
                     TerminalView(session: session, autoAttach: session.isRunning)
                 }
                 .buttonStyle(.borderedProminent)

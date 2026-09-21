@@ -53,8 +53,19 @@ final class TerminalLifecycleTests: XCTestCase {
       "last_activity_at":null,"idle_ms":0,"connector":"claude"}]}
     """
 
+    /// Counts terminal sockets the model asks for, so a test can assert that
+    /// none was opened rather than that one was opened and closed.
+    private final class TerminalDials: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _count = 0
+        var count: Int { lock.withLock { _count } }
+        func record() { lock.withLock { _count += 1 } }
+    }
+
     private func linkedModel(
-        authenticator: StubDeviceOwnerAuthenticator = StubDeviceOwnerAuthenticator()
+        authenticator: StubDeviceOwnerAuthenticator = StubDeviceOwnerAuthenticator(),
+        permission: DevicePermission = .control,
+        dials: TerminalDials = TerminalDials()
     ) async -> AppModel {
         StubProtocol.reset()
         StubProtocol.stub(path: "/v2/capabilities", body: Self.capabilities)
@@ -68,10 +79,13 @@ final class TerminalLifecycleTests: XCTestCase {
             },
             presentationStore: MemorySessionPresentationStore(),
             terminalSizeStore: MemoryTerminalSizeStore(),
-            terminalConnector: { _, _, _ in FakeConnection() },
+            terminalConnector: { _, _, _ in
+                dials.record()
+                return FakeConnection()
+            },
             terminalUnlock: TerminalUnlock(authenticator: authenticator, grace: 600)
         )
-        await model.connectPairedDevice(pairedRecord(permission: .control))
+        await model.connectPairedDevice(pairedRecord(permission: permission))
         return model
     }
 
@@ -187,22 +201,95 @@ final class TerminalLifecycleTests: XCTestCase {
         )
     }
 
-    /// Opening a conversation is also a handoff: the phone takes the exclusive
-    /// terminal surface for as long as that chat is the active session screen.
-    func testOpeningChatClaimsTheTerminalAndLeavingReturnsIt() async throws {
-        let model = await linkedModel()
+    /// Opening a conversation observes the session and nothing more: no
+    /// terminal socket, so no resize and no detach on the Mac, and no owner
+    /// check, because nothing the check protects is being opened.
+    func testOpeningChatOpensNoTerminalAndAsksForNoOwnerCheck() async throws {
+        let authenticator = StubDeviceOwnerAuthenticator()
+        let dials = TerminalDials()
+        let model = await linkedModel(authenticator: authenticator, dials: dials)
         let session = try XCTUnwrap(model.sessions.first)
 
-        let claimed = await model.claimTerminalForChat(for: session)
-        let terminal = try XCTUnwrap(claimed)
+        // What ChatView's task does, in full.
+        let store = try XCTUnwrap(model.conversationStore(for: session))
+        store.start()
+        await settle()
+
+        XCTAssertEqual(dials.count, 0, "chat never dials the terminal")
+        XCTAssertEqual(authenticator.prompts, 0, "reading a chat is not an owner-checked action")
+        XCTAssertFalse(model.isTerminalUnlocked)
+        XCTAssertNil(model.terminalSession(for: session))
+
+        // The terminal is still there for whoever asks for it explicitly.
+        await unlocked(model)
+        XCTAssertEqual(authenticator.prompts, 1)
+        XCTAssertNotNil(model.terminalSession(for: session))
+    }
+
+    /// Backgrounding and foregrounding an open chat stops and restarts the
+    /// conversation socket only. There is no terminal to churn.
+    func testBackgroundingAndForegroundingChatNeverTouchesTheTerminal() async throws {
+        let authenticator = StubDeviceOwnerAuthenticator()
+        let dials = TerminalDials()
+        let model = await linkedModel(authenticator: authenticator, dials: dials)
+        let session = try XCTUnwrap(model.sessions.first)
+        let store = try XCTUnwrap(model.conversationStore(for: session))
+        store.start()
+
+        for _ in 0..<5 {
+            model.suspendConversations()
+            model.suspendTerminals()
+            await settle()
+            model.resumeConversations()
+            await settle()
+        }
+
+        XCTAssertEqual(dials.count, 0)
+        XCTAssertEqual(authenticator.prompts, 0)
+        XCTAssertTrue(model.conversationStore(for: session) === store)
+    }
+
+    /// A terminal this phone took deliberately is not chat's to release:
+    /// opening and leaving a conversation leaves it attached.
+    func testOpeningChatLeavesADeliberatelyTakenTerminalAttached() async throws {
+        let dials = TerminalDials()
+        let model = await linkedModel(dials: dials)
+        await unlocked(model)
+        let session = try XCTUnwrap(model.sessions.first)
+        let terminal = try XCTUnwrap(model.terminalSession(for: session))
+        terminal.attach(cols: 100, rows: 30)
         await settle()
         XCTAssertEqual(terminal.state, .attached)
-        XCTAssertTrue(terminal.stoleSurface)
 
-        model.discardTerminal(for: session)
+        let store = try XCTUnwrap(model.conversationStore(for: session))
+        store.start()
         await settle()
-        XCTAssertEqual(terminal.state, .closed(.detached))
-        XCTAssertFalse(terminal.stoleSurface)
+        store.stop()
+        await settle()
+
+        XCTAssertEqual(terminal.state, .attached)
+        XCTAssertEqual(dials.count, 1, "the one deliberate attach, and nothing from chat")
+    }
+
+    /// Observing is the least a paired phone is granted, and it is enough for
+    /// chat: no terminal permission, and no owner check to get in.
+    func testAnObserveOnlyPhoneOpensChatWithoutTheTerminalOrAPrompt() async throws {
+        let authenticator = StubDeviceOwnerAuthenticator()
+        let dials = TerminalDials()
+        let model = await linkedModel(
+            authenticator: authenticator, permission: .observe, dials: dials
+        )
+        let session = try XCTUnwrap(model.sessions.first)
+
+        XCTAssertFalse(model.surface.terminal)
+        XCTAssertTrue(model.surface.chat)
+        let store = try XCTUnwrap(model.conversationStore(for: session))
+        store.start()
+        await settle()
+
+        XCTAssertEqual(dials.count, 0)
+        XCTAssertEqual(authenticator.prompts, 0)
+        XCTAssertNil(model.terminalSession(for: session))
     }
 
     /// The gate is the grant, not the screen: a phone that may not open a

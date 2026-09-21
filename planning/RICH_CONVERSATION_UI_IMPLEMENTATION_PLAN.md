@@ -145,6 +145,10 @@ other.
 
 ### Chat currently takes the terminal, and does not need to
 
+**Fixed in coo:1035.kyw6.** The claim, the drain, and
+`AppModel.claimTerminalForChat` are gone; the findings below describe the code
+as it was audited and are kept as the reason for the change.
+
 - `ChatView.swift:48-62` claims the terminal and drains it, via
   `AppModel.claimTerminalForChat` (`AppModel.swift:733-746`), which calls
   `unlockTerminal` (`AppModel.swift:367-372`) — so **opening a read-only chat
@@ -641,6 +645,16 @@ them worse.
 Opening Chat no longer takes, resizes, or authenticates against the exclusive
 terminal surface on the phone's behalf.
 
+**Status: done (coo:1035.kyw6).** `ChatView` starts the conversation store and
+nothing else. No host-internal observer was needed: the connector already reads
+the screen over `ConversationControl`, which is not a surface. No action needed
+terminal ownership, so there is no "Take terminal and continue" step; the
+toolbar link and the fallback are labelled **Take terminal**, and the owner
+check now says what it guards. Covered by `TerminalLifecycleTests` (no terminal
+dial, no owner prompt, no background/foreground churn, observe-only chat) and
+the real-PTY test `chat_observes_and_sends_beside_an_attached_desktop_terminal`
+(desktop stays attached at 160×48, no `SIGWINCH`, exactly one prompt).
+
 ### What the code already answers
 
 Three of the first draft's four investigation questions are settled and do not
@@ -659,6 +673,14 @@ need re-investigation:
   creating it removes the problem.
 
 ### The question that remains
+
+**Resolved in coo:1035.ygzy:**
+[Conversation geometry decision](../docs/DECISION_CONVERSATION_GEOMETRY.md)
+records real-PTY measurements and the action matrix. Preserve the supplied
+launch geometry (80×24 unattended default) and the last human terminal size
+after detach; Chat does not pin or resize. Wrapped choices continue to refuse
+with the existing validation reason. The following describes the original
+investigation question, now answered by that decision.
 
 **Does removing the phone's attach change the PTY geometry that the connector's
 screen heuristics depend on?** Attach resizes the PTY unless pinned and never

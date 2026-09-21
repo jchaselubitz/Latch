@@ -360,6 +360,10 @@ public final class AppModel {
 
     /// Asks the device owner to confirm before a terminal is opened.
     ///
+    /// Only taking the terminal asks this. Observing a conversation, sending
+    /// to it, and answering its prompts never do: they go through the
+    /// Conversation Hub and open no terminal.
+    ///
     /// Called by the terminal screen ahead of `terminalSession(for:)`. Inside
     /// the grace window it answers without prompting, so attaching, reading
     /// something else, and reattaching is one Face ID check rather than three.
@@ -367,7 +371,7 @@ public final class AppModel {
     public func unlockTerminal() async -> Bool {
         guard surface.terminal else { return false }
         return await unlockRemoteAccess(
-            reason: "Open a terminal on your Mac and run commands on it."
+            reason: "Take this session's terminal from your Mac and type into it."
         )
     }
 
@@ -721,28 +725,6 @@ public final class AppModel {
             detachAllTerminals()
         }
         return true
-    }
-
-    /// Takes the session's terminal while its conversation is open.
-    ///
-    /// A chat still drives the Conversation Hub, but it now owns the same
-    /// exclusive session surface as the terminal screen. The preview supplies
-    /// the Mac's current grid so claiming it does not resize or reflow the
-    /// agent. The caller must consume `output` and discard the terminal when
-    /// the chat disappears.
-    public func claimTerminalForChat(for session: SessionSummary) async -> TerminalSession? {
-        guard session.isRunning, surface.terminal else { return nil }
-        let preview = try? await previewSession(for: session)
-        guard await unlockTerminal(), let terminal = terminalSession(for: session) else {
-            return nil
-        }
-        let grid = TerminalGeometry.grid(
-            for: terminalSize,
-            preview: preview,
-            viewport: .zero
-        )
-        terminal.attach(cols: grid.cols, rows: grid.rows)
-        return terminal
     }
 
     /// Classifies a discovery failure. A protocol disagreement is the one

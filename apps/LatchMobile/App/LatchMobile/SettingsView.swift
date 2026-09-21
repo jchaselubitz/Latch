@@ -48,9 +48,11 @@ struct SettingsView: View {
             Text("Session view")
         } footer: {
             Text("""
-            Terminal opens the session's live terminal and takes it from whatever is \
-            attached on your Mac. Sessions without a Claude or Codex connector — every \
-            plain shell — always open in the terminal.
+            Chat observes the conversation: it never opens the terminal, resizes it, \
+            or asks for an owner check, and whatever is attached on your Mac stays attached. \
+            Terminal takes the session's live terminal from your Mac after an owner \
+            check. Sessions without a Claude or Codex connector — every plain shell — \
+            always open in the terminal.
             """)
         }
 
