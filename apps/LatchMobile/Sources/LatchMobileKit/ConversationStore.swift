@@ -40,8 +40,26 @@ public struct ConversationOperation: Codable, Equatable, Identifiable, Sendable 
 }
 
 public protocol ConversationStoreStorage {
+    /// The cache as last recorded: the base snapshot with any later journal
+    /// entries already folded in.
     func load(sessionID: String) throws -> ConversationStoreCache?
+    /// Replaces the whole cache and discards the journal. The store calls this
+    /// only when a snapshot replaces the transcript or the journal is compacted.
     func save(_ cache: ConversationStoreCache, sessionID: String) throws
+    /// Records one incremental change after the last `save` and returns the
+    /// bytes the journal now holds, which the store uses to decide when to
+    /// compact. Storages without a journal return 0.
+    func append(_ entry: ConversationJournalEntry, sessionID: String) throws -> Int
+}
+
+extension ConversationStoreStorage {
+    /// Fallback for storages without a journal. Correct, but a full rewrite:
+    /// `FileConversationStoreStorage` implements a real append.
+    public func append(_ entry: ConversationJournalEntry, sessionID: String) throws -> Int {
+        let cache = try load(sessionID: sessionID) ?? ConversationStoreCache()
+        try save(cache.applying([entry]), sessionID: sessionID)
+        return 0
+    }
 }
 
 public struct ConversationStoreCache: Codable, Equatable, Sendable {
@@ -52,6 +70,9 @@ public struct ConversationStoreCache: Codable, Equatable, Sendable {
     public var state: ConversationState?
     public var hasMoreBefore: Bool
     public var operations: [ConversationOperation]
+    /// The last journal entry this cache already reflects. Entries at or below
+    /// it are stale leftovers of an interrupted compaction and are ignored.
+    public var journalSequence: UInt64?
 
     public init(
         generation: String? = nil,
@@ -60,7 +81,8 @@ public struct ConversationStoreCache: Codable, Equatable, Sendable {
         items: [ConversationItem] = [],
         state: ConversationState? = nil,
         hasMoreBefore: Bool = false,
-        operations: [ConversationOperation] = []
+        operations: [ConversationOperation] = [],
+        journalSequence: UInt64? = nil
     ) {
         self.generation = generation
         self.revision = revision
@@ -69,11 +91,75 @@ public struct ConversationStoreCache: Codable, Equatable, Sendable {
         self.state = state
         self.hasMoreBefore = hasMoreBefore
         self.operations = operations
+        self.journalSequence = journalSequence
+    }
+
+    /// Folds journal entries over this cache. Replay stops at the first gap in
+    /// the sequence: every entry carries the revision its items belong to, so a
+    /// contiguous prefix is always a consistent (if older) resume position.
+    public func applying(_ entries: [ConversationJournalEntry]) -> ConversationStoreCache {
+        var expected = (journalSequence ?? 0) &+ 1
+        var result = self
+        var byID: [String: ConversationItem]?
+        for entry in entries where entry.sequence >= expected {
+            guard entry.sequence == expected else { break }
+            if byID == nil { byID = Dictionary(items.map { ($0.id, $0) }, uniquingKeysWith: { _, new in new }) }
+            entry.removedIDs.forEach { byID?[$0] = nil }
+            entry.upserts.forEach { byID?[$0.id] = $0 }
+            result.generation = entry.generation
+            result.revision = entry.revision
+            result.operationEpoch = entry.operationEpoch
+            result.state = entry.state
+            result.hasMoreBefore = entry.hasMoreBefore
+            result.operations = entry.operations
+            result.journalSequence = entry.sequence
+            expected = entry.sequence &+ 1
+        }
+        if let byID { result.items = byID.values.sorted { $0.ordinal < $1.ordinal } }
+        return result
     }
 }
 
-/// Disk-backed, per-session cache. Existing v1 derived event caches are not
-/// consulted or migrated: v2 snapshots are a complete replacement boundary.
+/// One incremental cache change: the items that changed or left since the
+/// previous entry, plus the small, whole conversation metadata at that point.
+public struct ConversationJournalEntry: Codable, Equatable, Sendable {
+    public var sequence: UInt64
+    public var generation: String?
+    public var revision: UInt64
+    public var operationEpoch: String?
+    public var state: ConversationState?
+    public var hasMoreBefore: Bool
+    public var operations: [ConversationOperation]
+    public var upserts: [ConversationItem]
+    public var removedIDs: [String]
+
+    public init(
+        sequence: UInt64,
+        generation: String?,
+        revision: UInt64,
+        operationEpoch: String?,
+        state: ConversationState?,
+        hasMoreBefore: Bool,
+        operations: [ConversationOperation],
+        upserts: [ConversationItem],
+        removedIDs: [String]
+    ) {
+        self.sequence = sequence
+        self.generation = generation
+        self.revision = revision
+        self.operationEpoch = operationEpoch
+        self.state = state
+        self.hasMoreBefore = hasMoreBefore
+        self.operations = operations
+        self.upserts = upserts
+        self.removedIDs = removedIDs
+    }
+}
+
+/// Disk-backed, per-session cache: a base snapshot (`<session>.json`) plus an
+/// append-only journal of newline-delimited entries (`<session>.journal`).
+/// Existing v1 derived event caches are not consulted or migrated: v2
+/// snapshots are a complete replacement boundary.
 public final class FileConversationStoreStorage: ConversationStoreStorage, @unchecked Sendable {
     private let directory: URL
     private let encoder = JSONEncoder()
@@ -88,18 +174,60 @@ public final class FileConversationStoreStorage: ConversationStoreStorage, @unch
 
     public func load(sessionID: String) throws -> ConversationStoreCache? {
         let url = fileURL(sessionID)
-        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
-        return try decoder.decode(ConversationStoreCache.self, from: Data(contentsOf: url))
+        let base = FileManager.default.fileExists(atPath: url.path)
+            ? try decoder.decode(ConversationStoreCache.self, from: Data(contentsOf: url))
+            : nil
+        let entries = journalEntries(sessionID)
+        guard base != nil || !entries.isEmpty else { return nil }
+        return (base ?? ConversationStoreCache()).applying(entries)
     }
 
     public func save(_ cache: ConversationStoreCache, sessionID: String) throws {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         try encoder.encode(cache).write(to: fileURL(sessionID), options: .atomic)
+        // The new base records the journal sequence it covers, so an
+        // interruption before this removal leaves only ignorable entries.
+        try? FileManager.default.removeItem(at: journalURL(sessionID))
+    }
+
+    public func append(_ entry: ConversationJournalEntry, sessionID: String) throws -> Int {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let url = journalURL(sessionID)
+        if !FileManager.default.fileExists(atPath: url.path) {
+            FileManager.default.createFile(atPath: url.path, contents: nil)
+        }
+        // Compact JSON escapes every control character, so a newline can only
+        // be the record separator.
+        var line = try encoder.encode(entry)
+        line.append(0x0A)
+        let handle = try FileHandle(forWritingTo: url)
+        defer { try? handle.close() }
+        let end = try handle.seekToEnd()
+        try handle.write(contentsOf: line)
+        return Int(end) + line.count
+    }
+
+    private func journalEntries(_ sessionID: String) -> [ConversationJournalEntry] {
+        guard let data = try? Data(contentsOf: journalURL(sessionID)) else { return [] }
+        var entries: [ConversationJournalEntry] = []
+        for line in data.split(separator: 0x0A) {
+            // A record torn by an interrupted write ends the usable prefix.
+            guard let entry = try? decoder.decode(ConversationJournalEntry.self, from: Data(line)) else { break }
+            entries.append(entry)
+        }
+        return entries
     }
 
     private func fileURL(_ sessionID: String) -> URL {
-        let safe = sessionID.unicodeScalars.map { CharacterSet.alphanumerics.contains($0) ? String($0) : "_" }.joined()
-        return directory.appendingPathComponent("\(safe).json")
+        directory.appendingPathComponent("\(safeName(sessionID)).json")
+    }
+
+    private func journalURL(_ sessionID: String) -> URL {
+        directory.appendingPathComponent("\(safeName(sessionID)).journal")
+    }
+
+    private func safeName(_ sessionID: String) -> String {
+        sessionID.unicodeScalars.map { CharacterSet.alphanumerics.contains($0) ? String($0) : "_" }.joined()
     }
 }
 
@@ -109,9 +237,9 @@ public final class ConversationStore {
     /// Rows currently offered to the view. The complete local history is in
     /// `retainedItems`; moving this window never evicts that history.
     public private(set) var items: [ConversationItem]
-    public var retainedItems: [ConversationItem] { workingItems }
+    public var retainedItems: [ConversationItem] { transcript.items }
     public var hasEarlierRendered: Bool { renderedEnd > items.count }
-    public var hasNewerRendered: Bool { renderedEnd < workingItems.count }
+    public var hasNewerRendered: Bool { renderedEnd < transcript.count }
     public var isHistoryLimitReached: Bool { serverHasMoreBefore && !hasMoreBefore }
     public private(set) var state: ConversationState?
     public private(set) var generation: String?
@@ -130,15 +258,29 @@ public final class ConversationStore {
     private let maximumItems: Int
     private let maximumBytes: Int
     private let maximumRenderedItems = 300
+    private let persistInterval: Duration
     private var gateway: LatchGateway
     private var retentionSeconds: TimeInterval
     private var socket: ConversationSocket?
-    private var workingItems: [ConversationItem]
+    private var transcript = RetainedTranscript()
     private var renderedEnd: Int
     private var serverHasMoreBefore: Bool
     private var publishTask: Task<Void, Never>?
     private var isStarted = false
     private var resyncRequestedAtRevision: UInt64?
+
+    // Persistence is a journal of what changed since the last entry, written
+    // at most once per `persistInterval` while a turn streams, and immediately
+    // for operation and history changes. See `flushPersistence`.
+    @ObservationIgnored private var persistTask: Task<Void, Never>?
+    @ObservationIgnored private var journalSequence: UInt64
+    @ObservationIgnored private var dirtyItemIDs: Set<String> = []
+    @ObservationIgnored private var removedItemIDs: Set<String> = []
+    @ObservationIgnored private var hasUnpersistedChanges = false
+    @ObservationIgnored private var needsCompaction = false
+    /// Below this the journal is never compacted: rewriting a small cache to
+    /// save replaying a few entries is not worth the write.
+    private static let minimumCompactionBytes = 256 * 1024
 
     public init(
         sessionID: String,
@@ -146,7 +288,8 @@ public final class ConversationStore {
         operationRetentionSeconds: Int,
         storage: any ConversationStoreStorage = FileConversationStoreStorage(),
         maximumItems: Int = 10_000,
-        maximumBytes: Int = 32 * 1024 * 1024
+        maximumBytes: Int = 32 * 1024 * 1024,
+        persistInterval: Duration = .milliseconds(500)
     ) {
         self.sessionID = sessionID
         self.gateway = gateway
@@ -154,18 +297,23 @@ public final class ConversationStore {
         self.storage = storage
         self.maximumItems = maximumItems
         self.maximumBytes = maximumBytes
+        self.persistInterval = persistInterval
         let cached = (try? storage.load(sessionID: sessionID)) ?? ConversationStoreCache()
+        journalSequence = cached.journalSequence ?? 0
         generation = cached.generation
         revision = cached.revision
         operationEpoch = cached.operationEpoch
-        let restoredItems = Self.bounded(cached.items, maximumItems: maximumItems, maximumBytes: maximumBytes)
-        workingItems = restoredItems
-        renderedEnd = restoredItems.count
-        items = Array(restoredItems.suffix(maximumRenderedItems))
+        var restored = RetainedTranscript()
+        restored.replaceAll(cached.items)
+        let evicted = restored.evict(maximumItems: maximumItems, maximumBytes: maximumBytes)
+        transcript = restored
+        renderedEnd = restored.count
+        items = Array(restored.items.suffix(maximumRenderedItems))
         state = cached.state
         serverHasMoreBefore = cached.hasMoreBefore
-        hasMoreBefore = cached.hasMoreBefore && restoredItems.count < maximumItems
+        hasMoreBefore = cached.hasMoreBefore && restored.count < maximumItems
         operations = cached.operations
+        if !evicted.isEmpty { noteChanges(upserted: [], removed: evicted) }
         publishRenderedItems()
     }
 
@@ -175,11 +323,15 @@ public final class ConversationStore {
     public var resolveReason: String? { state?.resolveRequest.reason }
     public var pendingRequest: ConversationItem? {
         guard let requestID = state?.pendingRequest else { return nil }
-        return workingItems.first { item in
+        return transcript.items.last { item in
             if case .request(let id, _, _, _, _) = item.kind { return id == requestID }
             return false
         }
     }
+
+    /// Items measured for the byte budget over this store's lifetime. Each
+    /// item is measured once when it enters or changes, never per publish.
+    var measuredItemCount: Int { transcript.measuredItemCount }
 
     /// Restored content is already published by init; this only begins network
     /// observation. Keeping the store in AppModel means leaving a chat does not
@@ -193,6 +345,8 @@ public final class ConversationStore {
     }
 
     public func stop() {
+        // Stopping precedes suspension, so nothing waits on the throttle.
+        flushPersistence()
         isStarted = false
         if let socket { Task { await socket.stop() } }
         socket = nil
@@ -212,7 +366,7 @@ public final class ConversationStore {
         let operation = ConversationOperation(id: UUID().uuidString, text: text, operationEpoch: operationEpoch)
         operations.append(operation)
         appendOptimisticItem(for: operation)
-        persist()
+        persistNow()
         send(operation: operation)
     }
 
@@ -247,7 +401,8 @@ public final class ConversationStore {
             publishRenderedItems()
             return
         }
-        guard hasMoreBefore, let oldest = workingItems.map(\.ordinal).filter({ $0 != UInt64.max }).min() else { return }
+        // Optimistic rows sort last, so the first retained row is the oldest.
+        guard hasMoreBefore, let oldest = transcript.items.first?.ordinal, oldest != UInt64.max else { return }
         let requestID = UUID().uuidString
         Task {
             do {
@@ -260,7 +415,7 @@ public final class ConversationStore {
 
     public func showNewer() {
         guard hasNewerRendered else { return }
-        renderedEnd = min(workingItems.count, renderedEnd + 100)
+        renderedEnd = min(transcript.count, renderedEnd + 100)
         publishRenderedItems()
     }
 
@@ -305,8 +460,9 @@ public final class ConversationStore {
             generation = snapshot.generation
             revision = snapshot.revision
             operationEpoch = snapshot.operationEpoch
-            workingItems = Self.bounded(snapshot.items, maximumItems: maximumItems, maximumBytes: maximumBytes)
-            renderedEnd = workingItems.count
+            transcript.replaceAll(snapshot.items)
+            _ = transcript.evict(maximumItems: maximumItems, maximumBytes: maximumBytes)
+            renderedEnd = transcript.count
             state = snapshot.state
             serverHasMoreBefore = snapshot.hasMoreBefore
             if epochChanged || snapshot.reason == "operation_epoch" {
@@ -314,26 +470,24 @@ public final class ConversationStore {
             }
             mergeAcceptedOperations(with: snapshot.items)
             mergeOptimisticItems()
+            // A snapshot replaces the transcript, so it is the one change
+            // recorded as a whole cache rather than a journal entry.
+            needsCompaction = true
             publishImmediately()
+            flushPersistence()
             updateSocketPosition()
         case .itemsUpserted(let messageGeneration, let messageRevision, let upserts):
             guard acceptNextMutation(messageGeneration, revision: messageRevision) else { return }
             upsert(upserts)
             revision = messageRevision
-            mergeAcceptedOperations(with: upserts)
+            if mergeAcceptedOperations(with: upserts) { persistNow() } else { schedulePersist() }
             schedulePublish()
             updateSocketPosition()
         case .itemsRemoved(let messageGeneration, let messageRevision, let ids):
             guard acceptNextMutation(messageGeneration, revision: messageRevision) else { return }
-            let oldLastID = items.last?.id
-            let wasAtTail = renderedEnd == workingItems.count
-            workingItems.removeAll { ids.contains($0.id) }
-            if wasAtTail {
-                renderedEnd = workingItems.count
-            } else if let oldLastID, let index = workingItems.firstIndex(where: { $0.id == oldLastID }) {
-                renderedEnd = index + 1
-            }
+            removeItems(Set(ids))
             revision = messageRevision
+            schedulePersist()
             schedulePublish()
             updateSocketPosition()
         case .stateChanged(let messageGeneration, let messageRevision, let changedState):
@@ -349,6 +503,7 @@ public final class ConversationStore {
                 // snapshot from our last contiguous revision.
                 state = changedState
                 requestResync()
+                schedulePersist()
                 schedulePublish()
                 return
             }
@@ -358,22 +513,24 @@ public final class ConversationStore {
                 resyncRequestedAtRevision = nil
                 updateSocketPosition()
             }
+            schedulePersist()
             schedulePublish()
         case .operationResult(let operationID, let status, let itemID, let reason):
             applyOperationResult(operationID: operationID, status: status, itemID: itemID, reason: reason)
         case .historyPage(_, let page, let more):
             let oldFirst = items.first?.id
             let oldRenderedEnd = renderedEnd
-            let oldCount = workingItems.count
+            let oldCount = transcript.count
             upsert(page)
             serverHasMoreBefore = more
             // A history response moves the visible window toward the page.
             // Once full, the old first row remains visible for scroll anchoring.
             renderedEnd = oldCount < maximumRenderedItems
-                ? workingItems.count
-                : min(workingItems.count, oldRenderedEnd)
+                ? transcript.count
+                : min(transcript.count, oldRenderedEnd)
             prependAnchor = oldFirst
             publishImmediately()
+            persistNow()
         case .error(_, let message):
             connectionError = message
         }
@@ -394,17 +551,33 @@ public final class ConversationStore {
     }
 
     private func upsert(_ newItems: [ConversationItem]) {
+        guard !newItems.isEmpty else { return }
+        preservingRenderedWindow {
+            transcript.upsert(newItems)
+            let evicted = transcript.evict(maximumItems: maximumItems, maximumBytes: maximumBytes)
+            noteChanges(upserted: newItems.map(\.id), removed: evicted)
+        }
+    }
+
+    private func removeItems(_ ids: Set<String>) {
+        guard !ids.isEmpty else { return }
+        preservingRenderedWindow {
+            noteChanges(upserted: [], removed: transcript.remove(ids))
+        }
+    }
+
+    /// Keeps a reader who is following the tail on it, and a reader looking
+    /// at older rows on the same last row, across a transcript change.
+    private func preservingRenderedWindow(_ mutate: () -> Void) {
         let oldLastID = items.last?.id
-        let wasAtTail = renderedEnd == workingItems.count
-        var byID = Dictionary(uniqueKeysWithValues: workingItems.map { ($0.id, $0) })
-        newItems.forEach { byID[$0.id] = $0 }
-        workingItems = Self.bounded(Array(byID.values), maximumItems: maximumItems, maximumBytes: maximumBytes)
+        let wasAtTail = renderedEnd == transcript.count
+        mutate()
         if wasAtTail {
-            renderedEnd = workingItems.count
-        } else if let oldLastID, let index = workingItems.firstIndex(where: { $0.id == oldLastID }) {
+            renderedEnd = transcript.count
+        } else if let oldLastID, let index = transcript.index(of: oldLastID) {
             renderedEnd = index + 1
         } else {
-            renderedEnd = min(renderedEnd, workingItems.count)
+            renderedEnd = min(renderedEnd, transcript.count)
         }
     }
 
@@ -420,10 +593,9 @@ public final class ConversationStore {
     }
 
     private func mergeOptimisticItems() {
-        let existing = Set(workingItems.map(\.id))
         for operation in operations where operation.status == .sending && operation.itemId == nil {
             let id = "operation:\(operation.id)"
-            guard !existing.contains(id) else { continue }
+            guard !transcript.contains(id) else { continue }
             upsert([ConversationItem(
                 id: id,
                 ordinal: UInt64.max - UInt64(operations.firstIndex(where: { $0.id == operation.id }) ?? 0),
@@ -441,8 +613,8 @@ public final class ConversationStore {
             // Keep the optimistic row until the canonical item is actually
             // observed. An accepted action precedes transcript observation and
             // removing it here would make the person's message blink away.
-            if let itemID, workingItems.contains(where: { $0.id == itemID }) {
-                workingItems.removeAll { $0.id == "operation:\(operationID)" }
+            if let itemID, transcript.contains(itemID) {
+                removeItems(["operation:\(operationID)"])
                 operations.remove(at: index)
             }
         case "refused":
@@ -461,9 +633,12 @@ public final class ConversationStore {
             operations[index].reason = reason ?? "The host returned an unknown operation result."
         }
         publishImmediately()
+        persistNow()
     }
 
-    private func mergeAcceptedOperations(with upserts: [ConversationItem]) {
+    /// Returns whether any operation completed, so the caller records it now.
+    @discardableResult
+    private func mergeAcceptedOperations(with upserts: [ConversationItem]) -> Bool {
         let IDs = Set(upserts.map(\.id))
         var completed = operations.filter { $0.itemId.map(IDs.contains) == true }
 
@@ -486,11 +661,10 @@ public final class ConversationStore {
             else { continue }
             completed.append(remaining.remove(at: match))
         }
-        for operation in completed {
-            workingItems.removeAll { $0.id == "operation:\(operation.id)" }
-        }
+        removeItems(Set(completed.map { "operation:\($0.id)" }))
         let completedIDs = Set(completed.map(\.id))
         operations.removeAll { completedIDs.contains($0.id) }
+        return !completed.isEmpty
     }
 
     private func requestResync() {
@@ -529,7 +703,7 @@ public final class ConversationStore {
             }
             send(operation: operations[index])
         }
-        persist()
+        persistNow()
     }
 
     private func send(operation: ConversationOperation) {
@@ -565,22 +739,29 @@ public final class ConversationStore {
         }
     }
 
+    /// Publishes any change still waiting on the 16 ms coalescing tick.
+    func publishPendingChanges() {
+        publishImmediately()
+    }
+
     private func publishImmediately() {
         publishTask?.cancel()
         publishTask = nil
         publishRenderedItems()
-        persist()
     }
 
     private func publishRenderedItems() {
-        renderedEnd = min(renderedEnd, workingItems.count)
-        items = Array(workingItems[max(0, renderedEnd - maximumRenderedItems)..<renderedEnd])
+        renderedEnd = min(renderedEnd, transcript.count)
+        let window = Array(transcript.items[max(0, renderedEnd - maximumRenderedItems)..<renderedEnd])
+        // An equal window is not reassigned: that would invalidate every
+        // observer of `items` for a state-only change.
+        if window != items { items = window }
         // Leave room for a whole 100-item wire page (each item is at most
         // 32 KiB). When capacity is exhausted, hide the remote paging control.
-        let size = (try? JSONEncoder().encode(workingItems).count) ?? maximumBytes
-        hasMoreBefore = serverHasMoreBefore
-            && workingItems.count <= maximumItems - min(100, maximumItems)
-            && size <= maximumBytes - min(100 * 32 * 1024, maximumBytes)
+        let more = serverHasMoreBefore
+            && transcript.count <= maximumItems - min(100, maximumItems)
+            && transcript.totalBytes <= maximumBytes - min(100 * 32 * 1024, maximumBytes)
+        if more != hasMoreBefore { hasMoreBefore = more }
     }
 
     private func updateSocketPosition() {
@@ -589,28 +770,218 @@ public final class ConversationStore {
         Task { await socket.updateResumePosition(position) }
     }
 
-    private func persist() {
+    private func noteChanges(upserted: [String], removed: [String]) {
+        for id in upserted {
+            removedItemIDs.remove(id)
+            dirtyItemIDs.insert(id)
+        }
+        for id in removed {
+            dirtyItemIDs.remove(id)
+            removedItemIDs.insert(id)
+        }
+        hasUnpersistedChanges = true
+    }
+
+    /// Streaming changes are coalesced: the first one arms a single write and
+    /// later ones join it, so a turn costs one small append per interval
+    /// however fast its partial updates arrive. The loss window on a crash is
+    /// one interval, and it is safe: an entry carries the revision its items
+    /// belong to, so a lost entry only means resuming from an older revision.
+    private func schedulePersist() {
+        hasUnpersistedChanges = true
+        guard persistTask == nil else { return }
+        persistTask = Task { [weak self, persistInterval] in
+            try? await Task.sleep(for: persistInterval)
+            guard !Task.isCancelled else { return }
+            self?.flushPersistence()
+        }
+    }
+
+    /// Operation and history changes are written without waiting: operation
+    /// records decide what may be retried, and a fetched page is not
+    /// re-fetchable for free.
+    private func persistNow() {
+        hasUnpersistedChanges = true
+        flushPersistence()
+    }
+
+    /// Appends one journal entry holding only the items changed since the last
+    /// entry. The whole cache is rewritten only when a snapshot replaced the
+    /// transcript, an append failed (a missing entry would break the
+    /// contiguous journal), or the journal outgrew the transcript it describes;
+    /// the last keeps replay cheaper than a rewrite and total bytes written
+    /// linear in bytes changed.
+    func flushPersistence() {
+        persistTask?.cancel()
+        persistTask = nil
+        guard hasUnpersistedChanges || needsCompaction else { return }
+        if !needsCompaction {
+            let entry = ConversationJournalEntry(
+                sequence: journalSequence &+ 1,
+                generation: generation,
+                revision: revision,
+                operationEpoch: operationEpoch,
+                state: state,
+                hasMoreBefore: serverHasMoreBefore,
+                operations: operations,
+                upserts: dirtyItemIDs.compactMap(transcript.item(id:)).sorted { $0.ordinal < $1.ordinal },
+                removedIDs: removedItemIDs.sorted()
+            )
+            do {
+                let journalBytes = try storage.append(entry, sessionID: sessionID)
+                journalSequence = entry.sequence
+                clearPendingChanges()
+                guard journalBytes > max(Self.minimumCompactionBytes, transcript.totalBytes) else { return }
+            } catch {}
+            needsCompaction = true
+        }
         let cache = ConversationStoreCache(
             generation: generation,
             revision: revision,
             operationEpoch: operationEpoch,
-            items: workingItems,
+            items: transcript.items,
             state: state,
             hasMoreBefore: serverHasMoreBefore,
-            operations: operations
+            operations: operations,
+            journalSequence: journalSequence
         )
-        try? storage.save(cache, sessionID: sessionID)
+        // On failure the flags stay set and the next flush retries the rewrite.
+        guard (try? storage.save(cache, sessionID: sessionID)) != nil else { return }
+        needsCompaction = false
+        clearPendingChanges()
     }
 
-    private static func bounded(_ source: [ConversationItem], maximumItems: Int, maximumBytes: Int) -> [ConversationItem] {
+    private func clearPendingChanges() {
+        dirtyItemIDs.removeAll(keepingCapacity: true)
+        removedItemIDs.removeAll(keepingCapacity: true)
+        hasUnpersistedChanges = false
+    }
+}
+
+/// The retained transcript in ordinal order, with an id index and a running
+/// encoded-size total, so neither a lookup nor the byte budget needs a pass
+/// over every item. Each item is measured once, when it enters or changes.
+struct RetainedTranscript {
+    private(set) var items: [ConversationItem] = []
+    private(set) var totalBytes = 0
+    private(set) var measuredItemCount = 0
+    /// Absolute positions: index plus `evictedCount`, so evicting from the
+    /// front does not rewrite every remaining entry.
+    private var positions: [String: Int] = [:]
+    private var sizes: [String: Int] = [:]
+    private var evictedCount = 0
+    private let encoder = JSONEncoder()
+
+    var count: Int { items.count }
+
+    func contains(_ id: String) -> Bool { positions[id] != nil }
+
+    func index(of id: String) -> Int? { positions[id].map { $0 - evictedCount } }
+
+    func item(id: String) -> ConversationItem? { index(of: id).map { items[$0] } }
+
+    mutating func replaceAll(_ source: [ConversationItem]) {
         var byID: [String: ConversationItem] = [:]
         source.forEach { byID[$0.id] = $0 }
-        var ordered = Array(byID.values).sorted { $0.ordinal < $1.ordinal }
-        if ordered.count > maximumItems { ordered.removeFirst(ordered.count - maximumItems) }
-        let encoder = JSONEncoder()
-        while ordered.count > 1, (try? encoder.encode(ordered).count) ?? 0 > maximumBytes {
-            ordered.removeFirst()
+        items = byID.values.sorted { $0.ordinal < $1.ordinal }
+        sizes.removeAll(keepingCapacity: true)
+        totalBytes = 0
+        for item in items { measure(item) }
+        reindexAll()
+    }
+
+    /// A tail update replaces in place or appends. Only an item that lands
+    /// before existing ones moves anything, and a batch of those (a history
+    /// page) is placed with one sort.
+    mutating func upsert(_ source: [ConversationItem]) {
+        var moved = false
+        var lateArrivals: [ConversationItem] = []
+        for item in source {
+            measure(item)
+            if let index = index(of: item.id) {
+                moved = moved || items[index].ordinal != item.ordinal
+                items[index] = item
+            } else {
+                if let last = items.last, last.ordinal > item.ordinal { lateArrivals.append(item) }
+                items.append(item)
+                positions[item.id] = items.count - 1 + evictedCount
+            }
         }
-        return ordered
+        guard moved || !lateArrivals.isEmpty else { return }
+        if !moved, lateArrivals.count == 1, let item = lateArrivals.first, items.last?.id == item.id {
+            // One late arrival behind the tail (typically ahead of optimistic
+            // rows): shift only the rows after its place.
+            items.removeLast()
+            let target = items.partitioningIndex { $0.ordinal > item.ordinal }
+            items.insert(item, at: target)
+            reindex(from: target)
+        } else {
+            items.sort { $0.ordinal < $1.ordinal }
+            reindexAll()
+        }
+    }
+
+    @discardableResult
+    mutating func remove(_ ids: Set<String>) -> [String] {
+        let present = ids.compactMap { id in index(of: id).map { (id, $0) } }
+        guard let first = present.map(\.1).min() else { return [] }
+        items.removeAll { ids.contains($0.id) }
+        for (id, _) in present {
+            positions[id] = nil
+            totalBytes -= sizes.removeValue(forKey: id) ?? 0
+        }
+        reindex(from: first)
+        return present.map(\.0)
+    }
+
+    /// Drops the oldest rows until both bounds hold, keeping at least one.
+    mutating func evict(maximumItems: Int, maximumBytes: Int) -> [String] {
+        var dropped = 0
+        var bytes = totalBytes
+        while items.count - dropped > 1,
+              items.count - dropped > maximumItems || bytes > maximumBytes {
+            bytes -= sizes[items[dropped].id] ?? 0
+            dropped += 1
+        }
+        guard dropped > 0 else { return [] }
+        let ids = items[..<dropped].map(\.id)
+        for id in ids {
+            positions[id] = nil
+            sizes[id] = nil
+        }
+        items.removeFirst(dropped)
+        evictedCount += dropped
+        totalBytes = bytes
+        return ids
+    }
+
+    private mutating func measure(_ item: ConversationItem) {
+        let size = (try? encoder.encode(item).count) ?? 0
+        measuredItemCount += 1
+        totalBytes += size - (sizes.updateValue(size, forKey: item.id) ?? 0)
+    }
+
+    private mutating func reindex(from start: Int) {
+        for index in start..<items.count { positions[items[index].id] = index + evictedCount }
+    }
+
+    private mutating func reindexAll() {
+        evictedCount = 0
+        positions.removeAll(keepingCapacity: true)
+        reindex(from: 0)
+    }
+}
+
+private extension Array {
+    /// The first index whose element satisfies `belongsInSecondPartition`,
+    /// for an array already partitioned by it.
+    func partitioningIndex(where belongsInSecondPartition: (Element) -> Bool) -> Int {
+        var low = startIndex
+        var high = endIndex
+        while low < high {
+            let middle = low + (high - low) / 2
+            if belongsInSecondPartition(self[middle]) { high = middle } else { low = middle + 1 }
+        }
+        return low
     }
 }

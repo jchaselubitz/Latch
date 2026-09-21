@@ -171,6 +171,8 @@ other.
   JSON-encodes the **entire** item array on each iteration, then `persist`
   (`ConversationStore.swift:529-540`) atomically rewrites the whole cache file.
   That is transcript-wide work per append, on the client.
+  *(Resolved by coo:1033.5xv8; see the Phase 1 publication and persistence
+  decision below.)*
 - `FileConversationStoreStorage` (`ConversationStore.swift:77-100`) writes that
   cache with no `FileProtectionType` and no backup exclusion.
 
@@ -475,8 +477,50 @@ them worse.
    paging control stops when less than one full wire page of item or byte
    capacity remains. This keeps each fetched page in the retained cache and
    leaves headroom for items several times larger than today's plain text.
-   The later publication/persistence objective will replace the current
-   transcript-wide byte measurement and cache rewrite.
+
+   **Phase 1 publication and persistence decision (coo:1033.5xv8):**
+   - *Size accounting.* The retained transcript keeps an id index and a
+     running encoded-byte total. Each item is JSON-encoded once, when it
+     enters or changes, to learn its size; publishing never measures the
+     transcript. A tail update replaces in place or appends. Only rows that
+     land before the tail move anything, and a history page is placed with
+     one sort.
+   - *Persistence: a journal, not write-on-quiesce.* The cache is a base
+     snapshot (`<session>.json`) plus an append-only, newline-delimited
+     journal (`<session>.journal`). Each entry holds only the items changed
+     or removed since the previous entry, plus the small conversation
+     metadata (revision, state, operations). Write-on-quiesce was rejected
+     because a long streaming turn never quiesces, so it would either lose
+     the whole turn on a crash or still end in a full rewrite. Streaming
+     changes are throttled into at most one append per 500 ms. Operation
+     results, sends, completed operations and history pages are appended
+     immediately, because they decide retries or cost a refetch. The whole
+     cache is rewritten only for a snapshot, after a failed append, or when
+     the journal outgrows both the transcript and 256 KiB. That keeps total
+     bytes written linear in bytes changed. The base records the last
+     journal sequence it covers, and replay stops at a torn record or a
+     sequence gap. Every entry carries the revision its items belong to, so a
+     lost tail entry only means resuming from an older revision. `stop()`
+     (which runs before suspension) flushes anything pending.
+   - *Stable rows.* The published 300-row window is reassigned only when it
+     actually changes, and `ConversationRow` is `Equatable`. A tail update
+     therefore re-renders only the row whose item changed.
+   - *Measured cost of one partial-message upsert*, from `receive` to the
+     published tail, release build, `FileConversationStoreStorage`, ~220-byte
+     rows (`LATCH_STORE_BENCH=1 swift test -c release --filter
+     ConversationStoreBenchmarkTests`):
+
+     | Retained rows | Before (median / p95) | After (median / p95) |
+     | ---: | ---: | ---: |
+     | 300 | 4.1 ms / 8.0 ms | 0.037 ms / 0.044 ms |
+     | 2,000 | 22.8 ms / 24.4 ms | 0.037 ms / 0.041 ms |
+     | 10,000 | 111.6 ms / 129.8 ms | 0.037 ms / 0.046 ms |
+
+     "Before" included a full atomic cache rewrite on every publish. "After"
+     adds one throttled journal append (0.1–0.2 ms median) per 500 ms of
+     streaming. These figures stop at the published `items` array; SwiftUI
+     layout and paint of the changed row are not included and still need
+     the on-device measurement in the Measurements section.
 5. Set `FileProtectionType.complete` (or the strictest class compatible with
    background resume) on the conversation cache and exclude it from backup.
 6. Derive a live status line from `ConversationState.phase` and the newest

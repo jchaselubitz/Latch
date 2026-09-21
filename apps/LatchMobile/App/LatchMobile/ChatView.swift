@@ -136,7 +136,10 @@ private struct ConversationList: View {
                             .frame(maxWidth: .infinity)
                     }
                     ForEach(store.items) { item in
+                        // Equatable rows let a tail update re-render only the
+                        // row whose item changed, not every settled row.
                         ConversationRow(item: item)
+                            .equatable()
                             .id(item.id)
                     }
                     if store.hasNewerRendered {
@@ -164,7 +167,7 @@ private struct ConversationList: View {
     }
 }
 
-private struct ConversationRow: View {
+private struct ConversationRow: View, Equatable {
     let item: ConversationItem
 
     var body: some View {
