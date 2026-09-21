@@ -28,6 +28,9 @@ More focused documentation:
 - [Mobile session creation](FEATURE_MOBILE_SESSION_CREATION.md), its
   [implementation plan](PLAN_MOBILE_SESSION_CREATION.md), and the
   [field check](FIELD_CHECK_MOBILE_SESSION_CREATION.md) that is still to run
+- [Rich conversation view](FEATURE_RICH_CONVERSATION_UI.md) for mobile and an
+  embeddable web SDK, plus its
+  [phased implementation guide](../planning/RICH_CONVERSATION_UI_IMPLEMENTATION_PLAN.md)
 - [TypeScript gateway integration](REMOTE_SDK.md)
 - [architecture rules](ARCHITECTURE_RULES.md) and
   [CLI release process](CLI_RELEASES.md)

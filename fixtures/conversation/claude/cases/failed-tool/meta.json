@@ -1,0 +1,26 @@
+{
+  "covers": [
+    "a failed tool followed by a successful answer"
+  ],
+  "capturedFrom": {
+    "agent": "claude-code",
+    "session": "real Claude Code session on the Latch checkout (0e920c11-b282-4c38-a48d-1af826a485c5)",
+    "sourceLines": [
+      1022,
+      1023,
+      1024,
+      1025,
+      1031
+    ],
+    "capturedAt": "2026-09-21",
+    "notes": "tool_result is_error with Exit code 1 is retained in the source. The current connector cannot represent a failed tool (it emits status succeeded and summary 'completed'); expected.json records that current projection. A later mission fixes the connector."
+  },
+  "sanitized": [
+    "absolute paths",
+    "temp session directories",
+    "home directories"
+  ],
+  "id": "failed-tool",
+  "recordCount": 5,
+  "sourceBytes": 2611
+}

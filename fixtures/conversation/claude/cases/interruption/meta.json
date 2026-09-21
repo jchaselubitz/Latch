@@ -1,0 +1,24 @@
+{
+  "covers": [
+    "interruption"
+  ],
+  "capturedFrom": {
+    "agent": "claude-code",
+    "session": "real Claude Code session on the Latch checkout (0e920c11-b282-4c38-a48d-1af826a485c5)",
+    "sourceLines": [
+      835,
+      843,
+      844,
+      847
+    ],
+    "capturedAt": "2026-09-21",
+    "notes": "Claude records an is_error tool_result ('user doesn't want to proceed') plus a user text block '[Request interrupted by user for tool use]', then an assistant status summary."
+  },
+  "sanitized": [
+    "absolute paths",
+    "home directories"
+  ],
+  "id": "interruption",
+  "recordCount": 4,
+  "sourceBytes": 5151
+}

@@ -1,0 +1,3 @@
+{"type":"user","uuid":"0a258485-e618-4d32-8c9f-d3181f979010","parentUuid":null,"timestamp":"2026-08-13T11:11:22.437Z","isSidechain":false,"message":{"role":"user","content":"Reply with exactly: latch-live-ok"}}
+{"type":"assistant","uuid":"d1ff2e67-4029-497f-b292-5439c521fe8f","parentUuid":"0a258485-e618-4d32-8c9f-d3181f979010","timestamp":"2026-08-13T11:11:23.986Z","isSidechain":false,"message":{"role":"assistant","content":[{"type":"text","text":"latch-live-ok"}]}}
+{"hook_event_name":"PermissionRequest","prompt_id":"ddc8b841-342d-431b-84a0-076fb535b263","tool_name":"Bash","timestamp":"2026-08-13T15:57:51Z","tool_input":{"command":"printf latch-live-resolution-ok > /tmp/latch-coo-707-permission-proof","description":"Write permission-test proof string to temp file"}}

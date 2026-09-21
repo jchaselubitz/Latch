@@ -1,0 +1,19 @@
+{
+  "covers": [
+    "a permission request"
+  ],
+  "capturedFrom": {
+    "agent": "claude-code",
+    "session": "live Claude Code 2.1.228 capture already retained as fixtures/harness/claude-code/live-2.1.228 and live-permission-2.1.228",
+    "capturedAt": "2026-08-13",
+    "notes": "PermissionRequest records live on the hook sidecar; the connector also accepts them inline, which is how this slice is stored. tool_input.command is the original live proof command."
+  },
+  "sanitized": [
+    "absolute paths",
+    "session ids in hook metadata",
+    "home directories"
+  ],
+  "id": "permission-request",
+  "recordCount": 3,
+  "sourceBytes": 777
+}

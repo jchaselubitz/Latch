@@ -1,0 +1,26 @@
+{
+  "covers": [
+    "fenced code blocks",
+    "long lines that need horizontal scrolling"
+  ],
+  "capturedFrom": {
+    "agent": "claude-code",
+    "session": "real Claude Code session (4eb7442e-a44f-4295-8ccd-c8d586f823fe)",
+    "sourceLines": [
+      41,
+      98
+    ],
+    "capturedAt": "2026-09-21",
+    "notes": "Assistant reply contains multiple fenced blocks including command lines longer than 120 characters."
+  },
+  "sanitized": [
+    "absolute paths",
+    "internal hostnames",
+    "IPv6",
+    "container ids",
+    "home directories"
+  ],
+  "id": "fenced-code",
+  "recordCount": 2,
+  "sourceBytes": 2700
+}

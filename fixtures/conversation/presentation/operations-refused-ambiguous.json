@@ -1,0 +1,23 @@
+{
+  "id": "operations-refused-ambiguous",
+  "covers": [
+    "refused user operations",
+    "ambiguous user operations"
+  ],
+  "baseCase": "markdown-prose",
+  "notes": "operation_result statuses are Hub receipts, not Claude transcript events. They remain distinct rows, keep the submitted text, and never replay; retry is always a new operation. The surrounding transcript is the captured markdown-prose snapshot.",
+  "operations": [
+    {
+      "id": "op-refused",
+      "text": "retry pairing from the phone",
+      "status": "refused",
+      "reason": "read-only"
+    },
+    {
+      "id": "op-ambiguous",
+      "text": "continue",
+      "status": "ambiguous",
+      "reason": "connection lost"
+    }
+  ]
+}

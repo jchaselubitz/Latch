@@ -27,6 +27,37 @@ public enum ConversationSocketEvent: Sendable {
     case state(ConversationSocketState)
     case message(ConversationServerMessage)
     case failure(String)
+    /// Content this build could not present. Reported alongside (never
+    /// instead of) the rest of the frame, and never a reason to reconnect.
+    case degraded(ConversationDecodeDiagnostics)
+}
+
+/// Counts of what an older client skipped or reduced to a placeholder, so a
+/// newer gateway's unfamiliar content degrades visibly rather than silently.
+public struct ConversationDecodeDiagnostics: Equatable, Sendable {
+    /// Items shown as a neutral placeholder row: an unknown `kind.type`, or a
+    /// known one whose fields did not decode.
+    public var unrecognizedItems: Int
+    /// Items without a readable `id` and `ordinal`, which cannot be placed.
+    public var droppedItems: Int
+    /// Whole frames that did not decode, such as an unknown message `type`.
+    public var undecodableFrames: Int
+
+    public init(unrecognizedItems: Int = 0, droppedItems: Int = 0, undecodableFrames: Int = 0) {
+        self.unrecognizedItems = unrecognizedItems
+        self.droppedItems = droppedItems
+        self.undecodableFrames = undecodableFrames
+    }
+
+    public var isEmpty: Bool { unrecognizedItems == 0 && droppedItems == 0 && undecodableFrames == 0 }
+
+    public static func + (lhs: Self, rhs: Self) -> Self {
+        Self(
+            unrecognizedItems: lhs.unrecognizedItems + rhs.unrecognizedItems,
+            droppedItems: lhs.droppedItems + rhs.droppedItems,
+            undecodableFrames: lhs.undecodableFrames + rhs.undecodableFrames
+        )
+    }
 }
 
 public enum ConversationSocketError: Error, Equatable, Sendable {
@@ -135,7 +166,7 @@ public actor ConversationSocket {
 
                 while shouldRun, !Task.isCancelled {
                     let data = try await opened.receive()
-                    await eventHandler(.message(try decoder.decode(ConversationServerMessage.self, from: data)))
+                    await deliver(data)
                 }
             } catch is CancellationError {
                 return
@@ -148,5 +179,29 @@ public actor ConversationSocket {
                 try? await Task.sleep(for: .seconds(delay))
             }
         }
+    }
+
+    /// Only transport errors may leave the receive loop. A frame this build
+    /// cannot decode is counted and skipped: reconnecting would make the
+    /// gateway resend the same frame and loop forever instead of degrading.
+    /// A skipped mutation leaves a revision gap that the store's ordinary
+    /// resync path already recovers from.
+    private func deliver(_ data: Data) async {
+        let tally = ConversationDecodeTally()
+        decoder.userInfo[.conversationDecodeTally] = tally
+        defer { decoder.userInfo[.conversationDecodeTally] = nil }
+        let message: ConversationServerMessage
+        do {
+            message = try decoder.decode(ConversationServerMessage.self, from: data)
+        } catch {
+            await eventHandler(.degraded(ConversationDecodeDiagnostics(undecodableFrames: 1)))
+            return
+        }
+        let diagnostics = ConversationDecodeDiagnostics(
+            unrecognizedItems: tally.unrecognizedItems,
+            droppedItems: tally.droppedItems
+        )
+        if !diagnostics.isEmpty { await eventHandler(.degraded(diagnostics)) }
+        await eventHandler(.message(message))
     }
 }

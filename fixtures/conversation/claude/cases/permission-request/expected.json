@@ -1,0 +1,66 @@
+{
+  "projectedItemCount": 3,
+  "snapshot": {
+    "generation": "generation-1",
+    "hasMoreBefore": false,
+    "items": [
+      {
+        "createdAt": "2026-08-13T11:11:22.437Z",
+        "id": "0a258485-e618-4d32-8c9f-d3181f979010",
+        "kind": {
+          "role": "user",
+          "status": "observed",
+          "text": "Reply with exactly: latch-live-ok",
+          "type": "message"
+        },
+        "ordinal": 1
+      },
+      {
+        "createdAt": "2026-08-13T11:11:23.986Z",
+        "id": "d1ff2e67-4029-497f-b292-5439c521fe8f",
+        "kind": {
+          "role": "assistant",
+          "status": "complete",
+          "text": "latch-live-ok",
+          "type": "message"
+        },
+        "ordinal": 2
+      },
+      {
+        "createdAt": "1970-01-01T00:00:00Z",
+        "id": "request:ddc8b841-342d-431b-84a0-076fb535b263",
+        "kind": {
+          "choices": [
+            "Allow once",
+            "Deny"
+          ],
+          "prompt": "Write permission-test proof string to temp file",
+          "requestId": "ddc8b841-342d-431b-84a0-076fb535b263",
+          "requestType": "permission",
+          "status": "pending",
+          "type": "request"
+        },
+        "ordinal": 3
+      }
+    ],
+    "operationEpoch": "fixture",
+    "reason": "initial",
+    "revision": 4,
+    "state": {
+      "connector": {
+        "id": "claude",
+        "version": "1"
+      },
+      "pendingRequest": "ddc8b841-342d-431b-84a0-076fb535b263",
+      "phase": "awaiting_input",
+      "resolveRequest": {
+        "enabled": true
+      },
+      "sendMessage": {
+        "enabled": false,
+        "reason": "resolve the pending request first"
+      }
+    }
+  },
+  "truncateAfter": []
+}

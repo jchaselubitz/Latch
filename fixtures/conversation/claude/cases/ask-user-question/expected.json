@@ -1,0 +1,71 @@
+{
+  "projectedItemCount": 3,
+  "snapshot": {
+    "generation": "generation-1",
+    "hasMoreBefore": false,
+    "items": [
+      {
+        "createdAt": "2026-09-03T18:42:08.654Z",
+        "id": "7b27e129-3eab-4d23-b625-c5aaff25e68b",
+        "kind": {
+          "role": "user",
+          "status": "observed",
+          "text": "wait how do I add capture-harness to system audio recording settings pane?",
+          "type": "message"
+        },
+        "ordinal": 1
+      },
+      {
+        "createdAt": "2026-09-03T18:59:54.333Z",
+        "id": "432d9b2b-fb95-4482-b2dc-34fd883d7b80",
+        "kind": {
+          "name": "AskUserQuestion",
+          "parentMessageId": "432d9b2b-fb95-4482-b2dc-34fd883d7b80",
+          "status": "running",
+          "summary": "",
+          "type": "tool"
+        },
+        "ordinal": 2
+      },
+      {
+        "createdAt": "1970-01-01T00:00:00Z",
+        "id": "request:toolu_01BkoxBwEeghSmLMvCjqNWzk",
+        "kind": {
+          "choices": [
+            "Voice fixtures (near-end + double-talk)",
+            "USB microphone",
+            "Screen lock + sleep/wake",
+            "Real meeting audio (Zoom or Meet)",
+            "Record it as untestable (Recommended)",
+            "I'll install Teams"
+          ],
+          "prompt": "Which of the remaining scenarios can you drive right now? I'll script everything around whatever you pick.\nTeams isn't installed (only its loopback audio driver remains). How should I handle that row of the matrix?",
+          "requestId": "toolu_01BkoxBwEeghSmLMvCjqNWzk",
+          "requestType": "question",
+          "status": "pending",
+          "type": "request"
+        },
+        "ordinal": 3
+      }
+    ],
+    "operationEpoch": "fixture",
+    "reason": "initial",
+    "revision": 4,
+    "state": {
+      "connector": {
+        "id": "claude",
+        "version": "1"
+      },
+      "pendingRequest": "toolu_01BkoxBwEeghSmLMvCjqNWzk",
+      "phase": "awaiting_input",
+      "resolveRequest": {
+        "enabled": true
+      },
+      "sendMessage": {
+        "enabled": false,
+        "reason": "resolve the pending request first"
+      }
+    }
+  },
+  "truncateAfter": []
+}

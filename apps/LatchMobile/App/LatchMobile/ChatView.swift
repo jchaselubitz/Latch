@@ -195,6 +195,16 @@ private struct ConversationRow: View {
             .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(.yellow.opacity(0.12), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        case .unrecognized:
+            // Shown, not hidden: a gap in the transcript would be worse than
+            // an honest placeholder for content a newer Mac sent.
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: "questionmark.square.dashed")
+                Text("This item needs a newer version of Latch to display.")
+                Spacer(minLength: 0)
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
         }
     }
 }
@@ -305,6 +315,24 @@ private struct ConnectionStatus: View {
             .padding(.vertical, 6)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(.thinMaterial)
+        } else if skipped > 0 {
+            // Placeholder rows already show unrecognized items in place;
+            // content that could not be placed at all is only visible here.
+            HStack(spacing: 6) {
+                Image(systemName: "arrow.down.app.dashed")
+                Text("Some updates need a newer version of Latch (\(skipped) skipped).").lineLimit(2)
+                Spacer(minLength: 0)
+            }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.thinMaterial)
         }
+    }
+
+    private var skipped: Int {
+        store.decodeDiagnostics.droppedItems + store.decodeDiagnostics.undecodableFrames
     }
 }

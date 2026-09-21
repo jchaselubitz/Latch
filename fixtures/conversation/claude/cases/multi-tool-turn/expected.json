@@ -1,0 +1,64 @@
+{
+  "projectedItemCount": 3,
+  "snapshot": {
+    "generation": "generation-1",
+    "hasMoreBefore": false,
+    "items": [
+      {
+        "createdAt": "2026-09-03T14:17:59.243Z",
+        "id": "d078cc97-a6d5-4a61-a361-8b61e90c56a0",
+        "kind": {
+          "role": "user",
+          "status": "observed",
+          "text": "Look at the two implementation docs and make any improvements",
+          "type": "message"
+        },
+        "ordinal": 1
+      },
+      {
+        "createdAt": "2026-09-03T14:18:41.361Z",
+        "id": "d7aac659-1880-44c3-a947-875fc6a2d062",
+        "kind": {
+          "role": "assistant",
+          "status": "complete",
+          "text": "I'll read both implementation plans, then check them against the actual codebase before making improvements.",
+          "type": "message"
+        },
+        "ordinal": 2
+      },
+      {
+        "createdAt": "2026-09-03T14:18:42.932Z",
+        "id": "d7aac659-1880-44c3-a947-875fc6a2d062:block:3",
+        "kind": {
+          "name": "Bash",
+          "status": "succeeded",
+          "summary": "completed",
+          "type": "tool"
+        },
+        "ordinal": 7
+      }
+    ],
+    "operationEpoch": "fixture",
+    "reason": "initial",
+    "revision": 11,
+    "state": {
+      "connector": {
+        "id": "claude",
+        "version": "1"
+      },
+      "pendingRequest": null,
+      "phase": "idle",
+      "resolveRequest": {
+        "enabled": false,
+        "reason": "no pending request"
+      },
+      "sendMessage": {
+        "enabled": true
+      }
+    }
+  },
+  "truncateAfter": [
+    "d7aac659-1880-44c3-a947-875fc6a2d062",
+    "d7aac659-1880-44c3-a947-875fc6a2d062"
+  ]
+}

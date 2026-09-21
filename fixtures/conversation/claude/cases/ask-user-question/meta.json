@@ -1,0 +1,23 @@
+{
+  "covers": [
+    "AskUserQuestion carrying option descriptions",
+    "AskUserQuestion with multiple questions"
+  ],
+  "capturedFrom": {
+    "agent": "claude-code",
+    "session": "real Claude Code session (08489850-436f-4c57-ad5c-6a3578ddd61a)",
+    "sourceLines": [
+      414,
+      644
+    ],
+    "capturedAt": "2026-09-21",
+    "notes": "Two structured questions, each with per-option descriptions. multiSelect is present on the first question; the connector currently flattens this to prompt + choice labels."
+  },
+  "sanitized": [
+    "absolute paths",
+    "home directories"
+  ],
+  "id": "ask-user-question",
+  "recordCount": 2,
+  "sourceBytes": 2013
+}

@@ -10,9 +10,13 @@ Latch protocol major 2 deliberately has a small TypeScript surface:
 - `@latch/terminal-react` renders a terminal handle through an embedder-supplied
   xterm renderer.
 
-Both packages are private workspaces. They are terminal integrations, not a
-conversation SDK. The only supported conversation client is the native mobile
-client, which speaks the canonical v2 conversation socket directly.
+Both packages are private workspaces. Today they are terminal integrations, not
+a conversation SDK. The only currently supported conversation client is the
+native mobile client, which speaks the canonical v2 conversation socket
+directly. A headless TypeScript conversation client and optional React renderer
+are proposed in the
+[rich conversation implementation guide](../planning/RICH_CONVERSATION_UI_IMPLEMENTATION_PLAN.md#phase-7--minimal-embeddable-web-sdk);
+this document does not describe them as available before that phase ships.
 
 ## Protocol boundary
 
@@ -167,11 +171,11 @@ Every gateway failure is `{ "error": <code>, "reason": <text> }`, and
 | `request_id_conflict` | 409 | A creation request id was reused with a different `cwd`. |
 | `request_failed` | any | The answer carried no more specific code. |
 
-There is no `@latch/chat-react`, `@latch/harness-schema`, remote React SDK
-example, event cursor, transcript reducer, HTTP send endpoint, compatibility
-mode, or v1 fallback. Consumers needing a conversation UI should implement the
-v2 socket from the canonical schema; they must not recreate or import a legacy
-surface.
+There is currently no `@latch/conversation-react`, remote React SDK example,
+public event cursor, transcript reducer, HTTP send endpoint, compatibility mode,
+or v1 fallback. Until the planned SDK ships, internal consumers needing a
+conversation UI use the canonical v2 socket rather than recreating or importing
+a legacy surface.
 
 ## Development
 
@@ -182,6 +186,6 @@ npm run build
 npm test
 ```
 
-The packages are private while Latch is unlicensed. A future public SDK needs a
-separate versioned design; it must start from the v2 conversation protocol, not
+The packages are private while Latch is unlicensed. The planned conversation SDK
+starts from the v2 conversation protocol and generated canonical contract, not
 from removed v1 APIs.

@@ -1,0 +1,22 @@
+{
+  "covers": [
+    "multi-paragraph assistant Markdown"
+  ],
+  "capturedFrom": {
+    "agent": "claude-code",
+    "session": "real Claude Code session on the Latch checkout (0e920c11-b282-4c38-a48d-1af826a485c5)",
+    "sourceLines": [
+      1287,
+      1460
+    ],
+    "capturedAt": "2026-09-21",
+    "notes": "Pairing-debug turn. Intermediate tool records omitted; parentUuid relinked so the slice is a valid main chain."
+  },
+  "sanitized": [
+    "absolute paths",
+    "home directories"
+  ],
+  "id": "markdown-prose",
+  "recordCount": 2,
+  "sourceBytes": 1924
+}

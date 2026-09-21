@@ -4,6 +4,7 @@ Language-neutral evidence retained across engine implementations.
 
 ```text
 fixtures/
+  conversation/ # captured Claude source + current Hub projections; invented Codex corpus
   harness/    # schema-first normalized events and raw Claude Code records
   protocol/   # legacy v1 worker-protocol corpus; inactive after the tmux swap
   vt/         # recorded PTY streams from real Claude Code and Codex sessions

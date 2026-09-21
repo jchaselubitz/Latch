@@ -1,0 +1,61 @@
+{
+  "projectedItemCount": 3,
+  "snapshot": {
+    "generation": "generation-1",
+    "hasMoreBefore": false,
+    "items": [
+      {
+        "createdAt": "2026-09-08T06:27:19.896Z",
+        "id": "35e2a926-8149-4d07-96ea-b49921c53cae",
+        "kind": {
+          "name": "Bash",
+          "status": "succeeded",
+          "summary": "completed",
+          "type": "tool"
+        },
+        "ordinal": 1
+      },
+      {
+        "createdAt": "2026-09-08T06:27:21.379Z",
+        "id": "7edadaae-6481-4ff9-9b0c-425c84aaf2bd",
+        "kind": {
+          "name": "Bash",
+          "status": "succeeded",
+          "summary": "completed",
+          "type": "tool"
+        },
+        "ordinal": 2
+      },
+      {
+        "createdAt": "2026-09-08T06:27:37.501Z",
+        "id": "d1c1c746-2d70-4e87-afcb-73514ebb32aa",
+        "kind": {
+          "role": "assistant",
+          "status": "complete",
+          "text": "Desktop polls the directory every 2 seconds while no phone is linked. Fixing that cadence, retrying the release asset upload, and writing the plan's Objective 3 record.",
+          "type": "message"
+        },
+        "ordinal": 3
+      }
+    ],
+    "operationEpoch": "fixture",
+    "reason": "initial",
+    "revision": 6,
+    "state": {
+      "connector": {
+        "id": "claude",
+        "version": "1"
+      },
+      "pendingRequest": null,
+      "phase": "idle",
+      "resolveRequest": {
+        "enabled": false,
+        "reason": "no pending request"
+      },
+      "sendMessage": {
+        "enabled": true
+      }
+    }
+  },
+  "truncateAfter": []
+}

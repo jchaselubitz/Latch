@@ -1,0 +1,41 @@
+{
+  "projectedItemCount": 1,
+  "snapshot": {
+    "generation": "generation-1",
+    "hasMoreBefore": false,
+    "items": [
+      {
+        "createdAt": "2026-09-07T22:48:44.899Z",
+        "id": "c55eb0c4-2b24-4bea-b425-b1616c6dede1",
+        "kind": {
+          "name": "mcp__railway__list-variables",
+          "status": "succeeded",
+          "summary": "completed",
+          "type": "tool"
+        },
+        "ordinal": 1
+      }
+    ],
+    "operationEpoch": "fixture",
+    "reason": "initial",
+    "revision": 7,
+    "state": {
+      "connector": {
+        "id": "claude",
+        "version": "1"
+      },
+      "pendingRequest": null,
+      "phase": "idle",
+      "resolveRequest": {
+        "enabled": false,
+        "reason": "no pending request"
+      },
+      "sendMessage": {
+        "enabled": true
+      }
+    }
+  },
+  "truncateAfter": [
+    "c55eb0c4-2b24-4bea-b425-b1616c6dede1"
+  ]
+}

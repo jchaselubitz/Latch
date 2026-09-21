@@ -1,0 +1,27 @@
+{
+  "covers": [
+    "branch truncation"
+  ],
+  "capturedFrom": {
+    "agent": "claude-code",
+    "session": "real Claude Code session on the Latch checkout (0e920c11-b282-4c38-a48d-1af826a485c5)",
+    "sourceLines": [
+      151,
+      152,
+      153,
+      154,
+      155,
+      166
+    ],
+    "capturedAt": "2026-09-21",
+    "notes": "The last user record's parentUuid points at an earlier assistant, not the previous record. The connector emits TruncateAfter for that parent."
+  },
+  "sanitized": [
+    "absolute paths",
+    "cloud resource ids in tool input",
+    "home directories"
+  ],
+  "id": "branch-truncation",
+  "recordCount": 6,
+  "sourceBytes": 3659
+}

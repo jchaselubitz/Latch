@@ -233,30 +233,45 @@ public enum ConversationItemKind: Equatable, Sendable, Codable {
     case message(role: String, text: String, status: MessageStatus)
     case tool(name: String, summary: String, status: String, parentMessageId: String?)
     case request(requestId: String, requestType: String, prompt: String, choices: [String], status: String)
+    /// A kind this build cannot present: a `type` added after it shipped, or a
+    /// known `type` whose fields do not decode. `type` is the wire value when
+    /// it was readable. Forward compatibility is a property of the installed
+    /// client, so this degrades to a neutral row rather than failing the batch
+    /// or the socket.
+    case unrecognized(type: String?)
 
     private enum CodingKeys: String, CodingKey {
         case type, role, text, status, name, summary, parentMessageId
         case requestId, requestType, prompt, choices
     }
 
-    public init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        switch try container.decode(String.self, forKey: .type) {
+    /// Never throws: an unreadable kind becomes `.unrecognized`.
+    public init(from decoder: Decoder) {
+        guard let container = try? decoder.container(keyedBy: CodingKeys.self) else {
+            self = .unrecognized(type: nil)
+            return
+        }
+        let type = try? container.decode(String.self, forKey: .type)
+        self = (try? Self.known(type, in: container)) ?? .unrecognized(type: type)
+    }
+
+    private static func known(_ type: String?, in container: KeyedDecodingContainer<CodingKeys>) throws -> Self {
+        switch type {
         case "message":
-            self = .message(
+            return .message(
                 role: try container.decode(String.self, forKey: .role),
                 text: try container.decode(String.self, forKey: .text),
                 status: try container.decode(MessageStatus.self, forKey: .status)
             )
         case "tool":
-            self = .tool(
+            return .tool(
                 name: try container.decode(String.self, forKey: .name),
                 summary: try container.decode(String.self, forKey: .summary),
                 status: try container.decode(String.self, forKey: .status),
                 parentMessageId: try container.decodeIfPresent(String.self, forKey: .parentMessageId)
             )
         case "request":
-            self = .request(
+            return .request(
                 requestId: try container.decode(String.self, forKey: .requestId),
                 requestType: try container.decode(String.self, forKey: .requestType),
                 prompt: try container.decode(String.self, forKey: .prompt),
@@ -289,6 +304,9 @@ public enum ConversationItemKind: Equatable, Sendable, Codable {
             try container.encode(prompt, forKey: .prompt)
             try container.encode(choices, forKey: .choices)
             try container.encode(status, forKey: .status)
+        case .unrecognized(let type):
+            // Round-trips through the store cache back to `.unrecognized`.
+            try container.encodeIfPresent(type, forKey: .type)
         }
     }
 }
@@ -299,6 +317,64 @@ public struct ConversationItem: Codable, Equatable, Identifiable, Sendable {
     /// Display metadata only. Clients order by ordinal.
     public let createdAt: String
     public let kind: ConversationItemKind
+}
+
+/// Per-frame count of item elements that could not be presented. The socket
+/// installs a fresh tally under `CodingUserInfoKey.conversationDecodeTally`
+/// before each decode, so degradation is counted rather than silent.
+public final class ConversationDecodeTally {
+    /// Elements rendered as an `.unrecognized` placeholder row.
+    public internal(set) var unrecognizedItems = 0
+    /// Elements without a readable `id` and `ordinal`: they cannot be placed
+    /// or deduplicated, so they are omitted and only counted.
+    public internal(set) var droppedItems = 0
+
+    public init() {}
+}
+
+extension CodingUserInfoKey {
+    public static let conversationDecodeTally = CodingUserInfoKey(rawValue: "latch.conversationDecodeTally")!
+}
+
+/// One element of a wire item list. Decoding never throws, so one bad element
+/// cannot fail the whole batch. A failed element keeps its `id` and `ordinal`
+/// when those are still readable, so ordering and dedup keep working.
+struct TolerantConversationItem: Decodable {
+    let item: ConversationItem?
+
+    private enum CodingKeys: String, CodingKey { case id, ordinal, createdAt, kind }
+    private enum KindKeys: String, CodingKey { case type }
+
+    init(from decoder: Decoder) {
+        let tally = decoder.userInfo[.conversationDecodeTally] as? ConversationDecodeTally
+        if let decoded = try? ConversationItem(from: decoder) {
+            if case .unrecognized = decoded.kind { tally?.unrecognizedItems += 1 }
+            item = decoded
+            return
+        }
+        guard let container = try? decoder.container(keyedBy: CodingKeys.self),
+              let id = try? container.decode(String.self, forKey: .id),
+              let ordinal = try? container.decode(UInt64.self, forKey: .ordinal)
+        else {
+            tally?.droppedItems += 1
+            item = nil
+            return
+        }
+        tally?.unrecognizedItems += 1
+        let kind = try? container.nestedContainer(keyedBy: KindKeys.self, forKey: .kind)
+        item = ConversationItem(
+            id: id,
+            ordinal: ordinal,
+            createdAt: (try? container.decode(String.self, forKey: .createdAt)) ?? "",
+            kind: .unrecognized(type: try? kind?.decode(String.self, forKey: .type))
+        )
+    }
+}
+
+extension KeyedDecodingContainer {
+    func decodeConversationItems(forKey key: Key) throws -> [ConversationItem] {
+        try decode([TolerantConversationItem].self, forKey: key).compactMap { $0.item }
+    }
 }
 
 public struct OperationAvailability: Codable, Equatable, Sendable {
@@ -330,6 +406,26 @@ public struct ConversationSnapshot: Codable, Equatable, Sendable {
     public let reason: String?
 }
 
+extension ConversationSnapshot {
+    private enum TolerantKeys: String, CodingKey {
+        case generation, revision, operationEpoch, items, state, hasMoreBefore, reason
+    }
+
+    /// Declared in an extension so the memberwise initializer survives.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: TolerantKeys.self)
+        self.init(
+            generation: try container.decode(String.self, forKey: .generation),
+            revision: try container.decode(UInt64.self, forKey: .revision),
+            operationEpoch: try container.decode(String.self, forKey: .operationEpoch),
+            items: try container.decodeConversationItems(forKey: .items),
+            state: try container.decode(ConversationState.self, forKey: .state),
+            hasMoreBefore: try container.decode(Bool.self, forKey: .hasMoreBefore),
+            reason: try container.decodeIfPresent(String.self, forKey: .reason)
+        )
+    }
+}
+
 public enum ConversationServerMessage: Decodable, Equatable, Sendable {
     case snapshot(ConversationSnapshot)
     case itemsUpserted(generation: String, revision: UInt64, items: [ConversationItem])
@@ -351,7 +447,7 @@ public enum ConversationServerMessage: Decodable, Equatable, Sendable {
         case "items_upserted": self = .itemsUpserted(
             generation: try container.decode(String.self, forKey: .generation),
             revision: try container.decode(UInt64.self, forKey: .revision),
-            items: try container.decode([ConversationItem].self, forKey: .items)
+            items: try container.decodeConversationItems(forKey: .items)
         )
         case "items_removed": self = .itemsRemoved(
             generation: try container.decode(String.self, forKey: .generation),
@@ -371,7 +467,7 @@ public enum ConversationServerMessage: Decodable, Equatable, Sendable {
         )
         case "history_page": self = .historyPage(
             requestId: try container.decode(String.self, forKey: .requestId),
-            items: try container.decode([ConversationItem].self, forKey: .items),
+            items: try container.decodeConversationItems(forKey: .items),
             hasMoreBefore: try container.decode(Bool.self, forKey: .hasMoreBefore)
         )
         case "error": self = .error(

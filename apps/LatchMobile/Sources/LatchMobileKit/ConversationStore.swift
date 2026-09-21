@@ -116,6 +116,8 @@ public final class ConversationStore {
     public private(set) var socketState: ConversationSocketState = .idle
     public private(set) var connectionError: String?
     public private(set) var prependAnchor: String?
+    /// Cumulative for this store's lifetime; content-free by construction.
+    public private(set) var decodeDiagnostics = ConversationDecodeDiagnostics()
 
     public let sessionID: String
     private let storage: any ConversationStoreStorage
@@ -265,6 +267,9 @@ public final class ConversationStore {
             connectionError = message
         case .message(let message):
             apply(message)
+        case .degraded(let diagnostics):
+            decodeDiagnostics = decodeDiagnostics + diagnostics
+            LinkTrace.shared.mark("conversation-degraded")
         }
     }
 

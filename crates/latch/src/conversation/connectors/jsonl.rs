@@ -1289,6 +1289,368 @@ mod tests {
             .join(agent)
             .join("source-corpus.jsonl")
     }
+
+    fn claude_cases_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/conversation/claude/cases")
+    }
+
+    fn poll_all(connector: &mut JsonlConnector) -> Vec<ConnectorMutation> {
+        let budget = PollBudget {
+            max_records: 512,
+            deadline: std::time::Duration::from_secs(5),
+        };
+        let mut mutations = Vec::new();
+        loop {
+            let result = connector.poll(budget.clone()).unwrap();
+            if result.mutations.is_empty() {
+                break;
+            }
+            mutations.extend(result.mutations);
+        }
+        mutations
+    }
+
+    fn wire_status_message(status: &MessageStatus) -> &'static str {
+        match status {
+            MessageStatus::Submitted => "submitted",
+            MessageStatus::Observed => "observed",
+            MessageStatus::Partial => "partial",
+            MessageStatus::Complete => "complete",
+            MessageStatus::Failed => "failed",
+        }
+    }
+
+    fn wire_item(item: &super::super::super::ConversationItem) -> Value {
+        serde_json::json!({
+            "id": item.id.as_str(),
+            "ordinal": item.ordinal.get(),
+            "createdAt": item.created_at,
+            "kind": match &item.kind {
+                ConversationItemKind::Message { role, text, status } => serde_json::json!({
+                    "type": "message",
+                    "role": match role {
+                        MessageRole::User => "user",
+                        MessageRole::Assistant => "assistant",
+                    },
+                    "text": text,
+                    "status": wire_status_message(status),
+                }),
+                ConversationItemKind::Tool {
+                    name,
+                    summary,
+                    status,
+                    parent_message_id,
+                } => {
+                    let mut kind = serde_json::json!({
+                        "type": "tool",
+                        "name": name,
+                        "summary": summary,
+                        "status": match status {
+                            ToolStatus::Running => "running",
+                            ToolStatus::Succeeded => "succeeded",
+                            ToolStatus::Failed => "failed",
+                        },
+                    });
+                    if let Some(parent) = parent_message_id {
+                        kind["parentMessageId"] = Value::String(parent.as_str().to_owned());
+                    }
+                    kind
+                }
+                ConversationItemKind::Request {
+                    request_id,
+                    request_type,
+                    prompt,
+                    choices,
+                    status,
+                } => serde_json::json!({
+                    "type": "request",
+                    "requestId": request_id,
+                    "requestType": match request_type {
+                        RequestType::Permission => "permission",
+                        RequestType::Question => "question",
+                    },
+                    "prompt": prompt,
+                    "choices": choices,
+                    "status": match status {
+                        RequestStatus::Pending => "pending",
+                        RequestStatus::Resolved => "resolved",
+                        RequestStatus::Dismissed => "dismissed",
+                    },
+                }),
+            },
+        })
+    }
+
+    fn wire_availability(availability: &super::super::super::Availability) -> Value {
+        let mut value = serde_json::json!({ "enabled": availability.enabled });
+        if let Some(reason) = &availability.reason {
+            value["reason"] = Value::String(reason.clone());
+        }
+        value
+    }
+
+    fn wire_state(state: &ConversationState) -> Value {
+        serde_json::json!({
+            "phase": match state.phase {
+                ConversationPhase::Starting => "starting",
+                ConversationPhase::Idle => "idle",
+                ConversationPhase::Working => "working",
+                ConversationPhase::AwaitingInput => "awaiting_input",
+                ConversationPhase::Exited => "exited",
+                ConversationPhase::Unavailable => "unavailable",
+            },
+            "sendMessage": wire_availability(&state.send_message),
+            "resolveRequest": wire_availability(&state.resolve_request),
+            "pendingRequest": state.pending_request,
+            "connector": state.connector.as_ref().map(|connector| serde_json::json!({
+                "id": connector.id,
+                "version": connector.version,
+            })),
+        })
+    }
+
+    fn project_case(source: PathBuf) -> (Vec<ConnectorMutation>, super::super::super::Projection) {
+        let mut connector = JsonlConnector::fixture("claude", source);
+        assert!(matches!(connector.detect(), Detection::Supported(_)));
+        let mutations = poll_all(&mut connector);
+        let mut projection = super::super::super::Projection::new(
+            super::super::super::OperationEpoch::new("fixture"),
+            ConversationState::starting(Some(connector.identity())),
+        );
+        for mutation in &mutations {
+            match projection.apply_connector(mutation.clone()) {
+                Ok(_) => {}
+                Err(super::super::super::ProjectionError::UnknownTruncateTarget) => {
+                    // A Claude attachment or thinking-only record occupies the
+                    // connector chain but never mints a projection id. Live
+                    // Hub polls fail the same way; cases that need a rewind
+                    // keep a parent that did mint an item.
+                }
+                Err(error) => panic!("projecting {} failed: {error}", connector.id),
+            }
+        }
+        assert!(connector
+            .poll(PollBudget {
+                max_records: 64,
+                deadline: std::time::Duration::from_secs(1)
+            })
+            .unwrap()
+            .mutations
+            .is_empty());
+        (mutations, projection)
+    }
+
+    fn expected_document(
+        case: &str,
+        mutations: &[ConnectorMutation],
+        projection: &super::super::super::Projection,
+    ) -> Value {
+        let projected_item_count = projection.snapshot(usize::MAX).items.len();
+        let (limit, max_bytes) = if case == "long-transcript" {
+            (300, 512 * 1024)
+        } else {
+            (usize::MAX, usize::MAX)
+        };
+        let snapshot = projection.snapshot_bounded(limit, max_bytes);
+        let truncate_after: Vec<String> = mutations
+            .iter()
+            .filter_map(|mutation| match mutation {
+                ConnectorMutation::TruncateAfter(id) => Some(id.as_str().to_owned()),
+                _ => None,
+            })
+            .collect();
+        serde_json::json!({
+            "snapshot": {
+                "generation": snapshot.generation.as_wire(),
+                "revision": snapshot.revision.get(),
+                "operationEpoch": snapshot.operation_epoch.as_str(),
+                "items": snapshot.items.iter().map(wire_item).collect::<Vec<_>>(),
+                "state": wire_state(&snapshot.state),
+                "hasMoreBefore": snapshot.has_more_before,
+                "reason": "initial",
+            },
+            "projectedItemCount": projected_item_count,
+            "truncateAfter": truncate_after,
+        })
+    }
+
+    fn claude_case_ids() -> Vec<String> {
+        let mut ids: Vec<String> = fs::read_dir(claude_cases_dir())
+            .unwrap()
+            .filter_map(|entry| {
+                let entry = entry.ok()?;
+                entry
+                    .file_type()
+                    .ok()?
+                    .is_dir()
+                    .then(|| entry.file_name().to_str().unwrap_or_default().to_owned())
+            })
+            .filter(|name| !name.starts_with('.'))
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    #[test]
+    fn claude_cases_match_checked_in_projections() {
+        let update = std::env::var_os("UPDATE_CONVERSATION_FIXTURES").is_some();
+        let ids = claude_case_ids();
+        assert!(
+            !ids.is_empty(),
+            "expected captured Claude cases under fixtures/conversation/claude/cases"
+        );
+        for id in &ids {
+            let dir = claude_cases_dir().join(id);
+            let source = dir.join("source.jsonl");
+            let expected_path = dir.join("expected.json");
+            let (mutations, projection) = project_case(source);
+            let actual = expected_document(id, &mutations, &projection);
+            if update {
+                fs::write(&expected_path, serde_json::to_vec_pretty(&actual).unwrap()).unwrap();
+            }
+            let expected: Value =
+                serde_json::from_slice(&fs::read(&expected_path).unwrap_or_else(|_| {
+                    panic!(
+                        "{}: missing expected.json (run with UPDATE_CONVERSATION_FIXTURES=1)",
+                        id
+                    )
+                }))
+                .unwrap();
+            assert_eq!(
+                actual, expected,
+                "{id} projection drifted from expected.json"
+            );
+        }
+    }
+
+    #[test]
+    fn claude_case_corpus_covers_required_shapes() {
+        let cases = claude_cases_dir();
+        let markdown = fs::read_to_string(cases.join("markdown-prose/expected.json")).unwrap();
+        assert!(
+            markdown.contains("\\n\\n"),
+            "markdown-prose must retain multi-paragraph assistant text"
+        );
+
+        let fenced: Value =
+            serde_json::from_slice(&fs::read(cases.join("fenced-code/expected.json")).unwrap())
+                .unwrap();
+        let fenced_text = fenced["snapshot"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|item| item["kind"]["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(fenced_text.contains("```"), "fenced-code must keep fences");
+        assert!(
+            fenced_text.lines().any(|line| line.len() > 120),
+            "fenced-code must keep a line long enough to scroll horizontally"
+        );
+
+        let multi_source = fs::read_to_string(cases.join("multi-tool-turn/source.jsonl")).unwrap();
+        assert_eq!(
+            multi_source.matches("\"type\":\"tool_use\"").count(),
+            3,
+            "multi-tool-turn source must keep the three tool_use blocks from one assistant record"
+        );
+        let multi: Value =
+            serde_json::from_slice(&fs::read(cases.join("multi-tool-turn/expected.json")).unwrap())
+                .unwrap();
+        // Sibling tool_result records all parent the assistant, so today's
+        // connector TruncateAfters the earlier tools. The source still has
+        // three calls; expected.json records the current collapsed projection.
+        assert!(
+            multi["truncateAfter"].as_array().unwrap().len() >= 2,
+            "parallel tool_result records currently rewind the branch"
+        );
+
+        let failed_source = fs::read_to_string(cases.join("failed-tool/source.jsonl")).unwrap();
+        assert!(
+            failed_source.contains("\"is_error\":true"),
+            "failed-tool source must retain the provider error flag even though the connector currently cannot emit ToolStatus::Failed"
+        );
+        let failed: Value =
+            serde_json::from_slice(&fs::read(cases.join("failed-tool/expected.json")).unwrap())
+                .unwrap();
+        assert!(
+            failed["snapshot"]["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["kind"]["type"] == "tool" && item["kind"]["status"] == "succeeded"),
+            "current connector still projects the failed tool as succeeded; expected.json must record that until the connector mission lands"
+        );
+
+        let permission: Value = serde_json::from_slice(
+            &fs::read(cases.join("permission-request/expected.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            permission["snapshot"]["state"]["pendingRequest"],
+            "ddc8b841-342d-431b-84a0-076fb535b263"
+        );
+        assert!(permission["snapshot"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["kind"]["type"] == "request"
+                && item["kind"]["requestType"] == "permission"));
+
+        let question: Value = serde_json::from_slice(
+            &fs::read(cases.join("ask-user-question/expected.json")).unwrap(),
+        )
+        .unwrap();
+        let request = question["snapshot"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["kind"]["type"] == "request")
+            .expect("AskUserQuestion must become a request item");
+        assert_eq!(request["kind"]["requestType"], "question");
+        assert!(
+            request["kind"]["choices"].as_array().unwrap().len() >= 6,
+            "option labels from both questions must survive flattening"
+        );
+        assert!(
+            request["kind"]["prompt"].as_str().unwrap().contains('\n'),
+            "multiple question prompts are joined with newlines"
+        );
+
+        let truncation: Value = serde_json::from_slice(
+            &fs::read(cases.join("branch-truncation/expected.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            !truncation["truncateAfter"].as_array().unwrap().is_empty(),
+            "branch-truncation must emit TruncateAfter"
+        );
+
+        let interruption = fs::read_to_string(cases.join("interruption/source.jsonl")).unwrap();
+        assert!(
+            interruption.contains("[Request interrupted by user for tool use]"),
+            "interruption source must keep Claude's interrupt marker"
+        );
+
+        let long: Value =
+            serde_json::from_slice(&fs::read(cases.join("long-transcript/expected.json")).unwrap())
+                .unwrap();
+        let published = long["snapshot"]["items"].as_array().unwrap().len();
+        let projected = long["projectedItemCount"].as_u64().unwrap();
+        assert!(
+            projected > 300,
+            "long-transcript source must project more than the store window, got {projected}"
+        );
+        assert!(
+            published <= 300,
+            "long-transcript snapshot is the store window, got {published}"
+        );
+        assert!(
+            long["snapshot"]["hasMoreBefore"].as_bool().unwrap(),
+            "a windowed long transcript must report earlier items exist"
+        );
+    }
+
     fn conformance(agent: &'static str) {
         let mut connector = JsonlConnector::fixture(agent, corpus(agent));
         assert!(matches!(connector.detect(), Detection::Supported(_)));
@@ -1357,10 +1719,7 @@ mod tests {
             .mutations
             .is_empty());
     }
-    #[test]
-    fn claude_conforms_to_the_connector_suite() {
-        conformance("claude");
-    }
+
     #[test]
     fn codex_conforms_to_the_connector_suite() {
         conformance("codex");

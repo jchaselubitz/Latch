@@ -1,0 +1,12 @@
+{
+  "id": "reconnect-optimistic",
+  "covers": [
+    "reconnect with an optimistic item awaiting canonical observation"
+  ],
+  "baseCase": "markdown-prose",
+  "notes": "Not a Claude source record. Current chat restores a sending operation from cache and re-attaches it as a submitted user row until an observed user item with the same text arrives. The surrounding transcript is the captured markdown-prose snapshot.",
+  "optimistic": {
+    "id": "op-awaiting",
+    "text": "ok paired"
+  }
+}

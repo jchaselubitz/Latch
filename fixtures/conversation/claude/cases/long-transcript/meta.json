@@ -1,0 +1,23 @@
+{
+  "covers": [
+    "long transcript for scroll measurement"
+  ],
+  "capturedFrom": {
+    "agent": "claude-code",
+    "session": "real Claude Code session on the Latch checkout (0e920c11-b282-4c38-a48d-1af826a485c5)",
+    "sourceLines": "full user+assistant chain (1471 records)",
+    "capturedAt": "2026-09-21",
+    "notes": "Parents linearized onto a single branch so scroll measurement is not entangled with rewind. Full user+assistant chain from one real Latch session, compacted. Sized so the projected item count exceeds the ConversationStore published window (300 items / 512 KiB)."
+  },
+  "sanitized": [
+    "absolute paths",
+    "home directories",
+    "temp session directories",
+    "cloud resource ids",
+    "truncated tool payloads"
+  ],
+  "long": true,
+  "id": "long-transcript",
+  "recordCount": 1471,
+  "sourceBytes": 823318
+}

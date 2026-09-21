@@ -1,0 +1,26 @@
+{
+  "covers": [
+    "several tools inside a single turn"
+  ],
+  "capturedFrom": {
+    "agent": "claude-code",
+    "session": "real Claude Code session (ae5465f4-7911-5e49-bbf1-80cc2c781263)",
+    "sourceLines": [
+      3,
+      18,
+      19,
+      23,
+      27
+    ],
+    "capturedAt": "2026-09-21",
+    "notes": "One assistant record emits Read, Read, and Bash together; the following user records are the three tool_result blocks."
+  },
+  "sanitized": [
+    "absolute paths",
+    "usernames in directory listings",
+    "home directories"
+  ],
+  "id": "multi-tool-turn",
+  "recordCount": 5,
+  "sourceBytes": 3494
+}

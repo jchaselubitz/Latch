@@ -3,7 +3,7 @@
   "generator": "Tools/generate-contract.py",
   "generated": {
     "path": "Sources/LatchMobileKit/Generated/LatchContract.swift",
-    "sha256": "ade7e71a9a3794c4d25bbdbb2430f5f83ada1eb302ec4aefcbe14daa10128909"
+    "sha256": "5169d0888dc48584c9cf161885c11870a8c58d71006ebca05bd0bd6cd11f4454"
   },
   "schemas": [
     {

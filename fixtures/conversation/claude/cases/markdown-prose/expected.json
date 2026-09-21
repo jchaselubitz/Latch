@@ -1,0 +1,50 @@
+{
+  "projectedItemCount": 2,
+  "snapshot": {
+    "generation": "generation-1",
+    "hasMoreBefore": false,
+    "items": [
+      {
+        "createdAt": "2026-09-08T07:19:39.533Z",
+        "id": "4478938b-023e-4a4a-8dfe-8c608c61b2ed",
+        "kind": {
+          "role": "user",
+          "status": "observed",
+          "text": "the desktop app says it has successfully paired, but the phone says \"the secure connection closed before the request completed\" is this expected at this stage. or should I debug this before we proceed here?",
+          "type": "message"
+        },
+        "ordinal": 1
+      },
+      {
+        "createdAt": "2026-09-08T07:25:04.502Z",
+        "id": "cebc4a9f-52c5-45bc-a49d-3cab08fd3996",
+        "kind": {
+          "role": "assistant",
+          "status": "complete",
+          "text": "Not expected, and you don't need to re-pair. Here is what happened.\n\n**Cause.** Your Mac approved the phone correctly, but the helper Desktop launches for that link died immediately with `revoked controller`. The phone keeps its identity key across the app reinstall and across your four retries, so the Mac's device store now holds five records with that same key. The first one is the old ICE-era record I revoked during cutover, and the lookup took the first match instead of the active one. So the authority refused a controller you had just approved, Desktop kept restarting the helper (that is the relay admission every ~30 s in the control-plane log), and the phone saw its freshly authenticated link close before its first request.\n\n**Fix.** A key now resolves to its active record, and to the newest revoked one only when none is active; a regression test re-enrolls a revoked key and checks both outcomes. The fix is in the `latch` binary only. A signed, notarized payload with it is building now (version bump, about four minutes); I'll install it, and the existing pairing (the last one, `e8ee3d03…`) should come up on its own since the phone retries with backoff. If the phone shows \"Pairing required\" instead, foreground the app once. I'll tell you when it's installed.",
+          "type": "message"
+        },
+        "ordinal": 2
+      }
+    ],
+    "operationEpoch": "fixture",
+    "reason": "initial",
+    "revision": 3,
+    "state": {
+      "connector": {
+        "id": "claude",
+        "version": "1"
+      },
+      "pendingRequest": null,
+      "phase": "idle",
+      "resolveRequest": {
+        "enabled": false,
+        "reason": "no pending request"
+      },
+      "sendMessage": {
+        "enabled": true
+      }
+    }
+  },
+  "truncateAfter": []
+}
