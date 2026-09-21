@@ -22,6 +22,16 @@
 		ABCDEF0123456789ABCD0041 /* TerminalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD0040 /* TerminalView.swift */; };
 		ABCDEF0123456789ABCD0051 /* FolderPickerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD0050 /* FolderPickerView.swift */; };
 		ABCDEF0123456789ABCD0038 /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = ABCDEF0123456789ABCD0037 /* SwiftTerm */; };
+		ABCDEF0123456789ABCD0072 /* ConversationScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD0071 /* ConversationScreen.swift */; };
+		ABCDEF0123456789ABCD0074 /* ConversationTranscript.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD0073 /* ConversationTranscript.swift */; };
+		ABCDEF0123456789ABCD0076 /* ConversationMessageRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD0075 /* ConversationMessageRow.swift */; };
+		ABCDEF0123456789ABCD0078 /* ConversationMarkdownView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD0077 /* ConversationMarkdownView.swift */; };
+		ABCDEF0123456789ABCD007A /* ConversationActivityDisclosure.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD0079 /* ConversationActivityDisclosure.swift */; };
+		ABCDEF0123456789ABCD007C /* ConversationRequestCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD007B /* ConversationRequestCard.swift */; };
+		ABCDEF0123456789ABCD007E /* ConversationComposer.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD007D /* ConversationComposer.swift */; };
+		ABCDEF0123456789ABCD0080 /* ConversationNotices.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD007F /* ConversationNotices.swift */; };
+		ABCDEF0123456789ABCD0082 /* ConversationToolbar.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD0081 /* ConversationToolbar.swift */; };
+		ABCDEF0123456789ABCD0084 /* ConversationPreviews.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD0083 /* ConversationPreviews.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -40,6 +50,16 @@
 		ABCDEF0123456789ABCD0034 /* SwiftTermSurface.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SwiftTermSurface.swift; sourceTree = "<group>"; };
 		ABCDEF0123456789ABCD0040 /* TerminalView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalView.swift; sourceTree = "<group>"; };
 		ABCDEF0123456789ABCD0050 /* FolderPickerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FolderPickerView.swift; sourceTree = "<group>"; };
+		ABCDEF0123456789ABCD0071 /* ConversationScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationScreen.swift; sourceTree = "<group>"; };
+		ABCDEF0123456789ABCD0073 /* ConversationTranscript.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationTranscript.swift; sourceTree = "<group>"; };
+		ABCDEF0123456789ABCD0075 /* ConversationMessageRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationMessageRow.swift; sourceTree = "<group>"; };
+		ABCDEF0123456789ABCD0077 /* ConversationMarkdownView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationMarkdownView.swift; sourceTree = "<group>"; };
+		ABCDEF0123456789ABCD0079 /* ConversationActivityDisclosure.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationActivityDisclosure.swift; sourceTree = "<group>"; };
+		ABCDEF0123456789ABCD007B /* ConversationRequestCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationRequestCard.swift; sourceTree = "<group>"; };
+		ABCDEF0123456789ABCD007D /* ConversationComposer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationComposer.swift; sourceTree = "<group>"; };
+		ABCDEF0123456789ABCD007F /* ConversationNotices.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationNotices.swift; sourceTree = "<group>"; };
+		ABCDEF0123456789ABCD0081 /* ConversationToolbar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationToolbar.swift; sourceTree = "<group>"; };
+		ABCDEF0123456789ABCD0083 /* ConversationPreviews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationPreviews.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -70,6 +90,7 @@
 				ABCDEF0123456789ABCD0010 /* LatchMobileApp.swift */,
 				ABCDEF0123456789ABCD0011 /* SessionsView.swift */,
 				ABCDEF0123456789ABCD0012 /* ChatView.swift */,
+				ABCDEF0123456789ABCD0070 /* Conversation */,
 				ABCDEF0123456789ABCD0013 /* SettingsView.swift */,
 				ABCDEF0123456789ABCD001E /* PairingView.swift */,
 				ABCDEF0123456789ABCD001F /* QRScannerView.swift */,
@@ -91,6 +112,23 @@
 				ABCDEF0123456789ABCD0003 /* Latch.app */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		ABCDEF0123456789ABCD0070 /* Conversation */ = {
+			isa = PBXGroup;
+			children = (
+				ABCDEF0123456789ABCD0071 /* ConversationScreen.swift */,
+				ABCDEF0123456789ABCD0073 /* ConversationTranscript.swift */,
+				ABCDEF0123456789ABCD0075 /* ConversationMessageRow.swift */,
+				ABCDEF0123456789ABCD0077 /* ConversationMarkdownView.swift */,
+				ABCDEF0123456789ABCD0079 /* ConversationActivityDisclosure.swift */,
+				ABCDEF0123456789ABCD007B /* ConversationRequestCard.swift */,
+				ABCDEF0123456789ABCD007D /* ConversationComposer.swift */,
+				ABCDEF0123456789ABCD007F /* ConversationNotices.swift */,
+				ABCDEF0123456789ABCD0081 /* ConversationToolbar.swift */,
+				ABCDEF0123456789ABCD0083 /* ConversationPreviews.swift */,
+			);
+			path = Conversation;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -179,6 +217,16 @@
 				ABCDEF0123456789ABCD0015 /* LatchMobileApp.swift in Sources */,
 				ABCDEF0123456789ABCD0016 /* SessionsView.swift in Sources */,
 				ABCDEF0123456789ABCD0017 /* ChatView.swift in Sources */,
+				ABCDEF0123456789ABCD0072 /* ConversationScreen.swift in Sources */,
+				ABCDEF0123456789ABCD0074 /* ConversationTranscript.swift in Sources */,
+				ABCDEF0123456789ABCD0076 /* ConversationMessageRow.swift in Sources */,
+				ABCDEF0123456789ABCD0078 /* ConversationMarkdownView.swift in Sources */,
+				ABCDEF0123456789ABCD007A /* ConversationActivityDisclosure.swift in Sources */,
+				ABCDEF0123456789ABCD007C /* ConversationRequestCard.swift in Sources */,
+				ABCDEF0123456789ABCD007E /* ConversationComposer.swift in Sources */,
+				ABCDEF0123456789ABCD0080 /* ConversationNotices.swift in Sources */,
+				ABCDEF0123456789ABCD0082 /* ConversationToolbar.swift in Sources */,
+				ABCDEF0123456789ABCD0084 /* ConversationPreviews.swift in Sources */,
 				ABCDEF0123456789ABCD0018 /* SettingsView.swift in Sources */,
 				ABCDEF0123456789ABCD0032 /* SessionTerminalSurface.swift in Sources */,
 				ABCDEF0123456789ABCD0033 /* TerminalKeyBar.swift in Sources */,

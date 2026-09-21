@@ -286,6 +286,16 @@ final class TerminalLifecycleTests: XCTestCase {
         XCTAssertNotNil(model.terminalSession(for: session))
     }
 
+    /// Leaving a chat and coming back returns the same store, so the draft
+    /// written there is still in the composer.
+    func testAChatDraftSurvivesNavigatingAwayAndBack() async throws {
+        let model = await linkedModel(authenticator: StubDeviceOwnerAuthenticator())
+        let session = try XCTUnwrap(model.sessions.first)
+        model.conversationStore(for: session)?.draft = "check the logs"
+
+        XCTAssertEqual(model.conversationStore(for: session)?.draft, "check the logs")
+    }
+
     /// Unlinking ends the grace window, so a phone relinked to another Mac
     /// starts from a fresh check rather than inheriting one.
     func testTearingDownEveryTerminalEndsTheGraceWindow() async throws {

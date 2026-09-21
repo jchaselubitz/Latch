@@ -4,6 +4,10 @@ import SwiftUI
 /// Hub-owned conversation rendering. The view does not fold transcript records
 /// or decide whether an interaction is allowed; those answers arrive in the
 /// store's pushed state over the one v2 socket.
+///
+/// This file owns the session lifecycle and the terminal fallbacks. What the
+/// conversation looks like lives in `Conversation/`, and how wire items become
+/// turns lives in `ConversationProjection`.
 struct ChatView: View {
     let session: SessionSummary
 
@@ -11,8 +15,14 @@ struct ChatView: View {
     @State private var store: ConversationStore?
     @State private var claimedTerminal: TerminalSession?
     @State private var terminalDrain: Task<Void, Never>?
-    @State private var draft = ""
     @FocusState private var composerFocused: Bool
+
+    /// Nil until the store exists; the toolbar then shows the Hub-derived
+    /// status, including the newest running tool when appropriate.
+    @MainActor
+    private var screenContent: ConversationScreenContent? {
+        store.map(ConversationScreenContent.init(store:))
+    }
 
     var body: some View {
         Group {
@@ -29,6 +39,19 @@ struct ChatView: View {
         }
         .navigationTitle(session.displayName)
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ConversationToolbar(title: session.displayName, statusLine: screenContent?.statusLine)
+            if appModel.surface.terminal {
+                ToolbarItem(placement: .topBarTrailing) {
+                    NavigationLink {
+                        TerminalView(session: session, autoAttach: session.isRunning)
+                    } label: {
+                        Image(systemName: "terminal")
+                    }
+                    .accessibilityLabel("Open terminal")
+                }
+            }
+        }
         .task {
             guard store == nil else { return }
             store = appModel.conversationStore(for: session)
@@ -69,22 +92,12 @@ struct ChatView: View {
                 detail: "This session's connector cannot provide a conversation."
             )
         } else {
-            VStack(spacing: 0) {
-                ConversationList(store: store)
-
-                if let request = store.pendingRequest {
-                    RequestControls(request: request, store: store)
-                }
-
-                if !store.operations.isEmpty {
-                    OperationNotices(store: store)
-                }
-
-                Composer(store: store, draft: $draft, focused: $composerFocused)
-            }
-            .safeAreaInset(edge: .top, spacing: 0) {
-                ConnectionStatus(store: store)
-            }
+            ConversationScreen(
+                content: screenContent ?? ConversationScreenContent(store: store),
+                actions: ConversationScreenActions(store: store),
+                draft: Binding(get: { store.draft }, set: { store.draft = $0 }),
+                composerFocused: $composerFocused
+            )
         }
     }
 
@@ -115,237 +128,5 @@ struct ChatView: View {
                 description: Text(detail + " Use `latch attach` on the Mac for this session.")
             )
         }
-    }
-}
-
-private struct ConversationList: View {
-    let store: ConversationStore
-
-    var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 10) {
-                    if store.hasEarlierRendered || store.hasMoreBefore {
-                        Button(store.hasEarlierRendered ? "Show earlier messages" : "Load earlier messages") { store.loadOlder() }
-                            .buttonStyle(.bordered)
-                            .frame(maxWidth: .infinity)
-                    } else if store.isHistoryLimitReached {
-                        Text("History limit reached on this device")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity)
-                    }
-                    ForEach(store.items) { item in
-                        // Equatable rows let a tail update re-render only the
-                        // row whose item changed, not every settled row.
-                        ConversationRow(item: item)
-                            .equatable()
-                            .id(item.id)
-                    }
-                    if store.hasNewerRendered {
-                        Button("Show newer messages") { store.showNewer() }
-                            .buttonStyle(.bordered)
-                            .frame(maxWidth: .infinity)
-                    }
-                }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 12)
-            }
-            .onChange(of: store.prependAnchor) { _, anchor in
-                // Restoring the old first row after a history prepend keeps the
-                // reader's viewport stable instead of jumping toward the past.
-                guard let anchor else { return }
-                proxy.scrollTo(anchor, anchor: .top)
-            }
-            .onChange(of: store.items.last?.id) { _, id in
-                guard let id, !store.hasNewerRendered else { return }
-                withAnimation(.easeOut(duration: 0.18)) {
-                    proxy.scrollTo(id, anchor: .bottom)
-                }
-            }
-        }
-    }
-}
-
-private struct ConversationRow: View, Equatable {
-    let item: ConversationItem
-
-    var body: some View {
-        switch item.kind {
-        case .message(let role, let text, _):
-            HStack {
-                if role == "user" { Spacer(minLength: 38) }
-                Text(text)
-                    .textSelection(.enabled)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 9)
-                    .background(
-                        role == "user" ? AnyShapeStyle(Color.accentColor.opacity(0.16)) : AnyShapeStyle(.quaternary),
-                        in: RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    )
-                if role != "user" { Spacer(minLength: 38) }
-            }
-        case .tool(let name, let summary, let status, _):
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Image(systemName: status == "succeeded" ? "checkmark.circle" : "circle.dashed")
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(name).font(.caption.weight(.medium))
-                    if !summary.isEmpty { Text(summary).font(.caption2).foregroundStyle(.secondary).lineLimit(2) }
-                }
-                Spacer(minLength: 0)
-            }
-            .foregroundStyle(.secondary)
-        case .request(_, let type, let prompt, _, let status):
-            VStack(alignment: .leading, spacing: 4) {
-                Label(type == "permission" ? "Permission requested" : "Question", systemImage: type == "permission" ? "lock.shield" : "questionmark.bubble")
-                    .font(.caption.weight(.medium))
-                Text(prompt).font(.callout)
-                if status != "pending" {
-                    Text(status.replacingOccurrences(of: "_", with: " "))
-                        .font(.caption2).foregroundStyle(.secondary)
-                }
-            }
-            .padding(12)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(.yellow.opacity(0.12), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        case .unrecognized:
-            // Shown, not hidden: a gap in the transcript would be worse than
-            // an honest placeholder for content a newer Mac sent.
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Image(systemName: "questionmark.square.dashed")
-                Text("This item needs a newer version of Latch to display.")
-                Spacer(minLength: 0)
-            }
-            .font(.caption)
-            .foregroundStyle(.secondary)
-        }
-    }
-}
-
-private struct RequestControls: View {
-    let request: ConversationItem
-    let store: ConversationStore
-
-    var body: some View {
-        Group {
-            if case .request(let requestID, _, let prompt, let choices, _) = request.kind {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(prompt).font(.footnote).lineLimit(3)
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 8) {
-                            ForEach(choices.isEmpty ? ["yes", "no"] : choices, id: \.self) { choice in
-                                Button(choice) { store.resolve(requestID: requestID, choice: choice) }
-                                    .buttonStyle(.borderedProminent)
-                                    .controlSize(.small)
-                                    .disabled(!store.canResolve)
-                            }
-                        }
-                    }
-                    if let reason = store.resolveReason, !store.canResolve {
-                        Text(reason).font(.caption2).foregroundStyle(.secondary)
-                    }
-                }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(.thinMaterial)
-            }
-        }
-    }
-}
-
-private struct OperationNotices: View {
-    let store: ConversationStore
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            ForEach(store.operations) { operation in
-                if operation.status != .sending {
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Image(systemName: operation.status == .ambiguous ? "questionmark.diamond" : "exclamationmark.triangle")
-                        Text(operation.reason ?? "Message needs review.")
-                        Spacer(minLength: 0)
-                        Button("Retry") { store.retry(operation.id) }
-                            .buttonStyle(.bordered)
-                    }
-                    .font(.caption)
-                }
-            }
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
-        .background(.thinMaterial)
-    }
-}
-
-private struct Composer: View {
-    let store: ConversationStore
-    @Binding var draft: String
-    @FocusState.Binding var focused: Bool
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            if let reason = store.sendReason, !store.canSend {
-                Text(reason).font(.caption2).foregroundStyle(.secondary).padding(.horizontal, 4)
-            }
-            HStack(spacing: 8) {
-                TextField("Message", text: $draft, axis: .vertical)
-                    .lineLimit(1...5)
-                    .textFieldStyle(.plain)
-                    .focused($focused)
-                    .disabled(!store.canSend)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(.quaternary, in: Capsule())
-                Button {
-                    let text = draft
-                    draft = ""
-                    store.send(text: text)
-                } label: {
-                    Image(systemName: "arrow.up.circle.fill").font(.title2)
-                }
-                .disabled(!store.canSend || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            }
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(.bar)
-    }
-}
-
-private struct ConnectionStatus: View {
-    let store: ConversationStore
-
-    var body: some View {
-        if let error = store.connectionError {
-            HStack(spacing: 6) {
-                Image(systemName: "antenna.radiowaves.left.and.right")
-                Text(error).lineLimit(2)
-                Spacer(minLength: 0)
-            }
-            .font(.caption2)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 6)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(.thinMaterial)
-        } else if skipped > 0 {
-            // Placeholder rows already show unrecognized items in place;
-            // content that could not be placed at all is only visible here.
-            HStack(spacing: 6) {
-                Image(systemName: "arrow.down.app.dashed")
-                Text("Some updates need a newer version of Latch (\(skipped) skipped).").lineLimit(2)
-                Spacer(minLength: 0)
-            }
-            .font(.caption2)
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 6)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(.thinMaterial)
-        }
-    }
-
-    private var skipped: Int {
-        store.decodeDiagnostics.droppedItems + store.decodeDiagnostics.undecodableFrames
     }
 }

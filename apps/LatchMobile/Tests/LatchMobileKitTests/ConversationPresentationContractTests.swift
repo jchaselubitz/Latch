@@ -56,16 +56,53 @@ final class ConversationPresentationContractTests: XCTestCase {
         return results
     }
 
-    private static func presentationReferences() throws -> [Reference] {
-        let files = try FileManager.default.contentsOfDirectory(
-            at: app.appendingPathComponent("App/LatchMobile"),
-            includingPropertiesForKeys: [.isRegularFileKey],
-            options: [.skipsHiddenFiles]
-        )
-        .filter { $0.pathExtension == "swift" }
+    func testPresentationPhaseComparisonsAreDeclaredByTheCanonicalSchema() throws {
+        let phases = try ConversationSchema.phases()
+        var compared: [String] = []
+        for file in try Self.presentationFiles() {
+            let source = try String(contentsOf: file, encoding: .utf8)
+            for match in Self.matches(#"\bphase\s*(?:==|!=)\s*\"([^\"]+)\""#, in: source) {
+                guard let value = Self.capture(1, from: match, in: source) else { continue }
+                compared.append(value)
+                XCTAssertTrue(phases.contains(value), "\(file.lastPathComponent): phase == \(value) is not in conversation-state.schema.json")
+            }
+        }
+        XCTAssertFalse(compared.isEmpty, "expected the view state to compare phases")
+    }
 
-        var results: [Reference] = []
+    /// The presentation layer groups by ids, ordinals and state. It must not
+    /// branch on which agent is behind a session, so no provider name may
+    /// appear anywhere in it — not even in a comment.
+    func testPresentationNamesNoProvider() throws {
+        let files = try Self.presentationFiles()
+        XCTAssertTrue(files.contains { $0.lastPathComponent == "ConversationProjection.swift" })
         for file in files {
+            let source = try String(contentsOf: file, encoding: .utf8).lowercased()
+            for provider in ["claude", "codex"] {
+                XCTAssertFalse(source.contains(provider), "\(file.lastPathComponent) names \(provider)")
+            }
+        }
+    }
+
+    /// The chat screen, its components, and the pure presentation layer.
+    private static func presentationFiles() throws -> [URL] {
+        let roots = [
+            app.appendingPathComponent("App/LatchMobile/Conversation"),
+            app.appendingPathComponent("Sources/LatchMobileKit/ConversationPresentation"),
+        ]
+        var files = [app.appendingPathComponent("App/LatchMobile/ChatView.swift")]
+        for root in roots {
+            let enumerator = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])
+            while let file = enumerator?.nextObject() as? URL {
+                if file.pathExtension == "swift" { files.append(file) }
+            }
+        }
+        return files
+    }
+
+    private static func presentationReferences() throws -> [Reference] {
+        var results: [Reference] = []
+        for file in try presentationFiles() {
             let source = try String(contentsOf: file, encoding: .utf8)
             results += references(in: source, sourceName: file.lastPathComponent)
         }

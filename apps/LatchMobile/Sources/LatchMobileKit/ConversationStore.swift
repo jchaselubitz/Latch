@@ -37,6 +37,53 @@ public struct ConversationOperation: Codable, Equatable, Identifiable, Sendable 
         self.reason = reason
         self.itemId = itemId
     }
+
+    /// The transcript row shown for this operation until the host's own item
+    /// replaces it.
+    public var optimisticItemID: String { "operation:\(id)" }
+}
+
+public enum ConversationResolveStatus: Equatable, Sendable {
+    /// Sent; the host has not answered yet.
+    case sending
+    /// The host applied the answer. The request settles when the transcript
+    /// says so.
+    case accepted
+    /// The host declined to apply the answer, for the reason it gave.
+    case refused
+    /// It is unknown whether the host applied the answer.
+    case ambiguous
+    /// The answer never left the phone.
+    case notSent
+}
+
+/// One explicit answer to one request. Like a send, each answer is its own
+/// operation: answering again after a refusal is a new attempt, never a
+/// replay of the old one.
+public struct ConversationResolveAttempt: Equatable, Identifiable, Sendable {
+    /// The operation id sent with the answer.
+    public let id: String
+    public let requestId: String
+    public let choice: String
+    public var status: ConversationResolveStatus
+    public var reason: String?
+
+    public init(
+        id: String,
+        requestId: String,
+        choice: String,
+        status: ConversationResolveStatus = .sending,
+        reason: String? = nil
+    ) {
+        self.id = id
+        self.requestId = requestId
+        self.choice = choice
+        self.status = status
+        self.reason = reason
+    }
+
+    /// An answer on its way or already applied is not offered again.
+    public var isInFlight: Bool { status == .sending || status == .accepted }
 }
 
 public protocol ConversationStoreStorage {
@@ -293,6 +340,15 @@ public final class ConversationStore {
     public private(set) var prependAnchor: String?
     /// Cumulative for this store's lifetime; content-free by construction.
     public private(set) var decodeDiagnostics = ConversationDecodeDiagnostics()
+    /// The message being written. It lives with the store, which AppModel
+    /// keeps for the whole link, so it survives leaving the chat and every
+    /// reconnect. It is deliberately not written to disk.
+    public var draft = ""
+    /// The latest answer this phone gave to each request, oldest first. Kept
+    /// in memory only: the Hub's state remains the authority on what is
+    /// pending, and these only explain what happened to an answer.
+    public private(set) var resolveAttempts: [ConversationResolveAttempt] = []
+    private static let maximumResolveAttempts = 20
 
     public let sessionID: String
     private let storage: any ConversationStoreStorage
@@ -413,26 +469,102 @@ public final class ConversationStore {
 
     /// An explicit retry is always a new operation. In particular, ambiguous
     /// operations may already have reached the kernel and must never be replayed.
+    /// The settled record it replaces is dismissed, so one explicit choice
+    /// cannot be offered, and taken, twice.
     public func retry(_ operationID: String) {
-        guard let operation = operations.first(where: { $0.id == operationID }) else { return }
+        guard let operation = operations.first(where: { $0.id == operationID }),
+              operation.status != .sending,
+              canSend
+        else { return }
+        dismissOperation(operationID)
         send(text: operation.text)
     }
 
+    /// Forgets a settled operation the person has reviewed, along with its
+    /// transcript row. One still sending stays: its outcome is still coming.
+    public func dismissOperation(_ operationID: String) {
+        guard let index = operations.firstIndex(where: { $0.id == operationID }),
+              operations[index].status != .sending
+        else { return }
+        let operation = operations.remove(at: index)
+        removeItems([operation.optimisticItemID])
+        publishImmediately()
+        persistNow()
+    }
+
+    /// Returns a settled operation's exact text to the composer for editing,
+    /// after anything already typed, and dismisses the operation. Nothing is
+    /// sent until the person sends it.
+    public func editOperation(_ operationID: String) {
+        guard let operation = operations.first(where: { $0.id == operationID }),
+              operation.status != .sending
+        else { return }
+        draft = draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? operation.text
+            : draft + "\n\n" + operation.text
+        dismissOperation(operationID)
+    }
+
+    public func resolveAttempt(for requestID: String) -> ConversationResolveAttempt? {
+        resolveAttempts.last { $0.requestId == requestID }
+    }
+
+    /// Answers the exact request the host names as pending. Each answer is a
+    /// new operation. A request whose answer is in flight or already accepted
+    /// is not answered again; after a refusal or an uncertain outcome only
+    /// another explicit choice answers it.
     public func resolve(requestID: String, choice: String) {
-        guard canResolve, let operationEpoch else { return }
-        let operationID = UUID().uuidString
+        guard canResolve,
+              let operationEpoch,
+              state?.pendingRequest == requestID,
+              resolveAttempt(for: requestID)?.isInFlight != true
+        else { return }
+        let attempt = ConversationResolveAttempt(id: UUID().uuidString, requestId: requestID, choice: choice)
+        resolveAttempts.removeAll { $0.requestId == requestID }
+        resolveAttempts.append(attempt)
+        if resolveAttempts.count > Self.maximumResolveAttempts {
+            resolveAttempts.removeFirst(resolveAttempts.count - Self.maximumResolveAttempts)
+        }
+        let socket = socket
         Task {
+            guard let socket else {
+                sendFailed(attempt.id, status: .notSent, reason: "The conversation is not connected.")
+                return
+            }
             do {
-                try await socket?.send(.resolveRequest(
+                try await socket.send(.resolveRequest(
                     operationEpoch: operationEpoch,
-                    operationId: operationID,
+                    operationId: attempt.id,
                     requestId: requestID,
                     choice: choice
                 ))
+            } catch let error as ConversationSocketError where error == .notConnected {
+                sendFailed(attempt.id, status: .notSent, reason: "The conversation is not connected.")
             } catch {
-                connectionError = error.localizedDescription
+                // A failed write may still have left the phone.
+                sendFailed(attempt.id, status: .ambiguous, reason: error.localizedDescription)
             }
         }
+    }
+
+    /// A local send failure never overrides an outcome the host already gave.
+    private func sendFailed(_ operationID: String, status: ConversationResolveStatus, reason: String) {
+        guard resolveAttempts.first(where: { $0.id == operationID })?.status == .sending else { return }
+        updateResolveAttempt(operationID, status: status, reason: reason)
+    }
+
+    private func updateResolveAttempt(_ operationID: String, status: ConversationResolveStatus, reason: String?) {
+        guard let index = resolveAttempts.firstIndex(where: { $0.id == operationID }) else { return }
+        resolveAttempts[index].status = status
+        resolveAttempts[index].reason = reason
+    }
+
+    /// An accepted answer to a request the host no longer names as pending
+    /// has done its job; the transcript row now says how it settled. Refused
+    /// and uncertain answers stay so the settled row can still explain them.
+    private func pruneSettledResolveAttempts() {
+        let pending = state?.pendingRequest
+        resolveAttempts.removeAll { $0.status == .accepted && $0.requestId != pending }
     }
 
     public func loadOlder(limit: Int = 100) {
@@ -505,6 +637,7 @@ public final class ConversationStore {
             _ = transcript.evict(maximumItems: maximumItems, maximumBytes: maximumBytes)
             renderedEnd = transcript.count
             state = snapshot.state
+            pruneSettledResolveAttempts()
             serverHasMoreBefore = snapshot.hasMoreBefore
             if epochChanged || snapshot.reason == "operation_epoch" {
                 markSendingOperationsForManualReview(reason: "The gateway operation record changed; review before retrying.")
@@ -543,12 +676,14 @@ public final class ConversationStore {
                 // item mutations we have not applied; ask the Hub to replay or
                 // snapshot from our last contiguous revision.
                 state = changedState
+                pruneSettledResolveAttempts()
                 requestResync()
                 schedulePersist()
                 schedulePublish()
                 return
             }
             state = changedState
+            pruneSettledResolveAttempts()
             if messageRevision > revision {
                 revision = messageRevision
                 resyncRequestedAtRevision = nil
@@ -647,6 +782,10 @@ public final class ConversationStore {
     }
 
     private func applyOperationResult(operationID: String, status: String, itemID: String?, reason: String?) {
+        if resolveAttempts.contains(where: { $0.id == operationID }) {
+            applyResolveResult(operationID: operationID, status: status, reason: reason)
+            return
+        }
         guard let index = operations.firstIndex(where: { $0.id == operationID }) else { return }
         switch status {
         case "accepted":
@@ -661,6 +800,9 @@ public final class ConversationStore {
         case "refused":
             operations[index].status = .refused
             operations[index].reason = reason ?? "The host refused this message."
+            // A refused message never reached the conversation, so it must
+            // not stay drawn as though it had; the operation keeps its text.
+            removeItems([operations[index].optimisticItemID])
         case "ambiguous":
             operations[index].status = .ambiguous
             operations[index].reason = reason ?? "It is unknown whether the host received this message."
@@ -675,6 +817,22 @@ public final class ConversationStore {
         }
         publishImmediately()
         persistNow()
+    }
+
+    /// A refusal to apply an answer is an expected outcome: the request moved
+    /// on, or the choice is no longer on screen. It is recorded, not raised.
+    private func applyResolveResult(operationID: String, status: String, reason: String?) {
+        switch status {
+        case "accepted":
+            updateResolveAttempt(operationID, status: .accepted, reason: nil)
+            pruneSettledResolveAttempts()
+        case "refused":
+            updateResolveAttempt(operationID, status: .refused, reason: reason ?? "The host did not apply this answer.")
+        case "ambiguous":
+            updateResolveAttempt(operationID, status: .ambiguous, reason: reason ?? "It is unknown whether the host applied this answer.")
+        default:
+            updateResolveAttempt(operationID, status: .ambiguous, reason: reason ?? "The host has no record of this answer.")
+        }
     }
 
     /// Returns whether any operation completed, so the caller records it now.
@@ -730,6 +888,11 @@ public final class ConversationStore {
         // Ambiguous outcomes are reconciled from the receipt, never redispatched.
         for operation in operations where operation.status == .ambiguous {
             Task { try? await socket?.send(.operationStatus(operationId: operation.id)) }
+        }
+        // An answer whose outcome was lost with the connection is asked
+        // about, never sent again.
+        for attempt in resolveAttempts where attempt.status == .sending || attempt.status == .ambiguous {
+            Task { try? await socket?.send(.operationStatus(operationId: attempt.id)) }
         }
         for index in operations.indices where operations[index].status == .sending {
             guard now.timeIntervalSince(operations[index].createdAt) <= retentionSeconds else {

@@ -74,10 +74,15 @@ were sanitized before check-in.
   loads the same `expected.json` snapshots into `ConversationStore`, so decode,
   publish order, pending-request selection, reconnect optimism, refused vs
   ambiguous operations, and the published window fail a mobile test when they
-  regress. ChatView renders every `ConversationItemKind` the store publishes;
-  the test switch is exhaustive on that enum.
+  regress. `ConversationProjection` presents every `ConversationItemKind` the
+  store publishes; the test switch is exhaustive on that enum.
+- Swift presentation: `ConversationProjectionTests` projects every case into
+  turns and activity groups (each item exactly once, tool runs collapsed,
+  one pending request); `ConversationMarkdownTests` renders every captured
+  assistant message and asserts no word is lost, HTML stays literal, image
+  URLs are dropped, and only web and mail links survive.
 
 ```bash
 cargo test --package latch --lib conversation::connectors::jsonl
-swift test --package-path apps/LatchMobile --filter ConversationFixtureTests
+swift test --package-path apps/LatchMobile --filter 'ConversationFixtureTests|ConversationProjectionTests|ConversationMarkdownTests'
 ```

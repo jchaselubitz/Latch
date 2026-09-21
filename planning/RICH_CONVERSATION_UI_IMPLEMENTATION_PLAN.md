@@ -407,6 +407,27 @@ rich item.
    fenced code, lists, and links. A third-party dependency only if the fixture
    suite shows the native path cannot preserve required structure or
    accessibility.
+
+   **Phase 0 Markdown decision (coo:1034.58an):** native, no dependency. The
+   captured corpus uses paragraphs, `##` headings, bullet and numbered lists,
+   GitHub tables, fenced code with long command lines, inline code, bold, and
+   bare URLs, and contains no raw HTML or images. Attributed Markdown alone
+   flattens block structure in `Text`, so `ConversationMarkdown` (in
+   `LatchMobileKit/ConversationPresentation`) splits blocks natively and hands
+   only the prose inside each block to Foundation's inline-only parser. Code is
+   never passed through the inline parser. Foundation keeps raw HTML as literal
+   text; the seam strips image URLs and every link scheme other than `http`,
+   `https`, and `mailto`. `ConversationMarkdownTests` renders every captured
+   assistant message and asserts that each word of the source reaches a
+   rendered, selectable string.
+
+   **Phase 0 presentation layout (coo:1034.58an):** the pure types and the
+   projection live in `LatchMobileKit/ConversationPresentation/` so `swift
+   test` covers them without a simulator; the SwiftUI components live in
+   `App/LatchMobile/Conversation/` and take presentation values and closures
+   rather than the store, which is what makes the per-state previews possible.
+   `ConversationPresentationContractTests` fails if either directory or
+   `ChatView.swift` names a provider.
 6. Add view-state previews or a small app-target test harness for loading,
    empty, ready, working, awaiting-input, interrupted, disconnected, and failed
    states.
@@ -536,6 +557,23 @@ them worse.
 7. Replace the ordinary composer with the pending request controls. Remove the
    duplicate prompt text currently displayed in both the transcript and bottom
    controls, while retaining the historical request row after it settles.
+
+   **Phase 1 request decision (coo:1034.r88b):** While a request is pending,
+   its row in the transcript is only a marker ("Answer below"); the prompt
+   and choices appear once, in the controls that replace the composer. The
+   controls offer exactly the host's `choices`. The old client-side yes/no
+   fallback is gone: a request without choices says it cannot be answered
+   from the phone. The store now tracks each answer as its own operation
+   (`ConversationResolveAttempt`). Before this change a resolve's
+   `operation_result` was dropped, so a refusal never reached the screen. An
+   answer is sent only for the `requestId` that state names as pending, and
+   not while another answer to it is in flight or accepted. A refused,
+   ambiguous or unsent answer stays on the card with the host's reason, and
+   answering again takes a new tap, which creates a new operation. Refusals
+   stay attached to the request after it settles, so the historical row still
+   explains them. Accepted answers are pruned once the request is no longer
+   pending. On reconnect, answers whose outcome is unknown are queried with
+   `operation_status` and never resent.
 8. Add a Chat → Terminal toolbar action whenever the terminal endpoint and grant
    make it available. Keep Terminal → Chat as the reverse action.
 9. Replace unconditional tail scrolling with a tested policy:
@@ -543,11 +581,38 @@ them worse.
    - release follow when the user scrolls upward;
    - keep prepend anchoring for history pages; and
    - show Jump to latest while follow is released.
+
+   **Scroll decision (coo:1034.s55m):** The transcript measures its bottom in
+   its own scroll coordinate space and reports the distance to the viewport
+   bottom to `ConversationTailFollowState`. A touch drag can release following
+   after 64 points; content growth and programmatic scrolling cannot. The
+   floating Jump to latest control restores following, and Reduce Motion
+   removes the auto-scroll animation. The existing first-row anchor remains
+   the history-prepend restoration point.
 10. Persist drafts per session in memory first. Preserve them across navigation
     and reconnect; disk persistence can follow only if product use demonstrates
     a need across app termination.
+
+    **Draft decision (coo:1034.r88b):** The draft is a property of the
+    session's `ConversationStore`. AppModel keeps that store until the phone
+    unlinks, so the draft survives leaving the chat and every reconnect, and
+    it is never written to disk. The composer field stays editable in every
+    state. Sending is also disabled while the socket is reconnecting, even
+    when the last pushed state allowed it, and the transport's reason is
+    shown. A pending request or running tool is described as an agent state,
+    not as an error.
 11. Give ambiguous and refused operations distinct rows. Retrying always creates
     a new operation using the existing store rule.
+
+    **Operation decision (coo:1034.r88b):** A refused send is removed from
+    the transcript because it never reached the conversation. Its row offers
+    Edit, which returns the exact text to the draft after anything already
+    typed, plus Send again and Dismiss. An ambiguous send keeps its bubble,
+    captioned "Delivery unknown". Its row offers "Send as new message" and
+    Dismiss, and no Edit, because the text may already have arrived. Manual
+    review offers all three. Every action that sends creates a new operation
+    and dismisses the settled record it replaces. Nothing retries while an
+    operation is still sending, or while the host cannot accept a send.
 
 ### Tests
 

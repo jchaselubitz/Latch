@@ -7,8 +7,9 @@ import XCTest
 /// Connector projection is checked in Rust against each case's `expected.json`.
 /// These tests load that same wire snapshot into `ConversationStore` so a
 /// regression in decode, publish, pending-request selection, or the 300-item
-/// window fails here. ChatView's row switch is exhaustive on `ConversationItemKind`;
-/// this suite fails to compile if a new kind is added without a presentable arm.
+/// window fails here. `ConversationProjection`'s switch is exhaustive on
+/// `ConversationItemKind`; this suite fails to compile if a new kind is added
+/// without a presentable arm.
 @MainActor
 final class ConversationFixtureTests: XCTestCase {
     private final class MemoryStorage: ConversationStoreStorage, @unchecked Sendable {
@@ -227,7 +228,9 @@ final class ConversationFixtureTests: XCTestCase {
         XCTAssertEqual(cached.operations.map(\.status), [.refused, .ambiguous])
         XCTAssertEqual(cached.operations.map(\.text), fixture.operations.map(\.text))
         XCTAssertEqual(cached.operations.map(\.reason), fixture.operations.map(\.reason))
-        XCTAssertTrue(cached.items.contains { $0.id == "operation:op-refused" })
+        // A refused message never reached the conversation, so only its
+        // operation keeps the text; an ambiguous one may have, so its row stays.
+        XCTAssertFalse(cached.items.contains { $0.id == "operation:op-refused" })
         XCTAssertTrue(cached.items.contains { $0.id == "operation:op-ambiguous" })
     }
 
