@@ -293,6 +293,33 @@ final class ConversationStoreTests: XCTestCase {
         XCTAssertEqual(try storage.load(sessionID: "ses/file")?.revision, 3)
     }
 
+    #if os(iOS)
+    func testFileStorageProtectsDirectoryAndFilesAndExcludesThemFromBackup() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let storage = FileConversationStoreStorage(directory: directory)
+        let cache = ConversationStoreCache(generation: "g", revision: 1, operationEpoch: "e", items: [])
+        try storage.save(cache, sessionID: "protected/session")
+        _ = try storage.append(
+            ConversationJournalEntry(
+                sequence: 1, generation: "g", revision: 1, operationEpoch: "e", state: nil,
+                hasMoreBefore: false, operations: [], upserts: [], removedIDs: []
+            ),
+            sessionID: "protected/session"
+        )
+
+        for url in [
+            directory,
+            directory.appendingPathComponent("protected_session.json"),
+            directory.appendingPathComponent("protected_session.journal")
+        ] {
+            let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+            XCTAssertEqual(attributes[.protectionKey] as? FileProtectionType, .completeUntilFirstUserAuthentication)
+            XCTAssertEqual(try url.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup, true)
+        }
+    }
+    #endif
+
     func testFileStorageIgnoresEntriesAlreadyCoveredByACompactedBase() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: directory) }

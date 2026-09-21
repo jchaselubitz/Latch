@@ -323,8 +323,12 @@ Desktop consumes the same Hub contract as mobile; it does not read
 - Conversation data remains inside the end-to-end encrypted paired path. The
   control plane and relay receive no transcript, tool output, path, or prompt
   plaintext.
-- The on-device conversation cache is protected at rest and excluded from
-  device backup. Rich items put tool output, file paths, and patch text into
+- The on-device conversation cache uses iOS
+  `FileProtectionType.completeUntilFirstUserAuthentication` and is excluded
+  from device backup. This is the strictest class compatible with cache writes
+  during background reconnect after the device has locked: `.complete` would
+  reject them, while `.completeUnlessOpen` does not cover a journal opened
+  after locking. Rich items put tool output, file paths, and patch text into
   that cache, so it is treated as sensitive local data rather than incidental
   state.
 - Tool input, tool output, patches, paths, and uploads are bounded and

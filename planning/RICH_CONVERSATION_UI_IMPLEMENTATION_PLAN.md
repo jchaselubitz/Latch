@@ -521,8 +521,15 @@ them worse.
      streaming. These figures stop at the published `items` array; SwiftUI
      layout and paint of the changed row are not included and still need
      the on-device measurement in the Measurements section.
-5. Set `FileProtectionType.complete` (or the strictest class compatible with
-   background resume) on the conversation cache and exclude it from backup.
+5. **Phase 1 cache-at-rest decision (coo:1033.d54x):** Every iOS conversation
+   cache directory, base snapshot, and journal file is set to
+   `FileProtectionType.completeUntilFirstUserAuthentication` and excluded from
+   device backup. This is the strictest class compatible with background
+   reconnect: `.complete` would make a cache write fail while the device is
+   locked, and `.completeUnlessOpen` does not protect a journal opened after
+   locking. Protection is applied after each atomic snapshot write and before
+   every journal append, rather than relying on directory inheritance, so
+   files created later receive it too.
 6. Derive a live status line from `ConversationState.phase` and the newest
    running tool. Do not call an idle network request "thinking," and do not call
    a quiet turn "complete."
