@@ -174,7 +174,7 @@ private struct ConversationRow: View {
             }
         case .tool(let name, let summary, let status, _):
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Image(systemName: status == "complete" ? "checkmark.circle" : "circle.dashed")
+                Image(systemName: status == "succeeded" ? "checkmark.circle" : "circle.dashed")
                 VStack(alignment: .leading, spacing: 2) {
                     Text(name).font(.caption.weight(.medium))
                     if !summary.isEmpty { Text(summary).font(.caption2).foregroundStyle(.secondary).lineLimit(2) }
