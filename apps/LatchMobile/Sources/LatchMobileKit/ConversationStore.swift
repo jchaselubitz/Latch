@@ -106,7 +106,13 @@ public final class FileConversationStoreStorage: ConversationStoreStorage, @unch
 @MainActor
 @Observable
 public final class ConversationStore {
+    /// Rows currently offered to the view. The complete local history is in
+    /// `retainedItems`; moving this window never evicts that history.
     public private(set) var items: [ConversationItem]
+    public var retainedItems: [ConversationItem] { workingItems }
+    public var hasEarlierRendered: Bool { renderedEnd > items.count }
+    public var hasNewerRendered: Bool { renderedEnd < workingItems.count }
+    public var isHistoryLimitReached: Bool { serverHasMoreBefore && !hasMoreBefore }
     public private(set) var state: ConversationState?
     public private(set) var generation: String?
     public private(set) var revision: UInt64
@@ -123,10 +129,13 @@ public final class ConversationStore {
     private let storage: any ConversationStoreStorage
     private let maximumItems: Int
     private let maximumBytes: Int
+    private let maximumRenderedItems = 300
     private var gateway: LatchGateway
     private var retentionSeconds: TimeInterval
     private var socket: ConversationSocket?
     private var workingItems: [ConversationItem]
+    private var renderedEnd: Int
+    private var serverHasMoreBefore: Bool
     private var publishTask: Task<Void, Never>?
     private var isStarted = false
     private var resyncRequestedAtRevision: UInt64?
@@ -136,8 +145,8 @@ public final class ConversationStore {
         gateway: LatchGateway,
         operationRetentionSeconds: Int,
         storage: any ConversationStoreStorage = FileConversationStoreStorage(),
-        maximumItems: Int = 300,
-        maximumBytes: Int = 512 * 1024
+        maximumItems: Int = 10_000,
+        maximumBytes: Int = 32 * 1024 * 1024
     ) {
         self.sessionID = sessionID
         self.gateway = gateway
@@ -151,10 +160,13 @@ public final class ConversationStore {
         operationEpoch = cached.operationEpoch
         let restoredItems = Self.bounded(cached.items, maximumItems: maximumItems, maximumBytes: maximumBytes)
         workingItems = restoredItems
-        items = restoredItems
+        renderedEnd = restoredItems.count
+        items = Array(restoredItems.suffix(maximumRenderedItems))
         state = cached.state
-        hasMoreBefore = cached.hasMoreBefore
+        serverHasMoreBefore = cached.hasMoreBefore
+        hasMoreBefore = cached.hasMoreBefore && restoredItems.count < maximumItems
         operations = cached.operations
+        publishRenderedItems()
     }
 
     public var canSend: Bool { state?.sendMessage.enabled == true && operationEpoch != nil }
@@ -163,7 +175,7 @@ public final class ConversationStore {
     public var resolveReason: String? { state?.resolveRequest.reason }
     public var pendingRequest: ConversationItem? {
         guard let requestID = state?.pendingRequest else { return nil }
-        return items.first { item in
+        return workingItems.first { item in
             if case .request(let id, _, _, _, _) = item.kind { return id == requestID }
             return false
         }
@@ -229,7 +241,13 @@ public final class ConversationStore {
     }
 
     public func loadOlder(limit: Int = 100) {
-        guard hasMoreBefore, let oldest = items.map(\.ordinal).filter({ $0 != UInt64.max }).min() else { return }
+        if hasEarlierRendered {
+            prependAnchor = items.first?.id
+            renderedEnd = max(maximumRenderedItems, renderedEnd - min(100, max(1, limit)))
+            publishRenderedItems()
+            return
+        }
+        guard hasMoreBefore, let oldest = workingItems.map(\.ordinal).filter({ $0 != UInt64.max }).min() else { return }
         let requestID = UUID().uuidString
         Task {
             do {
@@ -238,6 +256,12 @@ public final class ConversationStore {
                 connectionError = error.localizedDescription
             }
         }
+    }
+
+    public func showNewer() {
+        guard hasNewerRendered else { return }
+        renderedEnd = min(workingItems.count, renderedEnd + 100)
+        publishRenderedItems()
     }
 
     private var resumePosition: ConversationResumePosition {
@@ -282,8 +306,9 @@ public final class ConversationStore {
             revision = snapshot.revision
             operationEpoch = snapshot.operationEpoch
             workingItems = Self.bounded(snapshot.items, maximumItems: maximumItems, maximumBytes: maximumBytes)
+            renderedEnd = workingItems.count
             state = snapshot.state
-            hasMoreBefore = snapshot.hasMoreBefore
+            serverHasMoreBefore = snapshot.hasMoreBefore
             if epochChanged || snapshot.reason == "operation_epoch" {
                 markSendingOperationsForManualReview(reason: "The gateway operation record changed; review before retrying.")
             }
@@ -300,7 +325,14 @@ public final class ConversationStore {
             updateSocketPosition()
         case .itemsRemoved(let messageGeneration, let messageRevision, let ids):
             guard acceptNextMutation(messageGeneration, revision: messageRevision) else { return }
+            let oldLastID = items.last?.id
+            let wasAtTail = renderedEnd == workingItems.count
             workingItems.removeAll { ids.contains($0.id) }
+            if wasAtTail {
+                renderedEnd = workingItems.count
+            } else if let oldLastID, let index = workingItems.firstIndex(where: { $0.id == oldLastID }) {
+                renderedEnd = index + 1
+            }
             revision = messageRevision
             schedulePublish()
             updateSocketPosition()
@@ -331,8 +363,15 @@ public final class ConversationStore {
             applyOperationResult(operationID: operationID, status: status, itemID: itemID, reason: reason)
         case .historyPage(_, let page, let more):
             let oldFirst = items.first?.id
+            let oldRenderedEnd = renderedEnd
+            let oldCount = workingItems.count
             upsert(page)
-            hasMoreBefore = more
+            serverHasMoreBefore = more
+            // A history response moves the visible window toward the page.
+            // Once full, the old first row remains visible for scroll anchoring.
+            renderedEnd = oldCount < maximumRenderedItems
+                ? workingItems.count
+                : min(workingItems.count, oldRenderedEnd)
             prependAnchor = oldFirst
             publishImmediately()
         case .error(_, let message):
@@ -355,9 +394,18 @@ public final class ConversationStore {
     }
 
     private func upsert(_ newItems: [ConversationItem]) {
+        let oldLastID = items.last?.id
+        let wasAtTail = renderedEnd == workingItems.count
         var byID = Dictionary(uniqueKeysWithValues: workingItems.map { ($0.id, $0) })
         newItems.forEach { byID[$0.id] = $0 }
         workingItems = Self.bounded(Array(byID.values), maximumItems: maximumItems, maximumBytes: maximumBytes)
+        if wasAtTail {
+            renderedEnd = workingItems.count
+        } else if let oldLastID, let index = workingItems.firstIndex(where: { $0.id == oldLastID }) {
+            renderedEnd = index + 1
+        } else {
+            renderedEnd = min(renderedEnd, workingItems.count)
+        }
     }
 
     private func appendOptimisticItem(for operation: ConversationOperation) {
@@ -367,7 +415,7 @@ public final class ConversationStore {
             createdAt: ISO8601DateFormatter().string(from: operation.createdAt),
             kind: .message(role: "user", text: operation.text, status: .submitted)
         )
-        workingItems.append(local)
+        upsert([local])
         publishImmediately()
     }
 
@@ -376,12 +424,12 @@ public final class ConversationStore {
         for operation in operations where operation.status == .sending && operation.itemId == nil {
             let id = "operation:\(operation.id)"
             guard !existing.contains(id) else { continue }
-            workingItems.append(ConversationItem(
+            upsert([ConversationItem(
                 id: id,
                 ordinal: UInt64.max - UInt64(operations.firstIndex(where: { $0.id == operation.id }) ?? 0),
                 createdAt: ISO8601DateFormatter().string(from: operation.createdAt),
                 kind: .message(role: "user", text: operation.text, status: .submitted)
-            ))
+            )])
         }
     }
 
@@ -520,9 +568,19 @@ public final class ConversationStore {
     private func publishImmediately() {
         publishTask?.cancel()
         publishTask = nil
-        items = Self.bounded(workingItems, maximumItems: maximumItems, maximumBytes: maximumBytes)
-        workingItems = items
+        publishRenderedItems()
         persist()
+    }
+
+    private func publishRenderedItems() {
+        renderedEnd = min(renderedEnd, workingItems.count)
+        items = Array(workingItems[max(0, renderedEnd - maximumRenderedItems)..<renderedEnd])
+        // Leave room for a whole 100-item wire page (each item is at most
+        // 32 KiB). When capacity is exhausted, hide the remote paging control.
+        let size = (try? JSONEncoder().encode(workingItems).count) ?? maximumBytes
+        hasMoreBefore = serverHasMoreBefore
+            && workingItems.count <= maximumItems - min(100, maximumItems)
+            && size <= maximumBytes - min(100 * 32 * 1024, maximumBytes)
     }
 
     private func updateSocketPosition() {
@@ -536,9 +594,9 @@ public final class ConversationStore {
             generation: generation,
             revision: revision,
             operationEpoch: operationEpoch,
-            items: items,
+            items: workingItems,
             state: state,
-            hasMoreBefore: hasMoreBefore,
+            hasMoreBefore: serverHasMoreBefore,
             operations: operations
         )
         try? storage.save(cache, sessionID: sessionID)

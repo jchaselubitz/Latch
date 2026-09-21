@@ -467,6 +467,16 @@ them worse.
      does not JSON-encode the transcript on every 16 ms publish; and
    - make persistence incremental and debounced rather than a full atomic
      rewrite of the cache per publish.
+
+   **Phase 1 retention decision (coo:1033.p4h3):** The phone retains up to
+   10,000 items or 32 MiB per session, while rendering at most 300 rows at a
+   time. The reader moves through retained rows in 100-row steps; a remote
+   history request is sent only after reaching the oldest retained row. The
+   paging control stops when less than one full wire page of item or byte
+   capacity remains. This keeps each fetched page in the retained cache and
+   leaves headroom for items several times larger than today's plain text.
+   The later publication/persistence objective will replace the current
+   transcript-wide byte measurement and cache rewrite.
 5. Set `FileProtectionType.complete` (or the strictest class compatible with
    background resume) on the conversation cache and exclude it from backup.
 6. Derive a live status line from `ConversationState.phase` and the newest

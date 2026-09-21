@@ -125,14 +125,24 @@ private struct ConversationList: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 10) {
-                    if store.hasMoreBefore {
-                        Button("Load earlier messages") { store.loadOlder() }
+                    if store.hasEarlierRendered || store.hasMoreBefore {
+                        Button(store.hasEarlierRendered ? "Show earlier messages" : "Load earlier messages") { store.loadOlder() }
                             .buttonStyle(.bordered)
+                            .frame(maxWidth: .infinity)
+                    } else if store.isHistoryLimitReached {
+                        Text("History limit reached on this device")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity)
                     }
                     ForEach(store.items) { item in
                         ConversationRow(item: item)
                             .id(item.id)
+                    }
+                    if store.hasNewerRendered {
+                        Button("Show newer messages") { store.showNewer() }
+                            .buttonStyle(.bordered)
+                            .frame(maxWidth: .infinity)
                     }
                 }
                 .padding(.horizontal, 14)
@@ -145,7 +155,7 @@ private struct ConversationList: View {
                 proxy.scrollTo(anchor, anchor: .top)
             }
             .onChange(of: store.items.last?.id) { _, id in
-                guard let id else { return }
+                guard let id, !store.hasNewerRendered else { return }
                 withAnimation(.easeOut(duration: 0.18)) {
                     proxy.scrollTo(id, anchor: .bottom)
                 }

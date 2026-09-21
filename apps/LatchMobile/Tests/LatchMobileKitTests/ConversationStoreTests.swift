@@ -88,6 +88,62 @@ final class ConversationStoreTests: XCTestCase {
         XCTAssertEqual(store.prependAnchor, "two")
     }
 
+    func testThreeHistoryPagesRemainRetainedAndReachableBeyondRenderedWindow() throws {
+        let storage = MemoryStorage()
+        let store = ConversationStore(sessionID: "ses_long", gateway: try gateway(), operationRetentionSeconds: 60, storage: storage)
+        func rows(_ range: ClosedRange<Int>) -> [ConversationItem] {
+            range.map { message("m\($0)", ordinal: UInt64($0), text: "message \($0)") }
+        }
+        store.receive(.message(.snapshot(ConversationSnapshot(
+            generation: "g", revision: 1, operationEpoch: "e",
+            items: rows(301...600), state: state(), hasMoreBefore: true, reason: "initial"
+        ))))
+
+        for (range, more) in [(201...300, true), (101...200, true), (1...100, false)] {
+            let anchor = store.items.first?.id
+            store.receive(.message(.historyPage(requestId: UUID().uuidString, items: rows(range), hasMoreBefore: more)))
+            XCTAssertEqual(store.prependAnchor, anchor)
+            XCTAssertTrue(store.items.contains(where: { $0.id == "m\(range.lowerBound)" }))
+        }
+
+        XCTAssertEqual(store.retainedItems.map(\.id), (1...600).map { "m\($0)" })
+        XCTAssertEqual(storage.caches["ses_long"]?.items.map(\.id), store.retainedItems.map(\.id))
+        let restored = ConversationStore(sessionID: "ses_long", gateway: try gateway(), operationRetentionSeconds: 60, storage: storage)
+        XCTAssertEqual(restored.retainedItems.count, 600)
+        XCTAssertEqual(restored.items.map(\.id), (301...600).map { "m\($0)" })
+        XCTAssertEqual(store.items.count, 300)
+        XCTAssertFalse(store.hasMoreBefore)
+        XCTAssertTrue(store.hasNewerRendered)
+        store.showNewer()
+        XCTAssertEqual(store.items.last?.id, "m400")
+        store.showNewer()
+        store.showNewer()
+        XCTAssertEqual(store.items.last?.id, "m600")
+        XCTAssertTrue(store.hasEarlierRendered)
+        store.loadOlder()
+        XCTAssertEqual(store.items.first?.id, "m201")
+        XCTAssertEqual(store.retainedItems.count, 600)
+    }
+
+    func testRetentionCapacityStopsRemotePagingBeforeAWholePageWouldBeDropped() throws {
+        let store = ConversationStore(
+            sessionID: "ses_capacity", gateway: try gateway(), operationRetentionSeconds: 60,
+            storage: MemoryStorage(), maximumItems: 200
+        )
+        let rows = (101...200).map { message("m\($0)", ordinal: UInt64($0), text: "item") }
+        store.receive(.message(.snapshot(ConversationSnapshot(
+            generation: "g", revision: 1, operationEpoch: "e",
+            items: rows, state: state(), hasMoreBefore: true, reason: "initial"
+        ))))
+        XCTAssertTrue(store.hasMoreBefore)
+        let older = (1...100).map { message("m\($0)", ordinal: UInt64($0), text: "item") }
+        store.receive(.message(.historyPage(requestId: "page", items: older, hasMoreBefore: true)))
+        XCTAssertEqual(store.retainedItems.count, 200)
+        XCTAssertEqual(store.retainedItems.first?.id, "m1")
+        XCTAssertFalse(store.hasMoreBefore)
+        XCTAssertTrue(store.isHistoryLimitReached)
+    }
+
     func testStateCompanionAtTheSameRevisionAppliesAndRevisionGapsDoNotAdvance() async throws {
         let store = ConversationStore(sessionID: "ses_gap", gateway: try gateway(), operationRetentionSeconds: 60, storage: MemoryStorage())
         store.receive(.message(.snapshot(ConversationSnapshot(
