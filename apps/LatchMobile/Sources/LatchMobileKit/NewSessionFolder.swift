@@ -42,8 +42,35 @@ public final class MemoryNewSessionFolderStore: NewSessionFolderStoring, @unchec
 }
 
 public enum FolderBrowserMode: Equatable, Sendable {
+    /// Start a standard shell in the chosen folder.
     case create
+    /// Start the named agent directly in the chosen folder.
+    case createAgent(SessionAgent)
     case chooseDefault
+
+    /// Whether choosing a folder starts something on the Mac.
+    public var isCreate: Bool {
+        switch self {
+        case .create, .createAgent: return true
+        case .chooseDefault: return false
+        }
+    }
+
+    /// The agent a creation launches, or nil for a shell or a selection.
+    public var agent: SessionAgent? {
+        if case .createAgent(let agent) = self { return agent }
+        return nil
+    }
+}
+
+public extension SessionAgent {
+    /// The product name shown on controls and in explanations.
+    var displayName: String {
+        switch self {
+        case .claude: return "Claude Code"
+        case .codex: return "Codex"
+        }
+    }
 }
 
 public enum NewSessionAccessError: Error, Equatable, Sendable {
@@ -168,7 +195,7 @@ public final class FolderBrowserModel {
     /// one-off choice and never mutates the preference.
     @discardableResult
     public func useCurrentAsDefault() -> Bool {
-        guard mode == .chooseDefault, hasAccess(), let path = currentPage?.path else {
+        guard !mode.isCreate, hasAccess(), let path = currentPage?.path else {
             if !hasAccess() { error = NewSessionAccessError.unavailable.message }
             return false
         }
@@ -177,7 +204,7 @@ public final class FolderBrowserModel {
     }
 
     public func startSession() async {
-        guard mode == .create, let cwd = currentPage?.path else { return }
+        guard mode.isCreate, let cwd = currentPage?.path else { return }
         guard hasAccess() else {
             error = NewSessionAccessError.unavailable.message
             return

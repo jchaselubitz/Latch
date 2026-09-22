@@ -66,15 +66,15 @@ public actor LatchGateway {
     public func invalidateDiscovery() { capabilities = nil }
 
     private func require(_ endpoint: GatewayEndpointsName) async throws {
-        let discovered: GatewayCapabilities
-        if let capabilities {
-            discovered = capabilities
-        } else {
-            discovered = try await discover()
-        }
+        let discovered = try await discoveredCapabilities()
         guard GatewayCompatibility.supports(endpoint: endpoint, capabilities: discovered) else {
             throw LatchError.endpointUnavailable(endpoint)
         }
+    }
+
+    private func discoveredCapabilities() async throws -> GatewayCapabilities {
+        if let capabilities { return capabilities }
+        return try await discover()
     }
 
     public func listSessions() async throws -> [SessionSummary] {
@@ -103,11 +103,28 @@ public actor LatchGateway {
 
     /// Creates the gateway's standard login shell. The request ID is supplied
     /// by the caller because it must survive a lost response and its retry.
-    public func createSession(requestID: UUID, cwd: String) async throws -> CreateReport {
+    /// Starts a session on the Mac: a standard shell, or `agent` launched
+    /// directly in `cwd`. The Mac resolves the agent's executable; the phone
+    /// names only the kind, and only one discovery listed under
+    /// `features.sessionAgents`, so an older gateway is never asked for a
+    /// field its contract closes against.
+    public func createSession(
+        requestID: UUID,
+        cwd: String,
+        agent: SessionAgent? = nil
+    ) async throws -> CreateReport {
         try await require(.createSession)
+        if let agent {
+            let discovered = try await discoveredCapabilities()
+            guard discovered.features.sessionAgents.contains(agent) else {
+                throw LatchError.agentUnavailable(agent)
+            }
+        }
         let body: Data
         do {
-            body = try JSONEncoder().encode(CreateSessionRequest(requestId: requestID, cwd: cwd))
+            body = try JSONEncoder().encode(
+                CreateSessionRequest(requestId: requestID, cwd: cwd, agent: agent)
+            )
         } catch {
             throw LatchError.malformedResponse(String(describing: error))
         }
@@ -287,6 +304,14 @@ public actor LatchGateway {
         // the phone must start a new intent under a new id.
         if status == 403, code == "request_id_foreign" {
             return .refused(reason.isEmpty ? "This request belongs to another device." : reason)
+        }
+        // The Mac serves agents but could not find this one. The reason is
+        // already the sentence to show, and nothing changes until someone
+        // installs it on the Mac.
+        if code == "agent_unavailable" {
+            return .refused(
+                reason.isEmpty ? "That agent is not installed on your Mac." : reason
+            )
         }
         if status == 401 || (status == 403 && code != "unreadable_directory") {
             return .unauthorized

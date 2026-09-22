@@ -258,6 +258,25 @@ public final class AppModel {
             && GatewayCompatibility.supports(endpoint: .createSession, capabilities: capabilities)
     }
 
+    /// Agent kinds the linked Mac will launch from the create route, in the
+    /// order discovery listed them. Empty on a Mac that predates agent
+    /// creation, which then offers shells only. Independent of this phone's
+    /// grant, like the rest of what a Mac advertises.
+    public var availableSessionAgents: [SessionAgent] {
+        guard case .linked(let capabilities) = linkState else { return [] }
+        guard GatewayCompatibility.supports(endpoint: .createSession, capabilities: capabilities)
+        else { return [] }
+        return capabilities.features.sessionAgents
+    }
+
+    /// Whether this phone may start `agent` right now: creation itself must
+    /// be allowed, and the Mac must have said it launches that kind.
+    public func canCreateNewSession(agent: SessionAgent?) -> Bool {
+        guard canCreateNewSession else { return false }
+        guard let agent else { return true }
+        return availableSessionAgents.contains(agent)
+    }
+
     /// Whether the linked Mac serves both new-session routes, independent of
     /// this phone's grant. The control is shown but disabled when the Mac can
     /// serve the flow and this phone may not use it, so the reason can be
@@ -388,11 +407,19 @@ public final class AppModel {
     public func newSessionFolderBrowser(
         mode: FolderBrowserMode
     ) async -> FolderBrowserModel? {
-        let available = mode == .create ? canCreateNewSession : canBrowseNewSessionFolders
+        let available = mode.isCreate
+            ? canCreateNewSession(agent: mode.agent)
+            : canBrowseNewSessionFolders
         guard available, let gateway else { return nil }
-        let reason = mode == .create
-            ? "Browse folders and start a new session on your Mac."
-            : "Browse folders on your Mac and choose a default."
+        let reason: String
+        switch mode {
+        case .create:
+            reason = "Browse folders and start a new session on your Mac."
+        case .createAgent(let agent):
+            reason = "Browse folders and start \(agent.displayName) on your Mac."
+        case .chooseDefault:
+            reason = "Browse folders on your Mac and choose a default."
+        }
         guard await unlockRemoteAccess(reason: reason) else { return nil }
 
         let browser = FolderBrowserModel(
@@ -406,13 +433,19 @@ public final class AppModel {
                 return try await gateway.browseDirectories(path: path, cursor: cursor)
             },
             create: { requestID, cwd in
-                guard self.canCreateNewSession else {
+                guard self.canCreateNewSession(agent: mode.agent) else {
                     throw NewSessionAccessError.unavailable
                 }
-                return try await gateway.createSession(requestID: requestID, cwd: cwd)
+                return try await gateway.createSession(
+                    requestID: requestID,
+                    cwd: cwd,
+                    agent: mode.agent
+                )
             },
             hasAccess: {
-                mode == .create ? self.canCreateNewSession : self.canBrowseNewSessionFolders
+                mode.isCreate
+                    ? self.canCreateNewSession(agent: mode.agent)
+                    : self.canBrowseNewSessionFolders
             },
             didCreate: { sessionID in
                 await self.refreshSessions()

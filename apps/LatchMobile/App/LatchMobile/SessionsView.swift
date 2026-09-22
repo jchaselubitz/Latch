@@ -6,6 +6,8 @@ struct SessionsView: View {
     @Environment(AppModel.self) private var model
     @Environment(PairingModel.self) private var pairing
     @State private var creatingSession = false
+    /// What the open picker starts: a shell, or an agent the Mac listed.
+    @State private var creatingMode: FolderBrowserMode = .create
     @State private var explainingGrant = false
     /// The session a Stop tap is asking about. Ending someone's work is not
     /// undoable, so it is always confirmed by name first.
@@ -71,7 +73,7 @@ struct SessionsView: View {
             .navigationTitle("Sessions")
             .toolbar { newSessionButton }
             .sheet(isPresented: $creatingSession) {
-                FolderPickerView(mode: .create)
+                FolderPickerView(mode: creatingMode)
             }
             .alert(
                 "This phone can't start a session",
@@ -120,29 +122,66 @@ struct SessionsView: View {
     /// Shown whenever the Mac serves both new-session routes, and disabled
     /// when this phone's grant does not reach them — a control that explains
     /// itself is more use than one that quietly disappears.
+    ///
+    /// A Mac that lists agents turns the button into a menu: a shell, or
+    /// each agent it will launch directly. A Mac that lists none keeps the
+    /// one-tap shell button it always had.
     @ToolbarContentBuilder
     private var newSessionButton: some ToolbarContent {
         ToolbarItem(placement: .primaryAction) {
             if model.advertisesNewSessionCreation {
-                Button {
-                    if model.canCreateNewSession {
-                        creatingSession = true
+                let agents = model.availableSessionAgents
+                Group {
+                    if agents.isEmpty {
+                        Button {
+                            startCreating(.create)
+                        } label: {
+                            newSessionLabel
+                        }
                     } else {
-                        explainingGrant = true
+                        Menu {
+                            Button {
+                                startCreating(.create)
+                            } label: {
+                                Label("Shell", systemImage: "terminal")
+                            }
+                            ForEach(agents, id: \.self) { agent in
+                                Button {
+                                    startCreating(.createAgent(agent))
+                                } label: {
+                                    Label(agent.displayName, systemImage: "sparkles")
+                                }
+                            }
+                        } label: {
+                            newSessionLabel
+                        }
                     }
-                } label: {
-                    Label("New session", systemImage: "plus")
                 }
                 .accessibilityLabel("New session")
                 .accessibilityHint(
                     model.canCreateNewSession
-                        ? "Choose a folder on your Mac and start a shell there"
+                        ? agents.isEmpty
+                            ? "Choose a folder on your Mac and start a shell there"
+                            : "Choose a shell or an agent, then a folder on your Mac to start it in"
                         : "Unavailable until this phone has control of your Mac"
                 )
                 // Left tappable when the grant is missing so the alert can say
                 // what to change on the Mac.
                 .opacity(model.canCreateNewSession ? 1 : 0.4)
             }
+        }
+    }
+
+    private var newSessionLabel: some View {
+        Label("New session", systemImage: "plus")
+    }
+
+    private func startCreating(_ mode: FolderBrowserMode) {
+        if model.canCreateNewSession(agent: mode.agent) {
+            creatingMode = mode
+            creatingSession = true
+        } else {
+            explainingGrant = true
         }
     }
 
@@ -286,6 +325,8 @@ struct SessionsView: View {
             TerminalView(session: session, autoAttach: autoAttach)
         case .chat:
             ChatView(session: session)
+        case .chatUnavailable(let block):
+            ChatUnavailableView(session: session, block: block)
         case .unavailable(let block):
             SessionUnavailableView(session: session, block: block)
         }
@@ -298,6 +339,66 @@ struct SessionsView: View {
         await pairing.refreshPermission()
         if !model.applyPairedDeviceRecord(pairing.record) {
             await model.connectPairedDevice(pairing.record)
+        }
+    }
+}
+
+/// A Chat choice never opens a terminal by implication. When Chat cannot open,
+/// this screen says why and makes terminal takeover a separate, deliberate
+/// action when the Mac and this phone permit it.
+private struct ChatUnavailableView: View {
+    let session: SessionSummary
+    let block: ChatRouteBlock
+
+    var body: some View {
+        ContentUnavailableView {
+            Label(title, systemImage: "exclamationmark.bubble")
+        } description: {
+            Text(detail)
+        } actions: {
+            recovery
+        }
+        .navigationTitle(session.displayName)
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private var title: String {
+        switch block {
+        case .noConnector: "Chat isn't available for this session"
+        case .noConversationEndpoint: "Chat needs a newer Mac service"
+        }
+    }
+
+    private var detail: String {
+        switch block {
+        case .noConnector:
+            "This session is a shell or was started without a recognized agent connector. Start a new Claude Code or Codex session to use Chat."
+        case .noConversationEndpoint:
+            "This Mac's Latch service does not offer the Conversation Hub. Update Latch on the Mac, then reopen this session."
+        }
+    }
+
+    @ViewBuilder
+    private var recovery: some View {
+        switch terminalRecovery {
+        case .available:
+            NavigationLink("Take terminal") {
+                // Reaching this screen began with a Chat tap. The terminal is
+                // only taken after this second, explicit tap.
+                TerminalView(session: session, autoAttach: false)
+            }
+            .buttonStyle(.borderedProminent)
+        case .needsControlGrant:
+            Text("To take the terminal instead, set this phone to Control and enable Allow terminal in Latch on your Mac.")
+                .multilineTextAlignment(.center)
+        case .unavailable:
+            Text("Use `latch attach` on the Mac for this session.")
+        }
+    }
+
+    private var terminalRecovery: TerminalRecovery {
+        switch block {
+        case .noConnector(let recovery), .noConversationEndpoint(let recovery): recovery
         }
     }
 }
@@ -420,6 +521,7 @@ private struct SessionRow: View {
         switch route {
         case .terminal: "terminal"
         case .chat: "bubble.left.and.bubble.right"
+        case .chatUnavailable: "exclamationmark.bubble"
         case .unavailable: "exclamationmark.circle"
         }
     }
@@ -431,6 +533,7 @@ private struct SessionRow: View {
         case .terminal(let autoAttach):
             autoAttach ? "Opens the terminal, taking it from your Mac" : "Opens the terminal"
         case .chat: "Opens the conversation"
+        case .chatUnavailable: "Chat is unavailable; opens recovery options"
         case .unavailable: "Cannot be opened"
         }
     }

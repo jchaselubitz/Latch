@@ -113,22 +113,39 @@ path failure — missing, unreadable, not a directory, outside what the gateway
 will serve — is one stable error, so the route cannot be used to probe the
 filesystem.
 
-Creation takes only two fields:
+Creation takes two fields, and an optional third:
 
 ```json
 { "requestId": "8cba5d78-79a0-4a55-9047-f77e57e463c7", "cwd": "/Users/jake/src" }
+{ "requestId": "8cba5d78-79a0-4a55-9047-f77e57e463c7", "cwd": "/Users/jake/src", "agent": "claude" }
+{ "requestId": "8cba5d78-79a0-4a55-9047-f77e57e463c7", "cwd": "/Users/jake/src", "agent": "codex" }
 ```
 
 `requestId` is a canonical hyphenated UUID and is the idempotency key. The Mac
 holds a creation lock across the lookup and the durable metadata write, so
 repeating one request id returns the session it already created rather than a
-second one; the same id against a different `cwd` is refused as
-`request_id_conflict`. Only the working directory crosses the boundary. The
-gateway builds the same interactive login shell `latch shell` does, at the
-standard initial geometry, with no command, agent, name, environment, or shell
-path supplied by the caller, and does not attach — the new session appears in
-`GET /v2/sessions` with no surface taken from anyone. The response is the
-existing `CreateReport`.
+second one; the same id against a different `cwd` or a different `agent` is
+refused as `request_id_conflict`. Without `agent`, the gateway builds the same
+interactive login shell `latch shell` does, at the standard initial geometry,
+with no command, name, environment, or shell path supplied by the caller.
+
+`agent` names a hosted agent kind, and only a kind the gateway lists in
+`features.sessionAgents` — a client must read an absent list as shells only
+and never send the field to such a gateway, whose contract closes the object.
+The gateway resolves the agent's executable on the Mac (through the owner's
+login shell, then its own PATH and the installer's known locations) and
+declares it as `argv[0]` with structured agent identity, then starts it through
+the owner's login shell so the session carries its harness marker and
+conversation connector. A kind the gateway
+does not list is `invalid_request`; a listed kind it cannot find on the Mac is
+refused as `agent_unavailable` (422) before anything is accepted, with a
+reason fit to show. Either way creation does not attach — the new session
+appears in `GET /v2/sessions` with no surface taken from anyone. The response
+is the existing `CreateReport`.
+
+Codex currently has a connector identity but no automatic transcript-source
+binding for a newly launched session. Its conversation remains in `starting`
+with send unavailable until an authoritative Codex binding is supplied.
 
 `POST /v2/sessions/{id}/stop` ends one session's hosted process. It requires
 the `control` grant — a device that may not type into the pane may not end

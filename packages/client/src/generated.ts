@@ -1,5 +1,5 @@
 // Generated from schemas/remote-access/v2/*.schema.json; do not edit by hand.
-// Canonical schema set SHA-256: 6d8174fcbf2b24ec41f4eaca3e54eb3353e2b874b9c375fbe3665eb77f0eec74
+// Canonical schema set SHA-256: d5efabb3331ad7f5148b34aef3aacf571f30d7c3bd9345587bc550bcfa71448d
 
 
 export type TerminalCloseReason =
@@ -17,7 +17,11 @@ export const TERMINAL_CLOSE_CODES = {
   kernel_error: 4500,
   resume_refused: 4411
 } as const satisfies Record<TerminalCloseReason, number>;
-export type GatewayFeatures = { exclusiveTerminal: boolean };
+export type SessionAgent = 'claude' | 'codex';
+export type CreateSessionRequest = { requestId: string; cwd: string; agent?: SessionAgent };
+/** `sessionAgents` is absent on a gateway that predates agent creation; read
+ * that as shells only. */
+export type GatewayFeatures = { exclusiveTerminal: boolean; sessionAgents?: SessionAgent[] };
 export type GatewayReadiness = {
   formatVersion: 2;
   address: string;

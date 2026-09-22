@@ -142,13 +142,15 @@ pub fn launch_from_fifo(path: &Path) -> Result<()> {
         command.env_clear();
     }
     command.env_remove("TMUX").env("TERM", DEFAULT_TERMINAL);
-    if let Some(id) = std::env::var_os(SESSION_ID_ENV) {
-        command.env(SESSION_ID_ENV, id);
-    }
     for (key, value) in &manifest.launch.env {
-        if key != "TMUX" && key != "TERM" {
+        if key != "TMUX" && key != "TERM" && key != SESSION_ID_ENV {
             command.env(key, value);
         }
+    }
+    // The kernel exports this session's own id; it is applied last so a
+    // manifest can never hand the program another session's identity.
+    if let Some(id) = std::env::var_os(SESSION_ID_ENV) {
+        command.env(SESSION_ID_ENV, id);
     }
     Err(command.exec()).context("cannot execute session command")
 }
@@ -559,11 +561,28 @@ fn materialize_environment(manifest: &mut LaunchManifest) {
         return;
     }
     let explicit = std::mem::take(&mut manifest.launch.env);
-    manifest.launch.env = std::env::vars()
-        .filter(|(key, _)| key != "TMUX" && key != "TERM")
-        .collect();
-    manifest.launch.env.extend(explicit);
+    manifest.launch.env = inheritable_environment(std::env::vars());
+    manifest.launch.env.extend(
+        explicit
+            .into_iter()
+            .filter(|(key, _)| key != SESSION_ID_ENV),
+    );
     manifest.launch.inherit_env = false;
+}
+
+/// The creator's variables a new session may inherit.
+///
+/// `TMUX` and `TERM` describe the creator's terminal, not the session's.
+/// `LATCH_SESSION_ID` names the session enclosing the creator when a gateway
+/// or `latch create` itself runs inside a Latch session; the kernel exports
+/// the new session's own id, and inheriting the enclosing one would point the
+/// agent's conversation hooks at the wrong session.
+fn inheritable_environment(
+    vars: impl IntoIterator<Item = (String, String)>,
+) -> std::collections::BTreeMap<String, String> {
+    vars.into_iter()
+        .filter(|(key, _)| key != "TMUX" && key != "TERM" && key != SESSION_ID_ENV)
+        .collect()
 }
 fn make_fifo(path: &Path) -> Result<()> {
     let bytes = std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str());
@@ -667,5 +686,29 @@ pub fn format_rfc3339(time: SystemTime) -> String {
             utc.tm_min,
             utc.tm_sec
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inherited_environment_drops_the_creators_terminal_and_session_identity() {
+        let vars = vec![
+            ("PATH".to_owned(), "/usr/bin".to_owned()),
+            ("TMUX".to_owned(), "/tmp/tmux".to_owned()),
+            ("TERM".to_owned(), "screen".to_owned()),
+            (SESSION_ID_ENV.to_owned(), "ses_enclosing".to_owned()),
+            ("HOME".to_owned(), "/Users/person".to_owned()),
+        ];
+        let inherited = inheritable_environment(vars);
+        assert_eq!(
+            inherited.into_iter().collect::<Vec<_>>(),
+            vec![
+                ("HOME".to_owned(), "/Users/person".to_owned()),
+                ("PATH".to_owned(), "/usr/bin".to_owned()),
+            ]
+        );
     }
 }

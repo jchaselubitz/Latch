@@ -43,7 +43,7 @@ pub fn prepare_claude_launch(
     home: &LatchHome,
     manifest: &mut LaunchManifest,
 ) -> anyhow::Result<()> {
-    if crate::session::meta::harness_kind(&manifest.launch.argv) != Some("claude") {
+    if crate::session::meta::launch_harness(&manifest.launch) != Some("claude") {
         return Ok(());
     }
     let plugin = ensure_claude_plugin(home)?;
@@ -58,6 +58,33 @@ pub fn prepare_claude_launch(
     manifest.launch.argv.splice(
         1..1,
         ["--plugin-dir".to_owned(), plugin.display().to_string()],
+    );
+    Ok(())
+}
+
+/// Install a session-scoped Codex SessionStart hook. Codex supplies the exact
+/// transcript path and thread id to this hook; Latch never searches rollouts.
+pub fn prepare_codex_launch(manifest: &mut LaunchManifest) -> anyhow::Result<()> {
+    if crate::session::meta::launch_harness(&manifest.launch) != Some("codex") {
+        return Ok(());
+    }
+    let executable = fs::canonicalize(std::env::current_exe()?)?;
+    let command = format!("{} __codex-conversation-hook", shell_quote(&executable));
+    let hook = format!(
+        "hooks.SessionStart=[{{hooks=[{{type=\"command\",command={}}}]}}]",
+        serde_json::to_string(&command)?
+    );
+    manifest.launch.argv.splice(
+        1..1,
+        [
+            // Codex otherwise pauses at a terminal-only hook review prompt
+            // before its first message. This flag also affects other hooks
+            // enabled for this one Codex process; keep the observer command
+            // fixed and scoped to this launch.
+            "--dangerously-bypass-hook-trust".to_owned(),
+            "-c".to_owned(),
+            hook,
+        ],
     );
     Ok(())
 }
@@ -90,7 +117,7 @@ pub fn record_launch_source_binding(
     paths: &SessionPaths,
     manifest: &LaunchManifest,
 ) -> anyhow::Result<()> {
-    if crate::session::meta::harness_kind(&manifest.launch.argv) != Some("codex") {
+    if crate::session::meta::launch_harness(&manifest.launch) != Some("codex") {
         return Ok(());
     }
     let Some(source) = manifest.launch.env.get(CODEX_SOURCE_ENV) else {
@@ -311,6 +338,8 @@ mod tests {
                 inherit_env: true,
                 size: TerminalSize::new(80, 24),
                 term: "xterm-256color".to_owned(),
+                agent: None,
+                login_shell: None,
             },
             display: DisplayMetadata::default(),
         };
@@ -320,6 +349,79 @@ mod tests {
                 .unwrap();
         assert_eq!(binding["connector"], "codex");
         assert_eq!(binding["source"], "/private/codex/session.jsonl");
+    }
+
+    #[test]
+    fn codex_launch_installs_a_session_start_hook_on_the_agent_argv() {
+        let mut manifest = LaunchManifest {
+            format_version: 1,
+            launch: LaunchSpec {
+                argv: vec!["codex".to_owned()],
+                cwd: PathBuf::from("/private/workspace"),
+                env: BTreeMap::new(),
+                inherit_env: true,
+                size: TerminalSize::new(80, 24),
+                term: "xterm-256color".to_owned(),
+                agent: Some(crate::session::manifest::AgentKind::Codex),
+                login_shell: None,
+            },
+            display: DisplayMetadata::default(),
+        };
+        prepare_codex_launch(&mut manifest).unwrap();
+        assert_eq!(manifest.launch.argv[0], "codex");
+        assert_eq!(manifest.launch.argv[1], "--dangerously-bypass-hook-trust");
+        assert_eq!(manifest.launch.argv[2], "-c");
+        assert!(manifest.launch.argv[3].contains("hooks.SessionStart="));
+        assert!(manifest.launch.argv[3].contains("__codex-conversation-hook"));
+    }
+
+    /// A declared agent started through the owner's login shell still gets
+    /// its observer on the agent argv, and the shell only ever receives that
+    /// argv as positional parameters.
+    #[test]
+    fn a_declared_claude_launch_is_observed_through_its_login_shell() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = LatchHome::new(temp.path());
+        let mut manifest = LaunchManifest {
+            format_version: 1,
+            launch: LaunchSpec {
+                argv: vec!["claude".to_owned(), "--model".to_owned(), "opus".to_owned()],
+                cwd: PathBuf::from("/private/workspace"),
+                env: BTreeMap::new(),
+                inherit_env: true,
+                size: TerminalSize::new(80, 24),
+                term: "xterm-256color".to_owned(),
+                agent: Some(crate::session::manifest::AgentKind::Claude),
+                login_shell: Some(crate::session::manifest::LoginShell {
+                    path: PathBuf::from("/bin/zsh"),
+                    prelude: Some("export TASK=1".to_owned()),
+                }),
+            },
+            display: DisplayMetadata::default(),
+        };
+        prepare_claude_launch(&home, &mut manifest).unwrap();
+        let plugin = ensure_claude_plugin(&home).unwrap();
+        manifest.launch.apply_login_shell();
+        assert_eq!(
+            manifest.launch.argv,
+            vec![
+                "/bin/zsh".to_owned(),
+                "-ilc".to_owned(),
+                "export TASK=1\nexec \"$@\"".to_owned(),
+                "latch".to_owned(),
+                "claude".to_owned(),
+                "--plugin-dir".to_owned(),
+                plugin.display().to_string(),
+                "--model".to_owned(),
+                "opus".to_owned(),
+            ]
+        );
+        assert_eq!(manifest.launch.login_shell, None);
+        assert_eq!(
+            manifest.launch.agent, None,
+            "the wrapped argv must still validate"
+        );
+        crate::session::manifest::write(Vec::new(), &manifest).unwrap();
     }
 
     #[test]
@@ -368,6 +470,8 @@ mod tests {
                 inherit_env: true,
                 size: TerminalSize::new(80, 24),
                 term: "xterm-256color".to_owned(),
+                agent: None,
+                login_shell: None,
             },
             display: DisplayMetadata::default(),
         };

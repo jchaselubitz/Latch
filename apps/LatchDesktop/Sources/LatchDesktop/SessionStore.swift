@@ -130,6 +130,11 @@ final class SessionStore: ObservableObject {
     var runningCount: Int { sessions.filter { $0.state == .running }.count }
     var canCreateSessions: Bool { cliCapabilities?.capabilities.create == true }
     var canAttachSessions: Bool { cliCapabilities?.capabilities.localAttach == true }
+    /// The selected CLI understands a declared agent launch. An older one
+    /// would ignore the declaration and run the agent without its login shell.
+    var canLaunchAgents: Bool {
+        cliCapabilities?.capabilities.extensions.contains(LatchClient.agentLaunchExtension) == true
+    }
 
     /// Live sessions in the current sidebar selection, in list order.
     var selectedLiveSessionIDs: [String] {

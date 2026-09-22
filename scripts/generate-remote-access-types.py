@@ -74,6 +74,33 @@ pub struct DirectoryPage {
 pub struct CreateSessionRequest {
     pub request_id: String,
     pub cwd: String,
+    /// Hosted agent to launch directly in the session instead of a standard
+    /// shell. Absent means a shell. The gateway accepts only a kind it
+    /// advertises in `features.session_agents`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<SessionAgent>,
+}
+
+/// Hosted agent kinds a caller may name at creation. The Mac resolves the
+/// executable and launch arguments; the caller names only the kind.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionAgent {
+    /// Claude Code, launched as its own executable so the observer plugin
+    /// and conversation connector attach.
+    Claude,
+    /// OpenAI Codex CLI, launched with its conversation connector identity.
+    Codex,
+}
+
+impl SessionAgent {
+    /// The harness marker Latch records for sessions running this agent.
+    pub const fn harness(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+        }
+    }
 }
 
 /// Reason carried in a terminal WebSocket close frame. `Detached` is a clean
@@ -111,6 +138,10 @@ pub struct GatewayFeatures {
     /// surface. The field remains so a client can detect a gateway that
     /// predates the exclusive cutover and refuse it.
     pub exclusive_terminal: bool,
+    /// Hosted agent kinds the create route accepts. A gateway that predates
+    /// agent creation omits the key, which a client reads as shells only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub session_agents: Vec<SessionAgent>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -351,7 +382,11 @@ export const TERMINAL_CLOSE_CODES = {
   kernel_error: 4500,
   resume_refused: 4411
 } as const satisfies Record<TerminalCloseReason, number>;
-export type GatewayFeatures = { exclusiveTerminal: boolean };
+export type SessionAgent = 'claude' | 'codex';
+export type CreateSessionRequest = { requestId: string; cwd: string; agent?: SessionAgent };
+/** `sessionAgents` is absent on a gateway that predates agent creation; read
+ * that as shells only. */
+export type GatewayFeatures = { exclusiveTerminal: boolean; sessionAgents?: SessionAgent[] };
 export type GatewayReadiness = {
   formatVersion: 2;
   address: string;

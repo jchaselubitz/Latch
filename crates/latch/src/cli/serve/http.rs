@@ -23,8 +23,8 @@ use super::auth::{
     load_token, origin_allowed, presented_token, selected_subprotocol, token_matches,
 };
 use super::contract::{
-    CreateSessionRequest, GatewayFeatures, GatewayReadiness, OPERATION_RETENTION_SECONDS,
-    REMOTE_ACCESS_SCHEMA_VERSION,
+    CreateSessionRequest, GatewayFeatures, GatewayReadiness, SessionAgent,
+    OPERATION_RETENTION_SECONDS, REMOTE_ACCESS_SCHEMA_VERSION,
 };
 use super::conversation::{self, ConversationConnect, ConversationQuery};
 use super::directory::{self, BrowseError};
@@ -34,7 +34,7 @@ use super::routes::{
 use super::terminal::{self, ResumeRegistry, TerminalConnect, TerminalQuery};
 use super::ServeOptions;
 use crate::cli::attach::SessionLookupError;
-use crate::cli::create::{self, RemoteShellError, RemoteShellRequest};
+use crate::cli::create::{self, RemoteSessionError, RemoteSessionRequest};
 use crate::cli::json::{CapabilitiesReport, CreateReport, CreatedSession};
 use crate::cli::manage::{self, InspectOptions, ListOptions, StopRequest};
 use crate::conversation::ConversationHub;
@@ -373,6 +373,7 @@ async fn gateway_capabilities(State(state): State<AppState>) -> Response {
         },
         features: GatewayFeatures {
             exclusive_terminal: true,
+            session_agents: SESSION_AGENTS.to_vec(),
         },
         gateway_instance_id: state.gateway_instance_id,
         operation_retention_seconds: OPERATION_RETENTION_SECONDS,
@@ -405,16 +406,22 @@ async fn browse_directories(Query(query): Query<DirectoryQuery>) -> Result<Respo
     Ok(Json(page).into_response())
 }
 
-/// Upper bound on a creation body. The request carries two short strings; the
-/// paired proxy already refuses a larger initial request, and this is the same
-/// refusal for the manual HTTPS route.
+/// Upper bound on a creation body. The request carries three short strings;
+/// the paired proxy already refuses a larger initial request, and this is the
+/// same refusal for the manual HTTPS route.
 const MAX_CREATE_BODY_BYTES: usize = 1024;
 
-/// Starts exactly one standard login shell in a validated directory.
+/// Hosted agents the create route will launch when asked. Advertised in
+/// discovery so a phone shows only controls this gateway can serve; whether
+/// the agent is actually installed is answered at creation time.
+const SESSION_AGENTS: &[SessionAgent] = &[SessionAgent::Claude, SessionAgent::Codex];
+
+/// Starts exactly one standard login shell, or one hosted agent, in a
+/// validated directory.
 ///
 /// Nothing else about the session is caller-controlled: no argv, environment,
-/// shell, display metadata, or terminal type crosses this boundary, and no
-/// attach is spawned.
+/// shell, display metadata, or terminal type crosses this boundary — an agent
+/// is named by kind and resolved on the Mac — and no attach is spawned.
 async fn create_session(
     State(state): State<AppState>,
     Extension(device): Extension<DeviceContext>,
@@ -441,20 +448,30 @@ async fn create_session(
             "requestId must be a UUID",
         ));
     }
+    if let Some(agent) = request.agent {
+        if !SESSION_AGENTS.contains(&agent) {
+            return Err(ApiError::coded(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "this gateway does not launch that agent",
+            ));
+        }
+    }
     let cwd = directory::canonical_directory_from_str(&request.cwd).map_err(map_browse_error)?;
 
     let home = state.home.clone();
     let outcome = tokio::task::spawn_blocking(move || {
-        create::create_remote_shell(RemoteShellRequest {
+        create::create_remote_session(RemoteSessionRequest {
             home,
             request_id: request.request_id,
             cwd,
+            agent: request.agent,
             device: device.0,
         })
     })
     .await
     .map_err(|_| internal("create session"))?
-    .map_err(map_remote_shell_error)?;
+    .map_err(map_remote_session_error)?;
 
     Ok(Json(CreateReport {
         protocol_version: crate::engine::PROTOCOL_VERSION,
@@ -484,27 +501,44 @@ fn is_request_id(value: &str) -> bool {
     parts.next().is_none()
 }
 
-fn map_remote_shell_error(error: RemoteShellError) -> ApiError {
+fn map_remote_session_error(error: RemoteSessionError) -> ApiError {
     match error {
-        RemoteShellError::RequestIdConflict => ApiError::coded(
+        RemoteSessionError::RequestIdConflict => ApiError::coded(
             StatusCode::CONFLICT,
             "request_id_conflict",
-            "this request id already created a session in another directory",
+            "this request id already created a different session",
         ),
         // Another device owns this id. Saying which would leak that device's
         // existence; the stable code is enough for the phone to stop retrying.
-        RemoteShellError::DeviceConflict => ApiError::coded(
+        RemoteSessionError::DeviceConflict => ApiError::coded(
             StatusCode::FORBIDDEN,
             "request_id_foreign",
             "this request id belongs to another device",
         ),
+        // Nothing to retry until the agent is installed on the Mac; the
+        // message is the sentence the phone shows, and names no path.
+        RemoteSessionError::AgentUnavailable(agent) => ApiError::coded(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "agent_unavailable",
+            format!(
+                "{} is not installed on this Mac, or its login shell cannot find it",
+                agent_display_name(agent)
+            ),
+        ),
         // The engine's failure detail can name paths, binaries, and kernel
         // state. The phone gets the stable code instead.
-        RemoteShellError::Failed(_) => ApiError::coded(
+        RemoteSessionError::Failed(_) => ApiError::coded(
             StatusCode::INTERNAL_SERVER_ERROR,
             "session_creation_failed",
             "the session could not be created",
         ),
+    }
+}
+
+fn agent_display_name(agent: SessionAgent) -> &'static str {
+    match agent {
+        SessionAgent::Claude => "Claude Code",
+        SessionAgent::Codex => "Codex",
     }
 }
 
@@ -856,6 +890,29 @@ mod tests {
         assert_eq!(value["stopSession"], true);
     }
 
+    /// The create route names the agents it launches so a phone shows only
+    /// controls this gateway serves; the wire spelling is the schema's enum.
+    #[test]
+    fn current_capabilities_advertise_supported_session_agents() {
+        let value = serde_json::to_value(GatewayFeatures {
+            exclusive_terminal: true,
+            session_agents: SESSION_AGENTS.to_vec(),
+        })
+        .unwrap();
+        assert_eq!(
+            value["sessionAgents"],
+            serde_json::json!(["claude", "codex"])
+        );
+        // A gateway that launches no agents omits the key, which an older
+        // client decoding a closed object still accepts.
+        let none = serde_json::to_value(GatewayFeatures {
+            exclusive_terminal: true,
+            session_agents: Vec::new(),
+        })
+        .unwrap();
+        assert!(none.get("sessionAgents").is_none());
+    }
+
     #[test]
     fn cors_allows_the_bounded_post_route() {
         let mut headers = HeaderMap::new();
@@ -973,6 +1030,18 @@ mod tests {
                 "invalid_request",
             ),
             (&create_body("relative/path"), 400, "invalid_path"),
+            // An agent kind this gateway does not advertise is refused as a
+            // malformed request, before any directory or shell lookup.
+            (
+                &serde_json::json!({
+                    "requestId": "8cba5d78-79a0-4a55-9047-f77e57e463c7",
+                    "cwd": work,
+                    "agent": "unsupported-agent",
+                })
+                .to_string(),
+                400,
+                "invalid_request",
+            ),
             (
                 &create_body(harness._dir.path().join("missing").to_str().unwrap()),
                 404,
@@ -997,9 +1066,17 @@ mod tests {
     async fn creation_is_refused_below_control_and_oversized_bodies_are_bounded() {
         let harness = harness().await;
         let work = harness.work.to_str().unwrap();
+        let claude = serde_json::json!({
+            "requestId": "8cba5d78-79a0-4a55-9047-f77e57e463c7",
+            "cwd": work,
+            "agent": "claude",
+        })
+        .to_string();
         for grant in ["observe", "interact"] {
             let (status, _) = post_create(&harness, Some(grant), &create_body(work)).await;
             assert_eq!(status, 403, "{grant} must not create sessions");
+            let (status, _) = post_create(&harness, Some(grant), &claude).await;
+            assert_eq!(status, 403, "{grant} must not launch agents");
         }
         let oversized = serde_json::json!({
             "requestId": "8cba5d78-79a0-4a55-9047-f77e57e463c7",
@@ -1089,17 +1166,26 @@ mod tests {
 
     #[test]
     fn creation_failures_have_stable_codes_without_engine_detail() {
-        let conflict = map_remote_shell_error(RemoteShellError::RequestIdConflict);
+        let conflict = map_remote_session_error(RemoteSessionError::RequestIdConflict);
         assert_eq!(conflict.status, StatusCode::CONFLICT);
         assert_eq!(conflict.code, "request_id_conflict");
 
-        let failed = map_remote_shell_error(RemoteShellError::Failed(anyhow::anyhow!(
+        let failed = map_remote_session_error(RemoteSessionError::Failed(anyhow::anyhow!(
             "cannot spawn /opt/homebrew/bin/latchd for /Users/person/secret"
         )));
         assert_eq!(failed.status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(failed.code, "session_creation_failed");
         assert!(!failed.message.contains("/Users/"));
         assert!(!failed.message.contains("latchd"));
+
+        // A missing agent is a stable, phone-readable refusal that names the
+        // product, not a path on the Mac.
+        let missing =
+            map_remote_session_error(RemoteSessionError::AgentUnavailable(SessionAgent::Claude));
+        assert_eq!(missing.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(missing.code, "agent_unavailable");
+        assert!(missing.message.contains("Claude Code"));
+        assert!(!missing.message.contains('/'));
     }
 
     #[test]

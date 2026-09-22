@@ -176,7 +176,33 @@ public enum SessionRoute: Equatable, Sendable {
     /// the person to ask.
     case terminal(autoAttach: Bool)
     case chat
+    /// Chat was explicitly requested, but is not available. The accompanying
+    /// screen explains why and offers a terminal only as an explicit choice.
+    case chatUnavailable(ChatRouteBlock)
     case unavailable(SessionRouteBlock)
+}
+
+/// Why a requested chat cannot open, together with the safe recovery choices
+/// available to this phone. This remains separate from `SessionRouteBlock`:
+/// the latter means neither requested presentation can open, while this one
+/// must never silently turn a Chat tap into a terminal takeover.
+public enum ChatRouteBlock: Equatable, Sendable {
+    /// The gateway definitively says this is a plain shell or an unrecognized
+    /// agent session, so a Conversation Hub cannot be created for it.
+    case noConnector(TerminalRecovery)
+    /// The paired Mac does not offer the Conversation Hub endpoint. This is a
+    /// Mac service version/availability problem, not a session diagnosis.
+    case noConversationEndpoint(TerminalRecovery)
+}
+
+/// What, if anything, the Chat-unavailable screen can offer instead.
+public enum TerminalRecovery: Equatable, Sendable {
+    /// A terminal can be taken, but only after the person taps the action.
+    case available
+    /// The Mac serves terminal, but this phone's current grant forbids it.
+    case needsControlGrant
+    /// This Mac does not offer a terminal route either.
+    case unavailable
 }
 
 /// Why neither screen can be opened. Each case is a different sentence on the
@@ -225,15 +251,36 @@ extension SessionRoute {
 
         case .chat:
             // `.unknown` still opens chat: an older Mac that omits the
-            // connector field must keep behaving exactly as it does today,
-            // including `ChatView`'s existing "connector is null" screen.
+            // connector field cannot prove that a session lacks one. The Hub
+            // gives the final answer after its initial state arrives.
             if chatPossible { return .chat }
-            // No connector, and the person asked for chat. They get the
-            // terminal instead — but *without* auto-attaching. The steal is
-            // not implied by a tap that asked for something else.
-            if surface.terminal { return .terminal(autoAttach: false) }
-            return .unavailable(block(surface: surface))
+            return .chatUnavailable(chatBlock(connector: connector, surface: surface))
         }
+    }
+
+    private static func chatBlock(
+        connector: SessionConnector,
+        surface: SessionSurface
+    ) -> ChatRouteBlock {
+        let recovery = terminalRecovery(surface: surface)
+        // A missing Hub prevents Chat for every session, so say that first.
+        // An explicit `connector: null` remains meaningful when the Hub is
+        // present: it is the reliable plain-shell/unrecognized-session case.
+        guard surface.chat else { return .noConversationEndpoint(recovery) }
+        switch connector {
+        case .none: return .noConnector(recovery)
+        case .named, .unknown:
+            // `.named` only reaches here when the Hub is absent, above.
+            // `.unknown` can only reach here when discovery says Chat is
+            // absent, so do not invent an unsupported-session diagnosis.
+            return .noConversationEndpoint(recovery)
+        }
+    }
+
+    private static func terminalRecovery(surface: SessionSurface) -> TerminalRecovery {
+        if surface.terminal { return .available }
+        if surface.terminalAdvertised { return .needsControlGrant }
+        return .unavailable
     }
 
     /// Which explanation to show when nothing can be opened. A phone whose

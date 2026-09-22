@@ -4,6 +4,16 @@ import XCTest
 
 /// Every screen state the chat view can present, derived from store facts.
 final class ConversationViewStateTests: XCTestCase {
+    func testConversationSupportWaitsForAStateFrameBeforeCallingItUnavailable() {
+        XCTAssertEqual(ConversationSupport.derive(state: nil), .loading)
+        XCTAssertEqual(
+            ConversationSupport.derive(state: state("starting")),
+            .availableOrStarting,
+            "a recognized connector may still be binding; nil connector is not a refusal"
+        )
+        XCTAssertEqual(ConversationSupport.derive(state: state("unavailable")), .unavailable)
+    }
+
     func testEveryStateIsReachable() {
         let cases: [(ConversationViewState, ConversationSocketState, String?, ConversationState?, Bool)] = [
             (.loading, .connecting, nil, nil, false),

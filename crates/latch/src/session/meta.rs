@@ -136,7 +136,7 @@ pub fn derive(request: MetaRequest<'_>) -> SessionMeta {
             .filter(|title| !title.is_empty()),
         cwd: request.launch.cwd.clone(),
         command_label,
-        harness: harness_kind(&request.launch.argv).map(str::to_owned),
+        harness: launch_harness(request.launch).map(str::to_owned),
         created_at: request.created_at.to_owned(),
         initial_size: request.launch.size,
         source: SourceInfo {
@@ -207,6 +207,18 @@ pub fn sanitize_display(raw: &str) -> String {
         .filter(|character| !character.is_control())
         .take(MAX_DISPLAY_CHARS)
         .collect()
+}
+
+/// Hosted harness a launch runs: the agent the launcher declared, or — for a
+/// manifest that predates the declaration — the one argv starts directly.
+///
+/// A shell wrapper is never looked inside. A launcher that starts an agent
+/// through a shell declares it with `launch.agent` and `launch.login_shell`.
+pub fn launch_harness(launch: &LaunchSpec) -> Option<&'static str> {
+    launch
+        .agent
+        .map(|agent| agent.harness())
+        .or_else(|| harness_kind(&launch.argv))
 }
 
 /// Hosted harness Latch recognizes from launch argv.
@@ -307,6 +319,8 @@ mod tests {
             inherit_env: true,
             size: TerminalSize::new(80, 24),
             term: "xterm-256color".to_owned(),
+            agent: None,
+            login_shell: None,
         }
     }
 
@@ -340,5 +354,41 @@ mod tests {
         let meta = derive_argv(vec!["/bin/zsh".to_owned(), "-il".to_owned()]);
         assert_eq!(meta.harness, None);
         assert_eq!(meta.command_label, "zsh");
+    }
+
+    /// The desktop and Overlord launches that could not open in Chat: the
+    /// agent is text inside a shell command, which Latch never parses.
+    #[test]
+    fn a_shell_command_that_runs_an_agent_is_not_marked() {
+        let meta = derive_argv(vec![
+            "/bin/zsh".to_owned(),
+            "-lc".to_owned(),
+            "claude".to_owned(),
+        ]);
+        assert_eq!(meta.harness, None);
+    }
+
+    #[test]
+    fn a_declared_agent_is_marked_even_when_a_login_shell_starts_it() {
+        for (agent, program) in [
+            (crate::session::manifest::AgentKind::Claude, "claude"),
+            (crate::session::manifest::AgentKind::Codex, "codex"),
+        ] {
+            let mut launch = launch(vec![program.to_owned()]);
+            launch.agent = Some(agent);
+            launch.login_shell = Some(crate::session::manifest::LoginShell {
+                path: PathBuf::from("/bin/zsh"),
+                prelude: None,
+            });
+            let display = DisplayMetadata::default();
+            let meta = derive(MetaRequest {
+                id: "ses_test",
+                launch: &launch,
+                display: &display,
+                created_at: "2026-08-13T00:00:00Z",
+            });
+            assert_eq!(meta.harness.as_deref(), Some(program));
+            assert_eq!(meta.command_label, program);
+        }
     }
 }

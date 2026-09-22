@@ -31,6 +31,9 @@ pub use attention::{
 };
 pub(crate) use auth::load_token;
 pub use auth::mint_token;
+/// The agent kinds a remote caller may name at creation; the create
+/// boundary in `cli::create` launches by this same vocabulary.
+pub use contract::SessionAgent;
 
 /// How the gateway should bind and authenticate.
 pub struct ServeOptions {

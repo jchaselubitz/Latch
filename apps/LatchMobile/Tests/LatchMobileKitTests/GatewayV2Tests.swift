@@ -143,6 +143,72 @@ final class GatewayV2Tests: XCTestCase {
         XCTAssertEqual(body, CreateSessionRequest(requestId: requestID, cwd: "/tmp/a b"))
     }
 
+    /// A shell request must stay byte-for-byte what an older Mac accepts:
+    /// its contract closes the object, so the `agent` key is omitted rather
+    /// than sent as null. An agent request names the kind and nothing else.
+    func testShellCreationOmitsTheAgentKeyAndAgentCreationNamesOnlyTheKind() async throws {
+        StubProtocol.stub(path: "/v2/capabilities", body: capabilities(agents: ["claude", "codex"]))
+        StubProtocol.stub(path: "/v2/sessions", body: """
+        {"protocolVersion":2,"session":{"id":"ses_new","name":"claude",
+        "state":"running","createdAt":"2026-09-06T00:00:00Z"}}
+        """)
+        let gateway = makeGateway()
+        let requestID = try XCTUnwrap(UUID(uuidString: "8cba5d78-79a0-4a55-9047-f77e57e463c7"))
+
+        _ = try await gateway.createSession(requestID: requestID, cwd: "/tmp/a")
+        let shell = try XCTUnwrap(StubProtocol.requests.last)
+        let shellBody = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(shell.body.utf8)) as? [String: Any]
+        )
+        XCTAssertEqual(Set(shellBody.keys), ["requestId", "cwd"])
+
+        _ = try await gateway.createSession(requestID: requestID, cwd: "/tmp/a", agent: .claude)
+        let agent = try XCTUnwrap(StubProtocol.requests.last)
+        let agentBody = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(agent.body.utf8)) as? [String: Any]
+        )
+        XCTAssertEqual(Set(agentBody.keys), ["requestId", "cwd", "agent"])
+        XCTAssertEqual(agentBody["agent"] as? String, "claude")
+        let decoded = try JSONDecoder().decode(CreateSessionRequest.self, from: Data(agent.body.utf8))
+        XCTAssertEqual(decoded, CreateSessionRequest(requestId: requestID, cwd: "/tmp/a", agent: .claude))
+
+        _ = try await gateway.createSession(requestID: requestID, cwd: "/tmp/a", agent: .codex)
+        let codex = try XCTUnwrap(StubProtocol.requests.last)
+        let codexBody = try JSONDecoder().decode(CreateSessionRequest.self, from: Data(codex.body.utf8))
+        XCTAssertEqual(codexBody.agent, .codex)
+    }
+
+    /// A Mac that serves creation but lists no agents — every Mac before this
+    /// feature — is never asked for one, and the refusal says the Mac is what
+    /// needs updating. A kind this build does not know is dropped, not fatal.
+    func testAgentCreationIsGatedByDiscoveryAndUnknownAgentsAreIgnored() async throws {
+        StubProtocol.stub(path: "/v2/capabilities", body: capabilities())
+        let old = makeGateway()
+        do {
+            _ = try await old.createSession(requestID: UUID(), cwd: "/tmp", agent: .claude)
+            XCTFail("an agent must not be requested from a Mac that lists none")
+        } catch {
+            XCTAssertEqual(error as? LatchError, .agentUnavailable(.claude))
+        }
+        XCTAssertEqual(StubProtocol.requests.map(\.path), ["/v2/capabilities"])
+
+        StubProtocol.reset()
+        StubProtocol.stub(path: "/v2/capabilities", body: capabilities(agents: ["codex-next", "claude", "codex"]))
+        let discovered = try await makeGateway().discover()
+        XCTAssertEqual(discovered.features.sessionAgents, [.claude, .codex])
+    }
+
+    /// The Mac serves agents but could not find this one. That is the person's
+    /// sentence to read, not a status line, and retrying changes nothing.
+    func testAMissingAgentOnTheMacIsAPlainRefusal() {
+        let error = LatchGateway.error(
+            status: 422,
+            path: "/v2/sessions",
+            data: Data(#"{"error":"agent_unavailable","reason":"Claude Code is not installed on this Mac"}"#.utf8)
+        )
+        XCTAssertEqual(error, .refused("Claude Code is not installed on this Mac"))
+    }
+
     func testUndiscoveredDirectoryAndCreationRoutesAreNeverProbed() async throws {
         StubProtocol.stub(path: "/v2/capabilities", body: capabilities(browse: false, create: false))
         let gateway = makeGateway()
@@ -189,14 +255,22 @@ final class GatewayV2Tests: XCTestCase {
         )
     }
 
-    private func capabilities(browse: Bool = true, create: Bool = true) -> String {
-        """
+    private func capabilities(
+        browse: Bool = true,
+        create: Bool = true,
+        agents: [String]? = nil
+    ) -> String {
+        let features = agents.map { names in
+            let list = names.map { "\"\($0)\"" }.joined(separator: ",")
+            return #"{"exclusiveTerminal":true,"sessionAgents":[\#(list)]}"#
+        } ?? #"{"exclusiveTerminal":true}"#
+        return """
         {"protocolVersion":2,"productVersion":"2.0.0",
          "capabilities":{"create":true,"openViewer":true,"localAttach":true,
           "cloudAttach":false,"selfUpdate":true,"extensions":[]},
          "endpoints":{"sessions":true,"terminal":true,"conversation":false,
           "browseDirectories":\(browse),"createSession":\(create)},
-         "features":{"exclusiveTerminal":true},"gatewayInstanceId":"gw-a-b",
+         "features":\(features),"gatewayInstanceId":"gw-a-b",
          "operationRetentionSeconds":600}
         """
     }

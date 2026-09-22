@@ -225,10 +225,39 @@ struct CLIUpdateReport: Codable, Sendable {
     }
 }
 
+/// What a new session starts.
+enum SessionAgent: String, CaseIterable, Identifiable, Sendable {
+    case shell
+    case claude
+    case codex
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .shell: return "Shell"
+        case .claude: return "Claude Code"
+        case .codex: return "Codex"
+        }
+    }
+
+    /// The agent's executable name, which is also its `launch.agent`
+    /// identity; `nil` for a shell.
+    var executable: String? {
+        switch self {
+        case .shell: return nil
+        case .claude: return "claude"
+        case .codex: return "codex"
+        }
+    }
+}
+
 struct NewSessionRequest: Sendable {
     var name = ""
     var title = ""
     var cwd = FileManager.default.homeDirectoryForCurrentUser.path
+    var agent = SessionAgent.shell
+    /// Custom shell command; used only when `agent` is `.shell`.
     var command = ""
     var cols: UInt16 = 120
     var rows: UInt16 = 36
@@ -252,11 +281,21 @@ struct LaunchManifest: Encodable, Sendable {
         let inheritEnv = true
         let size: TerminalSize
         let term = "xterm-256color"
+        /// Declared agent identity; `argv[0]` must be that agent's executable.
+        var agent: String? = nil
+        /// Starts `argv` through this login shell, wrapped by the CLI after it
+        /// has prepared the agent's observer.
+        var loginShell: LoginShell? = nil
 
         enum CodingKeys: String, CodingKey {
-            case argv, cwd, env, size, term
+            case argv, cwd, env, size, term, agent
             case inheritEnv = "inherit_env"
+            case loginShell = "login_shell"
         }
+    }
+
+    struct LoginShell: Encodable, Sendable {
+        let path: String
     }
 
     struct Display: Encodable, Sendable {

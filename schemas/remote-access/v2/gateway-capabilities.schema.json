@@ -39,7 +39,13 @@
       "type": "object",
       "required": ["exclusiveTerminal"],
       "properties": {
-        "exclusiveTerminal": { "type": "boolean" }
+        "exclusiveTerminal": { "type": "boolean" },
+        "sessionAgents": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["claude", "codex"] },
+          "uniqueItems": true,
+          "description": "Hosted agent kinds the create route accepts in its `agent` field. Absence means the gateway creates standard shells only. Whether the agent is actually installed is answered at creation time, not here."
+        }
       },
       "additionalProperties": false
     },

@@ -66,7 +66,7 @@ struct ChatView: View {
 
     @ViewBuilder
     private func conversation(_ store: ConversationStore) -> some View {
-        if store.state?.connector == nil, store.socketState == .open {
+        if ConversationSupport.derive(state: store.state) == .unavailable {
             terminalFallback(
                 title: "Conversation unsupported",
                 detail: "This session's connector cannot provide a conversation."

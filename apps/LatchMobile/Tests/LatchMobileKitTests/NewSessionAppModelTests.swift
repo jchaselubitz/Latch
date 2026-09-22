@@ -166,6 +166,116 @@ final class NewSessionAppModelTests: XCTestCase {
         XCTAssertNil(browser)
     }
 
+    /// The capabilities in `setUp` list no agents, as every Mac before this
+    /// feature does: the shell flow is unchanged and no agent control exists.
+    func testAMacThatListsNoAgentsOffersShellsOnly() async {
+        let model = makePairedModel(authenticator: StubDeviceOwnerAuthenticator())
+        await connect(model)
+
+        XCTAssertTrue(model.canCreateNewSession)
+        XCTAssertEqual(model.availableSessionAgents, [])
+        XCTAssertTrue(model.canCreateNewSession(agent: nil))
+        XCTAssertFalse(model.canCreateNewSession(agent: .claude))
+        let browser = await model.newSessionFolderBrowser(mode: .createAgent(.claude))
+        XCTAssertNil(browser)
+    }
+
+    /// A Mac that lists Claude gets a request that names it, and the created
+    /// session is highlighted like any other. Creation still does not open a
+    /// terminal or a conversation: the row is where the person goes next.
+    func testAClaudeSessionIsRequestedByKindAndHighlighted() async throws {
+        StubProtocol.stub(
+            path: "/v2/capabilities",
+            body: Self.capabilities.replacingOccurrences(
+                of: #""features":{"exclusiveTerminal":true}"#,
+                with: #""features":{"exclusiveTerminal":true,"sessionAgents":["claude","codex"]}"#
+            )
+        )
+        StubProtocol.stub(
+            method: "POST",
+            path: "/v2/sessions",
+            body: """
+            {"protocolVersion":2,"session":{"id":"ses_claude","name":"claude",
+            "state":"running","createdAt":"2026-09-06T00:00:00Z"}}
+            """
+        )
+        let terminalConnections = LockedCounter()
+        let model = makePairedModel(
+            authenticator: StubDeviceOwnerAuthenticator(),
+            terminalConnector: { _, _, _ in
+                terminalConnections.increment()
+                throw LatchError.transport("must not attach")
+            }
+        )
+        await connect(model)
+        XCTAssertEqual(model.availableSessionAgents, [.claude, .codex])
+        XCTAssertTrue(model.canCreateNewSession(agent: .claude))
+        XCTAssertTrue(model.canCreateNewSession(agent: .codex))
+
+        let openedBrowser = await model.newSessionFolderBrowser(mode: .createAgent(.claude))
+        let browser = try XCTUnwrap(openedBrowser)
+        await browser.startSession()
+
+        XCTAssertEqual(browser.createdSessionID, "ses_claude")
+        XCTAssertEqual(model.highlightedSessionID, "ses_claude")
+        XCTAssertEqual(terminalConnections.value, 0)
+        let post = try XCTUnwrap(
+            StubProtocol.requests.last { $0.method == "POST" && $0.path == "/v2/sessions" }
+        )
+        let body = try JSONDecoder().decode(CreateSessionRequest.self, from: Data(post.body.utf8))
+        XCTAssertEqual(body.agent, .claude)
+        XCTAssertEqual(body.cwd, "/home")
+
+        let openedCodexBrowser = await model.newSessionFolderBrowser(mode: .createAgent(.codex))
+        let codexBrowser = try XCTUnwrap(openedCodexBrowser)
+        await codexBrowser.startSession()
+        let codexPost = try XCTUnwrap(
+            StubProtocol.requests.last { $0.method == "POST" && $0.path == "/v2/sessions" }
+        )
+        let codexBody = try JSONDecoder().decode(
+            CreateSessionRequest.self, from: Data(codexPost.body.utf8)
+        )
+        XCTAssertEqual(codexBody.agent, .codex)
+        XCTAssertEqual(codexBody.cwd, "/home")
+        XCTAssertEqual(terminalConnections.value, 0)
+    }
+
+    /// An agent launch is a control action like any creation: a grant
+    /// downgrade while the picker is open stops the next request.
+    func testAgentCreationIsHeldToTheControlGrant() async throws {
+        StubProtocol.stub(
+            path: "/v2/capabilities",
+            body: Self.capabilities.replacingOccurrences(
+                of: #""features":{"exclusiveTerminal":true}"#,
+                with: #""features":{"exclusiveTerminal":true,"sessionAgents":["claude"]}"#
+            )
+        )
+        let gateway = LatchGateway(
+            link: try GatewayLink(address: "https://mac.local:8787", token: "token"),
+            session: StubProtocol.session()
+        )
+        let model = AppModel(
+            pairedGatewayFactory: { _ in gateway },
+            newSessionFolderStore: MemoryNewSessionFolderStore(),
+            terminalUnlock: TerminalUnlock(authenticator: StubDeviceOwnerAuthenticator(), grace: 600)
+        )
+        let control = pairedRecord(permission: .control)
+        await model.connectPairedDevice(control)
+        let openedBrowser = await model.newSessionFolderBrowser(mode: .createAgent(.claude))
+        let browser = try XCTUnwrap(openedBrowser)
+        let requestsBefore = StubProtocol.requests.count
+
+        XCTAssertTrue(model.applyPairedDeviceRecord(control.updating(permission: .interact)))
+        XCTAssertFalse(model.canCreateNewSession(agent: .claude))
+        // The Mac still lists the agent; only this phone's grant changed.
+        XCTAssertEqual(model.availableSessionAgents, [.claude])
+        await browser.startSession()
+
+        XCTAssertEqual(StubProtocol.requests.count, requestsBefore)
+        XCTAssertNil(browser.createdSessionID)
+        XCTAssertNotNil(browser.error)
+    }
+
     /// Settings reads the default from the model, so choosing one has to be
     /// visible without relaunching, and clearing it has to return the picker
     /// to the Mac's home directory.

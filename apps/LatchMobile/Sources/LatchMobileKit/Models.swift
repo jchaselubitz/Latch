@@ -215,6 +215,9 @@ public enum LatchError: Error, Equatable, Sendable {
     case notAGateway
     /// The feature was not advertised by discovery, so it must not be used.
     case endpointUnavailable(GatewayEndpointsName)
+    /// Discovery did not list this agent among the kinds the Mac launches, so
+    /// it must not be asked for.
+    case agentUnavailable(SessionAgent)
     /// The transport failed.
     case transport(String)
 
@@ -250,6 +253,8 @@ public enum LatchError: Error, Equatable, Sendable {
             return "This address is the Latch control plane, not the authenticated Mac gateway. Reconnect Remote Link."
         case .endpointUnavailable(let endpoint):
             return "This gateway does not offer \(endpoint.rawValue)."
+        case .agentUnavailable(let agent):
+            return "Your Mac's Latch does not start \(agent.displayName) sessions. Update Latch on the Mac."
         case .transport(let detail):
             return detail
         }

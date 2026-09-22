@@ -63,16 +63,19 @@ final class SessionRouteTests: XCTestCase {
             // today, including ChatView's own "connector is null" screen.
             (#line, .chat, .unknown, surface(chat: true, terminal: true), true, .chat),
 
-            // Chat preferred, no connector: the terminal, but the steal is not
-            // implied by a tap that asked for something else.
-            (#line, .chat, .none, surface(chat: true, terminal: true), true, .terminal(autoAttach: false)),
+            // Chat preferred, no connector: explain the plain-shell or
+            // unrecognized session. A terminal is a separate explicit action.
+            (#line, .chat, .none, surface(chat: true, terminal: true), true, .chatUnavailable(.noConnector(.available))),
             (
                 #line, .chat, .none,
                 surface(chat: true, terminal: false, terminalAdvertised: true), true,
-                .unavailable(.needsControlGrant)
+                .chatUnavailable(.noConnector(.needsControlGrant))
             ),
-            // No Hub either: chat is not possible for any session here.
-            (#line, .chat, .named("claude"), surface(chat: false, terminal: true), true, .terminal(autoAttach: false)),
+            // No Hub: this is an unavailable or outdated Mac service, not a
+            // diagnosis of the individual session. Preserve recovery facts.
+            (#line, .chat, .named("claude"), surface(chat: false, terminal: true), true, .chatUnavailable(.noConversationEndpoint(.available))),
+            (#line, .chat, .unknown, surface(chat: false, terminal: false, terminalAdvertised: true), true, .chatUnavailable(.noConversationEndpoint(.needsControlGrant))),
+            (#line, .chat, .none, surface(chat: false, terminal: false, terminalAdvertised: false), true, .chatUnavailable(.noConversationEndpoint(.unavailable))),
         ]
 
         for row in cases {

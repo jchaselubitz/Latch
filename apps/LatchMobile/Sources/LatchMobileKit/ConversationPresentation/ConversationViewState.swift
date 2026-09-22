@@ -1,5 +1,24 @@
 import Foundation
 
+/// Whether the Chat screen has a confirmed answer about its conversation.
+///
+/// Socket open only says the WebSocket handshake completed. Its initial
+/// snapshot is delivered separately, so treating `state?.connector == nil`
+/// as unsupported confuses a brief, normal loading interval with a refusal.
+public enum ConversationSupport: Equatable, Sendable {
+    /// No state frame has arrived yet.
+    case loading
+    /// A state frame arrived and the Hub has not refused this conversation.
+    case availableOrStarting
+    /// The Hub explicitly reported that it cannot provide this conversation.
+    case unavailable
+
+    public static func derive(state: ConversationState?) -> ConversationSupport {
+        guard let state else { return .loading }
+        return state.phase == "unavailable" ? .unavailable : .availableOrStarting
+    }
+}
+
 /// The one state the chat screen is in, derived from the store's facts.
 ///
 /// Labels describe what the host reported, not what the agent might be doing:

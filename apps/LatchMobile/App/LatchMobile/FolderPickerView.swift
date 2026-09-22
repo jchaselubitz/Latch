@@ -1,7 +1,7 @@
 import LatchMobileKit
 import SwiftUI
 
-/// The remote folder browser, shared by **New session** and
+/// The remote folder browser, shared by **New session** (shell or agent) and
 /// **Default folder**.
 ///
 /// It browses the Mac, not the phone: the iOS document picker can reach this
@@ -36,7 +36,7 @@ struct FolderPickerView: View {
                     )
                 }
             }
-            .navigationTitle(mode == .create ? "New session" : "Default folder")
+            .navigationTitle(title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -202,7 +202,7 @@ struct FolderPickerView: View {
         VStack(spacing: 8) {
             Button {
                 switch mode {
-                case .create:
+                case .create, .createAgent:
                     Task { await browser.startSession() }
                 case .chooseDefault:
                     if browser.useCurrentAsDefault() {
@@ -212,10 +212,10 @@ struct FolderPickerView: View {
                 }
             } label: {
                 HStack {
-                    if browser.isLoading, mode == .create {
+                    if browser.isLoading, mode.isCreate {
                         ProgressView()
                     }
-                    Text(mode == .create ? "Start session here" : "Use as default")
+                    Text(primaryActionTitle)
                         .font(.body.weight(.semibold))
                 }
                 .frame(maxWidth: .infinity)
@@ -223,8 +223,8 @@ struct FolderPickerView: View {
             .buttonStyle(.borderedProminent)
             .disabled(browser.currentPage == nil || browser.isLoading || !isPermitted)
 
-            if mode == .create {
-                Text("Starts a shell here. It does not open the session or run an agent.")
+            if let caption = actionCaption {
+                Text(caption)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -236,7 +236,36 @@ struct FolderPickerView: View {
     }
 
     private var isPermitted: Bool {
-        mode == .create ? model.canCreateNewSession : model.canBrowseNewSessionFolders
+        mode.isCreate ? model.canCreateNewSession(agent: mode.agent) : model.canBrowseNewSessionFolders
+    }
+
+    private var title: String {
+        switch mode {
+        case .create: return "New session"
+        case .createAgent(let agent): return "New \(agent.displayName) session"
+        case .chooseDefault: return "Default folder"
+        }
+    }
+
+    private var primaryActionTitle: String {
+        switch mode {
+        case .create: return "Start session here"
+        case .createAgent(let agent): return "Start \(agent.displayName) here"
+        case .chooseDefault: return "Use as default"
+        }
+    }
+
+    /// What the primary action does on the Mac, so a folder is chosen with
+    /// the consequence in view: a shell waits, an agent starts working.
+    private var actionCaption: String? {
+        switch mode {
+        case .create:
+            return "Starts a shell here. It does not open the session or run an agent."
+        case .createAgent(let agent):
+            return "Starts \(agent.displayName) in this folder on your Mac. The session appears in the list; open it to talk to it."
+        case .chooseDefault:
+            return nil
+        }
     }
 
     /// The last component of an absolute path, with the filesystem root shown

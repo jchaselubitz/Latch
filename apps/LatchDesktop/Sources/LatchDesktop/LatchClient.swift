@@ -119,26 +119,51 @@ actor LatchClient {
         try request(["update", "--json"], timeout: 120)
     }
 
+    /// Capability extension a CLI reports when it accepts `launch.agent`.
+    static let agentLaunchExtension = "agent-launch"
+
     func create(_ request: NewSessionRequest) throws -> CreateReport {
-        let shell = Self.loginShell()
+        try self.request(
+            ["create", "--manifest-file", "-", "--json"],
+            stdin: encoder.encode(Self.manifest(for: request, shell: Self.loginShell()))
+        )
+    }
+
+    /// The launch manifest for a new-session request.
+    ///
+    /// An agent is sent as its own argv with a declared identity, never as
+    /// shell text: the CLI records the identity and adds the agent's
+    /// conversation observer, then starts it through the login shell so it
+    /// has the same PATH it would have in a terminal. A shell, with or
+    /// without a custom command, is launched as before.
+    static func manifest(for request: NewSessionRequest, shell: String) -> LaunchManifest {
+        let size = TerminalSize(cols: request.cols, rows: request.rows)
+        if let agent = request.agent.executable {
+            return LaunchManifest(
+                launch: .init(
+                    argv: [agent],
+                    cwd: request.cwd,
+                    size: size,
+                    agent: agent,
+                    loginShell: .init(path: shell)
+                ),
+                display: .init(
+                    name: request.name.nilIfBlank,
+                    title: request.title.nilIfBlank,
+                    commandLabel: nil
+                )
+            )
+        }
         let argv = request.command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? [shell, "-l"]
             : [shell, "-lc", request.command]
-        let manifest = LaunchManifest(
-            launch: .init(
-                argv: argv,
-                cwd: request.cwd,
-                size: .init(cols: request.cols, rows: request.rows)
-            ),
+        return LaunchManifest(
+            launch: .init(argv: argv, cwd: request.cwd, size: size),
             display: .init(
                 name: request.name.nilIfBlank,
                 title: request.title.nilIfBlank,
                 commandLabel: request.command.nilIfBlank.map { _ in shell }
             )
-        )
-        return try self.request(
-            ["create", "--manifest-file", "-", "--json"],
-            stdin: encoder.encode(manifest)
         )
     }
 

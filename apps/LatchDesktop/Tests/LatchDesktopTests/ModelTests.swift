@@ -200,6 +200,40 @@ final class ModelTests: XCTestCase {
         XCTAssertEqual((display["source"] as? [String: Any])?["kind"] as? String, "desktop")
     }
 
+    private func launchObject(_ request: NewSessionRequest) throws -> [String: Any] {
+        let manifest = LatchClient.manifest(for: request, shell: "/bin/zsh")
+        let value = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(manifest)) as? [String: Any]
+        )
+        return try XCTUnwrap(value["launch"] as? [String: Any])
+    }
+
+    func testAgentSessionsDeclareTheirIdentityInsteadOfRunningShellText() throws {
+        for (agent, program) in [(SessionAgent.claude, "claude"), (SessionAgent.codex, "codex")] {
+            var request = NewSessionRequest()
+            request.cwd = "/tmp"
+            request.agent = agent
+            let launch = try launchObject(request)
+            XCTAssertEqual(launch["argv"] as? [String], [program])
+            XCTAssertEqual(launch["agent"] as? String, program)
+            XCTAssertEqual((launch["login_shell"] as? [String: Any])?["path"] as? String, "/bin/zsh")
+        }
+    }
+
+    func testShellSessionsKeepTheirLaunchAndDeclareNoAgent() throws {
+        var request = NewSessionRequest()
+        request.cwd = "/tmp"
+        var launch = try launchObject(request)
+        XCTAssertEqual(launch["argv"] as? [String], ["/bin/zsh", "-l"])
+        XCTAssertNil(launch["agent"])
+        XCTAssertNil(launch["login_shell"])
+
+        request.command = "make watch"
+        launch = try launchObject(request)
+        XCTAssertEqual(launch["argv"] as? [String], ["/bin/zsh", "-lc", "make watch"])
+        XCTAssertNil(launch["agent"])
+    }
+
     func testClientDrainsAResponseLargerThanTheProcessPipeBuffer() async throws {
         let padding = String(repeating: "x", count: 256_000)
         let fixture = try makeCLI(response: #"{"sessions":[],"future":"\#(padding)"}"#)

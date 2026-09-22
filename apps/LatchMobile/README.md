@@ -2,7 +2,10 @@
 
 Latch Mobile is the native iOS client for Latch's schema-first `/v2` gateway.
 It discovers, creates, observes, and controls sessions on one explicitly paired
-Mac without storing session state in the cloud.
+Mac without storing session state in the cloud. Creation starts a shell in a
+chosen folder on the Mac, or — when the Mac lists it under
+`features.sessionAgents` — Claude Code or Codex launched there with a
+structured agent identity, which then opens through its conversation connector.
 
 ## Architecture
 

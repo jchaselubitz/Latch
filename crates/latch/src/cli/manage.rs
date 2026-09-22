@@ -491,7 +491,12 @@ pub fn config_value(home: &LatchHome, key: &str) -> anyhow::Result<Option<String
     Ok(read_config(&home.config_file())?.remove(key))
 }
 
-/// Reports the unchanged engine discovery contract.
+/// Extension a launcher requires before sending `launch.agent` and
+/// `launch.login_shell`. An older build ignores both fields, so it would run
+/// the agent argv without the shell setup and without an identity.
+pub const AGENT_LAUNCH_EXTENSION: &str = "agent-launch";
+
+/// Reports the engine discovery contract.
 pub fn capabilities() -> CapabilitiesReport {
     CapabilitiesReport {
         protocol_version: PROTOCOL_VERSION,
@@ -502,7 +507,7 @@ pub fn capabilities() -> CapabilitiesReport {
             local_attach: true,
             cloud_attach: false,
             self_update: crate::cli::update::can_self_update(),
-            extensions: Vec::new(),
+            extensions: vec![AGENT_LAUNCH_EXTENSION.to_owned()],
         },
     }
 }

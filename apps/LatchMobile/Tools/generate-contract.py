@@ -192,13 +192,36 @@ public struct DirectoryPage: Codable, Equatable, Sendable {
     public var nextCursor: String?
 }
 
+/// Hosted agent kinds a phone may name at creation. The Mac resolves the
+/// executable and launch arguments; the phone names only the kind, and only
+/// one the gateway advertises in `GatewayFeatures.sessionAgents`.
+public enum SessionAgent: String, Codable, CaseIterable, Sendable {
+    case claude
+    case codex
+}
+
 public struct CreateSessionRequest: Codable, Equatable, Sendable {
     public var requestId: UUID
     public var cwd: String
+    /// Absent means a standard login shell; the key is omitted on the wire so
+    /// an older Mac, whose contract closes the object, still accepts a shell.
+    public var agent: SessionAgent?
 
-    public init(requestId: UUID, cwd: String) {
+    public init(requestId: UUID, cwd: String, agent: SessionAgent? = nil) {
         self.requestId = requestId
         self.cwd = cwd
+        self.agent = agent
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case requestId, cwd, agent
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(requestId, forKey: .requestId)
+        try container.encode(cwd, forKey: .cwd)
+        try container.encodeIfPresent(agent, forKey: .agent)
     }
 }
 
@@ -219,9 +242,25 @@ public struct GatewayFeatures: Codable, Equatable, Sendable {
     /// session's one exclusive surface. The field remains so this app can
     /// detect a Mac that predates the exclusive cutover and refuse it.
     public var exclusiveTerminal: Bool
+    /// Hosted agent kinds the create route accepts. A Mac that predates agent
+    /// creation omits the key and decodes as shells only; a kind this build
+    /// does not know is dropped rather than failing discovery.
+    public var sessionAgents: [SessionAgent]
 
-    public init(exclusiveTerminal: Bool = false) {
+    public init(exclusiveTerminal: Bool = false, sessionAgents: [SessionAgent] = []) {
         self.exclusiveTerminal = exclusiveTerminal
+        self.sessionAgents = sessionAgents
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case exclusiveTerminal, sessionAgents
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        exclusiveTerminal = try container.decode(Bool.self, forKey: .exclusiveTerminal)
+        let names = try container.decodeIfPresent([String].self, forKey: .sessionAgents) ?? []
+        sessionAgents = names.compactMap(SessionAgent.init(rawValue:))
     }
 }
 

@@ -65,6 +65,47 @@ terminal dimensions must be non-zero. `env` is applied only to the child;
 display metadata is sanitized and retained. Treat `command_label` and the
 display fields as safe-to-show text, never as a place for a secret.
 
+### Launch a hosted agent
+
+Latch identifies a Claude Code or Codex session from the launch itself. It
+records the session's harness marker, which selects its conversation
+connector for the session list, the Conversation Hub, and mobile Chat. It
+also prepares the agent's conversation observer, such as Claude's hook plugin.
+It never looks inside shell text, so `["/bin/zsh", "-lc", "claude"]` is a
+plain shell session with no connector.
+
+To start an agent the way a terminal would, with the owner's login-shell
+PATH, declare it and let Latch build the shell wrapper:
+
+```json
+{
+  "format_version": 1,
+  "launch": {
+    "argv": ["claude", "--model", "opus"],
+    "agent": "claude",
+    "login_shell": {"path": "/bin/zsh", "prelude": "export TASK_ID=task_123"},
+    "cwd": "/absolute/path/to/worktree",
+    "size": {"cols": 120, "rows": 40}
+  }
+}
+```
+
+- `agent` is `claude` or `codex`. `argv[0]` must be that executable, as a bare
+  name or a path; anything else is rejected with `launch.agent`.
+- `login_shell.path` must be absolute. After recording the identity and adding
+  the observer arguments to `argv`, Latch runs
+  `[path, "-ilc", "<prelude>\nexec \"$@\"", "latch", argv...]`. The program and
+  its arguments reach the shell as positional parameters, never as text.
+  `prelude` is optional launcher-authored shell that runs first. Latch never
+  interprets it.
+- Require the `agent-launch` entry in `latch capabilities --json`
+  `capabilities.extensions` before sending these fields. Older builds ignore
+  them and would run the agent argv directly, with no identity.
+
+A session's identity is fixed when it is created. Sessions started before a
+launcher adopted this path keep no harness marker and must be recreated to
+open in Chat.
+
 The command returns a stable JSON report and does not attach the caller:
 
 ```json

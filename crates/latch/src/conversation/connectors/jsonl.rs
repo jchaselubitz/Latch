@@ -322,11 +322,16 @@ impl JsonlConnector {
 
     fn state(&self) -> ConversationState {
         let (phase, send_message, resolve_request) = if self.source.is_none() {
+            // Codex creates its thread on the first prompt, so its
+            // SessionStart hook cannot bind a rollout before that prompt.
+            // The visible empty composer is enough to safely submit the
+            // first message without taking the terminal surface.
+            let can_start_codex = self.id == "codex" && self.screen_can_send == Some(true);
             (
                 ConversationPhase::Starting,
                 (
-                    false,
-                    Some("waiting for the agent's authoritative source binding".to_owned()),
+                    can_start_codex,
+                    (!can_start_codex).then(|| "waiting for the agent's empty composer".to_owned()),
                 ),
                 (
                     false,
@@ -412,6 +417,15 @@ impl JsonlConnector {
             .unwrap_or_default();
         if self.id == "claude" {
             return self.claude_record(object, &event, ordinal);
+        }
+        if self.id == "codex" && event == "response_item" {
+            // Raw user response items can contain injected AGENTS.md and
+            // environment context. Codex's completed conversation items
+            // distinguish the actual user message from that setup material.
+            return Vec::new();
+        }
+        if self.id == "codex" && event == "event_msg" {
+            return self.codex_conversation_item(object, ordinal);
         }
         if matches!(event.as_str(), "branch_rewrite" | "branch_replace") {
             let parent = string(object, "parent_id").or_else(|| string(object, "parent_uuid"));
@@ -547,6 +561,61 @@ impl JsonlConnector {
             id,
             created_at,
             kind,
+        })]
+    }
+
+    /// Codex's completed conversation item is the user-visible source. Raw
+    /// response items also contain injected setup context and must stay out.
+    fn codex_conversation_item(
+        &mut self,
+        object: &serde_json::Map<String, Value>,
+        ordinal: u64,
+    ) -> Vec<ConnectorMutation> {
+        let Some(payload) = object.get("payload").and_then(Value::as_object) else {
+            return Vec::new();
+        };
+        if string(payload, "type").as_deref() != Some("item_completed") {
+            return Vec::new();
+        }
+        let Some(item) = payload.get("item").and_then(Value::as_object) else {
+            return Vec::new();
+        };
+        let role = match string(item, "type").as_deref() {
+            Some("UserMessage") => MessageRole::User,
+            Some("AgentMessage") => MessageRole::Assistant,
+            _ => return Vec::new(),
+        };
+        let text = item
+            .get("content")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|part| {
+                let part = part.as_object()?;
+                matches!(string(part, "type").as_deref(), Some("text" | "Text"))
+                    .then(|| string(part, "text"))
+                    .flatten()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        if text.is_empty() {
+            return Vec::new();
+        }
+        vec![ConnectorMutation::Upsert(ObservedItem {
+            id: item
+                .get("id")
+                .and_then(Value::as_str)
+                .map(ConversationItemId::native)
+                .unwrap_or_else(|| {
+                    ConversationItemId::derived("codex", "message", &ordinal.to_string())
+                }),
+            created_at: string(object, "timestamp")
+                .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_owned()),
+            kind: ConversationItemKind::Message {
+                role,
+                text,
+                status: MessageStatus::Observed,
+            },
         })]
     }
 
@@ -1102,8 +1171,10 @@ fn is_empty_composer(connector: &str, line: &str) -> bool {
         &['›', '>']
     };
     markers.iter().any(|marker| {
-        line.strip_prefix(*marker)
-            .is_some_and(|rest| rest.trim().is_empty())
+        line.strip_prefix(*marker).is_some_and(|rest| {
+            let rest = rest.trim();
+            rest.is_empty() || (connector == "codex" && rest == "Ask Codex to do anything")
+        })
     })
 }
 fn screen_contains_request(screen: &str, request: &PendingRequest) -> bool {
@@ -1358,7 +1429,7 @@ impl Connector for JsonlConnector {
             .as_ref()
             .is_some_and(ConversationControl::is_event_driven);
         let refresh_screen = self.live_screen
-            && self.source.is_some()
+            && (self.source.is_some() || self.id == "codex")
             && if event_driven {
                 self.refresh_screen
             } else {
@@ -1412,7 +1483,7 @@ impl Connector for JsonlConnector {
     fn apply(&mut self, action: ConnectorAction, deadline: Duration) -> Result<ApplyResult> {
         let text = match action.id.as_str() {
             ACTION_SEND_MESSAGE
-                if self.source.is_some()
+                if (self.source.is_some() || self.id == "codex")
                     && self.pending_request.is_none()
                     && !self.tool_running =>
             {
@@ -1501,6 +1572,16 @@ impl Connector for JsonlConnector {
     }
 
     fn restore_checkpoint(&mut self, checkpoint: &[u8]) -> Result<()> {
+        // The action connector is built when the conversation is first
+        // watched, which can precede the agent's SessionStart binding when a
+        // phone opens Chat right after creating the session. Only the
+        // observation connector polls for the binding, so adopt it here:
+        // every action restores the latest checkpoint first, and without the
+        // source that checkpoint never matches and every send is refused
+        // while the pushed state says sending is available.
+        if self.source.is_none() {
+            self.refresh_binding();
+        }
         if checkpoint.is_empty() {
             return Ok(());
         }
@@ -1652,6 +1733,51 @@ mod tests {
         assert_eq!(connector_kind(Some("codex")), Some("codex"));
         assert_eq!(connector_kind(Some("bash")), None);
         assert_eq!(connector_kind(None), None);
+    }
+
+    #[test]
+    fn restoring_a_checkpoint_adopts_a_binding_written_after_the_connector_was_built() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = SessionId::parse("ses_fixture").unwrap();
+        fs::create_dir_all(LatchHome::new(dir.path()).session(&session).dir()).unwrap();
+        let mut connector = JsonlConnector::fixture("claude", PathBuf::from("unused.jsonl"));
+        connector.home = LatchHome::new(dir.path());
+        connector.source = None;
+        connector.agent_session_id = None;
+
+        // Watched before the agent started: no binding yet, nothing adopted.
+        connector.restore_checkpoint(&[]).unwrap();
+        assert!(connector.source.is_none());
+        assert_eq!(connector.state().phase, ConversationPhase::Starting);
+
+        let source = dir.path().join("transcript.jsonl");
+        fs::write(
+            connector
+                .home
+                .session(&session)
+                .conversation_source_binding(),
+            serde_json::json!({
+                "connector": "claude",
+                "source": source,
+                "agentSessionId": "agent-1",
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        // The next action restores a checkpoint first; that is where the
+        // binding written since must be picked up.
+        connector.restore_checkpoint(&[]).unwrap();
+        assert_eq!(connector.source.as_deref(), Some(source.as_path()));
+        assert_eq!(connector.agent_session_id.as_deref(), Some("agent-1"));
+        assert_ne!(connector.state().phase, ConversationPhase::Starting);
+
+        // A binding for another connector is not adopted.
+        let mut other = JsonlConnector::fixture("codex", PathBuf::from("unused.jsonl"));
+        other.home = LatchHome::new(dir.path());
+        other.source = None;
+        other.restore_checkpoint(&[]).unwrap();
+        assert!(other.source.is_none());
     }
 
     fn corpus(agent: &str) -> PathBuf {
@@ -2099,6 +2225,41 @@ mod tests {
     #[test]
     fn codex_conforms_to_the_connector_suite() {
         conformance("codex");
+    }
+
+    #[test]
+    fn codex_rollout_projects_only_completed_conversation_items() {
+        let mut connector = JsonlConnector::fixture("codex", PathBuf::from("unused"));
+        let user = serde_json::json!({"timestamp":"2026-09-22T12:00:00Z","payload":{"type":"item_completed","item":{"type":"UserMessage","id":"user-1","content":[{"type":"text","text":"hello"}]}}});
+        let assistant = serde_json::json!({"timestamp":"2026-09-22T12:00:01Z","payload":{"type":"item_completed","item":{"type":"AgentMessage","id":"assistant-1","content":[{"type":"Text","text":"hi"}]}}});
+        let setup = serde_json::json!({"payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"AGENTS.md secret"}]}});
+        let projected = connector.codex_conversation_item(user.as_object().unwrap(), 1);
+        assert!(
+            matches!(&projected[0], ConnectorMutation::Upsert(item) if matches!(&item.kind, ConversationItemKind::Message { role: MessageRole::User, text, .. } if text == "hello"))
+        );
+        let projected = connector.codex_conversation_item(assistant.as_object().unwrap(), 2);
+        assert!(
+            matches!(&projected[0], ConnectorMutation::Upsert(item) if matches!(&item.kind, ConversationItemKind::Message { role: MessageRole::Assistant, text, .. } if text == "hi"))
+        );
+        assert!(connector.record(setup, 3).is_empty());
+    }
+
+    #[test]
+    fn codex_startup_placeholder_is_an_empty_composer() {
+        assert!(is_empty_composer("codex", "› Ask Codex to do anything"));
+        assert!(!is_empty_composer("codex", "› draft"));
+    }
+
+    #[test]
+    fn codex_first_send_waits_for_a_confirmed_empty_composer() {
+        let mut connector = JsonlConnector::fixture("codex", PathBuf::from("unused"));
+        connector.source = None;
+        assert_eq!(connector.state().phase, ConversationPhase::Starting);
+        assert!(!connector.state().send_message.enabled);
+        connector.observe_screen("› Ask Codex to do anything");
+        assert!(connector.state().send_message.enabled);
+        connector.observe_screen("› draft");
+        assert!(!connector.state().send_message.enabled);
     }
 
     #[test]
