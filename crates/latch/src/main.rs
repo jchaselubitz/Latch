@@ -307,7 +307,13 @@ enum Command {
     },
     /// Capture one Claude hook record. Internal only.
     #[command(hide = true, name = "__conversation-hook")]
-    ConversationHook,
+    ConversationHook {
+        /// Observer plugin version baked into this hook command at
+        /// plugin-generation time. Defaults to 1 (the pre-`Stop`-hook
+        /// observer) for command lines written before this flag existed.
+        #[arg(long, default_value_t = 1)]
+        observer_version: u32,
+    },
     /// Capture one Codex source binding or observation record. Internal only.
     #[command(hide = true, name = "__codex-conversation-hook")]
     CodexConversationHook,
@@ -854,8 +860,12 @@ fn dispatch(command: Option<Command>) -> Result<()> {
         Some(Command::Launch { manifest_fifo }) => {
             latch::engine::launch_from_fifo(std::path::Path::new(&manifest_fifo))
         }
-        Some(Command::ConversationHook) => {
-            latch::observer::capture_claude_hook(&LatchHome::from_env()?, std::io::stdin())
+        Some(Command::ConversationHook { observer_version }) => {
+            latch::observer::capture_claude_hook(
+                &LatchHome::from_env()?,
+                std::io::stdin(),
+                observer_version,
+            )
         }
         Some(Command::CodexConversationHook) => {
             latch::observer::capture_codex_hook(&LatchHome::from_env()?, std::io::stdin())

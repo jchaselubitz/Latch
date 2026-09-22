@@ -19,8 +19,18 @@ use crate::session::paths::{LatchHome, SessionId, SessionPaths, DIR_MODE, FILE_M
 
 const MAX_HOOK_BYTES: usize = 1024 * 1024;
 const CLAUDE_PLUGIN_NAME: &str = "latch-conversation-observer";
-const OBSERVER_VERSION: u32 = 1;
+const OBSERVER_VERSION: u32 = 2;
 const CODEX_SOURCE_ENV: &str = "LATCH_CODEX_CONVERSATION_SOURCE";
+
+/// The observer version that first registers a `Stop` hook. A session whose
+/// Claude process was launched with an older plugin directory never emits
+/// `Stop`, so the connector must not treat its silence as a turn boundary.
+/// Compare a hook record's stamped `latch_observer_version` against this
+/// constant rather than assuming the currently running `latch` binary's
+/// compiled `OBSERVER_VERSION` describes every already-running session: the
+/// binary can be upgraded in place while an older Claude process keeps
+/// running against the plugin directory (and hook set) it was launched with.
+pub const STOP_HOOK_MIN_OBSERVER_VERSION: u32 = 2;
 
 struct PrivateWrite<'a> {
     path: &'a Path,
@@ -52,16 +62,24 @@ pub fn prepare_claude_launch(
     Ok(())
 }
 
-/// Captures one bounded Claude hook payload in the hosted session's raw sidecar.
-pub fn capture_claude_hook(home: &LatchHome, reader: impl Read) -> anyhow::Result<()> {
-    capture_hook(home, reader, "claude")
+/// Captures one bounded Claude hook payload in the hosted session's raw
+/// sidecar. `observer_version` is the version baked into the invoking hook
+/// command at plugin-generation time (see `ensure_claude_plugin`), not the
+/// running binary's compiled `OBSERVER_VERSION` — it tells the connector
+/// which hook set this specific Claude launch actually has.
+pub fn capture_claude_hook(
+    home: &LatchHome,
+    reader: impl Read,
+    observer_version: u32,
+) -> anyhow::Result<()> {
+    capture_hook(home, reader, "claude", Some(observer_version))
 }
 
 /// Captures a Codex hook/sidecar payload.  Integrations invoke this hidden
 /// command when Codex reports a source binding or incremental transcript
 /// record; the connector never searches a working directory for it.
 pub fn capture_codex_hook(home: &LatchHome, reader: impl Read) -> anyhow::Result<()> {
-    capture_hook(home, reader, "codex")
+    capture_hook(home, reader, "codex", None)
 }
 
 /// Persists the optional source path supplied by the launching integration.
@@ -92,7 +110,12 @@ pub fn record_launch_source_binding(
     })
 }
 
-fn capture_hook(home: &LatchHome, reader: impl Read, connector: &str) -> anyhow::Result<()> {
+fn capture_hook(
+    home: &LatchHome,
+    reader: impl Read,
+    connector: &str,
+    observer_version: Option<u32>,
+) -> anyhow::Result<()> {
     let raw = read_bounded_hook(reader)?;
     let latch_id = std::env::var(crate::session::paths::SESSION_ID_ENV)
         .context("conversation hook did not inherit LATCH_SESSION_ID")?;
@@ -108,6 +131,12 @@ fn capture_hook(home: &LatchHome, reader: impl Read, connector: &str) -> anyhow:
     object
         .entry("connector")
         .or_insert_with(|| Value::String(connector.to_owned()));
+    if let Some(observer_version) = observer_version {
+        object.insert(
+            "latch_observer_version".to_owned(),
+            Value::from(observer_version),
+        );
+    }
     let paths = home.session(&id);
     if !paths.meta().is_file() {
         bail!("conversation hook belongs to unknown Latch session {id}");
@@ -168,18 +197,27 @@ fn ensure_claude_plugin(home: &LatchHome) -> anyhow::Result<PathBuf> {
     }
     let executable =
         fs::canonicalize(std::env::current_exe().context("cannot locate the latch executable")?)?;
-    let command = format!("{} __conversation-hook", shell_quote(&executable));
+    // The version is baked into this specific plugin directory's command line
+    // at generation time. It stays immutable even if the `latch` binary at
+    // this path is later upgraded in place, so a hook fired by an
+    // already-running Claude process still truthfully reports which hook set
+    // (and thus which turn-boundary guarantees) that launch actually has.
+    let command = format!(
+        "{} __conversation-hook --observer-version {OBSERVER_VERSION}",
+        shell_quote(&executable)
+    );
     let plugin = serde_json::to_vec_pretty(&serde_json::json!({
         "name": CLAUDE_PLUGIN_NAME,
         "version": env!("CARGO_PKG_VERSION"),
-        "description": "Captures raw Claude source bindings and observations for Latch."
+        "description": "Captures raw Claude source bindings, permission requests, and turn completions for Latch."
     }))?;
     let hook =
         serde_json::json!({"matcher": ".*", "hooks": [{"type": "command", "command": command}]});
     let hooks = serde_json::to_vec_pretty(&serde_json::json!({
         "hooks": {
             "SessionStart": [hook.clone()],
-            "PermissionRequest": [hook],
+            "PermissionRequest": [hook.clone()],
+            "Stop": [hook],
         }
     }))?;
     write_private(PrivateWrite {
@@ -282,6 +320,36 @@ mod tests {
                 .unwrap();
         assert_eq!(binding["connector"], "codex");
         assert_eq!(binding["source"], "/private/codex/session.jsonl");
+    }
+
+    #[test]
+    fn claude_plugin_registers_a_versioned_stop_hook() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = LatchHome::new(temp.path());
+        let plugin = ensure_claude_plugin(&home).unwrap();
+        assert!(
+            plugin
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .ends_with(&format!("-v{OBSERVER_VERSION}")),
+            "the plugin directory name is stamped with the observer version so an \
+             upgrade never rewrites hooks an already-running Claude process relies on"
+        );
+        let hooks: Value =
+            serde_json::from_slice(&fs::read(plugin.join("hooks").join("hooks.json")).unwrap())
+                .unwrap();
+        for event in ["SessionStart", "PermissionRequest", "Stop"] {
+            let command = hooks["hooks"][event][0]["hooks"][0]["command"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{event} hook is registered"));
+            assert!(
+                command.contains(&format!("--observer-version {OBSERVER_VERSION}")),
+                "{event} command does not bake in the observer version: {command}"
+            );
+        }
+        assert_eq!(OBSERVER_VERSION, STOP_HOOK_MIN_OBSERVER_VERSION);
     }
 
     #[test]

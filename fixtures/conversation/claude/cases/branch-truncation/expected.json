@@ -9,8 +9,8 @@
         "id": "c55eb0c4-2b24-4bea-b425-b1616c6dede1",
         "kind": {
           "name": "mcp__railway__list-variables",
-          "status": "succeeded",
-          "summary": "completed",
+          "status": "failed",
+          "summary": "failed: Permission for this action was denied by the Claude Code auto mode classifier. Reason: Blocked by classifier. If you have other tasks that don't depend on this…",
           "type": "tool"
         },
         "ordinal": 1

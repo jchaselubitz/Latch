@@ -130,6 +130,27 @@ nothing else. There is no `Stop`, `PostToolUse`, or `Notification` hook, so
 **no turn-completion boundary exists**. Adding hooks is a one-line change to
 that JSON.
 
+**Fixed in coo:1036.02zv.** `observer.rs` now also registers `Stop` and bumps
+`OBSERVER_VERSION` to 2 (`STOP_HOOK_MIN_OBSERVER_VERSION`). The hook command
+baked into each plugin-version directory carries `--observer-version N`
+literally in its command line, so an already-running Claude process — which
+loaded its `--plugin-dir` and thus its exact hook set at launch — keeps
+reporting the version it actually has even after the `latch` binary at that
+path is upgraded in place; the connector never assumes "the version I'm
+compiled with" describes every session. `jsonl.rs` learns
+`hook_observer_version` from any hook record's stamped
+`latch_observer_version` field and only treats a real user message as opening
+an authoritative turn (`turn_open`) once it has seen a version at or above
+`STOP_HOOK_MIN_OBSERVER_VERSION`; `Stop` closes it. A session still running an
+older observer never sets `turn_open` and falls back to the pre-existing
+tool-running/screen inference untouched — it degrades honestly instead of
+fabricating a boundary it cannot back. `PostToolUse` was evaluated and
+declined: `tool_result` is already parsed reliably off the transcript
+(coo:1036.qs2z), so a second hook would not improve tool-status fidelity.
+Along the way, a latent bug was fixed where Claude's own `tool_use` transcript
+records never set `tool_running = true` at all, so the fallback inference
+itself had never actually shown `Working` for a real Claude session.
+
 ### Codex support does not exist
 
 `self.id == "claude"` is the only real translation branch (`jsonl.rs:351`).
@@ -1297,6 +1318,23 @@ at all.
   the transcript.
 - **Accept inference for Codex** and mark the state as inferred in the contract,
   so clients can present it more cautiously than a provider-reported boundary.
+
+**Fixed in coo:1036.02zv, for Claude.** `Stop` is now registered
+(`OBSERVER_VERSION` 2 = `STOP_HOOK_MIN_OBSERVER_VERSION`). Observer versioning
+answer: the version is baked as a literal `--observer-version N` argument in
+the command line written into that version's own plugin directory, so it is
+immutable per launch — an already-running Claude process still reports the
+hook set it actually has even if the `latch` binary at that path is upgraded
+in place later, since the next `OBSERVER_VERSION` bump writes to a *new*
+versioned directory rather than mutating this one. `jsonl.rs` reads
+`latch_observer_version` off any hook record and gates the new `turn_open`
+authority on it: a session that never reports version ≥ 2 keeps exactly the
+prior tool-running/screen inference, honestly, rather than a fabricated
+completion. `PostToolUse` was evaluated and declined — `tool_result` already
+gives reliable per-call status and content off the transcript
+(coo:1036.qs2z), so a second hook would not have improved tool-status
+fidelity, only added a second capture path to keep versioned. Codex inference
+remains unaddressed (still no Codex support at all; see §3 above).
 
 ### 5. Rich items do not fit the budgets that make resume work
 

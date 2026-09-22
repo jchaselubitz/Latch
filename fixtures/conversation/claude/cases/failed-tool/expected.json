@@ -9,8 +9,8 @@
         "id": "35e2a926-8149-4d07-96ea-b49921c53cae",
         "kind": {
           "name": "Bash",
-          "status": "succeeded",
-          "summary": "completed",
+          "status": "failed",
+          "summary": "Check whether the checksums file was prepared before the blocked upload · failed: Exit code 1",
           "type": "tool"
         },
         "ordinal": 1
@@ -21,7 +21,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Read the Desktop supervision loop cadence · returned 16 lines",
           "type": "tool"
         },
         "ordinal": 2

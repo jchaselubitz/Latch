@@ -9,8 +9,8 @@
         "id": "c354c1fe-b351-48f0-a77f-689ea09b0771",
         "kind": {
           "name": "Bash",
-          "status": "succeeded",
-          "summary": "completed",
+          "status": "failed",
+          "summary": "Update decision, threat model, architecture rules, service and field-run READMEs · failed: The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP wh…",
           "type": "tool"
         },
         "ordinal": 1

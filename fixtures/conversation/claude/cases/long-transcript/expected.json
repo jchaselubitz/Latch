@@ -10,7 +10,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Read an existing link test for the establish, open, and read pattern · returned 10 lines",
           "type": "tool"
         },
         "ordinal": 334
@@ -21,7 +21,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Read the transport loop's end and the buffer constants · returned 8 lines",
           "type": "tool"
         },
         "ordinal": 335
@@ -32,7 +32,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Read the logical stream wrapper's shutdown and IO forwarding · returned 8 lines",
           "type": "tool"
         },
         "ordinal": 336
@@ -43,7 +43,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Patch the link driver's close and carrier-end drains and run transport tests · returned 6 lines",
           "type": "tool"
         },
         "ordinal": 337
@@ -65,7 +65,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Prove the regression fails on the old driver and passes on the fixed one · returned 1 line",
           "type": "tool"
         },
         "ordinal": 339
@@ -76,7 +76,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Check the stalled regression run and which link.rs is on disk · returned 5 lines",
           "type": "tool"
         },
         "ordinal": 340
@@ -87,7 +87,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Restore the fixed driver and rerun the regression · returned 4 lines",
           "type": "tool"
         },
         "ordinal": 341
@@ -109,7 +109,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Test, rebuild the XCFramework and iOS app, and reinstall on the phone · returned 1 line",
           "type": "tool"
         },
         "ordinal": 343
@@ -120,7 +120,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Bump the version and build the signed CLI payload with the transport fix · returned 1 line",
           "type": "tool"
         },
         "ordinal": 344
@@ -142,7 +142,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Record the receipt-loss failure and fix in the plan · returned 1 line",
           "type": "tool"
         },
         "ordinal": 346
@@ -175,7 +175,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Install the new CLI payload and check the phone chain progress · returned 7 lines",
           "type": "tool"
         },
         "ordinal": 349
@@ -186,7 +186,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Restart the helper so Desktop relaunches it from the new binary · returned 2 lines",
           "type": "tool"
         },
         "ordinal": 350
@@ -197,7 +197,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Rebuild and notarize the Desktop app at 0.2609080746.0 · returned 1 line",
           "type": "tool"
         },
         "ordinal": 351
@@ -208,7 +208,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Check the phone build chain output so far · returned 1 line",
           "type": "tool"
         },
         "ordinal": 352
@@ -219,7 +219,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Wait for the phone build chain and show its result · returned 5 lines",
           "type": "tool"
         },
         "ordinal": 353
@@ -241,7 +241,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Launch the fixed phone app and list the active Mac record · returned 2 lines",
           "type": "tool"
         },
         "ordinal": 355
@@ -274,7 +274,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Commit the transport fix, push main, and tag the release · returned 7 lines",
           "type": "tool"
         },
         "ordinal": 358
@@ -285,7 +285,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Format, commit the fix, and move the release tag onto it · returned 7 lines",
           "type": "tool"
         },
         "ordinal": 359
@@ -296,7 +296,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "List release workflow runs to cancel the one from the wrong commit · returned 3 lines",
           "type": "tool"
         },
         "ordinal": 360
@@ -307,7 +307,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Cancel the release run that started from the wrong commit · returned 3 lines",
           "type": "tool"
         },
         "ordinal": 361
@@ -318,7 +318,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Check whether the owner has re-paired yet · returned 7 lines",
           "type": "tool"
         },
         "ordinal": 362
@@ -340,7 +340,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Wait for the release workflow, then attach the Desktop archive and checksums · returned 2 lines",
           "type": "tool"
         },
         "ordinal": 364
@@ -351,7 +351,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Post Overlord progress update · returned 1 line",
           "type": "tool"
         },
         "ordinal": 365
@@ -384,7 +384,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Check the Mac audit for the new pairing and streams · returned 10 lines",
           "type": "tool"
         },
         "ordinal": 368
@@ -395,7 +395,7 @@
         "kind": {
           "name": "mcp__railway__get-logs",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "returned 1 line",
           "type": "tool"
         },
         "ordinal": 369
@@ -406,7 +406,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Install the 0.2609080746.0 Desktop app and relaunch it · returned 4 lines",
           "type": "tool"
         },
         "ordinal": 370
@@ -417,7 +417,7 @@
         "kind": {
           "name": "mcp__railway__get-logs",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "returned 1 line",
           "type": "tool"
         },
         "ordinal": 371
@@ -428,7 +428,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Confirm the helper restarted and the phone reconnected after the Desktop swap · returned 8 lines",
           "type": "tool"
         },
         "ordinal": 372
@@ -439,7 +439,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Record Mac-side baselines and check the phone's lock state · returned 3 lines",
           "type": "tool"
         },
         "ordinal": 373
@@ -450,7 +450,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Run 30 reconnect cycles then 30 cold opens on the phone over USB · returned 1 line",
           "type": "tool"
         },
         "ordinal": 374
@@ -461,7 +461,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Confirm the reconnect-cycle run started on the phone · returned 1 line",
           "type": "tool"
         },
         "ordinal": 375
@@ -472,7 +472,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Check the release assets and cycle-run progress · returned 6 lines",
           "type": "tool"
         },
         "ordinal": 376
@@ -483,7 +483,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Check whether the app is running on the phone and what the harness is doing · returned 4 lines",
           "type": "tool"
         },
         "ordinal": 377
@@ -494,7 +494,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Show the latest Mac audit events · returned 9 lines",
           "type": "tool"
         },
         "ordinal": 378
@@ -505,7 +505,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Peek at the phone's diagnostics files · returned 1 line",
           "type": "tool"
         },
         "ordinal": 379
@@ -516,7 +516,7 @@
         "kind": {
           "name": "mcp__railway__get-logs",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "returned 1 line",
           "type": "tool"
         },
         "ordinal": 380
@@ -527,7 +527,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Inspect the running app's arguments and devicectl's argument handling · returned 4 lines",
           "type": "tool"
         },
         "ordinal": 381
@@ -538,7 +538,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Launch the app without arguments and watch for its first streams · returned 2 lines",
           "type": "tool"
         },
         "ordinal": 382
@@ -549,7 +549,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Read the launch error details and the lock state · returned 17 lines",
           "type": "tool"
         },
         "ordinal": 383
@@ -560,7 +560,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Wait for the phone to be unlocked, then run 30 cycles and 30 cold opens · returned 1 line",
           "type": "tool"
         },
         "ordinal": 384
@@ -604,7 +604,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Check harness progress, phone lock state, and the Mac's public address · returned 4 lines",
           "type": "tool"
         },
         "ordinal": 388
@@ -615,7 +615,7 @@
         "kind": {
           "name": "mcp__railway__get-logs",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "returned 1 line",
           "type": "tool"
         },
         "ordinal": 389
@@ -626,7 +626,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Launch the app with diagnostics arguments while unlocked and watch for streams · returned 5 lines",
           "type": "tool"
         },
         "ordinal": 390
@@ -637,7 +637,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Pass app arguments after a -- separator in the harness · returned 1 line",
           "type": "tool"
         },
         "ordinal": 391
@@ -648,7 +648,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Launch with the separator and a 3-cycle diagnostics run, then count streams · returned 3 lines",
           "type": "tool"
         },
         "ordinal": 392
@@ -659,7 +659,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Fix the harness launch separator and stop the broken run · returned 6 lines",
           "type": "tool"
         },
         "ordinal": 393
@@ -670,7 +670,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Pull and summarize the phone's diagnostics from the 3-cycle test · returned 5 lines",
           "type": "tool"
         },
         "ordinal": 394
@@ -681,7 +681,7 @@
         "kind": {
           "name": "mcp__railway__get-logs",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "returned 1 line",
           "type": "tool"
         },
         "ordinal": 395
@@ -692,7 +692,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Read the Mac audit since 08:14 and the recovery-cycle implementation · returned 10 lines",
           "type": "tool"
         },
         "ordinal": 396
@@ -703,7 +703,7 @@
         "kind": {
           "name": "mcp__railway__get-logs",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "returned 1 line",
           "type": "tool"
         },
         "ordinal": 397
@@ -714,7 +714,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Read the helper's status emission points · returned 16 lines",
           "type": "tool"
         },
         "ordinal": 398
@@ -725,7 +725,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Find the audit writer and the crate's public surface for the helper · returned 12 lines",
           "type": "tool"
         },
         "ordinal": 399
@@ -736,7 +736,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Read the helper's status details and the LatchHome type · returned 7 lines",
           "type": "tool"
         },
         "ordinal": 400
@@ -747,7 +747,7 @@
         "kind": {
           "name": "mcp__railway__get-logs",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "returned 1 line",
           "type": "tool"
         },
         "ordinal": 401
@@ -758,7 +758,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Print the raw per-attempt stages from the 3-cycle test · returned 4 lines",
           "type": "tool"
         },
         "ordinal": 402
@@ -769,7 +769,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Read how the phone races the LAN and relay carriers · returned 6 lines",
           "type": "tool"
         },
         "ordinal": 403
@@ -780,7 +780,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Record helper link status transitions in the Mac audit trail · returned 9 lines",
           "type": "tool"
         },
         "ordinal": 404
@@ -791,7 +791,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Read the phone's LAN/relay race and loser handling · returned 6 lines",
           "type": "tool"
         },
         "ordinal": 405
@@ -802,7 +802,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Read the LAN connect timeouts and how LAN targets are discovered · returned 13 lines",
           "type": "tool"
         },
         "ordinal": 406
@@ -813,7 +813,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Read the Mac's Bonjour advertisement and LAN-accept replacement rule · returned 14 lines",
           "type": "tool"
         },
         "ordinal": 407
@@ -824,7 +824,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Check whether generated Swift bindings propagate task cancellation to Rust futures · returned 1 line",
           "type": "tool"
         },
         "ordinal": 408
@@ -835,7 +835,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Build the instrumented helper, install it unsigned for diagnosis, and restart it · returned 9 lines",
           "type": "tool"
         },
         "ordinal": 409
@@ -846,7 +846,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Run three diagnostics cycles and read the Mac's link lifecycle audit · returned 1 line",
           "type": "tool"
         },
         "ordinal": 410
@@ -857,7 +857,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Locate the coordinator's link-loss detection and retry scheduling · returned 7 lines",
           "type": "tool"
         },
         "ordinal": 411
@@ -868,7 +868,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Check whether the instrumented helper is running and writing audit events · returned 6 lines",
           "type": "tool"
         },
         "ordinal": 412
@@ -879,7 +879,7 @@
         "kind": {
           "name": "mcp__railway__get-logs",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "returned 1 line",
           "type": "tool"
         },
         "ordinal": 413
@@ -890,7 +890,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Inspect the running helper's sockets, gateway child, and home resolution · returned 8 lines",
           "type": "tool"
         },
         "ordinal": 414
@@ -901,7 +901,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Read the audit writer for a reason it could silently fail · returned 8 lines",
           "type": "tool"
         },
         "ordinal": 415
@@ -912,7 +912,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Sign the diagnostic helper, reinstall, and verify it starts its gateway and sockets · returned 8 lines",
           "type": "tool"
         },
         "ordinal": 416
@@ -923,7 +923,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Run three cycles and read the Mac's link lifecycle from the audit · returned 12 lines",
           "type": "tool"
         },
         "ordinal": 417
@@ -934,7 +934,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Read the phone's suspend, resume, and settle logic · returned 9 lines",
           "type": "tool"
         },
         "ordinal": 418
@@ -945,7 +945,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Read the coordinator's suspend and resume semantics · returned 9 lines",
           "type": "tool"
         },
         "ordinal": 419
@@ -956,7 +956,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Read the app-model recovery test fixtures · returned 9 lines",
           "type": "tool"
         },
         "ordinal": 420
@@ -967,7 +967,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Read the scripted connector test fixture · returned 4 lines",
           "type": "tool"
         },
         "ordinal": 421
@@ -978,7 +978,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Make suspend and resume apply in request order in the app model · returned 1 line",
           "type": "tool"
         },
         "ordinal": 422
@@ -989,7 +989,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Read the connector fixture API and the existing suspend/resume test · returned 11 lines",
           "type": "tool"
         },
         "ordinal": 423
@@ -1000,7 +1000,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Add the suspend/resume ordering regression and run the recovery suites · returned 5 lines",
           "type": "tool"
         },
         "ordinal": 424
@@ -1022,7 +1022,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Rebuild and reinstall the phone app, run five cycles, and read both sides · returned 2 lines",
           "type": "tool"
         },
         "ordinal": 426
@@ -1033,7 +1033,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Record the suspend/resume race, the audited link lifecycle, and the signing note · returned 1 line",
           "type": "tool"
         },
         "ordinal": 427
@@ -1044,7 +1044,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Run the whole mobile kit suite after the app-model change · returned 1 line",
           "type": "tool"
         },
         "ordinal": 428
@@ -1055,7 +1055,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Record the same-LAN Mac baseline and drop the two mislabeled baselines · returned 2 lines",
           "type": "tool"
         },
         "ordinal": 429
@@ -1066,7 +1066,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Wait for the five-cycle run and show both sides' results · returned 13 lines",
           "type": "tool"
         },
         "ordinal": 430
@@ -1077,7 +1077,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Run five cycles with the LAN attempt skipped and read the phone's stages · returned 4 lines",
           "type": "tool"
         },
         "ordinal": 431
@@ -1088,7 +1088,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Read the coordinator's supervise loop, publish, and stopSupervisor · returned 12 lines",
           "type": "tool"
         },
         "ordinal": 432
@@ -1099,7 +1099,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Read the FFI connect path and the native connection's close and wait behavior · returned 11 lines",
           "type": "tool"
         },
         "ordinal": 433
@@ -1110,7 +1110,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Read the FFI connect_wss implementation and its runtime · returned 11 lines",
           "type": "tool"
         },
         "ordinal": 434
@@ -1121,7 +1121,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Read stopSupervisor's tail and the FFI close, wait_closed, and open_service · returned 13 lines",
           "type": "tool"
         },
         "ordinal": 435
@@ -1132,7 +1132,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Add the content-free phone stage trace and build the kit · returned 2 lines",
           "type": "tool"
         },
         "ordinal": 436
@@ -1143,7 +1143,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Rebuild with the trace, reinstall, run three cycles, and read the phone trace with the Mac audit · returned 17 lines",
           "type": "tool"
         },
         "ordinal": 437
@@ -1154,7 +1154,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Read the snapshot observation code on both sides and the trace head · returned 7 lines",
           "type": "tool"
         },
         "ordinal": 438
@@ -1165,7 +1165,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Check the stub protocol capabilities, request timeouts, and the refresh path · returned 3 lines",
           "type": "tool"
         },
         "ordinal": 439
@@ -1176,7 +1176,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Run discovery as a generation-guarded task instead of inline in the snapshot loop · returned 1 line",
           "type": "tool"
         },
         "ordinal": 440
@@ -1187,7 +1187,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Read the stub URL protocol to add a hanging response · returned 8 lines",
           "type": "tool"
         },
         "ordinal": 441
@@ -1198,7 +1198,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Run the app-model suites after the discovery change · returned 4 lines",
           "type": "tool"
         },
         "ordinal": 442
@@ -1220,7 +1220,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Add the hung-request regression and run the app-model suite · returned 4 lines",
           "type": "tool"
         },
         "ordinal": 444
@@ -1231,7 +1231,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Rebuild, smoke-test three cycles, then run the same-LAN measured rows · returned 1 line",
           "type": "tool"
         },
         "ordinal": 445
@@ -1253,7 +1253,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Record the finding, then check the smoke result · returned 8 lines",
           "type": "tool"
         },
         "ordinal": 447
@@ -1275,7 +1275,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Commit and push the phone stall fixes and the audit instrumentation · returned 2 lines",
           "type": "tool"
         },
         "ordinal": 449
@@ -1286,7 +1286,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Post progress and check the same-LAN run · returned 4 lines",
           "type": "tool"
         },
         "ordinal": 450
@@ -1297,7 +1297,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Report the larger applicationReady sample per attempt and re-summarize the smoke run · returned 10 lines",
           "type": "tool"
         },
         "ordinal": 451
@@ -1308,7 +1308,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Wait for the same-LAN run to finish · returned 5 lines",
           "type": "tool"
         },
         "ordinal": 452
@@ -1319,7 +1319,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Summarize the same-LAN cycles and cold opens · returned 14 lines",
           "type": "tool"
         },
         "ordinal": 453
@@ -1330,7 +1330,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "List every measured reconnect attempt with its path and outcome · returned 5 lines",
           "type": "tool"
         },
         "ordinal": 454
@@ -1341,7 +1341,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Record the same-LAN automated rows as a field run · returned 2 lines",
           "type": "tool"
         },
         "ordinal": 455
@@ -1352,7 +1352,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Inspect the LAN attempt outcomes in the phone trace · returned 14 lines",
           "type": "tool"
         },
         "ordinal": 456
@@ -1363,7 +1363,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Read how the LAN target host is chosen on both ends · returned 12 lines",
           "type": "tool"
         },
         "ordinal": 457
@@ -1374,7 +1374,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Check the Mac's Bonjour advertisement and the phone's local-network entitlements · returned 7 lines",
           "type": "tool"
         },
         "ordinal": 458
@@ -1385,7 +1385,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Record the same-LAN measurements in the field report · returned 1 line",
           "type": "tool"
         },
         "ordinal": 459
@@ -1396,7 +1396,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Widen the Bonjour browse, trace its result, rebuild, and run five LAN-allowed cycles · returned 1 line",
           "type": "tool"
         },
         "ordinal": 460
@@ -1407,7 +1407,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Wait for the LAN check and show the browse results · returned 12 lines",
           "type": "tool"
         },
         "ordinal": 461
@@ -1451,7 +1451,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Resolve the Mac's advertised LAN service and its addresses · returned 1 line",
           "type": "tool"
         },
         "ordinal": 465
@@ -1462,7 +1462,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Show the Mac's advertised service record and address resolution · returned 1 line",
           "type": "tool"
         },
         "ordinal": 466
@@ -1473,7 +1473,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Bump the version and build the signed, notarized CLI payload with the audited helper · returned 1 line",
           "type": "tool"
         },
         "ordinal": 467
@@ -1484,7 +1484,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Record the LAN discovery finding as outstanding · returned 1 line",
           "type": "tool"
         },
         "ordinal": 468
@@ -1494,8 +1494,8 @@
         "id": "267aa1c5-6ed1-473f-aa89-98a7a38201bc",
         "kind": {
           "name": "Bash",
-          "status": "succeeded",
-          "summary": "completed",
+          "status": "failed",
+          "summary": "Wait for the payload build to finish · failed: The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP wh…",
           "type": "tool"
         },
         "ordinal": 469
@@ -1539,7 +1539,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Run five LAN-allowed cycles and read the browse and path results · returned 16 lines",
           "type": "tool"
         },
         "ordinal": 473
@@ -1550,7 +1550,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Read the connect options struct to extend it · returned 7 lines",
           "type": "tool"
         },
         "ordinal": 474
@@ -1561,7 +1561,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Add the diagnostics-only prefer-LAN option and build the kit · returned 2 lines",
           "type": "tool"
         },
         "ordinal": 475
@@ -1572,7 +1572,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Show the finished payload build · returned 5 lines",
           "type": "tool"
         },
         "ordinal": 476
@@ -1583,7 +1583,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Install the notarized 0.2609080913.0 payload and restart the helper · returned 6 lines",
           "type": "tool"
         },
         "ordinal": 477
@@ -1594,7 +1594,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Rebuild the phone app with prefer-LAN, install, and run five LAN-first cycles · returned 1 line",
           "type": "tool"
         },
         "ordinal": 478
@@ -1605,7 +1605,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Wait for the LAN-first cycles and show the results · returned 14 lines",
           "type": "tool"
         },
         "ordinal": 479
@@ -1616,7 +1616,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Map interface names to the indices the advertisement appeared on · returned 18 lines",
           "type": "tool"
         },
         "ordinal": 480
@@ -1627,7 +1627,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Check the mdns-sd interface controls available · returned 5 lines",
           "type": "tool"
         },
         "ordinal": 481
@@ -1638,7 +1638,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Fix the Bonjour descriptor, rebuild, and rerun five LAN-first cycles · returned 1 line",
           "type": "tool"
         },
         "ordinal": 482
@@ -1649,7 +1649,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Record the Bonjour descriptor finding in the plan · returned 1 line",
           "type": "tool"
         },
         "ordinal": 483
@@ -1660,7 +1660,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Wait for the LAN-first cycles with the descriptor fix · returned 11 lines",
           "type": "tool"
         },
         "ordinal": 484
@@ -1671,7 +1671,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Check if-addrs availability and the LAN target parsing · returned 10 lines",
           "type": "tool"
         },
         "ordinal": 485
@@ -1682,7 +1682,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Publish LAN addresses from the Mac, try them first on the phone, and widen LAN bounds · returned 5 lines",
           "type": "tool"
         },
         "ordinal": 486
@@ -1693,7 +1693,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Find tests and fixtures that pin the TXT record shape · returned 1 line",
           "type": "tool"
         },
         "ordinal": 487
@@ -1704,7 +1704,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Build helper, FFI, XCFramework, and app with the LAN fixes, then measure LAN-first and race cycles · returned 1 line",
           "type": "tool"
         },
         "ordinal": 488
@@ -1715,7 +1715,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Wait for the LAN chain and show its full log · returned 10 lines",
           "type": "tool"
         },
         "ordinal": 489
@@ -1726,7 +1726,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Read the browse completion code and the continuation guard helper · returned 11 lines",
           "type": "tool"
         },
         "ordinal": 490
@@ -1737,7 +1737,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Return the browse on first match, rebuild, and measure the ordinary race · returned 1 line",
           "type": "tool"
         },
         "ordinal": 491
@@ -1748,7 +1748,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Record the LAN address publication and browse changes in the plan · returned 1 line",
           "type": "tool"
         },
         "ordinal": 492
@@ -1759,7 +1759,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Wait for the race check and show its result · returned 11 lines",
           "type": "tool"
         },
         "ordinal": 493
@@ -1770,7 +1770,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Read the connector's current race section before rewriting it · returned 9 lines",
           "type": "tool"
         },
         "ordinal": 494
@@ -1781,7 +1781,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Rewrite the connector as LAN-then-relay and drop the prefer-LAN option · returned 5 lines",
           "type": "tool"
         },
         "ordinal": 495
@@ -1792,7 +1792,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Find docs and comments that still describe a LAN/relay race · returned 3 lines",
           "type": "tool"
         },
         "ordinal": 496
@@ -1803,7 +1803,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Fix the connector's doc comment and check for uses of the old race helper · returned 7 lines",
           "type": "tool"
         },
         "ordinal": 497
@@ -1814,7 +1814,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Record the LAN-then-relay design change in the decision and plan · returned 1 line",
           "type": "tool"
         },
         "ordinal": 498
@@ -1825,7 +1825,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Test, rebuild, smoke the LAN-then-relay connector, then rerun the same-LAN rows on the LAN path · returned 1 line",
           "type": "tool"
         },
         "ordinal": 499
@@ -1836,7 +1836,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Wait for the LAN-path same-LAN run and show the results · returned 1 line",
           "type": "tool"
         },
         "ordinal": 500
@@ -1847,7 +1847,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Show the LAN-path run progress so far · returned 11 lines",
           "type": "tool"
         },
         "ordinal": 501
@@ -1858,7 +1858,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Wait for the cold opens and show the LAN-path summaries · returned 9 lines",
           "type": "tool"
         },
         "ordinal": 502
@@ -1869,7 +1869,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Record the LAN-path same-LAN run and tidy the connector comment · returned 1 line",
           "type": "tool"
         },
         "ordinal": 503
@@ -1880,7 +1880,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Update the field report with the LAN-path results · returned 5 lines",
           "type": "tool"
         },
         "ordinal": 504
@@ -1891,7 +1891,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Fix the record reference, commit the LAN fixes and evidence, and push · returned 3 lines",
           "type": "tool"
         },
         "ordinal": 505
@@ -1902,7 +1902,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Post Overlord progress · returned 1 line",
           "type": "tool"
         },
         "ordinal": 506
@@ -1913,7 +1913,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Run ten helper restarts and ten gateway restarts with the phone on the LAN path · returned 1 line",
           "type": "tool"
         },
         "ordinal": 507
@@ -1946,7 +1946,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Show the restart-row recoveries and the latest Mac audit · returned 3 lines",
           "type": "tool"
         },
         "ordinal": 510
@@ -1957,7 +1957,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Compute per-restart recovery for the helper and gateway rows · returned 7 lines",
           "type": "tool"
         },
         "ordinal": 511
@@ -1968,7 +1968,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Read the helper restart backoff and its reset rule · returned 9 lines",
           "type": "tool"
         },
         "ordinal": 512
@@ -1979,7 +1979,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Reset the helper restart schedule after a healthy run, with a unit test · returned 3 lines",
           "type": "tool"
         },
         "ordinal": 513
@@ -1990,7 +1990,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Check whether the Railway CLI can restart a service · returned 3 lines",
           "type": "tool"
         },
         "ordinal": 514
@@ -2001,7 +2001,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Show the Desktop build error · returned 4 lines",
           "type": "tool"
         },
         "ordinal": 515
@@ -2023,7 +2023,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Fix the timestamp scope and run the Desktop suite · returned 3 lines",
           "type": "tool"
         },
         "ordinal": 517
@@ -2034,7 +2034,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Run ten relay restarts with the phone on the relay path · returned 1 line",
           "type": "tool"
         },
         "ordinal": 518
@@ -2045,7 +2045,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Show the remaining Desktop build error · returned 1 line",
           "type": "tool"
         },
         "ordinal": 519
@@ -2056,7 +2056,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Show the Desktop test build error · returned 3 lines",
           "type": "tool"
         },
         "ordinal": 520
@@ -2067,7 +2067,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Mark the schedule test main-actor and rerun the Desktop suite · returned 2 lines",
           "type": "tool"
         },
         "ordinal": 521
@@ -2077,8 +2077,8 @@
         "id": "db4f5276-6f98-4eba-942f-09ebfd6f0745",
         "kind": {
           "name": "Bash",
-          "status": "succeeded",
-          "summary": "completed",
+          "status": "failed",
+          "summary": "Check the relay-restart row progress · failed: <tool_use_error>Blocked: sleep 60 followed by: cat /tmp/claude/session/0e920c11-b282-4c38-a48d-1af826a485c5/scratchpad/matrix/relay-restarts.log. To wait for a…",
           "type": "tool"
         },
         "ordinal": 522
@@ -2089,7 +2089,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Build and notarize the Desktop app with the restart-schedule fix · returned 1 line",
           "type": "tool"
         },
         "ordinal": 523
@@ -2100,7 +2100,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Check the relay-restart row progress · returned 1 line",
           "type": "tool"
         },
         "ordinal": 524
@@ -2111,7 +2111,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Check whether the Railway restart command is waiting on a prompt · returned 1 line",
           "type": "tool"
         },
         "ordinal": 525
@@ -2122,7 +2122,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Inspect the relay-restart script's processes · returned 5 lines",
           "type": "tool"
         },
         "ordinal": 526
@@ -2133,7 +2133,7 @@
         "kind": {
           "name": "mcp__railway__list-deployments",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "returned 1 line",
           "type": "tool"
         },
         "ordinal": 527
@@ -2144,7 +2144,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Read the relay-restart task output · returned 4 lines",
           "type": "tool"
         },
         "ordinal": 528
@@ -2155,7 +2155,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Try one relay restart from the CLI and time it · returned 3 lines",
           "type": "tool"
         },
         "ordinal": 529
@@ -2166,7 +2166,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Record the restart-schedule defect and wait for the relay-restart row · returned 1 line",
           "type": "tool"
         },
         "ordinal": 530
@@ -2177,7 +2177,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Check the relay-restart row progress and the Desktop build result · returned 4 lines",
           "type": "tool"
         },
         "ordinal": 531
@@ -2188,7 +2188,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Stop the stuck relay-restart script and check the Desktop build output · returned 4 lines",
           "type": "tool"
         },
         "ordinal": 532
@@ -2199,7 +2199,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Rerun the relay-restart row with a non-interactive restart command · returned 1 line",
           "type": "tool"
         },
         "ordinal": 533
@@ -2210,7 +2210,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Confirm the relay restarts are proceeding · returned 3 lines",
           "type": "tool"
         },
         "ordinal": 534
@@ -2221,7 +2221,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Wait for the relay-restart row and show recoveries · returned 1 line",
           "type": "tool"
         },
         "ordinal": 535
@@ -2232,7 +2232,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Check the relay-restart row state · returned 3 lines",
           "type": "tool"
         },
         "ordinal": 536
@@ -2243,7 +2243,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Wait for the relay-restart summary · returned 5 lines",
           "type": "tool"
         },
         "ordinal": 537
@@ -2254,7 +2254,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Install the fixed Desktop, then run helper and gateway restart rows spaced 75 s apart · returned 1 line",
           "type": "tool"
         },
         "ordinal": 538
@@ -2276,7 +2276,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Record the relay-restart evidence and commit the Desktop fix · returned 2 lines",
           "type": "tool"
         },
         "ordinal": 540
@@ -2287,7 +2287,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Prepare the control-plane outage script and check restart-row progress · returned 5 lines",
           "type": "tool"
         },
         "ordinal": 541
@@ -2298,7 +2298,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Wait for the helper-restart row summary · returned 1 line",
           "type": "tool"
         },
         "ordinal": 542
@@ -2309,7 +2309,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Wait again for the helper-restart row summary · returned 3 lines",
           "type": "tool"
         },
         "ordinal": 543
@@ -2320,7 +2320,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Compute per-restart recovery for the helper row from its own process segment · returned 2 lines",
           "type": "tool"
         },
         "ordinal": 544
@@ -2342,7 +2342,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Print the phone's state sequence during the helper-restart row against the kill times · returned 13 lines",
           "type": "tool"
         },
         "ordinal": 546
@@ -2353,7 +2353,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Restrict published LAN addresses to en* interfaces and bound the phone's LAN phase · returned 3 lines",
           "type": "tool"
         },
         "ordinal": 547
@@ -2364,7 +2364,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Record the helper-restart recovery finding in the plan · returned 1 line",
           "type": "tool"
         },
         "ordinal": 548
@@ -2375,7 +2375,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Wait for the gateway-restart row and compute its recoveries · returned 3 lines",
           "type": "tool"
         },
         "ordinal": 549
@@ -2397,7 +2397,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Wait for the gateway row to finish and compute recoveries from its own segment · returned 4 lines",
           "type": "tool"
         },
         "ordinal": 551
@@ -2408,7 +2408,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Install both fixes, rerun helper and gateway restart rows, then the control-plane outage row · returned 1 line",
           "type": "tool"
         },
         "ordinal": 552
@@ -2419,7 +2419,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Commit the LAN address and budget fixes · returned 1 line",
           "type": "tool"
         },
         "ordinal": 553
@@ -2430,7 +2430,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Prepare the long-suspension harness and check CI · returned 4 lines",
           "type": "tool"
         },
         "ordinal": 554
@@ -2441,7 +2441,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Identify why CI fails on main · returned 7 lines",
           "type": "tool"
         },
         "ordinal": 555
@@ -2463,7 +2463,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Rewrite the drain as a while-let loop and run clippy · returned 2 lines",
           "type": "tool"
         },
         "ordinal": 557
@@ -2474,7 +2474,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Read the Mobile client CI job failure · returned 2 lines",
           "type": "tool"
         },
         "ordinal": 558
@@ -2485,7 +2485,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Find the actual failing assertion or error in the mobile CI job · returned 3 lines",
           "type": "tool"
         },
         "ordinal": 559
@@ -2496,7 +2496,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Read the mobile CI job steps · returned 8 lines",
           "type": "tool"
         },
         "ordinal": 560
@@ -2507,7 +2507,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Read the test that failed on CI · returned 7 lines",
           "type": "tool"
         },
         "ordinal": 561
@@ -2518,7 +2518,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Run the CI-failing test locally three times · returned 3 lines",
           "type": "tool"
         },
         "ordinal": 562
@@ -2529,7 +2529,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Make the lifecycle tests wait for state, then commit and push with the clippy fix · returned 3 lines",
           "type": "tool"
         },
         "ordinal": 563
@@ -2540,7 +2540,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Check progress of the restart rerun chain · returned 8 lines",
           "type": "tool"
         },
         "ordinal": 564
@@ -2551,7 +2551,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Note restart behaviour in the runbook and wait for the helper row · returned 1 line",
           "type": "tool"
         },
         "ordinal": 565
@@ -2562,7 +2562,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Wait for the helper row rerun and compute its recoveries · returned 4 lines",
           "type": "tool"
         },
         "ordinal": 566
@@ -2573,7 +2573,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Compare the phone's state sequence with the kill times and the Mac's link events · returned 13 lines",
           "type": "tool"
         },
         "ordinal": 567
@@ -2584,7 +2584,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Record the helper-row rerun and wait for the gateway row · returned 1 line",
           "type": "tool"
         },
         "ordinal": 568
@@ -2595,7 +2595,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Build the final coordinated signed, notarized CLI payload and Desktop app · returned 1 line",
           "type": "tool"
         },
         "ordinal": 569
@@ -2606,7 +2606,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Wait for the gateway row and control-plane outage row to finish · returned 6 lines",
           "type": "tool"
         },
         "ordinal": 570
@@ -2617,7 +2617,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Install the final coordinated release on the Mac and relaunch Desktop · returned 10 lines",
           "type": "tool"
         },
         "ordinal": 571
@@ -2628,7 +2628,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Record the restart and lease/outage rows as field runs · returned 1 line",
           "type": "tool"
         },
         "ordinal": 572
@@ -2639,7 +2639,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Finalize the field report identities and the plan's stopping-point record · returned 1 line",
           "type": "tool"
         },
         "ordinal": 573
@@ -2661,7 +2661,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Commit the stopping-point state, push, and tag the final release · returned 2 lines",
           "type": "tool"
         },
         "ordinal": 575
@@ -2672,7 +2672,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Attach the notarized Desktop archive to the final release once the workflow publishes it · returned 2 lines",
           "type": "tool"
         },
         "ordinal": 576
@@ -2683,7 +2683,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Append the stopping-point summary to the mission artifact · returned 1 line",
           "type": "tool"
         },
         "ordinal": 577
@@ -2694,7 +2694,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Post the pause request with the exact help needed · returned 3 lines",
           "type": "tool"
         },
         "ordinal": 578
@@ -2727,7 +2727,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Confirm the final release assets · returned 3 lines",
           "type": "tool"
         },
         "ordinal": 581
@@ -2771,7 +2771,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Relaunch the app normally and record a Mac baseline for the manual subset · returned 3 lines",
           "type": "tool"
         },
         "ordinal": 585
@@ -2815,7 +2815,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Read the Mac audit since the manual test began · returned 11 lines",
           "type": "tool"
         },
         "ordinal": 589
@@ -2826,7 +2826,7 @@
         "kind": {
           "name": "mcp__railway__get-logs",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "returned 1 line",
           "type": "tool"
         },
         "ordinal": 590
@@ -2837,7 +2837,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "List sessions and locate the terminal surface rules · returned 7 lines",
           "type": "tool"
         },
         "ordinal": 591
@@ -2848,7 +2848,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Locate how the proxy handles bytes after the request head · returned 7 lines",
           "type": "tool"
         },
         "ordinal": 592
@@ -2859,7 +2859,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Find the proxy stream entry point · returned 2 lines",
           "type": "tool"
         },
         "ordinal": 593
@@ -2870,7 +2870,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Read the proxy's head read, injection, and byte piping · returned 15 lines",
           "type": "tool"
         },
         "ordinal": 594
@@ -2881,7 +2881,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Read the tail of the injection (what happens to bytes after the head) · returned 9 lines",
           "type": "tool"
         },
         "ordinal": 595
@@ -2892,7 +2892,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Locate the loopback adapter's request handling and pumps · returned 8 lines",
           "type": "tool"
         },
         "ordinal": 596
@@ -2903,7 +2903,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Read the adapter's request pump and the loopback receive helper · returned 9 lines",
           "type": "tool"
         },
         "ordinal": 597
@@ -2914,7 +2914,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Read the gateway address and the v2 route table · returned 5 lines",
           "type": "tool"
         },
         "ordinal": 598
@@ -2925,7 +2925,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Find the session creation request contract · returned 8 lines",
           "type": "tool"
         },
         "ordinal": 599
@@ -2936,7 +2936,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "See the exact paths and bodies the phone sends for create and terminal · returned 6 lines",
           "type": "tool"
         },
         "ordinal": 600
@@ -2947,7 +2947,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Read the create request contract and check for a WebSocket client library · returned 10 lines",
           "type": "tool"
         },
         "ordinal": 601
@@ -2958,7 +2958,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Create a session through the loopback gateway directly and time it · returned 4 lines",
           "type": "tool"
         },
         "ordinal": 602
@@ -2969,7 +2969,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Read the FFI stream read and write implementations · returned 11 lines",
           "type": "tool"
         },
         "ordinal": 603
@@ -2980,7 +2980,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Check whether the logical stream can be split into read and write halves · returned 7 lines",
           "type": "tool"
         },
         "ordinal": 604
@@ -2991,7 +2991,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Read the existing FFI tests to model a full-duplex regression · returned 12 lines",
           "type": "tool"
         },
         "ordinal": 605
@@ -3002,7 +3002,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Split the FFI stream into independently locked halves and add the full-duplex regression · returned 8 lines",
           "type": "tool"
         },
         "ordinal": 606
@@ -3024,7 +3024,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Rebuild the XCFramework and phone app with the stream fix, install, and launch · returned 2 lines",
           "type": "tool"
         },
         "ordinal": 608
@@ -3035,7 +3035,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Record and commit the stream-lock fix · returned 3 lines",
           "type": "tool"
         },
         "ordinal": 609
@@ -3046,7 +3046,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Wait for the phone rebuild and install · returned 6 lines",
           "type": "tool"
         },
         "ordinal": 610
@@ -3090,7 +3090,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Record the manual terminal verification for the same-LAN row · returned 2 lines",
           "type": "tool"
         },
         "ordinal": 614
@@ -3134,7 +3134,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Run the cellular reconnect cycles and cold opens over USB · returned 2 lines",
           "type": "tool"
         },
         "ordinal": 618
@@ -3145,7 +3145,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Wait for the cellular rows · returned 2 lines",
           "type": "tool"
         },
         "ordinal": 619
@@ -3156,7 +3156,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Wait for the cellular cold opens to finish · returned 9 lines",
           "type": "tool"
         },
         "ordinal": 620
@@ -3167,7 +3167,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Record the cellular row, update the report and plan, commit and push · returned 3 lines",
           "type": "tool"
         },
         "ordinal": 621
@@ -3178,7 +3178,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Post progress and update the mission artifact · returned 2 lines",
           "type": "tool"
         },
         "ordinal": 622
@@ -3189,7 +3189,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Post the pause request with the remaining owner steps · returned 3 lines",
           "type": "tool"
         },
         "ordinal": 623
@@ -3233,7 +3233,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Add the remaining matrix work as a new mission objective · returned 2 lines",
           "type": "tool"
         },
         "ordinal": 627
@@ -3244,7 +3244,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Confirm the new objective was added and see its order · returned 1 line",
           "type": "tool"
         },
         "ordinal": 628
@@ -3266,7 +3266,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Check for an objective reorder command · returned 5 lines",
           "type": "tool"
         },
         "ordinal": 630
@@ -3277,7 +3277,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Move the matrix objective ahead of the review objective · returned 2 lines",
           "type": "tool"
         },
         "ordinal": 631
@@ -3288,7 +3288,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "Reorder the objectives and deliver this objective · returned 5 lines",
           "type": "tool"
         },
         "ordinal": 632
@@ -3307,7 +3307,7 @@
     ],
     "operationEpoch": "fixture",
     "reason": "initial",
-    "revision": 1180,
+    "revision": 1181,
     "state": {
       "connector": {
         "id": "claude",

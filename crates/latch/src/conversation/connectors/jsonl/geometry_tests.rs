@@ -131,7 +131,7 @@ fn send_and_resolve_at_desktop_phone_and_never_attached_geometry() {
             ("codex", "› draft", None, Some("the codex composer is no longer empty")),
             ("claude", "Permission required\n1. Yes\n2. No", Some("Yes"), None),
             ("claude", "Permission required\n1. Allow this command to read the project configuration files\n2. No", Some(LONG_CHOICE),
-                if name == "phone" { Some("the requested choice is not identifiable on the current screen") } else { None }),
+                if name == "phone" { Some("the selected decision is no longer identifiable on the current Claude prompt") } else { None }),
             ("claude", "Unrelated screen", Some("Yes"), Some("the requested Claude prompt is no longer visible")),
         ] {
             let pty = Pty::spawn(paint, choice.is_some(), None);
@@ -148,6 +148,8 @@ fn send_and_resolve_at_desktop_phone_and_never_attached_geometry() {
                 connector.pending_request = Some(PendingRequest {
                     id: "request".into(), request_type: RequestType::Permission,
                     prompt: "Permission required".into(), choices: vec![choice.into()],
+                    screen_seen: true,
+                    announced_at: None,
                 });
                 ConnectorAction { id: ACTION_RESOLVE_REQUEST.into(), payload: serde_json::json!({"requestId":"request", "choice":choice}) }
             } else {
@@ -169,6 +171,63 @@ fn send_and_resolve_at_desktop_phone_and_never_attached_geometry() {
             assert_eq!((after.cols, after.rows, after.attached), (cols, rows, surface.is_some()));
         }
     }
+}
+
+#[test]
+fn permission_resolution_rejects_unoffered_and_stale_choices() {
+    let pty = Pty::spawn("Permission required\n1. Yes\n2. No", true, None);
+    pty.start();
+    let mut connector = JsonlConnector::fixture("claude", PathBuf::from("unused-source.jsonl"));
+    connector.home = pty.home.clone();
+    connector.pending_request = Some(PendingRequest {
+        id: "request".into(),
+        request_type: RequestType::Permission,
+        prompt: "Permission required".into(),
+        choices: vec!["Yes".into(), "No".into()],
+        screen_seen: true,
+        announced_at: None,
+    });
+
+    let unoffered = connector
+        .apply(
+            ConnectorAction {
+                id: ACTION_RESOLVE_REQUEST.into(),
+                payload: serde_json::json!({"requestId":"request", "choice":"Allow once"}),
+            },
+            Duration::from_secs(5),
+        )
+        .unwrap();
+    assert_eq!(
+        unoffered,
+        ApplyResult::Refused {
+            reason: "the selected decision is not among the choices currently offered by Claude"
+                .into()
+        }
+    );
+    client::call(
+        &pty.socket,
+        &Request::Submit {
+            text: "sentinel".into(),
+        },
+    )
+    .unwrap();
+    pty.wait_text("RECEIVED:s");
+
+    let stale = connector
+        .apply(
+            ConnectorAction {
+                id: ACTION_RESOLVE_REQUEST.into(),
+                payload: serde_json::json!({"requestId":"old-request", "choice":"Yes"}),
+            },
+            Duration::from_secs(5),
+        )
+        .unwrap();
+    assert_eq!(
+        stale,
+        ApplyResult::Refused {
+            reason: "action is not currently available".into()
+        }
+    );
 }
 
 #[test]

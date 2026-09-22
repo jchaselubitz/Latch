@@ -30,10 +30,7 @@
         "createdAt": "1970-01-01T00:00:00Z",
         "id": "request:ddc8b841-342d-431b-84a0-076fb535b263",
         "kind": {
-          "choices": [
-            "Allow once",
-            "Deny"
-          ],
+          "choices": [],
           "prompt": "Write permission-test proof string to temp file",
           "requestId": "ddc8b841-342d-431b-84a0-076fb535b263",
           "requestType": "permission",

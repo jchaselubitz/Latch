@@ -32,7 +32,7 @@
         "kind": {
           "name": "Bash",
           "status": "succeeded",
-          "summary": "completed",
+          "summary": "List repo files and recent commits · returned 7 lines",
           "type": "tool"
         },
         "ordinal": 7

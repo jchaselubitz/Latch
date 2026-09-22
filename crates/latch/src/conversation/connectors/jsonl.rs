@@ -101,13 +101,35 @@ struct PendingRequest {
     request_type: RequestType,
     prompt: String,
     choices: Vec<String>,
+    /// A permission hook can arrive a fraction before Claude paints its
+    /// prompt. Do not mistake that first empty snapshot for a dismissal.
+    #[serde(default)]
+    screen_seen: bool,
+    /// Claude's transcript and hook sidecar advance independently. This lets
+    /// us ignore transcript records that existed before a newly-read hook.
+    #[serde(default)]
+    announced_at: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 struct RuntimeCheckpoint {
     pending_request: Option<PendingRequest>,
     tools: HashMap<String, (String, String)>,
+    /// Sanitized input summary per open call, so the result can say what the
+    /// call was as well as how it ended. Absent in older checkpoints.
+    #[serde(default)]
+    tool_summaries: HashMap<String, String>,
     tool_running: bool,
+    /// True from a real user turn until an authoritative `Stop` hook closes
+    /// it. Only ever set once `hook_observer_version` proves this session's
+    /// Claude launch actually emits `Stop`; otherwise the pre-existing
+    /// tool-running/screen inference is the only signal, unchanged.
+    #[serde(default)]
+    turn_open: bool,
+    /// The `latch_observer_version` last stamped on any hook record read for
+    /// this session, or `None` before any hook has been observed.
+    #[serde(default)]
+    hook_observer_version: Option<u32>,
     last_state: Option<ConversationState>,
     screen_can_send: Option<bool>,
 }
@@ -127,7 +149,10 @@ pub struct JsonlConnector {
     malformed_records: u64,
     pending_request: Option<PendingRequest>,
     tools: HashMap<String, (String, String)>,
+    tool_summaries: HashMap<String, String>,
     tool_running: bool,
+    turn_open: bool,
+    hook_observer_version: Option<u32>,
     last_state: Option<ConversationState>,
     screen_can_send: Option<bool>,
     live_screen: bool,
@@ -162,7 +187,10 @@ impl JsonlConnector {
             malformed_records: 0,
             pending_request: None,
             tools: HashMap::new(),
+            tool_summaries: HashMap::new(),
             tool_running: false,
+            turn_open: false,
+            hook_observer_version: None,
             last_state: None,
             screen_can_send: None,
             live_screen: true,
@@ -191,7 +219,10 @@ impl JsonlConnector {
             malformed_records: 0,
             pending_request: None,
             tools: HashMap::new(),
+            tool_summaries: HashMap::new(),
             tool_running: false,
+            turn_open: false,
+            hook_observer_version: None,
             last_state: None,
             screen_can_send: None,
             live_screen: false,
@@ -214,7 +245,10 @@ impl JsonlConnector {
         RuntimeCheckpoint {
             pending_request: self.pending_request.clone(),
             tools: self.tools.clone(),
+            tool_summaries: self.tool_summaries.clone(),
             tool_running: self.tool_running,
+            turn_open: self.turn_open,
+            hook_observer_version: self.hook_observer_version,
             last_state: self.last_state.clone(),
             screen_can_send: self.screen_can_send,
         }
@@ -223,9 +257,21 @@ impl JsonlConnector {
     fn restore_runtime(&mut self, runtime: RuntimeCheckpoint) {
         self.pending_request = runtime.pending_request;
         self.tools = runtime.tools;
+        self.tool_summaries = runtime.tool_summaries;
         self.tool_running = runtime.tool_running;
+        self.turn_open = runtime.turn_open;
+        self.hook_observer_version = runtime.hook_observer_version;
         self.last_state = runtime.last_state;
         self.screen_can_send = runtime.screen_can_send;
+    }
+
+    /// Whether this session's Claude launch is known to emit an authoritative
+    /// `Stop` hook. `false` until a hook record has proven otherwise, which
+    /// keeps every pre-existing session on the tool/screen inference it
+    /// already had instead of fabricating a turn boundary it cannot back.
+    fn stop_hook_supported(&self) -> bool {
+        self.hook_observer_version
+            .is_some_and(|version| version >= crate::observer::STOP_HOOK_MIN_OBSERVER_VERSION)
     }
 
     fn control(&mut self) -> Result<&mut ConversationControl> {
@@ -261,7 +307,13 @@ impl JsonlConnector {
         self.active_chain.clear();
         self.pending_request = None;
         self.tools.clear();
+        self.tool_summaries.clear();
         self.tool_running = false;
+        // `hook_observer_version` deliberately survives a rebind, exactly
+        // like `hook_offset`: both describe the one continuous hook sidecar
+        // for this Latch session, not the specific source file currently
+        // bound.
+        self.turn_open = false;
         self.last_state = None;
         self.screen_can_send = None;
         self.last_screen_refresh = None;
@@ -287,7 +339,7 @@ impl JsonlConnector {
                 (false, Some("resolve the pending request first".to_owned())),
                 (true, None),
             )
-        } else if self.tool_running {
+        } else if self.tool_running || self.turn_open {
             (
                 ConversationPhase::Working,
                 (false, Some("agent is working".to_owned())),
@@ -326,8 +378,15 @@ impl JsonlConnector {
 
     fn observe_screen(&mut self, screen: &str) -> Vec<ConnectorMutation> {
         let mut mutations = Vec::new();
-        if let Some(request) = self.pending_request.as_ref() {
-            if !screen_contains_request(screen, request) {
+        if let Some(request) = self.pending_request.as_mut() {
+            if screen_contains_request(screen, request) {
+                request.screen_seen = true;
+                let choices = visible_choices(screen, &request.prompt);
+                if !choices.is_empty() && request.choices != choices {
+                    request.choices = choices;
+                    mutations.push(request_mutation(request, RequestStatus::Pending));
+                }
+            } else if request.screen_seen {
                 let request = self.pending_request.take().expect("request was present");
                 mutations.push(request_mutation(&request, RequestStatus::Dismissed));
             }
@@ -411,7 +470,7 @@ impl JsonlConnector {
                     name: string(object, "tool")
                         .or_else(|| string(object, "name"))
                         .unwrap_or_else(|| "tool".to_owned()),
-                    summary: string(object, "summary").unwrap_or_default(),
+                    summary: sanitize_summary(&string(object, "summary").unwrap_or_default()),
                     status: tool_status(object),
                     parent_message_id: string(object, "parent_id")
                         .or_else(|| string(object, "parent_uuid"))
@@ -424,7 +483,7 @@ impl JsonlConnector {
                     name: string(object, "tool")
                         .or_else(|| string(object, "name"))
                         .unwrap_or_else(|| "tool".to_owned()),
-                    summary: string(object, "summary").unwrap_or_default(),
+                    summary: sanitize_summary(&string(object, "summary").unwrap_or_default()),
                     status: tool_status(object),
                     parent_message_id: None,
                 })
@@ -449,6 +508,8 @@ impl JsonlConnector {
                                 .collect()
                         })
                         .unwrap_or_default(),
+                    screen_seen: false,
+                    announced_at: None,
                 });
                 Some(ConversationItemKind::Request {
                     request_id,
@@ -499,12 +560,22 @@ impl JsonlConnector {
         event: &str,
         ordinal: u64,
     ) -> Vec<ConnectorMutation> {
-        if event == "permission_request"
-            || string(object, "hook_event_name").as_deref() == Some("PermissionRequest")
+        let hook_event_name = string(object, "hook_event_name");
+        if let Some(version) = object.get("latch_observer_version").and_then(Value::as_u64) {
+            self.hook_observer_version = Some(version as u32);
+        }
+        if event == "permission_request" || hook_event_name.as_deref() == Some("PermissionRequest")
         {
             return self.claude_permission(object, ordinal);
         }
-        if string(object, "hook_event_name").is_some() {
+        if hook_event_name.as_deref() == Some("Stop") {
+            // Authoritative turn boundary: the agent itself reported that it
+            // stopped responding, so the turn this session opened is closed
+            // regardless of what the transcript or screen otherwise suggest.
+            self.turn_open = false;
+            return Vec::new();
+        }
+        if hook_event_name.is_some() {
             return Vec::new();
         }
         let uuid = string(object, "uuid");
@@ -539,12 +610,20 @@ impl JsonlConnector {
             }];
         }
 
-        // Any authoritative main-chain progress dismisses a request that was
-        // not itself re-announced. Claude emits no explicit resolution record.
-        if let Some(request) = self.pending_request.take() {
+        let at = string(object, "timestamp").unwrap_or_else(|| "1970-01-01T00:00:00Z".to_owned());
+        // Any authoritative main-chain progress after the request dismisses
+        // it when it was not itself re-announced. Hooks are read before the
+        // transcript, however, so replaying an older transcript record must
+        // not instantly dismiss a permission prompt that is still on screen.
+        if self.pending_request.as_ref().is_some_and(|request| {
+            request
+                .announced_at
+                .as_deref()
+                .is_none_or(|announced_at| timestamp_is_after(&at, announced_at))
+        }) {
+            let request = self.pending_request.take().expect("request was present");
             mutations.push(request_mutation(&request, RequestStatus::Dismissed));
         }
-        let at = string(object, "timestamp").unwrap_or_else(|| "1970-01-01T00:00:00Z".to_owned());
         match event {
             "user" => {
                 let content = object
@@ -552,6 +631,13 @@ impl JsonlConnector {
                     .and_then(|message| message.get("content"));
                 let text = claude_text(content);
                 if !text.is_empty() {
+                    // A real user turn starts here. It only stays open on the
+                    // authority of a later `Stop` hook when this session is
+                    // known to emit one; otherwise this flag never turns on
+                    // and the pre-existing tool/screen inference is unchanged.
+                    if self.stop_hook_supported() {
+                        self.turn_open = true;
+                    }
                     mutations.push(upsert(
                         &uuid,
                         at.clone(),
@@ -570,13 +656,15 @@ impl JsonlConnector {
                         continue;
                     };
                     if let Some((name, item_id)) = self.tools.remove(&call_id) {
+                        let input = self.tool_summaries.remove(&call_id).unwrap_or_default();
+                        let (status, summary) = claude_tool_outcome(&input, block);
                         mutations.push(upsert(
                             &item_id,
                             at.clone(),
                             ConversationItemKind::Tool {
                                 name,
-                                summary: "completed".to_owned(),
-                                status: ToolStatus::Succeeded,
+                                summary,
+                                status,
                                 parent_message_id: None,
                             },
                         ));
@@ -618,14 +706,21 @@ impl JsonlConnector {
                                 string_value(block, "id").unwrap_or_else(|| item_id.clone());
                             let name =
                                 string_value(block, "name").unwrap_or_else(|| "tool".to_owned());
+                            let summary = safe_tool_summary(&name, block.get("input"));
                             self.tools
                                 .insert(call_id.clone(), (name.clone(), item_id.clone()));
+                            self.tool_summaries.insert(call_id.clone(), summary.clone());
+                            // The prior fallback signal for `Working`: no
+                            // hook tells us a tool started, so the transcript
+                            // record itself is authoritative for this half of
+                            // the boundary regardless of Stop-hook support.
+                            self.tool_running = true;
                             mutations.push(upsert(
                                 &item_id,
                                 at.clone(),
                                 ConversationItemKind::Tool {
                                     name: name.clone(),
-                                    summary: safe_tool_summary(&name, block.get("input")),
+                                    summary,
                                     status: ToolStatus::Running,
                                     parent_message_id: Some(ConversationItemId::native(
                                         uuid.clone(),
@@ -638,6 +733,8 @@ impl JsonlConnector {
                                     request_type: RequestType::Question,
                                     prompt: claude_question_prompt(block.get("input")),
                                     choices: claude_question_choices(block.get("input")),
+                                    screen_seen: false,
+                                    announced_at: None,
                                 };
                                 self.pending_request = Some(request.clone());
                                 mutations.push(request_mutation(&request, RequestStatus::Pending));
@@ -680,7 +777,19 @@ impl JsonlConnector {
                         string(object, "tool_name").unwrap_or_else(|| "this tool".to_owned())
                     )
                 }),
-            choices: vec!["Allow once".to_owned(), "Deny".to_owned()],
+            // Some providers include choices in the hook payload. Preserve
+            // those as a fallback, but replace them with the numbered labels
+            // Claude actually paints before presenting the request to a user.
+            choices: object
+                .get("choices")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect(),
+            screen_seen: false,
+            announced_at: string(object, "timestamp"),
         };
         self.pending_request = Some(request.clone());
         vec![request_mutation(&request, RequestStatus::Pending)]
@@ -753,20 +862,237 @@ fn claude_question_choices(input: Option<&Value>) -> Vec<String> {
         .filter_map(|option| string_value(option, "label"))
         .collect()
 }
+/// Upper bound, in characters, of any tool summary a connector emits. The
+/// contract allows 16384 and the Hub rejects items over 32 KiB; a summary is a
+/// one-line description, so it stays far below both.
+const MAX_TOOL_SUMMARY_CHARS: usize = 320;
+/// Upper bound of the input description or failure detail within a summary.
+const MAX_SUMMARY_PART_CHARS: usize = 160;
+/// Only this much of a provider string is ever scanned for a summary, so an
+/// unexpectedly large record costs a bounded amount of work.
+const MAX_SUMMARY_SCAN_BYTES: usize = 4096;
+const REDACTED: &str = "[redacted]";
+
+/// A safe, human-readable description of a tool call's input. Only named,
+/// descriptive fields are used; raw commands, file contents, and arbitrary
+/// input objects are never copied.
 fn safe_tool_summary(name: &str, input: Option<&Value>) -> String {
-    if name == "Bash" {
+    let field = |key: &str| {
         input
-            .and_then(|input| input.get("description"))
+            .and_then(|input| input.get(key))
             .and_then(Value::as_str)
-            .unwrap_or("Bash command")
-            .to_owned()
-    } else {
-        input
-            .and_then(|input| input.get("description"))
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned()
+            .map(|value| sanitize_part(value, MAX_SUMMARY_PART_CHARS))
+            .filter(|value| !value.is_empty())
+    };
+    field("description")
+        .or_else(|| {
+            ["file_path", "notebook_path", "path", "pattern", "url"]
+                .into_iter()
+                .find_map(field)
+        })
+        .unwrap_or_else(|| {
+            if name == "Bash" {
+                "Bash command".to_owned()
+            } else {
+                String::new()
+            }
+        })
+}
+
+/// The status and summary of a finished Claude tool call, from its
+/// `tool_result` block. A successful result is described by its shape only:
+/// its content can be a file, a command's output, or anything else the tool
+/// read, so it never reaches the summary. A failure carries the first line of
+/// its error, sanitized, because that line is what the user needs to know.
+fn claude_tool_outcome(input: &str, result: &Value) -> (ToolStatus, String) {
+    let failed = result.get("is_error").and_then(Value::as_bool) == Some(true);
+    let mut text = String::new();
+    let mut images = 0usize;
+    match result.get("content") {
+        Some(Value::String(content)) => text.push_str(content),
+        Some(Value::Array(blocks)) => {
+            for block in blocks {
+                match string_map(block, "type").as_deref() {
+                    Some("text") => {
+                        if let Some(part) = block.get("text").and_then(Value::as_str) {
+                            if !text.is_empty() {
+                                text.push('\n');
+                            }
+                            text.push_str(part);
+                        }
+                    }
+                    Some("image") => images += 1,
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
     }
+    let outcome = if failed {
+        let detail = text
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .map(|line| sanitize_part(line, MAX_SUMMARY_PART_CHARS))
+            .unwrap_or_default();
+        if detail.is_empty() {
+            "failed".to_owned()
+        } else {
+            format!("failed: {detail}")
+        }
+    } else {
+        let lines = text.lines().filter(|line| !line.trim().is_empty()).count();
+        match (lines, images) {
+            (0, 0) => "no output".to_owned(),
+            (0, 1) => "returned an image".to_owned(),
+            (0, n) => format!("returned {n} images"),
+            (1, _) => "returned 1 line".to_owned(),
+            (n, _) => format!("returned {n} lines"),
+        }
+    };
+    let summary = if input.is_empty() {
+        outcome
+    } else {
+        format!("{input} · {outcome}")
+    };
+    let status = if failed {
+        ToolStatus::Failed
+    } else {
+        ToolStatus::Succeeded
+    };
+    (status, sanitize_summary(&summary))
+}
+
+/// Bounds and sanitizes a complete tool summary.
+fn sanitize_summary(text: &str) -> String {
+    sanitize_part(text, MAX_TOOL_SUMMARY_CHARS)
+}
+
+/// Collapses `text` to one line of at most `max_chars` characters with
+/// secret-shaped tokens, environment assignments, and home directories
+/// redacted. Idempotent, so an already-sanitized part may be sanitized again.
+fn sanitize_part(text: &str, max_chars: usize) -> String {
+    let mut end = text.len().min(MAX_SUMMARY_SCAN_BYTES);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut out = String::new();
+    let mut redact_next = false;
+    for token in text[..end].split(|c: char| c.is_whitespace() || c.is_control()) {
+        if token.is_empty() {
+            continue;
+        }
+        let token = if redact_next {
+            REDACTED.to_owned()
+        } else {
+            redact_token(token)
+        };
+        redact_next = token.eq_ignore_ascii_case("bearer") || token.eq_ignore_ascii_case("basic");
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(&token);
+    }
+    if out.chars().count() > max_chars || end < text.len() {
+        let mut bounded: String = out.chars().take(max_chars.saturating_sub(1)).collect();
+        bounded.push('…');
+        return bounded;
+    }
+    out
+}
+
+fn redact_token(token: &str) -> String {
+    let token = redact_home(token);
+    if let Some((key, value)) = token.split_once(['=', ':']) {
+        let key_name = key.trim_start_matches(['-', '"', '\'', '{', '(']);
+        let key_name = key_name.trim_end_matches(['"', '\'']);
+        if !value.is_empty()
+            && value != REDACTED
+            && (is_env_name(key_name) || is_secret_key(key_name))
+        {
+            let separator = &token[key.len()..key.len() + 1];
+            return format!("{key}{separator}{REDACTED}");
+        }
+    }
+    let bare = token.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+    if is_secret_shaped(bare) {
+        return token.replace(bare, REDACTED);
+    }
+    token
+}
+
+/// `/Users/<name>` and `/home/<name>` become `~`, so paths keep their useful
+/// tail without naming the account that owns them.
+fn redact_home(token: &str) -> String {
+    let mut out = token.to_owned();
+    for root in ["/Users/", "/home/"] {
+        while let Some(start) = out.find(root) {
+            let rest = &out[start + root.len()..];
+            let user_len = rest.find('/').unwrap_or(rest.len());
+            if user_len == 0 {
+                break;
+            }
+            out.replace_range(start..start + root.len() + user_len, "~");
+        }
+    }
+    out
+}
+
+/// `NAME=value` with an upper-case shell-variable name.
+fn is_env_name(key: &str) -> bool {
+    let key = key.strip_prefix('$').unwrap_or(key);
+    key.len() >= 2
+        && key.starts_with(|c: char| c.is_ascii_uppercase() || c == '_')
+        && key
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+}
+
+fn is_secret_key(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    [
+        "password",
+        "passwd",
+        "secret",
+        "token",
+        "apikey",
+        "api_key",
+        "api-key",
+        "authorization",
+        "credential",
+        "private_key",
+    ]
+    .iter()
+    .any(|marker| key.contains(marker))
+}
+
+/// Provider credentials with a recognizable prefix, and long opaque strings
+/// that are more likely to be a key than anything a person would read.
+fn is_secret_shaped(token: &str) -> bool {
+    const PREFIXES: [&str; 13] = [
+        "sk-",
+        "sk_live_",
+        "sk_test_",
+        "ghp_",
+        "gho_",
+        "ghs_",
+        "ghu_",
+        "github_pat_",
+        "xoxb-",
+        "xoxp-",
+        "glpat-",
+        "AKIA",
+        "eyJ",
+    ];
+    if token.len() >= 16 && PREFIXES.iter().any(|prefix| token.starts_with(prefix)) {
+        return true;
+    }
+    token.len() >= 32
+        && token
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '+' | '=' | '.'))
+        && token.chars().any(|c| c.is_ascii_digit())
+        && token.chars().any(|c| c.is_ascii_alphabetic())
 }
 fn is_empty_composer(connector: &str, line: &str) -> bool {
     let line = line.trim_start();
@@ -789,20 +1115,42 @@ fn screen_contains_request(screen: &str, request: &PendingRequest) -> bool {
             .iter()
             .any(|choice| choice.len() >= 2 && screen.contains(&choice.to_lowercase()))
 }
-fn visible_choice_key(screen: &str, choice: &str) -> Option<String> {
-    screen.lines().find_map(|line| {
-        let line = line
-            .trim_start()
-            .trim_start_matches(['❯', '>'])
-            .trim_start();
-        let (number, label) = line.split_once('.')?;
-        (label.trim().eq_ignore_ascii_case(choice)
-            && matches!(
-                number.trim(),
-                "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"
-            ))
-        .then(|| number.trim().to_owned())
-    })
+fn visible_choices_with_keys(screen: &str, prompt: &str) -> Vec<(String, String)> {
+    let lines: Vec<_> = screen.lines().collect();
+    let prompt = prompt.to_lowercase();
+    let Some(prompt_line) = lines
+        .iter()
+        .rposition(|line| prompt.len() >= 4 && line.to_lowercase().contains(&prompt))
+    else {
+        return Vec::new();
+    };
+    lines[prompt_line + 1..]
+        .iter()
+        .copied()
+        .filter_map(|line| {
+            let line = line
+                .trim_start()
+                .trim_start_matches(['❯', '>'])
+                .trim_start();
+            let (number, label) = line.split_once('.')?;
+            let number = number.trim();
+            let label = label.trim();
+            (!label.is_empty()
+                && matches!(number, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"))
+            .then(|| (number.to_owned(), label.to_owned()))
+        })
+        .collect()
+}
+fn visible_choices(screen: &str, prompt: &str) -> Vec<String> {
+    visible_choices_with_keys(screen, prompt)
+        .into_iter()
+        .map(|(_, label)| label)
+        .collect()
+}
+fn visible_choice_key(screen: &str, prompt: &str, choice: &str) -> Option<String> {
+    visible_choices_with_keys(screen, prompt)
+        .into_iter()
+        .find_map(|(key, label)| label.eq_ignore_ascii_case(choice).then_some(key))
 }
 
 impl Connector for JsonlConnector {
@@ -915,7 +1263,9 @@ impl Connector for JsonlConnector {
                 self.active_chain.clear();
                 self.pending_request = None;
                 self.tools.clear();
+                self.tool_summaries.clear();
                 self.tool_running = false;
+                self.turn_open = false;
                 mutations.push(ConnectorMutation::Rebuild {
                     reason: "authoritative source file was replaced".to_owned(),
                 });
@@ -1112,14 +1462,25 @@ impl Connector for JsonlConnector {
             self.control()?.submit(text, remaining()?)?;
         } else {
             let request = self.pending_request.as_ref().expect("checked above");
+            if !request
+                .choices
+                .iter()
+                .any(|choice| choice.eq_ignore_ascii_case(text))
+            {
+                return Ok(ApplyResult::Refused {
+                    reason:
+                        "the selected decision is not among the choices currently offered by Claude"
+                            .to_owned(),
+                });
+            }
             if !screen_contains_request(&screen, request) {
                 return Ok(ApplyResult::Refused {
                     reason: "the requested Claude prompt is no longer visible".to_owned(),
                 });
             }
-            let Some(key) = visible_choice_key(&screen, text) else {
+            let Some(key) = visible_choice_key(&screen, &request.prompt, text) else {
                 return Ok(ApplyResult::Refused {
-                    reason: "the requested choice is not identifiable on the current screen"
+                    reason: "the selected decision is no longer identifiable on the current Claude prompt"
                         .to_owned(),
                 });
             };
@@ -1238,6 +1599,13 @@ fn read_binding(
 
 fn string(object: &serde_json::Map<String, Value>, key: &str) -> Option<String> {
     object.get(key).and_then(Value::as_str).map(str::to_owned)
+}
+fn timestamp_is_after(timestamp: &str, reference: &str) -> bool {
+    // Permission hooks carry whole-second UTC timestamps while Claude JSONL
+    // records normally include fractions. Comparing their raw strings would
+    // order `.123Z` before `Z`; keeping whole-second precision avoids treating
+    // the same observed prompt as later transcript progress.
+    timestamp.get(..19).unwrap_or(timestamp) > reference.get(..19).unwrap_or(reference)
 }
 fn record_id(object: &serde_json::Map<String, Value>, event: &str) -> Option<String> {
     match event {
@@ -1571,7 +1939,7 @@ mod tests {
         let failed_source = fs::read_to_string(cases.join("failed-tool/source.jsonl")).unwrap();
         assert!(
             failed_source.contains("\"is_error\":true"),
-            "failed-tool source must retain the provider error flag even though the connector currently cannot emit ToolStatus::Failed"
+            "failed-tool source must retain the provider error flag"
         );
         let failed: Value =
             serde_json::from_slice(&fs::read(cases.join("failed-tool/expected.json")).unwrap())
@@ -1581,8 +1949,13 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|item| item["kind"]["type"] == "tool" && item["kind"]["status"] == "succeeded"),
-            "current connector still projects the failed tool as succeeded; expected.json must record that until the connector mission lands"
+                .any(|item| item["kind"]["type"] == "tool"
+                    && item["kind"]["status"] == "failed"
+                    && item["kind"]["summary"]
+                        .as_str()
+                        .unwrap()
+                        .ends_with("failed: Exit code 1")),
+            "the is_error tool_result must project as a failed tool carrying its error"
         );
 
         let permission: Value = serde_json::from_slice(
@@ -1894,6 +2267,8 @@ mod tests {
             request_type: RequestType::Question,
             prompt: "Choose a mode".to_owned(),
             choices: vec!["Fast".to_owned(), "Careful".to_owned()],
+            screen_seen: true,
+            announced_at: None,
         });
 
         let mutations = connector.observe_screen("finished\n› \n");
@@ -1909,5 +2284,383 @@ mod tests {
                 ..
             })
         )));
+    }
+
+    #[test]
+    fn permission_choices_are_replaced_by_the_visible_numbered_decisions() {
+        let mut connector = JsonlConnector::fixture("claude", PathBuf::from("unused-source.jsonl"));
+        connector.pending_request = Some(PendingRequest {
+            id: "permission-1".to_owned(),
+            request_type: RequestType::Permission,
+            prompt: "Create empty permission marker file".to_owned(),
+            choices: Vec::new(),
+            screen_seen: false,
+            announced_at: None,
+        });
+
+        let mutations = connector.observe_screen(
+            "Earlier response\n1. Unrelated\nBash command\nCreate empty permission marker file\n1. Yes\n2. Yes, and don't ask again\n3. No",
+        );
+        let request = connector
+            .pending_request
+            .as_ref()
+            .expect("request remains pending");
+        assert!(request.screen_seen);
+        assert_eq!(request.choices, ["Yes", "Yes, and don't ask again", "No"]);
+        assert!(mutations.iter().any(|mutation| matches!(
+            mutation,
+            ConnectorMutation::Upsert(ObservedItem {
+                kind: ConversationItemKind::Request { choices, status: RequestStatus::Pending, .. },
+                ..
+            }) if choices == &vec!["Yes".to_owned(), "Yes, and don't ask again".to_owned(), "No".to_owned()]
+        )));
+    }
+
+    #[test]
+    fn transcript_records_before_a_permission_hook_do_not_dismiss_it() {
+        let mut connector = JsonlConnector::fixture("claude", PathBuf::from("unused-source.jsonl"));
+        connector.pending_request = Some(PendingRequest {
+            id: "permission-1".to_owned(),
+            request_type: RequestType::Permission,
+            prompt: "Create permission marker file".to_owned(),
+            choices: Vec::new(),
+            screen_seen: false,
+            announced_at: Some("2026-09-22T07:03:52Z".to_owned()),
+        });
+        let record = serde_json::json!({
+            "type": "user",
+            "uuid": "earlier-user-message",
+            "timestamp": "2026-09-22T07:03:51Z",
+            "message": { "content": "Use the Bash tool." }
+        });
+
+        let mutations = connector.claude_record(record.as_object().unwrap(), "user", 1);
+        assert_eq!(
+            connector
+                .pending_request
+                .as_ref()
+                .map(|request| request.id.as_str()),
+            Some("permission-1")
+        );
+        assert!(!mutations.iter().any(|mutation| matches!(
+            mutation,
+            ConnectorMutation::Upsert(ObservedItem {
+                kind: ConversationItemKind::Request {
+                    status: RequestStatus::Dismissed,
+                    ..
+                },
+                ..
+            })
+        )));
+    }
+
+    fn claude_tool_round_trip(input: Value, result: Value) -> (ToolStatus, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut connector = JsonlConnector::fixture("claude", dir.path().join("source.jsonl"));
+        let call = serde_json::json!({
+            "type": "assistant",
+            "uuid": "assistant-1",
+            "timestamp": "2026-09-22T08:00:00Z",
+            "message": { "content": [
+                { "type": "tool_use", "id": "toolu_1", "name": "Bash", "input": input }
+            ]}
+        });
+        connector.claude_record(call.as_object().unwrap(), "assistant", 1);
+        let mut block = result;
+        block["type"] = "tool_result".into();
+        block["tool_use_id"] = "toolu_1".into();
+        let record = serde_json::json!({
+            "type": "user",
+            "uuid": "user-1",
+            "parentUuid": "assistant-1",
+            "timestamp": "2026-09-22T08:00:01Z",
+            "message": { "content": [block] }
+        });
+        let mutations = connector.claude_record(record.as_object().unwrap(), "user", 2);
+        let tool = mutations
+            .into_iter()
+            .find_map(|mutation| match mutation {
+                ConnectorMutation::Upsert(ObservedItem {
+                    kind:
+                        ConversationItemKind::Tool {
+                            status, summary, ..
+                        },
+                    ..
+                }) => Some((status, summary)),
+                _ => None,
+            })
+            .expect("the tool_result updates its call");
+        assert!(
+            connector.tool_summaries.is_empty(),
+            "a finished call's summary is released"
+        );
+        tool
+    }
+
+    fn assert_clean(summary: &str, secrets: &[&str]) {
+        assert!(
+            summary.chars().count() <= MAX_TOOL_SUMMARY_CHARS,
+            "{summary}"
+        );
+        assert!(!summary.contains('\n'), "{summary}");
+        for secret in secrets {
+            assert!(!summary.contains(secret), "{secret} leaked into {summary}");
+        }
+    }
+
+    #[test]
+    fn tool_result_error_flag_fails_the_call_with_its_first_error_line() {
+        let (status, summary) = claude_tool_round_trip(
+            serde_json::json!({ "description": "Run the suite", "command": "cargo test" }),
+            serde_json::json!({ "content": "Exit code 101\nthread panicked", "is_error": true }),
+        );
+        assert_eq!(status, ToolStatus::Failed);
+        assert_eq!(summary, "Run the suite · failed: Exit code 101");
+    }
+
+    #[test]
+    fn tool_result_success_is_described_by_shape_not_content() {
+        let (status, summary) = claude_tool_round_trip(
+            serde_json::json!({ "description": "Read the config", "command": "cat .env" }),
+            serde_json::json!({ "content": [
+                { "type": "text", "text": "DATABASE_URL=postgres://u:hunter2@db\n\nMODE=prod" }
+            ]}),
+        );
+        assert_eq!(status, ToolStatus::Succeeded);
+        assert_eq!(summary, "Read the config · returned 2 lines");
+
+        let (_, empty) = claude_tool_round_trip(
+            serde_json::json!({ "command": "true" }),
+            serde_json::json!({ "content": "" }),
+        );
+        assert_eq!(empty, "Bash command · no output");
+    }
+
+    #[test]
+    fn tool_input_summary_never_copies_the_raw_command() {
+        let summary = safe_tool_summary(
+            "Bash",
+            Some(&serde_json::json!({ "command": "curl -H 'Authorization: Bearer abc123'" })),
+        );
+        assert_eq!(summary, "Bash command");
+        let read = safe_tool_summary(
+            "Read",
+            Some(&serde_json::json!({ "file_path": "/Users/alice/work/app/src/main.rs" })),
+        );
+        assert_eq!(read, "~/work/app/src/main.rs");
+    }
+
+    #[test]
+    fn tool_error_detail_redacts_secrets_environment_and_home_paths() {
+        let (status, summary) = claude_tool_round_trip(
+            serde_json::json!({ "description": "Deploy with GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123" }),
+            serde_json::json!({
+                "content": "error: AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY \"api_key\":\"s3cr3tvalue\" Authorization: Bearer opaque-token-value sk-live-0123456789abcdefghij at /home/bob/.aws/credentials",
+                "is_error": true
+            }),
+        );
+        assert_eq!(status, ToolStatus::Failed);
+        assert_clean(
+            &summary,
+            &[
+                "ghp_abcdefghijklmnopqrstuvwxyz0123",
+                "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY",
+                "s3cr3tvalue",
+                "opaque-token-value",
+                "sk-live-0123456789abcdefghij",
+                "/home/bob",
+            ],
+        );
+        assert!(summary.contains("GITHUB_TOKEN=[redacted]"), "{summary}");
+        assert!(summary.contains("~/.aws/credentials"), "{summary}");
+    }
+
+    #[test]
+    fn unexpectedly_large_tool_records_yield_a_bounded_summary() {
+        let huge = format!("{}\n", "x".repeat(900 * 1024));
+        let (status, summary) = claude_tool_round_trip(
+            serde_json::json!({ "description": "d".repeat(100_000) }),
+            serde_json::json!({ "content": huge, "is_error": true }),
+        );
+        assert_eq!(status, ToolStatus::Failed);
+        assert_clean(&summary, &[]);
+        assert!(summary.ends_with('…'));
+
+        let (_, many_lines) = claude_tool_round_trip(
+            serde_json::json!({ "description": "List everything" }),
+            serde_json::json!({ "content": "line\n".repeat(200_000) }),
+        );
+        assert_eq!(many_lines, "List everything · returned 200000 lines");
+    }
+
+    #[test]
+    fn generic_connector_summaries_are_bounded_and_sanitized() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut connector = JsonlConnector::fixture("codex", dir.path().join("source.jsonl"));
+        let record = serde_json::json!({
+            "event": "tool_result",
+            "id": "call-1",
+            "status": "failed",
+            "summary": format!("OPENAI_API_KEY=sk-proj-abcdefghijklmnop0123 {}", "y ".repeat(10_000)),
+        });
+        let mutations = connector.record(record, 1);
+        let Some(ConnectorMutation::Upsert(ObservedItem {
+            kind: ConversationItemKind::Tool {
+                status, summary, ..
+            },
+            ..
+        })) = mutations.into_iter().next()
+        else {
+            panic!("tool_result projects a tool item");
+        };
+        assert_eq!(status, ToolStatus::Failed);
+        assert_clean(&summary, &["sk-proj-abcdefghijklmnop0123"]);
+    }
+
+    #[test]
+    fn sanitizer_is_idempotent_and_keeps_ordinary_text() {
+        let once = sanitize_summary("Read /Users/jake/a.rs with TOKEN=abc · failed: Exit code 1");
+        assert_eq!(
+            once,
+            "Read ~/a.rs with TOKEN=[redacted] · failed: Exit code 1"
+        );
+        assert_eq!(sanitize_summary(&once), once);
+        assert_eq!(
+            sanitize_summary("Check https://example.com/docs at 12:30"),
+            "Check https://example.com/docs at 12:30"
+        );
+    }
+
+    fn claude_hook(event: &str, observer_version: u64) -> Value {
+        serde_json::json!({
+            "hook_event_name": event,
+            "latch_observer_version": observer_version,
+        })
+    }
+
+    fn claude_user_message(uuid: &str, text: &str) -> Value {
+        serde_json::json!({
+            "type": "user",
+            "uuid": uuid,
+            "timestamp": "2026-09-22T09:00:00Z",
+            "message": { "content": text },
+        })
+    }
+
+    fn claude_tool_call(uuid: &str, parent: &str, call_id: &str) -> Value {
+        serde_json::json!({
+            "type": "assistant",
+            "uuid": uuid,
+            "parentUuid": parent,
+            "timestamp": "2026-09-22T09:00:01Z",
+            "message": { "content": [
+                { "type": "tool_use", "id": call_id, "name": "Bash", "input": { "command": "make build" } }
+            ]},
+        })
+    }
+
+    fn claude_tool_result(uuid: &str, parent: &str, call_id: &str) -> Value {
+        serde_json::json!({
+            "type": "user",
+            "uuid": uuid,
+            "parentUuid": parent,
+            "timestamp": "2026-09-22T09:00:02Z",
+            "message": { "content": [
+                { "type": "tool_result", "tool_use_id": call_id, "content": "build ok" }
+            ]},
+        })
+    }
+
+    #[test]
+    fn a_stop_hook_capable_session_stays_working_between_tool_calls_until_stop() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut connector = JsonlConnector::fixture("claude", dir.path().join("source.jsonl"));
+
+        connector.claude_record(
+            claude_hook("SessionStart", 2).as_object().unwrap(),
+            "hook",
+            1,
+        );
+        assert!(connector.stop_hook_supported());
+
+        let user_message = claude_user_message("user-1", "Please run the build");
+        connector.claude_record(user_message.as_object().unwrap(), "user", 2);
+        assert_eq!(connector.state().phase, ConversationPhase::Working);
+
+        let tool_call = claude_tool_call("assistant-1", "user-1", "toolu_1");
+        connector.claude_record(tool_call.as_object().unwrap(), "assistant", 3);
+        assert_eq!(connector.state().phase, ConversationPhase::Working);
+
+        let tool_result = claude_tool_result("user-2", "assistant-1", "toolu_1");
+        connector.claude_record(tool_result.as_object().unwrap(), "user", 4);
+        // Between tool calls the agent is still mid-turn. Before the Stop
+        // hook, the phase inference (tool_running alone) would incorrectly
+        // report Idle right here even though nothing has actually finished.
+        assert!(!connector.tool_running);
+        assert_eq!(connector.state().phase, ConversationPhase::Working);
+
+        connector.claude_record(claude_hook("Stop", 2).as_object().unwrap(), "hook", 5);
+        assert_eq!(connector.state().phase, ConversationPhase::Idle);
+    }
+
+    #[test]
+    fn a_session_on_an_older_observer_keeps_the_prior_tool_running_inference() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut connector = JsonlConnector::fixture("claude", dir.path().join("source.jsonl"));
+        // No hook ever names an observer version at or above
+        // STOP_HOOK_MIN_OBSERVER_VERSION: this session's Claude process was
+        // launched with the older plugin directory and will never emit Stop.
+        assert!(!connector.stop_hook_supported());
+
+        let user_message = claude_user_message("user-1", "Please run the build");
+        connector.claude_record(user_message.as_object().unwrap(), "user", 1);
+        assert!(!connector.turn_open);
+
+        let tool_call = claude_tool_call("assistant-1", "user-1", "toolu_1");
+        connector.claude_record(tool_call.as_object().unwrap(), "assistant", 2);
+        assert_eq!(connector.state().phase, ConversationPhase::Working);
+
+        let tool_result = claude_tool_result("user-2", "assistant-1", "toolu_1");
+        connector.claude_record(tool_result.as_object().unwrap(), "user", 3);
+        // No capability was ever learned, so the connector must not invent a
+        // turn boundary it cannot back: the pre-existing behavior (Idle as
+        // soon as no tool is running) stays exactly as it was.
+        assert_eq!(connector.state().phase, ConversationPhase::Idle);
+    }
+
+    #[test]
+    fn a_hook_reporting_an_old_observer_version_does_not_enable_stop_semantics() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut connector = JsonlConnector::fixture("claude", dir.path().join("source.jsonl"));
+        connector.claude_record(
+            claude_hook("SessionStart", 1).as_object().unwrap(),
+            "hook",
+            1,
+        );
+        assert!(!connector.stop_hook_supported());
+    }
+
+    #[test]
+    fn an_open_turn_survives_a_checkpoint_restore() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.jsonl");
+        let mut connector = JsonlConnector::fixture("claude", source.clone());
+        connector.claude_record(
+            claude_hook("SessionStart", 2).as_object().unwrap(),
+            "hook",
+            1,
+        );
+        let user_message = claude_user_message("user-1", "Please run the build");
+        connector.claude_record(user_message.as_object().unwrap(), "user", 2);
+        assert_eq!(connector.state().phase, ConversationPhase::Working);
+
+        let checkpoint = connector.checkpoint_snapshot().unwrap();
+        let mut restored = JsonlConnector::fixture("claude", source);
+        restored.restore_checkpoint(&checkpoint).unwrap();
+        assert!(restored.stop_hook_supported());
+        assert_eq!(restored.state().phase, ConversationPhase::Working);
+
+        restored.claude_record(claude_hook("Stop", 2).as_object().unwrap(), "hook", 3);
+        assert_eq!(restored.state().phase, ConversationPhase::Idle);
     }
 }
