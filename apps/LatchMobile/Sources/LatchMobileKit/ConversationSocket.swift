@@ -66,11 +66,12 @@ public enum ConversationSocketError: Error, Equatable, Sendable {
 }
 
 /// Small seam around URLSession's task so the protocol client is testable
-/// without a network listener.  A paired Noise route remains an ordinary
-/// loopback WebSocket at this boundary.
+/// without a network listener. A paired Noise route remains an ordinary
+/// loopback WebSocket at this boundary. Unlike terminal input, conversation
+/// JSON must travel in WebSocket text frames.
 public protocol ConversationSocketConnection: Sendable {
     func receive() async throws -> Data
-    func send(_ data: Data) async throws
+    func send(_ text: String) async throws
     func cancel()
 }
 
@@ -93,8 +94,8 @@ public final class URLSessionConversationSocketConnection: ConversationSocketCon
         }
     }
 
-    public func send(_ data: Data) async throws {
-        try await task.send(.data(data))
+    public func send(_ text: String) async throws {
+        try await task.send(.string(text))
     }
 
     public func cancel() {
@@ -147,7 +148,11 @@ public actor ConversationSocket {
 
     public func send(_ message: ConversationClientMessage) async throws {
         guard let connection else { throw ConversationSocketError.notConnected }
-        try await connection.send(encoder.encode(message))
+        let data = try encoder.encode(message)
+        guard let text = String(data: data, encoding: .utf8) else {
+            throw ConversationSocketError.malformedMessage
+        }
+        try await connection.send(text)
     }
 
     private func run() async {

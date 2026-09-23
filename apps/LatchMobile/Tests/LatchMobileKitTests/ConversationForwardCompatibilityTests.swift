@@ -22,7 +22,7 @@ final class ConversationForwardCompatibilityTests: XCTestCase {
             throw CancellationError()
         }
 
-        func send(_ data: Data) async throws {}
+        func send(_ text: String) async throws {}
         func cancel() {}
     }
 

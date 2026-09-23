@@ -27,6 +27,9 @@ public enum ConversationSupport: Equatable, Sendable {
 public enum ConversationViewState: String, CaseIterable, Equatable, Sendable {
     /// No conversation state has arrived yet.
     case loading
+    /// The Hub recognized the agent but is waiting for its first source record.
+    /// Codex can accept the first message in this state.
+    case starting
     /// Connected, idle, and nothing has been said.
     case empty
     /// Connected and idle.
@@ -61,7 +64,7 @@ public enum ConversationViewState: String, CaseIterable, Equatable, Sendable {
         if state.pendingRequest != nil || state.phase == "awaiting_input" { return .awaitingInput }
         if state.phase == "working" { return .working }
         if state.phase == "exited" { return .interrupted }
-        if state.phase == "starting" { return .loading }
+        if state.phase == "starting" { return .starting }
         return hasItems ? .ready : .empty
     }
 
@@ -69,6 +72,7 @@ public enum ConversationViewState: String, CaseIterable, Equatable, Sendable {
     public var label: String? {
         switch self {
         case .loading: "Connecting…"
+        case .starting: "Starting…"
         case .empty, .ready: nil
         case .working: "Working"
         case .awaitingInput: "Waiting for your answer"

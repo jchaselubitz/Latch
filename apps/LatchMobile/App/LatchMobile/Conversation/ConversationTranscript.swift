@@ -182,7 +182,7 @@ private struct ConversationEmptyTranscript: View {
                 Label("This conversation is unavailable.", systemImage: "exclamationmark.bubble")
             case .disconnected:
                 Label("Waiting for the connection to return.", systemImage: "antenna.radiowaves.left.and.right")
-            case .empty, .ready, .working, .awaitingInput, .interrupted:
+            case .starting, .empty, .ready, .working, .awaitingInput, .interrupted:
                 Text("No messages yet.")
             }
         }

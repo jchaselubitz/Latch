@@ -20,7 +20,25 @@ final class ConversationSocketTests: XCTestCase {
             return next
         }
 
-        func send(_ data: Data) async throws {}
+        func send(_ text: String) async throws {}
+        func cancel() {}
+    }
+
+    private final class RecordingConnection: ConversationSocketConnection, @unchecked Sendable {
+        private let lock = NSLock()
+        private var messages: [String] = []
+
+        var sentMessages: [String] { lock.withLock { messages } }
+
+        func receive() async throws -> Data {
+            try await Task.sleep(for: .seconds(60))
+            throw CancellationError()
+        }
+
+        func send(_ text: String) async throws {
+            lock.withLock { messages.append(text) }
+        }
+
         func cancel() {}
     }
 
@@ -58,5 +76,31 @@ final class ConversationSocketTests: XCTestCase {
             if case .message(.snapshot(let snapshot)) = event { return snapshot.revision == 7 }
             return false
         })
+    }
+
+    func testClientMessageIsSentAsJSONText() async throws {
+        let connection = RecordingConnection()
+        let recorder = Recorder()
+        let socket = ConversationSocket(
+            makeConnection: { _ in connection },
+            eventHandler: { event in await recorder.record(event: event) }
+        )
+
+        await socket.start(position: ConversationResumePosition())
+        for _ in 0..<100 {
+            if await recorder.events.contains(where: {
+                if case .state(.open) = $0 { return true }
+                return false
+            }) { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        try await socket.send(.operationStatus(operationId: "op-1"))
+        await socket.stop()
+
+        let sent = try XCTUnwrap(connection.sentMessages.first)
+        let frame = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(sent.utf8)) as? [String: String])
+        XCTAssertEqual(frame["type"], "operation_status")
+        XCTAssertEqual(frame["operationId"], "op-1")
     }
 }

@@ -131,10 +131,13 @@ public struct ConversationComposerPresentation: Equatable, Sendable {
             return blocked(.connection, "Connecting", hostReason)
         case .failed:
             return blocked(.unavailable, "Sending unavailable", connectionError.map(ConversationSentence.make) ?? hostReason)
-        case .empty, .ready, .working, .awaitingInput, .interrupted:
+        case .starting, .empty, .ready, .working, .awaitingInput, .interrupted:
             break
         }
         if canSend { return ConversationComposerPresentation(canSend: true, notice: nil) }
+        if viewState == .starting {
+            return blocked(.agentState, "Agent starting", hostReason)
+        }
         // The host refuses a send while a request is pending or a tool runs.
         // Both are the agent doing its job, and are said that way.
         if state?.pendingRequest != nil || viewState == .awaitingInput {

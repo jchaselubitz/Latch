@@ -17,6 +17,7 @@ final class ConversationViewStateTests: XCTestCase {
     func testEveryStateIsReachable() {
         let cases: [(ConversationViewState, ConversationSocketState, String?, ConversationState?, Bool)] = [
             (.loading, .connecting, nil, nil, false),
+            (.starting, .open, nil, state("starting"), false),
             (.empty, .open, nil, state("idle"), false),
             (.ready, .open, nil, state("idle"), true),
             (.working, .open, nil, state("working"), true),
@@ -39,6 +40,24 @@ final class ConversationViewStateTests: XCTestCase {
             ConversationViewState.derive(socketState: .open, connectionError: nil, state: state("working", pending: "r"), hasItems: true),
             .awaitingInput
         )
+    }
+
+    func testCodexStartingStateIsNotMistakenForAnUnopenedSocket() {
+        let starting = state("starting")
+        XCTAssertEqual(
+            ConversationViewState.derive(socketState: .open, connectionError: nil, state: starting, hasItems: false),
+            .starting
+        )
+        XCTAssertEqual(ConversationViewState.starting.label, "Starting…")
+        XCTAssertTrue(ConversationComposerPresentation.derive(
+            viewState: .starting, state: starting, canSend: true, sendReason: nil, connectionError: nil
+        ).canSend)
+        let waiting = ConversationComposerPresentation.derive(
+            viewState: .starting, state: starting, canSend: false,
+            sendReason: "waiting for the agent's empty composer", connectionError: nil
+        )
+        XCTAssertFalse(waiting.canSend)
+        XCTAssertEqual(waiting.notice?.title, "Agent starting")
     }
 
     func testCachedContentWithoutStateIsStillLoading() {

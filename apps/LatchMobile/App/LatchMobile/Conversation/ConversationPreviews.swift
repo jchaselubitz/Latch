@@ -18,9 +18,9 @@ enum ConversationPreviewFixtures {
         var sendReason: String?
 
         switch viewState {
-        case .loading, .empty:
+        case .loading, .starting, .empty:
             items = []
-            canSend = viewState == .empty
+            canSend = viewState != .loading
             sendReason = viewState == .loading ? "Waiting for conversation state" : nil
         case .ready:
             items = conversation
