@@ -451,6 +451,14 @@ final class ControlPlaneHost {
               let host = url.host, !host.isEmpty else {
             throw ControlPlaneHostError.invalidAddress(trimmed)
         }
+        if url.scheme?.lowercased() == "http" {
+            let octets = host.split(separator: ".", omittingEmptySubsequences: false)
+            let isIPv4Loopback = octets.count == 4 && octets.first == "127"
+                && octets.allSatisfy { UInt8($0) != nil }
+            guard host.lowercased() == "localhost" || host == "::1" || isIPv4Loopback else {
+                throw ControlPlaneHostError.invalidAddress(trimmed)
+            }
+        }
         return url
     }
 

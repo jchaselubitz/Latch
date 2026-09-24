@@ -1,0 +1,105 @@
+{
+  "documentType": "codex-security.scan-manifest",
+  "scan": {
+    "artifacts": [
+      {
+        "mediaType": "application/json",
+        "path": "findings.json",
+        "sha256": "331c2cece54f61b6ec5d24b886da4d54ff23205ec29834462e476a339f280df1"
+      },
+      {
+        "mediaType": "text/markdown",
+        "path": "transport-native-follow-up.md",
+        "sha256": "daede63dbba8816e735e2332d288799b2a89d78728349babcac74bc37c3b058a"
+      },
+      {
+        "mediaType": "application/json",
+        "path": "coverage.json",
+        "sha256": "257f8265fedb78a08773e795338a00cef6fa625c30d40109e6eb3725ba71b328"
+      }
+    ],
+    "completedAt": "2026-09-23T15:42:29.670962Z",
+    "coverageRef": "coverage.json",
+    "findingsRef": "findings.json",
+    "id": "scan_latch_coo1001_aep3_20260923",
+    "limitations": [
+      "Offline static analysis; no runtime reproduction or production tests.",
+      "Hosted scan startup failed because its artifact directory was inside the target; artifacts produced through the prompt-only finalizer in /private/tmp.",
+      "Follow-up coo:1001.z2qn reviewed transport/FFI and security-relevant native clients. Coverage remains partial for conversation rendering, generated bindings, tests, and other deferred paths.",
+      "Measured token usage unavailable."
+    ],
+    "producer": {
+      "name": "codex-security-plugin",
+      "version": "0.1.24"
+    },
+    "scope": {
+      "excludePaths": [],
+      "includePaths": [
+        "."
+      ],
+      "runtimeStatus": "No application code, exploit, or production test executed.",
+      "validationMode": "Offline static source validation with independent review."
+    },
+    "sealedAt": "2026-09-23T15:42:29.670962Z",
+    "startedAt": "2026-09-23T07:12:01Z",
+    "status": "completed",
+    "target": {
+      "displayName": "Latch",
+      "kind": "git_worktree",
+      "revision": "4b7e46354ef0a7097f0f64e3a9ebd808718c7576",
+      "snapshotDigest": "codex-security-snapshot/v1:sha256:a06cdf6d81c1bcc96335ab7ef62ec03cccf03bd2062aab3e9b851cd058c84212",
+      "targetId": "latch-local-repository"
+    },
+    "threatModel": {
+      "assets": [
+        "Hosted processes, terminal input/output, filesystem access and agent conversations under the owner OS identity; Observe, Interact and Control are distinct grants (crates/latch/src/cli/serve/routes.rs:14-42).",
+        "Local state: LATCH_HOME or $HOME/.latch, sessions/<session-id>, serve.token and remote-access state; owner CLI/daemon and same-UID processes are recipients (crates/latch/src/session/paths.rs:112-156).",
+        "Remote identity/grants: remote-access/identity.json, devices.json, settings.json and audit.jsonl. macOS private keys use Keychain service co.cooperativ.latch.remote-access and device-id account; non-macOS/test keys use remote-access/identity.key with private file storage (crates/latch/src/cli/remote_access.rs:137-159,893-921,955-964,981-1001,1062-1084).",
+        "Supervised gateway bearer: <home>/remote-access/runtime/remote-link-gateway.token; readiness: remote-link-gateway-ready.json. The local helper launches latch serve on 127.0.0.1:0 with explicit token/ready paths and parent watchdog. A private owner lock and local-only address validation protect this resource (crates/latch/src/cli/remote_access.rs:413-433,491-507,538-593).",
+        "Control-plane account/device digests, pairings, admissions, leases and revocations in DATABASE_URL PostgreSQL; operator secret, admission key, relay service/invalidation credentials and optional APNs signing material are environment references, not inspected values (services/control-plane/src/config.ts:116-173; main.ts:25-44; api.ts:92-124,155-183).",
+        "Executable integrity and release signing authority. CLI updater checks checksum, payload manifest and matching signing team when the current installation has a recognized team; initial installer lacks publisher pinning (crates/latch/src/cli/update/mod.rs:368-390,568-615; scripts/install-cli.sh:25-41)."
+      ],
+      "assumptions": [
+        "User requested repository-wide review and a findings report; no supplied threat model or knowledge base. Root and crates/services/apps SECURITY.md resolution returned no policy.",
+        "Production exposure, concrete database URL, secret values, TLS termination, proxy trust and signing-infrastructure permissions were not inspected.",
+        "PostgreSQL configuration flows process.env -> loadConfig -> PostgresStore -> pg Pool. Pool defaults to 10; migrations default enabled. TLS is disabled if a regex over the full DATABASE_URL matches localhost, 127.0.0.1 or .railway.internal; otherwise rejectUnauthorized defaults false. Actual transport risk depends on deployment (services/control-plane/src/config.ts:144-147; main.ts:25-35; store/postgres.ts:140-147).",
+        "Non-loopback --allow-remote comments describe bearer access, but middleware currently denies non-loopback application requests; this is a documentation/implementation discrepancy, not an access bypass (crates/latch/src/cli/serve/mod.rs:7-9,101-115; auth.rs:92-95; http.rs:275-299).",
+        "Local process plane is POSIX; peer checks support macOS/BSD/Linux and fail closed elsewhere (crates/latchd/src/peer.rs:14-95).",
+        "Unsigned/ad-hoc/development updater installations skip matching-team verification (crates/latch/src/cli/update/mod.rs:568-615).",
+        "No dynamic exploitation or dependency vulnerability database checks were performed. Native archive extraction and exact deployment transport remain open questions.",
+        "Follow-up coo:1001.z2qn fully read 15 transport, FFI, and native-client files (75 total in coverage.json). Conversation rendering, generated bindings, tests, and other deferred paths remain unaudited. Findings are in transport-native-follow-up.md. Token usage measurement unavailable."
+      ],
+      "attackerCapabilities": [
+        "Unauthenticated network clients can send malformed traffic to externally deployed control-plane/relay listeners; actual edge exposure remains deployment-dependent.",
+        "Paired Observe/Interact controllers possess their own key and admissions but should not gain stronger grants or another device/account identity.",
+        "Relay infrastructure/traffic attackers may disrupt ciphertext delivery but are not assumed to possess pinned endpoint keys or the enrollment secret.",
+        "Other Unix users may attempt socket or temporary-directory access but lack owner UID/private state. Same-UID workloads already share ambient OS authority.",
+        "Terminal output, agent transcripts and source bindings can contain attacker-influenced content.",
+        "A release-asset attacker is not automatically a holder of the Developer ID signing key; initial-install and signed-update guarantees differ."
+      ],
+      "securityObjectives": [
+        "Authenticate local daemon peers as the owning UID and prevent foreign-user daemon impersonation.",
+        "Preserve endpoint confidentiality and exact key binding independently of relay admission.",
+        "Enforce Observe/Interact/Control and device identity consistently across stream parsing, gateway upgrade and later conversation actions; invalidate revoked grants.",
+        "Keep host gateway bearer and private keys outside cloud application payloads.",
+        "Prevent cross-account pairing/admission and unauthorized operator/relay administration.",
+        "Contain malformed-client errors and enforce capacity budgets across concurrent requests.",
+        "Authenticate executable publisher before execution and treat terminal/transcript data as lower-trust input."
+      ],
+      "summary": "Latch provides persistent user-owned terminal sessions through a Rust CLI and per-session latchd daemon, macOS Desktop, iOS Mobile, HTTP/WebSocket clients, and paired Remote Link access. Local clients use private Unix sockets. The gateway offers discovery, creation, directory browsing, preview, stop, terminal and conversation routes (crates/latch/src/cli/serve/routes.rs:77-142). Paired endpoints authenticate keys with Noise; the host authority proxy injects the local gateway credential and grants. The TypeScript control plane manages identity/admission, and the independently deployed relay carries encrypted records (crates/latch-remote/src/link.rs:262-275; crates/latch-transport/src/link.rs:752-784; crates/latch/src/cli/remote_access.rs:645-688; services/control-plane/src/api.ts:165-183; services/relay/src/server.ts:141-165).",
+      "trustBoundaries": [
+        "Other local UID -> daemon: socket directory LATCHD_SOCKET_DIR else /tmp/latchd-<uid>, with <8-hex-low32-FNV-home>-<session-id>.sock. Owner/private modes and O_NOFOLLOW directory inspection apply; daemon and client require same-user peer credentials. Same-UID hosted processes are not isolated tenants (crates/latchd/src/paths.rs:112-188; daemon.rs:440-478; client.rs:27-31; peer.rs:21-95).",
+        "HTTP/WebSocket client -> gateway: --token-file else <home>/serve.token; default bind 127.0.0.1:4610. A 32-byte random token is stored privately and loaded each request. Origin and token checks precede route authorization. Loopback without device headers receives Control; non-loopback application calls are rejected even with a bearer. OPTIONS is unauthenticated (crates/latch/src/main.rs:273-282,719-738; cli/serve/auth.rs:13-43; cli/serve/http.rs:255-335).",
+        "Paired controller -> host: Noise XX pins the expected static peer and purpose in the handshake. Local authorization is keyed by peer public key and grant revision. Enrollment matches proposal identity/key/permission and waits for Desktop approval before committing local authority (crates/latch-transport/src/link.rs:752-784; crates/latch-remote/src/link.rs:262-270,637-674). Follow-up coo:1001.z2qn confirmed those pins. Remaining issues are the approval-prompt name, pre-handshake buffering, LAN acceptor stall, and Bonjour target checks (transport-native-follow-up.md).",
+        "Authenticated stream -> loopback bearer authority: proxy rejects forbidden headers and transfer encoding, checks route grant and initial pipelining, injects bearer/grant/device and periodically checks revocation/revision. The reported parsing discrepancy breaks this boundary for conversation grants and identity. Conversation GET itself requires Observe; Hub mutation checks use the subscriber grant (crates/latch/src/cli/remote_access.rs:645-831; cli/serve/routes.rs:137-142; conversation/hub.rs:739-769).",
+        "Internet client/device -> control plane: domain-separated account/device credential digests, role/account pairing guards and admission rate limits; operator and relay redemption use separate secrets. Signed admissions bind issuer, audience, kid, room, role, purpose, generation, ticket, validity window and limits (services/control-plane/src/api.ts:75-183). Provisional enrollment credentials do not resolve as regular devices before host completion.",
+        "Internet endpoint -> relay: signed admission plus private control-plane redemption; role generation, lease deadlines, record/buffer/bandwidth bounds; invalidation uses its own secret. Relay TLS uses certificate/key paths or deployment termination. Missing error containment and pending-slot reservations are reported (services/relay/src/server.ts:9-14,92-114,141-208).",
+        "Relay -> redemption service: CONTROL_PLANE_URL with trailing slash removed, then /private/v1/relay/redemptions; RELAY_SERVICE_TOKEN is sent as bearer. Endpoint transport security depends on operator URL; no production URL was inspected (services/relay/src/main.ts:9-14,35-42).",
+        "Agent/source data -> observer and Hub: source bindings/raw hooks are stored beside sessions; launched Claude receives a generated private plugin. Such data is not inherently trusted, but same-UID agent execution already possesses user filesystem authority (crates/latch/src/observer.rs:41-60,112-134,191-193,213-256; session/paths.rs:235-245).",
+        "Release infrastructure -> installed execution: downloaded binaries must be authenticated before execution. Tag-triggered CI signs/notarizes using configured credentials; initial install signature checks do not pin the publisher (scripts/install-cli.sh:25-41; .github/workflows/release-cli.yml:28-69)."
+      ]
+    },
+    "userContext": "Conduct a security review of Latch. Overlord mission coo:1001; objective coo:1001.aep3. User subsequently requested continued work and a report of findings."
+  },
+  "schemaVersion": "1.0"
+}

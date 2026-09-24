@@ -4,9 +4,11 @@
 //! It speaks the protocol-major-2 contracts over `/v2` and wraps `latch attach`
 //! under a per-client PTY for the terminal channel.
 //!
-//! The supported remote path is an SSH tunnel to the loopback bind. The gateway
-//! speaks plaintext HTTP, so the bearer token is only safe on loopback (or a
-//! tunnel to it). Binding a non-loopback address requires `--allow-remote`.
+//! The gateway speaks plaintext HTTP, so the bearer token is only safe on
+//! loopback. A non-loopback bind is refused outright; there is no opt-in.
+//! Remote devices reach the gateway through the Remote Link proxy, which
+//! authenticates the device and injects the bearer on loopback. An SSH tunnel
+//! to the loopback bind is the other supported remote path.
 
 pub mod attention;
 mod auth;
@@ -47,8 +49,6 @@ pub struct ServeOptions {
     pub ready_file: Option<PathBuf>,
     /// `latch` executable used to spawn `attach` under a PTY.
     pub latch_bin: PathBuf,
-    /// Permit a non-loopback bind (plaintext HTTP; token in the clear).
-    pub allow_remote: bool,
     /// Stop when the supervising helper exits, including after a crash.
     pub exit_with_parent: bool,
 }
@@ -98,20 +98,18 @@ fn install_parent_watchdog() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `latch serve` only ever binds loopback. The gateway speaks plaintext HTTP
+/// and trusts loopback peers with the device grant headers the Remote Link
+/// proxy injects, so a non-loopback listener would both leak the bearer and
+/// let any network peer present those headers. There is deliberately no
+/// opt-in flag.
 fn refuse_non_loopback(options: &ServeOptions) -> anyhow::Result<()> {
     if options.bind.ip().is_loopback() {
         return Ok(());
     }
-    if !options.allow_remote {
-        bail!(
-            "refusing to bind {}: latch serve speaks plaintext HTTP and the bearer token travels in the clear. \
-             The supported remote path is an SSH tunnel to 127.0.0.1. Pass --allow-remote to opt in.",
-            options.bind
-        );
-    }
-    eprintln!(
-        "warning: {} is not loopback; latch serve speaks plaintext HTTP. Prefer an SSH tunnel to 127.0.0.1.",
+    bail!(
+        "refusing to bind {}: latch serve speaks plaintext HTTP and only listens on loopback. \
+         Use Remote Link (latch remote-access) or an SSH tunnel to 127.0.0.1 for remote access.",
         options.bind
     );
-    Ok(())
 }

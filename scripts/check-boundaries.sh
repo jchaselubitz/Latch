@@ -60,6 +60,18 @@ if [ -d packages/client ] &&
     report '@latch/client exposes a retired v1 conversation API'
 fi
 
+# --- Remote Link proxy owns authority headers --------------------------------
+#
+# The Remote Link proxy must parse the controller request and serialize a fresh
+# one. Copying its raw header slice would reintroduce the header-smuggling
+# boundary this check is intended to make mechanically visible.
+remote_access_source=crates/latch/src/cli/remote_access.rs
+if [ -f "$remote_access_source" ] &&
+    sed -n '/^fn authorize_and_inject(/,/^fn complete_initial_request_len(/p' "$remote_access_source" |
+        grep -qE 'extend_from_slice\(&request\[\.\.[^]]*\]\)'; then
+    report 'authorize_and_inject forwards a raw caller request slice'
+fi
+
 # --- Cloud services stay independent deployables ------------------------------
 #
 # services/ holds deployable cloud services. Each ships on its own, so it must

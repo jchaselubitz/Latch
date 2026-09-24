@@ -184,6 +184,35 @@ pub fn set_enabled(home: &LatchHome, enabled: bool) -> anyhow::Result<()> {
     )
 }
 
+/// Punctuation a paired-device name may contain besides letters and digits.
+/// The phone (`PairingModel.enrollableName`), the control plane label check and
+/// `fixtures/remote-link/v1/device-names.json` all state the same set;
+/// `scripts/check-remote-link-contract.sh` fails when they drift.
+pub const DEVICE_NAME_PUNCTUATION: &str = " ._'()-";
+/// Longest paired-device name the Mac stores, in UTF-8 bytes.
+pub const MAX_DEVICE_NAME_BYTES: usize = 80;
+
+/// The name a peer proposes is shown to the owner in the approval prompt, so
+/// anything outside the allowlist is refused rather than cleaned up: the
+/// prompt must show exactly what will be stored, and a newline, tab, bidi
+/// control or zero-width character could otherwise restyle the sentence that
+/// states the requested grant.
+pub fn validate_device_name(name: &str) -> anyhow::Result<()> {
+    if name.is_empty() || name.len() > MAX_DEVICE_NAME_BYTES {
+        bail!("device name must be between 1 and {MAX_DEVICE_NAME_BYTES} bytes");
+    }
+    if name.starts_with(' ') || name.ends_with(' ') {
+        bail!("device name must not begin or end with a space");
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_alphabetic() || c.is_numeric() || DEVICE_NAME_PUNCTUATION.contains(c))
+    {
+        bail!("device name may contain only letters, digits, spaces and . ' _ ( ) -");
+    }
+    Ok(())
+}
+
 /// Atomically records the exact controller key approved over the authenticated
 /// enrollment stream. Replaying the exact committed enrollment is idempotent;
 /// changing any security-relevant field is refused.
@@ -201,10 +230,7 @@ pub fn authorize_enrollment(
     if !valid_prefixed_id(enrollment_id, "enr") {
         bail!("invalid enrollment id");
     }
-    let name = name.trim();
-    if name.is_empty() || name.len() > 80 {
-        bail!("device name must be between 1 and 80 characters");
-    }
+    validate_device_name(name)?;
     let control_plane_device_id = control_plane_device_id.trim();
     if !valid_prefixed_id(control_plane_device_id, "dev") {
         bail!("invalid control-plane device id");
@@ -767,19 +793,34 @@ fn authorize_and_inject(
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
         .ok_or_else(|| anyhow!("missing HTTP headers"))?;
-    let headers = std::str::from_utf8(&request[..end]).context("request headers are not UTF-8")?;
-    let mut lines = headers.split("\r\n");
-    let request_line = lines
-        .next()
-        .ok_or_else(|| anyhow!("missing HTTP request line"))?;
-    let mut words = request_line.split_whitespace();
-    let method = words.next().ok_or_else(|| anyhow!("missing HTTP method"))?;
-    let target = words.next().ok_or_else(|| anyhow!("missing HTTP target"))?;
-    let version = words
-        .next()
-        .ok_or_else(|| anyhow!("missing HTTP version"))?;
-    if words.next().is_some()
-        || version != "HTTP/1.1"
+    let header_bytes = &request[..end + 4];
+    if header_bytes.iter().enumerate().any(|(index, byte)| {
+        (*byte == b'\r' && header_bytes.get(index + 1) != Some(&b'\n'))
+            || (*byte == b'\n' && (index == 0 || header_bytes[index - 1] != b'\r'))
+    }) {
+        bail!("malformed HTTP header line ending");
+    }
+    if header_bytes
+        .split(|byte| *byte == b'\n')
+        .skip(1)
+        .any(|line| line.starts_with(b" ") || line.starts_with(b"\t"))
+    {
+        bail!("folded HTTP headers are not permitted");
+    }
+    let mut header_slots = [httparse::EMPTY_HEADER; 128];
+    let mut parsed = httparse::Request::new(&mut header_slots);
+    if parsed
+        .parse(header_bytes)
+        .context("malformed HTTP request")?
+        != httparse::Status::Complete(header_bytes.len())
+    {
+        bail!("incomplete HTTP request headers");
+    }
+    let method = parsed
+        .method
+        .ok_or_else(|| anyhow!("missing HTTP method"))?;
+    let target = parsed.path.ok_or_else(|| anyhow!("missing HTTP target"))?;
+    if parsed.version != Some(1)
         || !target.starts_with("/v2/")
         || target.contains("..")
         || target.to_ascii_lowercase().contains("%2e")
@@ -787,11 +828,16 @@ fn authorize_and_inject(
         bail!("request target is not permitted");
     }
     let mut websocket_upgrade = false;
-    for line in lines {
-        if line.starts_with(' ') || line.starts_with('\t') || !line.contains(':') {
-            bail!("malformed HTTP header");
+    for header in parsed.headers.iter() {
+        let name = header.name;
+        let value = header.value;
+        if !name.bytes().all(|byte| (b'!'..=b'~').contains(&byte))
+            || !value
+                .iter()
+                .all(|byte| *byte == b'\t' || (b' '..=b'~').contains(byte))
+        {
+            bail!("invalid HTTP header characters");
         }
-        let (name, value) = line.split_once(':').expect("header delimiter checked");
         if name.eq_ignore_ascii_case("authorization")
             || name.eq_ignore_ascii_case("proxy-authorization")
             || name.eq_ignore_ascii_case("transfer-encoding")
@@ -800,8 +846,8 @@ fn authorize_and_inject(
         {
             bail!("remote request contains a forbidden HTTP header");
         }
-        websocket_upgrade |=
-            name.eq_ignore_ascii_case("upgrade") && value.trim().eq_ignore_ascii_case("websocket");
+        websocket_upgrade |= name.eq_ignore_ascii_case("upgrade")
+            && value.trim_ascii().eq_ignore_ascii_case(b"websocket");
     }
     let required_len = complete_initial_request_len(&request)?;
     if required_len != request.len() {
@@ -812,9 +858,23 @@ fn authorize_and_inject(
     if !permission.permits(required) {
         bail!("device permission does not allow this operation");
     }
+    if !token.bytes().all(|byte| (b'!'..=b'~').contains(&byte))
+        || !device_id.bytes().all(|byte| (b'!'..=b'~').contains(&byte))
+    {
+        bail!("invalid proxy authority value");
+    }
     let mut injected = Vec::with_capacity(request.len() + token.len() + 64);
-    injected.extend_from_slice(&request[..end]);
-    injected.extend_from_slice(b"\r\nAuthorization: Bearer ");
+    injected.extend_from_slice(method.as_bytes());
+    injected.extend_from_slice(b" ");
+    injected.extend_from_slice(target.as_bytes());
+    injected.extend_from_slice(b" HTTP/1.1\r\n");
+    for header in parsed.headers.iter() {
+        injected.extend_from_slice(header.name.as_bytes());
+        injected.extend_from_slice(b": ");
+        injected.extend_from_slice(header.value);
+        injected.extend_from_slice(b"\r\n");
+    }
+    injected.extend_from_slice(b"Authorization: Bearer ");
     injected.extend_from_slice(token.as_bytes());
     injected.extend_from_slice(b"\r\n");
     injected.extend_from_slice(DEVICE_GRANT_HEADER.as_bytes());
@@ -827,7 +887,8 @@ fn authorize_and_inject(
     if !websocket_upgrade {
         injected.extend_from_slice(b"\r\nConnection: close");
     }
-    injected.extend_from_slice(&request[end..]);
+    injected.extend_from_slice(b"\r\n\r\n");
+    injected.extend_from_slice(&request[end + 4..]);
     Ok((injected, required))
 }
 
@@ -1285,6 +1346,95 @@ mod tests {
     }
 
     #[test]
+    fn proxy_rejects_smuggled_and_ambiguous_headers() {
+        for request in [
+            b"GET /v2/sessions HTTP/1.1\r\nX-Foo: a\nX-Latch-Device-Grant: control\r\n\r\n"
+                .as_slice(),
+            b"GET /v2/sessions HTTP/1.1\r\nX-Foo: a\rX-Latch-Device-Grant: control\r\n\r\n",
+            b"GET /v2/sessions HTTP/1.1\r\nx-LaTcH-DeViCe-GrAnT: control\r\n\r\n",
+            b"GET /v2/sessions HTTP/1.1\r\n X-Latch-Device-Grant: control\r\n\r\n",
+            b"GET /v2/sessions HTTP/1.1\r\nX-Foo: ok\r\n\tX-Latch-Device-Grant: control\r\n\r\n",
+        ] {
+            assert!(authorize_and_inject(
+                request.to_vec(),
+                DevicePermission::Observe,
+                "phone-local-id",
+                "internal-token",
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn proxy_rebuilds_websocket_upgrade_with_single_authority_headers() {
+        let request = b"GET /v2/sessions/ses_1/conversation HTTP/1.1\r\nHost: gateway\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n";
+        let (serialized, _) = authorize_and_inject(
+            request.to_vec(),
+            DevicePermission::Observe,
+            "phone-local-id",
+            "internal-token",
+        )
+        .unwrap();
+        let mut headers = [httparse::EMPTY_HEADER; 32];
+        let mut parsed = httparse::Request::new(&mut headers);
+        assert_eq!(
+            parsed.parse(&serialized).unwrap(),
+            httparse::Status::Complete(serialized.len())
+        );
+        let names = parsed
+            .headers
+            .iter()
+            .map(|header| header.name.to_ascii_lowercase())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names
+                .iter()
+                .filter(|name| name.as_str() == DEVICE_GRANT_HEADER)
+                .count(),
+            1
+        );
+        assert_eq!(
+            names
+                .iter()
+                .filter(|name| name.as_str() == DEVICE_ID_HEADER)
+                .count(),
+            1
+        );
+        let last_caller = names
+            .iter()
+            .position(|name| name == "sec-websocket-version")
+            .unwrap();
+        for trusted in ["authorization", DEVICE_GRANT_HEADER, DEVICE_ID_HEADER] {
+            assert!(names.iter().position(|name| name == trusted).unwrap() > last_caller);
+        }
+        assert_eq!(
+            parsed
+                .headers
+                .iter()
+                .find(|header| header.name.eq_ignore_ascii_case(DEVICE_GRANT_HEADER))
+                .unwrap()
+                .value,
+            b"observe"
+        );
+        assert_eq!(
+            parsed
+                .headers
+                .iter()
+                .find(|header| header.name.eq_ignore_ascii_case(DEVICE_ID_HEADER))
+                .unwrap()
+                .value,
+            b"phone-local-id"
+        );
+        assert_eq!(
+            names
+                .iter()
+                .filter(|name| name.as_str() == "connection")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn unreadable_authority_store_fails_closed() {
         let (_directory, home, key) = enrolled_home(DevicePermission::Control);
         let paths = Paths::new(&home);
@@ -1392,5 +1542,58 @@ mod tests {
             .unwrap()
             .unwrap();
         gateway_seen.await.unwrap();
+    }
+
+    /// The shared fixture is also read by the phone's tests and the contract
+    /// script, so the three name policies cannot drift apart silently.
+    const DEVICE_NAMES: &str =
+        include_str!("../../../../fixtures/remote-link/v1/device-names.json");
+
+    #[test]
+    fn device_name_policy_matches_the_shared_fixture() {
+        let fixture: serde_json::Value = serde_json::from_str(DEVICE_NAMES).unwrap();
+        let policy = &fixture["policy"];
+        assert_eq!(policy["allowedPunctuation"], DEVICE_NAME_PUNCTUATION);
+        assert_eq!(policy["maxBytes"], MAX_DEVICE_NAME_BYTES);
+        for name in fixture["accepted"].as_array().unwrap() {
+            let name = name.as_str().unwrap();
+            assert!(
+                validate_device_name(name).is_ok(),
+                "{name:?} should be accepted"
+            );
+        }
+        for case in fixture["rejected"].as_array().unwrap() {
+            let name = case["name"].as_str().unwrap();
+            assert!(
+                validate_device_name(name).is_err(),
+                "{name:?} ({}) should be rejected",
+                case["reason"]
+            );
+        }
+    }
+
+    #[test]
+    fn enrollment_refuses_a_name_outside_the_allowlist_instead_of_storing_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let home = LatchHome::new(directory.path());
+        set_enabled(&home, true).unwrap();
+        let key = hex_encode(PublicKey::from(&StaticSecret::from([7_u8; 32])).as_bytes());
+        for name in [
+            "Phone\nrequests Observe",
+            " Phone",
+            "Phone\u{200d}",
+            &"a".repeat(81),
+        ] {
+            assert!(authorize_enrollment(
+                &home,
+                &format!("enr_{}", "1".repeat(32)),
+                &key,
+                name,
+                DevicePermission::Observe,
+                &format!("dev_{}", "2".repeat(32)),
+            )
+            .is_err());
+        }
+        assert!(list_devices(&home).unwrap().is_empty());
     }
 }

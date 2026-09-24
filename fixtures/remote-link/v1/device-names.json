@@ -1,0 +1,83 @@
+{
+  "description": "Paired-device name policy shared by the host (validate_device_name in crates/latch/src/cli/remote_access.rs), the phone (PairingModel.enrollableName) and scripts/check-remote-link-contract.sh. Accepted names are stored verbatim; rejected names are refused by the host, never cleaned up.",
+  "policy": {
+    "allowedPunctuation": " ._'()-",
+    "letters": true,
+    "digits": true,
+    "minBytes": 1,
+    "maxBytes": 80,
+    "noLeadingOrTrailingSpace": true
+  },
+  "accepted": [
+    "Jake's iPhone (work)",
+    "Jake's iPhone",
+    "Pixel_8 Pro",
+    "iPad mini-2",
+    "Zo\u00eb's iPad",
+    "Mac.Studio",
+    "\u5c0f\u660e\u7684\u624b\u673a",
+    "x"
+  ],
+  "rejected": [
+    {
+      "reason": "empty",
+      "name": ""
+    },
+    {
+      "reason": "newline",
+      "name": "Jake's iPhone\nrequests Observe"
+    },
+    {
+      "reason": "carriage return",
+      "name": "Jake's iPhone\rrequests Observe"
+    },
+    {
+      "reason": "tab",
+      "name": "Jake's\tiPhone"
+    },
+    {
+      "reason": "second requests phrase behind control characters",
+      "name": "iPhone requests Observe.\u0000\u000b\fConfirm iPhone"
+    },
+    {
+      "reason": "zero-width joiner",
+      "name": "Jake\u200d's iPhone"
+    },
+    {
+      "reason": "right-to-left override",
+      "name": "Jake's \u202eenohPi"
+    },
+    {
+      "reason": "line separator",
+      "name": "Jake's iPhone\u2028requests Observe"
+    },
+    {
+      "reason": "no-break space",
+      "name": "Jake's\u00a0iPhone"
+    },
+    {
+      "reason": "typographic apostrophe",
+      "name": "Jake\u2019s iPhone"
+    },
+    {
+      "reason": "colon",
+      "name": "Access: Observe"
+    },
+    {
+      "reason": "leading space",
+      "name": " Jake's iPhone"
+    },
+    {
+      "reason": "trailing space",
+      "name": "Jake's iPhone "
+    },
+    {
+      "reason": "81 bytes",
+      "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "reason": "over 80 bytes in 70 characters",
+      "name": "\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9"
+    }
+  ]
+}

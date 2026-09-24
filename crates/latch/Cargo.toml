@@ -29,6 +29,7 @@ path = "src/lib.rs"
 anyhow.workspace = true
 axum.workspace = true
 clap.workspace = true
+httparse = "1"
 latchd = { path = "../latchd" }
 libc.workspace = true
 serde.workspace = true

@@ -382,9 +382,17 @@ public final class PairingModel {
         let collapsed = cleaned
             .split(separator: " ", omittingEmptySubsequences: true)
             .joined(separator: " ")
-        let bounded = String(collapsed.prefix(64)).trimmingCharacters(in: .whitespaces)
+        // The control plane counts 64 characters; the Mac refuses more than
+        // 80 UTF-8 bytes. Both bounds hold, or the Mac rejects the pairing.
+        var bounded = String(collapsed.prefix(64))
+        while bounded.utf8.count > maxEnrollableNameBytes { bounded.removeLast() }
+        bounded = bounded.trimmingCharacters(in: .whitespaces)
         return bounded.isEmpty ? defaultDeviceName : bounded
     }
+
+    /// Mirrors `MAX_DEVICE_NAME_BYTES` on the Mac and
+    /// `fixtures/remote-link/v1/device-names.json`.
+    static let maxEnrollableNameBytes = 80
 
     /// Punctuation the platforms put in device names that the control plane's
     /// label set does not accept, mapped to the character it stands for.

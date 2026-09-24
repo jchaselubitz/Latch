@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context};
 use latch::cli::remote_access::{
-    authorize_enrollment, remote_link_identity, AuthenticatedGateway, DevicePermission,
-    SharedGatewayOwner,
+    authorize_enrollment, remote_link_identity, validate_device_name, AuthenticatedGateway,
+    DevicePermission, SharedGatewayOwner,
 };
 use latch::session::paths::LatchHome;
 use latch_transport::link::{
@@ -20,7 +20,7 @@ use latch_transport::link::{
 use mdns_sd::{ServiceDaemon, ServiceInfo};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Semaphore};
 use tokio::task::JoinSet;
 use zeroize::Zeroizing;
 
@@ -257,7 +257,12 @@ pub fn serve_shared_gateway(home: LatchHome, latch_bin: PathBuf) -> anyhow::Resu
 }
 
 /// Bound on how long a LAN peer may take to authenticate once it connects.
-const LAN_AUTHENTICATION_LIMIT: Duration = Duration::from_secs(10);
+/// A LAN Noise exchange takes milliseconds; the bound exists so a connection
+/// that never speaks gives its handshake permit back quickly.
+pub const LAN_AUTHENTICATION_LIMIT: Duration = Duration::from_secs(3);
+
+/// LAN handshakes allowed in flight at once.
+pub const LAN_HANDSHAKE_PERMITS: usize = 4;
 
 async fn run_session(home: LatchHome, config: RemoteLinkHostConfig) -> anyhow::Result<()> {
     let mut ipc = ipc_reader("latch-remote-ipc")?;
@@ -305,43 +310,24 @@ async fn run_session(home: LatchHome, config: RemoteLinkHostConfig) -> anyhow::R
     // LAN peer replaces whatever link is current, which is how a phone that
     // walks back onto the Wi-Fi re-establishes without waiting for the
     // relay side to notice.
-    let lan_acceptor = tokio::spawn({
-        let link_config = link_config.clone();
+    let (lan_tx, mut lan_rx) = mpsc::channel::<LanLink>(2);
+    let lan_acceptor = tokio::spawn(run_lan_acceptor(listener, link_config.clone(), lan_tx));
+    let lan_forwarder = tokio::spawn({
         let links_tx = links_tx.clone();
         async move {
-            loop {
-                let Ok((stream, _)) = listener.accept().await else {
-                    break;
+            while let Some(lan) = lan_rx.recv().await {
+                let established = EstablishedLink {
+                    link: lan.link,
+                    carrier: "lan",
+                    control: None,
+                    timings: LinkStageTimings {
+                        connect_ms: 0,
+                        peer_wait_ms: 0,
+                        authenticate_ms: lan.authenticate_ms,
+                    },
                 };
-                let started = std::time::Instant::now();
-                let established = tokio::time::timeout(
-                    LAN_AUTHENTICATION_LIMIT,
-                    SecureLink::establish(LanRecordIo::new(stream), link_config()),
-                )
-                .await;
-                match established {
-                    Ok(Ok(link)) => {
-                        let timings = LinkStageTimings {
-                            connect_ms: 0,
-                            peer_wait_ms: 0,
-                            authenticate_ms: started.elapsed().as_millis() as u64,
-                        };
-                        if links_tx
-                            .send(EstablishedLink {
-                                link,
-                                carrier: "lan",
-                                control: None,
-                                timings,
-                            })
-                            .await
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                    // An unauthenticated LAN peer is refused and forgotten; the
-                    // listener keeps serving the paired phone.
-                    Ok(Err(_)) | Err(_) => continue,
+                if links_tx.send(established).await.is_err() {
+                    break;
                 }
             }
         }
@@ -495,10 +481,78 @@ async fn run_session(home: LatchHome, config: RemoteLinkHostConfig) -> anyhow::R
     streams.abort_all();
     while streams.join_next().await.is_some() {}
     lan_acceptor.abort();
+    lan_forwarder.abort();
     wss_acceptor.abort();
     let _ = lan_acceptor.await;
+    let _ = lan_forwarder.await;
     let _ = wss_acceptor.await;
     result
+}
+
+/// A LAN peer that completed Noise authentication against the pinned key.
+pub struct LanLink {
+    /// The authenticated link, ready to accept streams.
+    pub link: Arc<SecureLink>,
+    /// Time from accepting the TCP connection to a completed handshake.
+    pub authenticate_ms: u64,
+}
+
+/// Accepts LAN carriers and authenticates each one concurrently, forwarding
+/// every authenticated link to `links`. Handshakes run as tasks bounded by
+/// [`LAN_HANDSHAKE_PERMITS`], and each has [`LAN_AUTHENTICATION_LIMIT`] to
+/// finish, so a connection that never speaks holds one permit for at most that
+/// long and cannot keep the paired phone out. Returns when the listener fails
+/// or `links` is closed; dropping the future cancels in-flight handshakes.
+pub async fn run_lan_acceptor(
+    listener: tokio::net::TcpListener,
+    link_config: Arc<dyn Fn() -> LinkConfig + Send + Sync>,
+    links: mpsc::Sender<LanLink>,
+) {
+    let permits = Arc::new(Semaphore::new(LAN_HANDSHAKE_PERMITS));
+    let mut handshakes = JoinSet::new();
+    loop {
+        // Taking the permit before accepting leaves further connections in
+        // the listen backlog until a handshake finishes or times out.
+        let Ok(permit) = permits.clone().acquire_owned().await else {
+            break;
+        };
+        let Ok((stream, _)) = listener.accept().await else {
+            break;
+        };
+        if links.is_closed() {
+            break;
+        }
+        while handshakes.try_join_next().is_some() {}
+        let config = link_config();
+        let links = links.clone();
+        handshakes.spawn(async move {
+            let _permit = permit;
+            let started = std::time::Instant::now();
+            let established = tokio::time::timeout(
+                LAN_AUTHENTICATION_LIMIT,
+                SecureLink::establish(LanRecordIo::new(stream), config),
+            )
+            .await;
+            match established {
+                Ok(Ok(link)) => {
+                    let authenticate_ms = started.elapsed().as_millis() as u64;
+                    if let Err(unsent) = links
+                        .send(LanLink {
+                            link,
+                            authenticate_ms,
+                        })
+                        .await
+                    {
+                        unsent.0.link.close().await;
+                    }
+                }
+                // An unauthenticated LAN peer is refused and forgotten; the
+                // listener keeps serving the paired phone.
+                Ok(Err(error)) => log::debug!("LAN handshake refused: {error}"),
+                Err(_) => log::debug!("LAN handshake timed out"),
+            }
+        });
+    }
 }
 
 /// Consumes admissions one socket at a time. Every socket ends the same way:
@@ -745,12 +799,14 @@ fn validate_proposal(
         || proposal.enrollment_id != enrollment_id
         || proposal.provisional_device_id.is_empty()
         || proposal.provisional_device_id.len() > 96
-        || proposal.name.trim().is_empty()
-        || proposal.name.len() > 80
         || decode_key(&proposal.controller_public_key)? != authenticated_key
     {
         bail!("enrollment proposal does not match the authenticated controller");
     }
+    // Checked before the proposal is shown to the owner; `authorize_enrollment`
+    // checks again before anything is stored.
+    validate_device_name(&proposal.name)
+        .context("enrollment proposal has an invalid device name")?;
     Ok(())
 }
 
@@ -944,4 +1000,50 @@ fn decode_key(value: &str) -> anyhow::Result<Vec<u8>> {
         .step_by(2)
         .map(|index| u8::from_str_radix(&value[index..index + 2], 16).map_err(Into::into))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ENROLLMENT: &str = "enr_fixture_00000001";
+
+    fn proposal(name: &str) -> EnrollmentProposal {
+        EnrollmentProposal {
+            r#type: "enrollment_proposal".into(),
+            version: 1,
+            enrollment_id: ENROLLMENT.into(),
+            provisional_device_id: "dev_fixture_00000001".into(),
+            controller_public_key: "22".repeat(32),
+            name: name.into(),
+            permission: DevicePermission::Control,
+        }
+    }
+
+    fn validate(name: &str) -> anyhow::Result<()> {
+        validate_proposal(&proposal(name), ENROLLMENT, &[0x22; 32])
+    }
+
+    #[test]
+    fn a_proposal_name_that_could_restyle_the_approval_prompt_is_rejected() {
+        // The Mac approval prompt shows this name next to the requested grant;
+        // a peer that controls line breaks or invisible characters in it could
+        // make the prompt lead with a different grant than the one committed.
+        for name in [
+            "Jake's iPhone\nrequests Observe",
+            "Jake\u{200d}'s iPhone",
+            "iPhone requests Observe.\u{0}\u{b}Confirm iPhone",
+            "iPhone\u{202e}requests Observe",
+            "Jake's iPhone\trequests Observe",
+            &"a".repeat(81),
+        ] {
+            assert!(validate(name).is_err(), "{name:?} should be rejected");
+        }
+    }
+
+    #[test]
+    fn an_ordinary_device_name_is_accepted() {
+        validate("Jake's iPhone (work)").unwrap();
+        validate(&"a".repeat(80)).unwrap();
+    }
 }

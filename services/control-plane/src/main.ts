@@ -29,6 +29,9 @@ async function main(): Promise<void> {
     poolSize: config.databasePoolSize,
     sslRejectUnauthorized: config.databaseSslRejectUnauthorized,
   });
+  if (store.tlsWarning) {
+    process.stderr.write(`${JSON.stringify({ level: 'warn', message: store.tlsWarning })}\n`);
+  }
 
   if (config.migrateOnBoot) {
     const files = await loadMigrations();

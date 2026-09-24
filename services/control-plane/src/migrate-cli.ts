@@ -17,6 +17,9 @@ async function main(): Promise<void> {
     poolSize: 1,
     sslRejectUnauthorized: config.databaseSslRejectUnauthorized,
   });
+  if (store.tlsWarning) {
+    process.stderr.write(`${JSON.stringify({ level: 'warn', message: store.tlsWarning })}\n`);
+  }
   try {
     const result = await runMigrations(store.pool, await loadMigrations());
     process.stdout.write(

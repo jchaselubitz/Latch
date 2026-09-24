@@ -433,21 +433,8 @@ public final class BonjourMacDiscovery: @unchecked Sendable {
         let collector = RemoteLinkLanTargetCollector()
         browser.browseResultsChangedHandler = { results, _ in
             let targets = results.flatMap { result -> [RemoteLinkLanTarget] in
-                guard case let .bonjour(record) = result.metadata,
-                      record["identityKey"]?.lowercased() == pin,
-                      record["linkVersion"] == "1",
-                      let host = record["lanHost"], !host.isEmpty,
-                      let portText = record["lanPort"],
-                      let port = UInt16(portText), port != 0
-                else { return [] }
-                // The Mac's concrete addresses come first (IPv4 before IPv6,
-                // as published); the `.local` name is the last resort because
-                // resolving it can outlast the LAN connect bound.
-                let addresses = (record["lanAddrs"] ?? "")
-                    .split(separator: ",")
-                    .map { String($0).trimmingCharacters(in: .whitespaces) }
-                    .filter { !$0.isEmpty && $0.count <= 45 }
-                return (addresses + [host]).map { RemoteLinkLanTarget(host: $0, port: port) }
+                guard case let .bonjour(record) = result.metadata else { return [] }
+                return RemoteLinkLanTarget.targets(fromTXT: record.dictionary, matching: pin)
             }
             Task { await collector.replace(with: targets) }
         }
@@ -474,6 +461,72 @@ public struct RemoteLinkLanTarget: Equatable, Sendable {
     public init(host: String, port: UInt16) {
         self.host = host
         self.port = port
+    }
+
+    /// The LAN targets a Mac's Bonjour TXT record publishes for the pinned
+    /// identity, in published order (IPv4 before IPv6). Anyone on the network
+    /// can publish a record, so only IP literals in ranges a phone and Mac
+    /// share without routing are kept; names (including the Mac's own
+    /// `lanHost`) and public addresses are dropped, which leaves the relay as
+    /// the path when nothing usable is published.
+    public static func targets(fromTXT record: [String: String], matching pin: String) -> [RemoteLinkLanTarget] {
+        guard record["identityKey"]?.lowercased() == pin.lowercased(),
+              record["linkVersion"] == "1",
+              let portText = record["lanPort"],
+              let port = UInt16(portText), port != 0
+        else { return [] }
+        return (record["lanAddrs"] ?? "")
+            .split(separator: ",")
+            .map { String($0).trimmingCharacters(in: .whitespaces) }
+            .filter { $0.count <= 45 && isSharedNetworkLiteral($0) }
+            .map { RemoteLinkLanTarget(host: $0, port: port) }
+    }
+
+    /// Tries `targets` in order and returns the first link `connect` produces.
+    /// Sequential on purpose: two LAN links to the same Mac would replace each
+    /// other there. Every failure, including an authentication refusal, moves
+    /// on to the next target, because any host on the network can publish a
+    /// record that is tried first; only `budget` running out, or cancellation,
+    /// ends the phase early.
+    public static func connectFirst<Link>(
+        _ targets: [RemoteLinkLanTarget],
+        budget: Duration,
+        onFailure: (Error) -> Void = { _ in },
+        connect: (RemoteLinkLanTarget) async throws -> Link
+    ) async -> Link? {
+        let deadline = ContinuousClock.now + budget
+        for target in targets.prefix(6) {
+            if Task.isCancelled || ContinuousClock.now >= deadline { return nil }
+            do {
+                return try await connect(target)
+            } catch {
+                onFailure(error)
+            }
+        }
+        return nil
+    }
+
+    /// Whether `host` is an IPv4 private (RFC 1918) or link-local literal, or
+    /// an IPv6 unique-local (`fc00::/7`) or link-local (`fe80::/10`) literal.
+    /// Mirrors `lan_address` in `crates/latch-transport-ffi`.
+    public static func isSharedNetworkLiteral(_ host: String) -> Bool {
+        // Darwin's `inet_pton` accepts a `%zone` suffix that the Rust parser
+        // refuses; keep the two in step by admitting literal characters only.
+        guard !host.isEmpty, host.allSatisfy({ $0.isHexDigit || $0 == "." || $0 == ":" }) else { return false }
+        var v4 = in_addr()
+        if host.withCString({ inet_pton(AF_INET, $0, &v4) }) == 1 {
+            let octets = withUnsafeBytes(of: v4.s_addr) { Array($0) }
+            switch (octets[0], octets[1]) {
+            case (10, _), (172, 16...31), (192, 168), (169, 254): return true
+            default: return false
+            }
+        }
+        var v6 = in6_addr()
+        if host.withCString({ inet_pton(AF_INET6, $0, &v6) }) == 1 {
+            let octets = withUnsafeBytes(of: v6) { Array($0) }
+            return (octets[0] & 0xfe) == 0xfc || (octets[0] == 0xfe && (octets[1] & 0xc0) == 0x80)
+        }
+        return false
     }
 }
 

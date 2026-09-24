@@ -89,11 +89,10 @@ pub fn token_matches(expected: &str, presented: &str) -> bool {
     diff == 0
 }
 
-/// Loopback-bound servers reject non-loopback browser origins. Non-loopback
-/// binds (opt-in via `--allow-remote`) accept every well-formed http(s) Origin
-/// because the token is already the access control; prefer an SSH tunnel to
-/// loopback instead.
-pub fn origin_allowed(origin: Option<&HeaderValue>, bind_is_loopback: bool) -> bool {
+/// The gateway only binds loopback, so a browser Origin is accepted only when
+/// it is absent, `null`, or itself a loopback http(s) origin. Any other origin
+/// is a cross-site page trying to drive the local gateway and is refused.
+pub fn origin_allowed(origin: Option<&HeaderValue>) -> bool {
     let Some(origin) = origin else {
         return true;
     };
@@ -113,15 +112,10 @@ pub fn origin_allowed(origin: Option<&HeaderValue>, bind_is_loopback: bool) -> b
         return false;
     }
     let host = uri.host().unwrap_or("");
-    let loopback = host.eq_ignore_ascii_case("localhost")
+    host.eq_ignore_ascii_case("localhost")
         || host == "127.0.0.1"
         || host == "::1"
-        || host.eq_ignore_ascii_case("[::1]");
-    if bind_is_loopback {
-        loopback
-    } else {
-        true
-    }
+        || host.eq_ignore_ascii_case("[::1]")
 }
 
 fn subprotocol_token(headers: &HeaderMap) -> Option<String> {
@@ -165,23 +159,22 @@ mod tests {
 
     #[test]
     fn loopback_origin_policy() {
-        assert!(origin_allowed(None, true));
-        assert!(origin_allowed(
-            Some(&HeaderValue::from_static("http://127.0.0.1:3000")),
-            true
-        ));
-        assert!(origin_allowed(
-            Some(&HeaderValue::from_static("http://localhost:5173")),
-            true
-        ));
-        assert!(!origin_allowed(
-            Some(&HeaderValue::from_static("https://evil.example")),
-            true
-        ));
-        assert!(origin_allowed(
-            Some(&HeaderValue::from_static("https://phone.example")),
-            false
-        ));
+        assert!(origin_allowed(None));
+        assert!(origin_allowed(Some(&HeaderValue::from_static("null"))));
+        assert!(origin_allowed(Some(&HeaderValue::from_static(
+            "http://127.0.0.1:3000"
+        ))));
+        assert!(origin_allowed(Some(&HeaderValue::from_static(
+            "http://localhost:5173"
+        ))));
+        assert!(!origin_allowed(Some(&HeaderValue::from_static(
+            "https://evil.example"
+        ))));
+        // There is no non-loopback bind any more, so a remote origin is never
+        // accepted, whatever the token says.
+        assert!(!origin_allowed(Some(&HeaderValue::from_static(
+            "https://phone.example"
+        ))));
     }
 
     #[test]

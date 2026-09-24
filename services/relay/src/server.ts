@@ -24,12 +24,13 @@ export interface RelayOptions {
   readonly issuer: string;
   readonly publicKeys: ReadonlyMap<string, string>;
   readonly invalidationSecret: string;
-  readonly redeem: (claim: AdmissionClaim, attemptId: string) => Promise<Lease>;
+  readonly redeem: (claim: AdmissionClaim, attemptId: string, signal: AbortSignal) => Promise<Lease>;
   readonly now?: () => number;
   readonly tls?: { readonly certPath: string; readonly keyPath: string };
   readonly maxConnections?: number;
   readonly maxConnectionsPerIp?: number;
   readonly bytesPerLease?: number;
+  readonly redemptionTimeoutMs?: number;
 }
 
 interface Peer {
@@ -75,8 +76,16 @@ export function createRelayServer(options: RelayOptions): {
   readonly drain: () => Promise<void>;
 } {
   const now = options.now ?? (() => Date.now());
+  const redemptionTimeoutMs = options.redemptionTimeoutMs ?? 10_000;
+  if (!Number.isSafeInteger(redemptionTimeoutMs) || redemptionTimeoutMs < 1) {
+    throw new Error('redemptionTimeoutMs must be a positive integer');
+  }
   const rooms = new Map<string, Room>();
+  const revokedRooms = new Map<string, number>();
   const connectionsByIp = new Map<string, number>();
+  const pendingByIp = new Map<string, number>();
+  let activeTotal = 0;
+  let pendingTotal = 0;
   let accepting = true;
   const listener = async (request: IncomingMessage, response: import('node:http').ServerResponse) => {
     if (request.method === 'GET' && request.url === '/health/live') {
@@ -99,6 +108,7 @@ export function createRelayServer(options: RelayOptions): {
         const roomId = String(value.roomId ?? '');
         if (Object.keys(value).sort().join(',') !== 'notAfter,roomId' ||
             !/^[A-Za-z0-9_-]{43}$/.test(roomId) || !Number.isSafeInteger(value.notAfter)) throw new Error();
+        revokedRooms.set(roomId, Math.max(revokedRooms.get(roomId) ?? 0, value.notAfter as number));
         closeRoom(roomId, 4003, 'revoked');
         response.writeHead(204).end();
       } catch {
@@ -138,16 +148,27 @@ export function createRelayServer(options: RelayOptions): {
     closePeer(room.controller, code, reason);
   }
 
+  function isRevoked(roomId: string): boolean {
+    const notAfter = revokedRooms.get(roomId);
+    if (notAfter === undefined) return false;
+    if (notAfter <= Math.floor(now() / 1000)) {
+      revokedRooms.delete(roomId);
+      return false;
+    }
+    return true;
+  }
+
   server.on('upgrade', async (request, socket, head) => {
+    socket.on('error', () => socket.destroy());
     if (!accepting || request.url !== '/v1/connect') {
       socket.write('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n');
       socket.destroy();
       return;
     }
     const sourceIp = (socket as import('node:net').Socket).remoteAddress ?? 'unknown';
-    const active = [...connectionsByIp.values()].reduce((sum, count) => sum + count, 0);
-    if (active >= (options.maxConnections ?? DEFAULT_MAX_CONNECTIONS) ||
-        (connectionsByIp.get(sourceIp) ?? 0) >= (options.maxConnectionsPerIp ?? DEFAULT_MAX_CONNECTIONS_PER_IP)) {
+    if (activeTotal + pendingTotal >= (options.maxConnections ?? DEFAULT_MAX_CONNECTIONS) ||
+        (connectionsByIp.get(sourceIp) ?? 0) + (pendingByIp.get(sourceIp) ?? 0) >=
+          (options.maxConnectionsPerIp ?? DEFAULT_MAX_CONNECTIONS_PER_IP)) {
       socket.write('HTTP/1.1 429 Too Many Requests\r\nConnection: close\r\n\r\n');
       socket.destroy();
       return;
@@ -158,18 +179,53 @@ export function createRelayServer(options: RelayOptions): {
       socket.destroy();
       return;
     }
+    pendingTotal++;
+    pendingByIp.set(sourceIp, (pendingByIp.get(sourceIp) ?? 0) + 1);
+    let reserved = true;
+    const release = () => {
+      if (!reserved) return;
+      reserved = false;
+      pendingTotal--;
+      const remaining = (pendingByIp.get(sourceIp) ?? 1) - 1;
+      if (remaining) pendingByIp.set(sourceIp, remaining);
+      else pendingByIp.delete(sourceIp);
+    };
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), redemptionTimeoutMs);
+    const disconnected = () => { controller.abort(); release(); };
+    socket.once('close', disconnected);
+    socket.once('end', disconnected);
     try {
       const claim = verifyAdmissionClaim(match[1]!, options.publicKeys, options.issuer, Math.floor(now() / 1000));
       const attemptId = randomBytes(16).toString('hex');
-      const lease = await options.redeem(claim, attemptId);
-      websocket.handleUpgrade(request, socket, head, (ws) => admit(ws, claim, lease, attemptId, sourceIp));
+      const lease = await Promise.race([
+        options.redeem(claim, attemptId, controller.signal),
+        new Promise<never>((_, reject) => controller.signal.addEventListener('abort', () => reject(new Error('redemption aborted')), { once: true })),
+      ]);
+      if (controller.signal.aborted || socket.destroyed || isRevoked(claim.roomId)) throw new Error('redemption invalidated');
+      websocket.handleUpgrade(request, socket, head, (ws) => {
+        ws.on('error', (error: Error & { code?: string }) => {
+          console.error('relay websocket error', { roomId: claim.roomId, role: claim.role, attemptId, code: error.code ?? 'unknown' });
+          ws.terminate();
+        });
+        socket.off('close', disconnected);
+        socket.off('end', disconnected);
+        clearTimeout(timer);
+        if (socket.destroyed) { release(); ws.terminate(); return; }
+        admit(ws, claim, lease, attemptId, sourceIp, release);
+      });
     } catch {
-      socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+      if (!socket.destroyed) socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
       socket.destroy();
+      clearTimeout(timer);
+      socket.off('close', disconnected);
+      socket.off('end', disconnected);
+      release();
     }
   });
 
-  function admit(socket: WebSocket, claim: AdmissionClaim, lease: Lease, attemptId: string, sourceIp: string): void {
+  function admit(socket: WebSocket, claim: AdmissionClaim, lease: Lease, attemptId: string, sourceIp: string, release: () => void): void {
+    if (isRevoked(claim.roomId)) { release(); socket.close(4003, 'revoked'); return; }
     let room = rooms.get(claim.roomId);
     if (!room) {
       room = {};
@@ -177,6 +233,7 @@ export function createRelayServer(options: RelayOptions): {
     }
     const existing = peer(room, claim.role);
     if (existing && existing.claim.generation >= claim.generation) {
+      release();
       socket.close(4004, 'stale generation');
       return;
     }
@@ -190,11 +247,14 @@ export function createRelayServer(options: RelayOptions): {
     };
     setPeer(room, claim.role, value);
     connectionsByIp.set(sourceIp, (connectionsByIp.get(sourceIp) ?? 0) + 1);
+    activeTotal++;
+    release();
     socket.binaryType = 'arraybuffer';
     socket.send(JSON.stringify({ type: 'lease_started', leaseId: lease.leaseId, expiresAt: lease.expiresAt }));
     socket.on('pong', () => { value.alive = true; });
     socket.on('message', (data, isBinary) => forward(value, data, isBinary));
     socket.on('close', () => {
+      activeTotal--;
       const remaining = (connectionsByIp.get(sourceIp) ?? 1) - 1;
       if (remaining <= 0) connectionsByIp.delete(sourceIp); else connectionsByIp.set(sourceIp, remaining);
       const current = rooms.get(claim.roomId);
@@ -255,6 +315,9 @@ export function createRelayServer(options: RelayOptions): {
   }
 
   const heartbeat = setInterval(() => {
+    for (const [roomId, notAfter] of revokedRooms) {
+      if (notAfter <= Math.floor(now() / 1000)) revokedRooms.delete(roomId);
+    }
     for (const [roomId, room] of rooms) {
       for (const value of [room.host, room.controller]) {
         if (!value) continue;

@@ -235,7 +235,9 @@ struct SettingsView: View {
             if let error = diagnostics.lastError {
                 Text(error).font(.footnote).foregroundStyle(.red)
             }
-            ForEach(model.recentStages.suffix(6).reversed(), id: \.self) { sample in
+            // Samples are plain values and repeat (two 0 ms stream opens are
+            // equal), so rows are keyed by position, not by value.
+            ForEach(Array(model.recentStages.enumerated()).suffix(6).reversed(), id: \.offset) { _, sample in
                 LabeledContent(sample.stage.rawValue, value: "\(sample.milliseconds) ms")
                     .font(.footnote)
             }

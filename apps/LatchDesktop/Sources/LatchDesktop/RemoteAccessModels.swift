@@ -90,6 +90,26 @@ enum RemotePairingProgress: Equatable, Sendable {
     case failed(String)
 }
 
+/// What the owner is asked to approve, split so the peer-chosen device name and
+/// the requested grant are rendered as separate labeled rows. The name is text
+/// the phone controls; the access row is text only the Mac chooses, and the two
+/// are never interpolated into one sentence.
+struct RemotePairingApproval: Equatable, Sendable {
+    let deviceName: String
+    let permission: DevicePermission
+    let comparison: String
+
+    var accessRequested: String { permission.label }
+    var accessDetail: String { permission.detail }
+}
+
+extension RemotePairingProgress {
+    var approval: RemotePairingApproval? {
+        guard case .comparing(let name, let permission, let code) = self else { return nil }
+        return RemotePairingApproval(deviceName: name, permission: permission, comparison: code)
+    }
+}
+
 /// One-use enrollment document displayed as a QR code. The host admission is
 /// kept out of the QR and inherited only by the Mac helper.
 struct RemoteEnrollmentMaterial: Identifiable, Equatable, Sendable {

@@ -523,6 +523,7 @@ fn verify_digest(
 /// carries.
 fn unpack(archive: &Path, into: &Path) -> Result<()> {
     let name = archive.file_name().unwrap_or_default().to_string_lossy();
+    validate_archive_members(archive)?;
     let (program, arguments): (&str, Vec<&std::ffi::OsStr>) = if name.ends_with(".zip") {
         (
             "ditto",
@@ -554,6 +555,73 @@ fn unpack(archive: &Path, into: &Path) -> Result<()> {
             "could not unpack {name}: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         );
+    }
+    for member in PAYLOAD_BINARIES
+        .iter()
+        .copied()
+        .chain([PAYLOAD_MANIFEST_NAME])
+    {
+        let metadata = fs::symlink_metadata(into.join(member))?;
+        if !metadata.file_type().is_file() {
+            bail!("release archive member {member} is not a regular file");
+        }
+    }
+    Ok(())
+}
+
+/// Only the four flat, regular payload files may be extracted. Check names and
+/// types before invoking an extractor, since publisher verification happens
+/// after extraction and cannot undo a write through a malicious link.
+fn validate_archive_members(archive: &Path) -> Result<()> {
+    let is_zip = archive
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .ends_with(".zip");
+    let (list_program, list_args, detail_program, detail_args): (&str, &[&str], &str, &[&str]) =
+        if is_zip {
+            ("unzip", &["-Z", "-1"], "zipinfo", &["-l"])
+        } else {
+            ("tar", &["-tzf"], "tar", &["-tvzf"])
+        };
+    let run = |program: &str, args: &[&str]| -> Result<String> {
+        let output = Command::new(program)
+            .args(args)
+            .arg(archive)
+            .stdin(Stdio::null())
+            .output()
+            .with_context(|| format!("could not inspect release archive with {program}"))?;
+        if !output.status.success() {
+            bail!(
+                "could not inspect release archive with {program}: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        String::from_utf8(output.stdout).context("release archive listing is not UTF-8")
+    };
+    let names = run(list_program, list_args)?;
+    let entries: Vec<&str> = names.lines().collect();
+    let expected: Vec<&str> = PAYLOAD_BINARIES
+        .iter()
+        .copied()
+        .chain([PAYLOAD_MANIFEST_NAME])
+        .collect();
+    if entries.len() != expected.len()
+        || expected
+            .iter()
+            .any(|name| entries.iter().filter(|entry| *entry == name).count() != 1)
+    {
+        bail!("release archive must contain only the four flat payload files");
+    }
+    let details = run(detail_program, detail_args)?;
+    for member in expected {
+        let suffix = format!(" {member}");
+        if !details
+            .lines()
+            .any(|line| line.starts_with('-') && line.ends_with(&suffix))
+        {
+            bail!("release archive member {member} is not a regular file");
+        }
     }
     Ok(())
 }
@@ -818,6 +886,99 @@ mod tests {
             "old",
         );
         path
+    }
+
+    /// Build a minimal tar fixture with an entry name/type that ordinary
+    /// filesystem-based tar creation cannot express (such as `../escape`).
+    fn archive_with_member(directory: &Path, name: &str, kind: u8, link: &str) -> PathBuf {
+        let tar_path = directory.join("fixture.tar");
+        let mut file = fs::File::create(&tar_path).unwrap();
+        for member in PAYLOAD_BINARIES
+            .iter()
+            .copied()
+            .chain([PAYLOAD_MANIFEST_NAME])
+            .chain(
+                (!PAYLOAD_BINARIES.contains(&name) && name != PAYLOAD_MANIFEST_NAME)
+                    .then_some(name),
+            )
+        {
+            let mut header = [0_u8; 512];
+            header[..member.len()].copy_from_slice(member.as_bytes());
+            header[100..108].copy_from_slice(b"0000644\0");
+            header[108..116].copy_from_slice(b"0000000\0");
+            header[116..124].copy_from_slice(b"0000000\0");
+            header[124..136].copy_from_slice(b"00000000000\0");
+            header[136..148].copy_from_slice(b"00000000000\0");
+            header[148..156].fill(b' ');
+            header[156] = if member == name { kind } else { b'0' };
+            if member == name {
+                header[157..157 + link.len()].copy_from_slice(link.as_bytes());
+            }
+            header[257..263].copy_from_slice(b"ustar\0");
+            header[263..265].copy_from_slice(b"00");
+            let sum: u32 = header.iter().map(|byte| u32::from(*byte)).sum();
+            header[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+            file.write_all(&header).unwrap();
+        }
+        file.write_all(&[0_u8; 1024]).unwrap();
+        drop(file);
+        let archive = directory.join("fixture.tar.gz");
+        let output = Command::new("gzip")
+            .args(["-c", "-n"])
+            .arg(&tar_path)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        fs::write(&archive, output.stdout).unwrap();
+        archive
+    }
+
+    #[test]
+    fn traversal_member_is_rejected_before_extraction() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = archive_with_member(dir.path(), "../escape", b'0', "");
+        let destination = dir.path().join("unpacked");
+        fs::create_dir(&destination).unwrap();
+        let error = unpack(&archive, &destination).unwrap_err();
+        assert!(format!("{error:#}").contains("four flat payload files"));
+        assert!(!dir.path().join("escape").exists());
+    }
+
+    #[test]
+    fn symlink_member_is_rejected_before_extraction() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir.path().join("outside");
+        fs::write(&outside, b"unchanged").unwrap();
+        let archive = archive_with_member(dir.path(), "latch", b'2', "../outside");
+        let destination = dir.path().join("unpacked");
+        fs::create_dir(&destination).unwrap();
+        let error = unpack(&archive, &destination).unwrap_err();
+        assert!(format!("{error:#}").contains("not a regular file"));
+        assert!(!destination.join("latch").exists());
+        assert_eq!(fs::read(&outside).unwrap(), b"unchanged");
+    }
+
+    #[test]
+    fn published_zip_shape_passes_archive_preflight() {
+        let dir = tempfile::tempdir().unwrap();
+        for member in PAYLOAD_BINARIES
+            .iter()
+            .copied()
+            .chain([PAYLOAD_MANIFEST_NAME])
+        {
+            fs::write(dir.path().join(member), b"fixture").unwrap();
+        }
+        let archive = dir.path().join("fixture.zip");
+        let status = Command::new("zip")
+            .current_dir(dir.path())
+            .args(["-q", "-X"])
+            .arg(&archive)
+            .args(PAYLOAD_BINARIES)
+            .arg(PAYLOAD_MANIFEST_NAME)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        validate_archive_members(&archive).unwrap();
     }
 
     fn write_live_kernel(path: &Path, kind: &str) {

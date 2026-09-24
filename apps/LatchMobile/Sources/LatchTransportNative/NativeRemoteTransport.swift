@@ -350,8 +350,7 @@ public final class NativeRemoteLinkConnector: RemoteLinkConnecting, @unchecked S
     static let lanBrowseWindow: Duration = .milliseconds(400)
 
     /// Tries the published LAN targets in order and keeps the first link that
-    /// authenticates. Sequential on purpose: two LAN links to the same Mac
-    /// would replace each other there.
+    /// authenticates; see `RemoteLinkLanTarget.connectFirst`.
     /// The whole LAN phase, across every published target, is bounded so a
     /// Mac whose LAN listener just moved (helper restart) or whose published
     /// addresses are stale costs at most this before the relay is tried.
@@ -360,25 +359,20 @@ public final class NativeRemoteLinkConnector: RemoteLinkConnecting, @unchecked S
     static func connectFirstLanTarget(
         _ targets: [RemoteLinkLanTarget], privateKey: Data, publicKey: Data, pin: Data, revision: UInt64
     ) async -> RemoteLink? {
-        let deadline = ContinuousClock.now + lanPhaseBudget
-        for target in targets.prefix(6) {
-            if Task.isCancelled || ContinuousClock.now >= deadline { return nil }
+        await RemoteLinkLanTarget.connectFirst(
+            targets, budget: lanPhaseBudget,
+            onFailure: { _ in LinkTrace.shared.mark("connector.lan.failed") }
+        ) { target in
             LinkTrace.shared.mark("connector.lan.begin")
-            do {
-                let link = try await RemoteLink.connectLan(
-                    host: target.host, port: target.port, purpose: .session, role: .controller,
-                    localPrivateKey: privateKey, localPublicKey: publicKey,
-                    expectedRemotePublicKey: pin, enrollmentId: nil, enrollmentSecret: nil,
-                    grantRevision: revision
-                )
-                LinkTrace.shared.mark("connector.lan.end")
-                return link
-            } catch {
-                LinkTrace.shared.mark("connector.lan.failed")
-                if case .authentication = Self.classify(error) { return nil }
-            }
+            let link = try await RemoteLink.connectLan(
+                host: target.host, port: target.port, purpose: .session, role: .controller,
+                localPrivateKey: privateKey, localPublicKey: publicKey,
+                expectedRemotePublicKey: pin, enrollmentId: nil, enrollmentSecret: nil,
+                grantRevision: revision
+            )
+            LinkTrace.shared.mark("connector.lan.end")
+            return link
         }
-        return nil
     }
 
     /// The failure worth reporting when both entry points failed: an

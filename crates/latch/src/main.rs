@@ -259,24 +259,16 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Serve a loopback HTTP/WebSocket gateway for remote clients.
+    /// Serve a loopback HTTP/WebSocket gateway for local clients.
     ///
-    /// The supported remote path is an SSH tunnel to this loopback port. The
-    /// gateway speaks plaintext HTTP, so the bearer token is only safe on
-    /// loopback (or a tunnel to it). Binding a non-loopback address requires
-    /// `--allow-remote`.
+    /// The gateway speaks plaintext HTTP, so the bearer token is only safe on
+    /// loopback. Non-loopback bind addresses are refused. Remote devices reach
+    /// the gateway through Remote Link (`latch remote-access`), or an SSH
+    /// tunnel to this loopback port.
     Serve {
-        /// Listen address. Loopback by default.
-        ///
-        /// Remote access should SSH-tunnel to this address. Non-loopback binds
-        /// speak plaintext HTTP and need `--allow-remote`.
+        /// Listen address. Must be a loopback address.
         #[arg(long, default_value = "127.0.0.1:4610")]
         bind: String,
-        /// Allow binding a non-loopback address (plaintext HTTP; token in the clear).
-        ///
-        /// Prefer an SSH tunnel to the default loopback bind instead.
-        #[arg(long)]
-        allow_remote: bool,
         /// Bearer token file. Defaults to `$LATCH_HOME/serve.token`.
         #[arg(long, value_name = "PATH")]
         token_file: Option<String>,
@@ -715,7 +707,6 @@ fn dispatch(command: Option<Command>) -> Result<()> {
         }
         Some(Command::Serve {
             bind,
-            allow_remote,
             token_file,
             ready_file,
             exit_with_parent,
@@ -738,7 +729,6 @@ fn dispatch(command: Option<Command>) -> Result<()> {
                     token_file,
                     ready_file: ready_file.map(std::path::PathBuf::from),
                     latch_bin: std::env::current_exe().context("cannot locate the latch binary")?,
-                    allow_remote,
                     exit_with_parent,
                 }),
             }

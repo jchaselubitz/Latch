@@ -32,11 +32,12 @@ const relay = createRelayServer({
   issuer,
   publicKeys,
   invalidationSecret,
-  redeem: async (claim, attemptId) => {
+  redeem: async (claim, attemptId, signal) => {
     const response = await fetch(`${controlPlane}/private/v1/relay/redemptions`, {
       method: 'POST',
       headers: { authorization: `Bearer ${serviceToken}`, 'content-type': 'application/json' },
       body: JSON.stringify({ ticketId: claim.jti, attemptId }),
+      signal,
     });
     if (!response.ok) throw new Error('ticket redemption refused');
     return await response.json() as { leaseId: string; expiresAt: number };

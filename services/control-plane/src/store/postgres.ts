@@ -133,18 +133,65 @@ export interface PostgresStoreOptions {
   readonly sslRejectUnauthorized: boolean;
 }
 
+/** Hosts whose connections skip TLS: loopback, and Railway's private network. */
+const PLAINTEXT_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);
+const PRIVATE_NETWORK_SUFFIX = '.railway.internal';
+
+export interface DatabaseTlsPolicy {
+  /** The value handed to `pg.Pool`'s `ssl` option. */
+  readonly ssl: false | { readonly rejectUnauthorized: boolean };
+  /** A startup warning when the connection is plaintext or unverified, else null. */
+  readonly warning: string | null;
+}
+
+/**
+ * Decides TLS for a connection string from its host alone. Only the parsed
+ * host is inspected, so a database name, user, password, or query parameter
+ * that merely contains "localhost" cannot switch TLS off. An unparseable URL
+ * gets TLS, which is the safe failure.
+ */
+export function databaseTlsPolicy(connectionString: string, rejectUnauthorized: boolean): DatabaseTlsPolicy {
+  let host = '';
+  let query = new URLSearchParams();
+  try {
+    const url = new URL(connectionString);
+    host = url.hostname.toLowerCase().replace(/^\[(.*)\]$/, '$1');
+    query = url.searchParams;
+  } catch {
+    // Fall through with no host: TLS stays on.
+  }
+  // pg lets sslmode and friends in the URL override the `ssl` option below.
+  const override = ['ssl', 'sslmode', 'sslrootcert', 'sslcert', 'sslkey'].filter((key) => query.has(key));
+  const overrideNote = override.length
+    ? `; DATABASE_URL sets ${override.join(', ')}, which overrides this decision`
+    : '';
+  if (PLAINTEXT_HOSTS.has(host) || host.endsWith(PRIVATE_NETWORK_SUFFIX)) {
+    return { ssl: false, warning: `database TLS disabled for host ${host}${overrideNote}` };
+  }
+  if (!rejectUnauthorized) {
+    return {
+      ssl: { rejectUnauthorized: false },
+      warning: `database TLS certificate is not verified (DATABASE_SSL_REJECT_UNAUTHORIZED=false)${overrideNote}`,
+    };
+  }
+  return { ssl: { rejectUnauthorized: true }, warning: override.length ? `database TLS${overrideNote}` : null };
+}
+
 export class PostgresStore implements Store {
   readonly pool: pg.Pool;
+  /** Logged by entrypoints at startup; null when TLS is on and verified. */
+  readonly tlsWarning: string | null;
 
   constructor(options: PostgresStoreOptions) {
-    const local = /localhost|127\.0\.0\.1|\.railway\.internal/.test(options.connectionString);
+    const tls = databaseTlsPolicy(options.connectionString, options.sslRejectUnauthorized);
+    this.tlsWarning = tls.warning;
     this.pool = new pg.Pool({
       connectionString: options.connectionString,
       max: options.poolSize,
-      // Railway's managed PostgreSQL presents a certificate signed by an
-      // internal authority; private-network connections are not exposed to
-      // the internet in the first place.
-      ssl: local ? false : { rejectUnauthorized: options.sslRejectUnauthorized },
+      // Railway's private network (*.railway.internal) is not exposed to the
+      // internet; every other host gets TLS, verified unless the operator
+      // explicitly opts out.
+      ssl: tls.ssl,
     });
   }
 

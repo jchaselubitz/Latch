@@ -9,6 +9,8 @@ import AppKit
 // for us. What this file has to get right is narrower:
 //
 //   * never replace the running bundle with something signed by somebody else;
+//   * never replace it with a different app, or an older Latch, that the same
+//     publisher happened to sign;
 //   * fail before downloading when the bundle cannot be written anyway;
 //   * leave the installed app untouched when any step fails.
 
@@ -128,6 +130,8 @@ enum UpdateError: LocalizedError, Equatable {
     case notWritable(String)
     case unpackFailed(String)
     case noApplicationInArchive
+    case unexpectedBundle(String)
+    case versionMismatch(String)
     case identityMismatch(String)
     case unsignedDownload
     case installFailed(String)
@@ -149,6 +153,10 @@ enum UpdateError: LocalizedError, Equatable {
             return "Latch could not expand the downloaded archive: \(detail)"
         case .noApplicationInArchive:
             return "The downloaded archive did not contain a Latch application."
+        case .unexpectedBundle(let detail):
+            return "The downloaded archive does not contain the Latch application (\(detail)) and was not installed."
+        case .versionMismatch(let detail):
+            return "The downloaded update is not the release it was published as (\(detail)) and was not installed."
         case .identityMismatch(let detail):
             return "The downloaded update is signed by a different developer (\(detail)) and was not installed."
         case .unsignedDownload:
@@ -237,10 +245,13 @@ enum UpdateInstaller {
         let unpack = try run("/usr/bin/ditto", ["-x", "-k", archive.path, expanded.path])
         guard unpack.status == 0 else { throw UpdateError.unpackFailed(unpack.diagnostic) }
 
-        guard let replacement = applicationBundle(in: expanded, manager: manager) else {
-            throw UpdateError.noApplicationInArchive
-        }
+        let replacement = try applicationBundle(in: expanded, manager: manager)
         try verify(replacement, matching: bundle)
+        try verifyVersion(
+            of: replacement,
+            publishedAs: update.version,
+            installed: shortVersion(of: bundle).flatMap(ReleaseVersion.init)
+        )
 
         do {
             _ = try manager.replaceItemAt(bundle, withItemAt: replacement)
@@ -306,14 +317,73 @@ enum UpdateInstaller {
         return nil
     }
 
-    /// The first `.app` at the top level of an expanded archive.
-    static func applicationBundle(in directory: URL, manager: FileManager) -> URL? {
-        let entries = (try? manager.contentsOfDirectory(
-            at: directory,
-            includingPropertiesForKeys: nil,
-            options: [.skipsHiddenFiles]
-        )) ?? []
-        return entries.first { $0.pathExtension == "app" }
+    /// The name the release script gives the bundle and the identifier its
+    /// Info.plist declares. Both are compiled in: the signature says who
+    /// built a bundle, not that it is this app.
+    static let bundleName = "Latch.app"
+    static let bundleIdentifier = "co.cooperativ.latch.desktop"
+
+    /// `Latch.app` at the top level of an expanded archive, refused unless it
+    /// declares the Latch bundle identifier. Anything else the same team
+    /// signs is a different app and must not take this one's place.
+    static func applicationBundle(in directory: URL, manager: FileManager) throws -> URL {
+        let bundle = directory.appendingPathComponent(bundleName, isDirectory: true)
+        var isDirectory: ObjCBool = false
+        guard manager.fileExists(atPath: bundle.path, isDirectory: &isDirectory),
+              isDirectory.boolValue
+        else {
+            let entries = (try? manager.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
+            )) ?? []
+            if let other = entries.first(where: { $0.pathExtension == "app" }) {
+                throw UpdateError.unexpectedBundle("found \(other.lastPathComponent), expected \(bundleName)")
+            }
+            throw UpdateError.noApplicationInArchive
+        }
+        let identifier = infoValue("CFBundleIdentifier", of: bundle) ?? "none"
+        guard identifier == bundleIdentifier else {
+            throw UpdateError.unexpectedBundle("identifier \(identifier), expected \(bundleIdentifier)")
+        }
+        return bundle
+    }
+
+    /// Requires the replacement to be the release it was offered as, and newer
+    /// than what is installed.
+    ///
+    /// The release tag chose this update, but the tag is only a label on the
+    /// GitHub release; the bundle's own version is what the publisher signed.
+    /// Without this, an older signed Latch attached to a newer tag would pass
+    /// every signature check and downgrade the install.
+    static func verifyVersion(
+        of replacement: URL,
+        publishedAs release: ReleaseVersion,
+        installed: ReleaseVersion?
+    ) throws {
+        let raw = shortVersion(of: replacement) ?? "none"
+        guard let version = ReleaseVersion(raw), version == release else {
+            throw UpdateError.versionMismatch("bundle version \(raw), release \(release)")
+        }
+        if let installed, !(version > installed) {
+            throw UpdateError.versionMismatch("bundle version \(version) is not newer than installed \(installed)")
+        }
+    }
+
+    static func shortVersion(of bundle: URL) -> String? {
+        infoValue("CFBundleShortVersionString", of: bundle)
+    }
+
+    /// Reads a string out of a bundle's Info.plist directly rather than through
+    /// `Bundle(url:)`, which caches by path and would answer for an earlier
+    /// bundle that once sat at the same location.
+    static func infoValue(_ key: String, of bundle: URL) -> String? {
+        let plist = bundle.appendingPathComponent("Contents/Info.plist")
+        guard let data = try? Data(contentsOf: plist),
+              let info = try? PropertyListSerialization.propertyList(from: data, format: nil)
+                as? [String: Any]
+        else { return nil }
+        return info[key] as? String
     }
 
     /// Quits and reopens the app once this process is gone.

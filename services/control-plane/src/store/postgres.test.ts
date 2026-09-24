@@ -4,9 +4,63 @@ import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 
 import { loadMigrations, runMigrations } from '../migrate.ts';
-import { PostgresStore } from './postgres.ts';
+import { PostgresStore, databaseTlsPolicy } from './postgres.ts';
 
 const connectionString = process.env.TEST_DATABASE_URL;
+
+describe('database TLS policy', () => {
+  it('disables TLS only for loopback and Railway private-network hosts', () => {
+    for (const url of [
+      'postgres://u:p@localhost:5432/latch',
+      'postgres://u:p@127.0.0.1/latch',
+      'postgres://u:p@[::1]:5432/latch',
+      'postgresql://u:p@postgres.railway.internal:5432/railway',
+      'postgres://u:p@LOCALHOST/latch',
+    ]) {
+      const policy = databaseTlsPolicy(url, true);
+      assert.equal(policy.ssl, false, url);
+      assert.match(policy.warning ?? '', /TLS disabled/, url);
+    }
+  });
+
+  it('keeps verified TLS when only other URL parts mention a local host', () => {
+    for (const url of [
+      'postgres://localhost:secret@db.example.com/latch',
+      'postgres://u:p@db.example.com/localhost',
+      'postgres://u:p@db.example.com/latch?application_name=127.0.0.1',
+      'postgres://u:p@evil.railway.internal.example.com/latch',
+      'postgres://u:p@localhost.example.com/latch',
+      'postgres://u:p@proxy.rlwy.net:12345/railway',
+    ]) {
+      const policy = databaseTlsPolicy(url, true);
+      assert.deepEqual(policy.ssl, { rejectUnauthorized: true }, url);
+      assert.equal(policy.warning, null, url);
+    }
+  });
+
+  it('keeps TLS on for an unparseable connection string', () => {
+    assert.deepEqual(databaseTlsPolicy('not a url localhost', true).ssl, { rejectUnauthorized: true });
+  });
+
+  it('warns when certificate verification is explicitly disabled', () => {
+    const policy = databaseTlsPolicy('postgres://u:p@proxy.rlwy.net:12345/railway', false);
+    assert.deepEqual(policy.ssl, { rejectUnauthorized: false });
+    assert.match(policy.warning ?? '', /not verified/);
+  });
+
+  it('warns when the URL carries TLS parameters that override the decision', () => {
+    const policy = databaseTlsPolicy('postgres://u:p@db.example.com/latch?sslmode=no-verify', true);
+    assert.match(policy.warning ?? '', /sslmode/);
+  });
+
+  it('exposes the warning on the store without connecting', async () => {
+    const store = new PostgresStore({
+      connectionString: 'postgres://u:p@localhost:1/latch', poolSize: 1, sslRejectUnauthorized: true,
+    });
+    assert.match(store.tlsWarning ?? '', /TLS disabled for host localhost/);
+    await store.close();
+  });
+});
 
 describe('postgres store', { skip: connectionString ? false : 'TEST_DATABASE_URL is not set' }, () => {
   let store: PostgresStore;

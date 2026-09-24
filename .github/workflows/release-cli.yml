@@ -72,6 +72,24 @@ jobs:
       - name: Verify three-binary archive
         run: scripts/test-release-archive.sh dist/latch-*-${{ matrix.target }}.zip ${{ matrix.target }}
 
+      # Runs the installer's own publisher check against the notarized payload
+      # before it is published, so a release the installer would refuse never
+      # ships, and confirms the Team ID pinned in the installer is the one CI
+      # signs with. The test script also asserts ad-hoc and foreign-team
+      # payloads are refused.
+      - name: Verify installer publisher pin
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          grep -Fqx "latch_team_id=\"$APPLE_TEAM_ID\"" scripts/install-cli.sh || {
+            echo "scripts/install-cli.sh pins a Team ID other than APPLE_TEAM_ID" >&2
+            exit 1
+          }
+          payload="$RUNNER_TEMP/latch-installer-payload"
+          ditto -x -k dist/latch-*-${{ matrix.target }}.zip "$payload"
+          scripts/test-install-verification.sh "$payload"
+
       - name: Attest release archive
         uses: actions/attest@v4
         with:

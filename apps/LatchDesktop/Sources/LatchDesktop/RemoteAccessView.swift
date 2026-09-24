@@ -389,6 +389,42 @@ private struct RemotePairingSheet: View {
         .frame(width: 460)
     }
 
+    /// The phone chooses the device name, so it is shown in its own boxed,
+    /// single-line row and never shares a line with the grant the Mac states.
+    private func approvalPrompt(_ approval: RemotePairingApproval) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 12, verticalSpacing: 8) {
+                GridRow {
+                    Text("Device").foregroundStyle(.secondary)
+                    Text(verbatim: approval.deviceName)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(.separator))
+                }
+                GridRow {
+                    Text("Access requested").foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(approval.accessRequested).font(.body.weight(.bold))
+                        Text(approval.accessDetail).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+            }
+            Text("Check that the phone shows exactly:")
+            Text(approval.comparison)
+                .font(.system(.title3, design: .monospaced).weight(.semibold))
+                .textSelection(.enabled)
+            HStack {
+                Button("Reject", role: .destructive, action: reject)
+                Spacer()
+                Button("Approve This Device", action: approve)
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
     /// What the sheet is waiting for. The comparison is surfaced before the
     /// exact key and grant are approved and committed.
     @ViewBuilder
@@ -403,20 +439,10 @@ private struct RemotePairingSheet: View {
             }
             .font(.caption)
             .foregroundStyle(.secondary)
-        case .comparing(let name, let permission, let code):
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Confirm \(name) requests \(permission.label), and check that the phone shows exactly:")
-                Text(code)
-                    .font(.system(.title3, design: .monospaced).weight(.semibold))
-                    .textSelection(.enabled)
-                HStack {
-                    Button("Reject", role: .destructive, action: reject)
-                    Spacer()
-                    Button("Approve This Device", action: approve)
-                        .keyboardShortcut(.defaultAction)
-                }
+        case .comparing:
+            if let approval = progress.approval {
+                approvalPrompt(approval)
             }
-            .fixedSize(horizontal: false, vertical: true)
         case .enrolled(let name):
             VStack(alignment: .leading, spacing: 4) {
                 Label("\(name) is paired.", systemImage: "checkmark.circle")

@@ -30,7 +30,7 @@ the platform stops routing new admissions to a replica that is shutting down.
 
 | Variable | Purpose | Lifetime / notes |
 | --- | --- | --- |
-| `DATABASE_URL`, `DATABASE_POOL_SIZE`, `DATABASE_SSL_REJECT_UNAUTHORIZED` | PostgreSQL | Railway reference |
+| `DATABASE_URL`, `DATABASE_POOL_SIZE`, `DATABASE_SSL_REJECT_UNAUTHORIZED` | PostgreSQL | Railway reference; use the private `*.railway.internal` URL. TLS is off only for loopback and `.railway.internal` hosts (decided from the parsed host); any other host gets verified TLS unless `DATABASE_SSL_REJECT_UNAUTHORIZED=false`, which logs a startup warning |
 | `MIGRATE_ON_BOOT` | apply `migrations/*.sql` at boot under an advisory lock | `true` |
 | `OPERATOR_SECRET` | mints one-use owner invitations | rotate at will; only the operator holds it |
 | `ADMISSION_PRIVATE_KEY_PEM`, `ADMISSION_KEY_ID`, `ADMISSION_ISSUER` | signs relay admission and lease-extension claims (Ed25519, compact EdDSA) | key id `latch-remote-link-2026-09a`; issuer is the control-plane origin |

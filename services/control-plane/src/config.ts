@@ -143,7 +143,7 @@ export function loadConfig(env: Env): Config {
     host: optional(env, 'HOST', '0.0.0.0'),
     databaseUrl: required(env, 'DATABASE_URL'),
     databasePoolSize: integer(env, 'DATABASE_POOL_SIZE', 10, 1, 100),
-    databaseSslRejectUnauthorized: boolean(env, 'DATABASE_SSL_REJECT_UNAUTHORIZED', false),
+    databaseSslRejectUnauthorized: boolean(env, 'DATABASE_SSL_REJECT_UNAUTHORIZED', true),
     migrateOnBoot: boolean(env, 'MIGRATE_ON_BOOT', true),
     maxDevicesPerAccount: integer(env, 'MAX_DEVICES_PER_ACCOUNT', 32, 2, 256),
     rateLimitPerMinute: integer(env, 'RATE_LIMIT_PER_MINUTE', 240, 10, 10_000),

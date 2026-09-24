@@ -64,8 +64,8 @@ terminal bytes, session names, endpoints, and credentials.
 The supervised `latch serve` process continues to bind only to an ephemeral
 loopback address and publishes its selected address through the Phase 0
 structured readiness file. If it exits, `lan-serve` starts a replacement and
-uses the new readiness address. This does not expose or invoke
-`latch serve --allow-remote`.
+uses the new readiness address. `latch serve` refuses any non-loopback bind, so
+the gateway is never published off-host.
 
 ## Explicit Phase 1 limits
 

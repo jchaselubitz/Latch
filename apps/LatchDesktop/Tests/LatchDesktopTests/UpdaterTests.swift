@@ -151,22 +151,127 @@ final class UpdaterTests: XCTestCase {
         XCTAssertNil(UpdateInstaller.teamIdentifier(inCodesignOutput: "Identifier=x"))
     }
 
-    func testTheApplicationIsFoundInsideAnExpandedArchive() throws {
+    /// An expanded archive holding one bundle with just enough Info.plist for
+    /// the updater's name, identifier, and version checks.
+    private func expandedArchive(
+        bundle name: String = "Latch.app",
+        identifier: String = "co.cooperativ.latch.desktop",
+        version: String = "0.2608101202.0"
+    ) throws -> (directory: URL, bundle: URL) {
+        let manager = FileManager.default
         let directory = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("latch-updater-\(UUID().uuidString)")
-        let manager = FileManager.default
-        try manager.createDirectory(at: directory, withIntermediateDirectories: true)
-        defer { try? manager.removeItem(at: directory) }
         try manager.createDirectory(
             at: directory.appendingPathComponent("__MACOSX"), withIntermediateDirectories: true
         )
-        try manager.createDirectory(
-            at: directory.appendingPathComponent("Latch.app"), withIntermediateDirectories: true
-        )
+        let bundle = directory.appendingPathComponent(name)
+        let contents = bundle.appendingPathComponent("Contents")
+        try manager.createDirectory(at: contents, withIntermediateDirectories: true)
+        let info: [String: Any] = [
+            "CFBundleIdentifier": identifier,
+            "CFBundleShortVersionString": version,
+        ]
+        try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
+            .write(to: contents.appendingPathComponent("Info.plist"))
+        return (directory, bundle)
+    }
+
+    func testTheApplicationIsFoundInsideAnExpandedArchive() throws {
+        let archive = try expandedArchive()
+        defer { try? FileManager.default.removeItem(at: archive.directory) }
         XCTAssertEqual(
-            UpdateInstaller.applicationBundle(in: directory, manager: manager)?.lastPathComponent,
+            try UpdateInstaller.applicationBundle(in: archive.directory, manager: .default)
+                .lastPathComponent,
             "Latch.app"
         )
+    }
+
+    func testAMatchingBundlePassesTheNameIdentifierAndVersionChecks() throws {
+        let archive = try expandedArchive(version: "0.2608101202.0")
+        defer { try? FileManager.default.removeItem(at: archive.directory) }
+        let bundle = try UpdateInstaller.applicationBundle(in: archive.directory, manager: .default)
+        XCTAssertNoThrow(try UpdateInstaller.verifyVersion(
+            of: bundle,
+            publishedAs: try XCTUnwrap(ReleaseVersion("v0.2608101202.0")),
+            installed: ReleaseVersion("0.2608100841.0")
+        ))
+    }
+
+    func testADifferentlyNamedBundleIsRefused() throws {
+        let archive = try expandedArchive(bundle: "Other.app")
+        defer { try? FileManager.default.removeItem(at: archive.directory) }
+        XCTAssertThrowsError(
+            try UpdateInstaller.applicationBundle(in: archive.directory, manager: .default)
+        ) { error in
+            guard case .unexpectedBundle = error as? UpdateError else {
+                return XCTFail("expected unexpectedBundle, got \(error)")
+            }
+        }
+    }
+
+    func testABundleNamedLatchWithAnotherIdentifierIsRefused() throws {
+        let archive = try expandedArchive(identifier: "com.example.other")
+        defer { try? FileManager.default.removeItem(at: archive.directory) }
+        XCTAssertThrowsError(
+            try UpdateInstaller.applicationBundle(in: archive.directory, manager: .default)
+        ) { error in
+            guard case .unexpectedBundle = error as? UpdateError else {
+                return XCTFail("expected unexpectedBundle, got \(error)")
+            }
+        }
+    }
+
+    func testAnArchiveWithNoApplicationIsRefused() throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("latch-updater-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        XCTAssertThrowsError(
+            try UpdateInstaller.applicationBundle(in: directory, manager: .default)
+        ) { error in
+            XCTAssertEqual(error as? UpdateError, .noApplicationInArchive)
+        }
+    }
+
+    /// The downgrade case: a genuine, correctly signed older Latch attached
+    /// to a newer release tag. The signature and Gatekeeper checks pass for
+    /// such a bundle, so the version check is what has to refuse it.
+    func testAnOlderBundleUnderANewerTagIsRefused() throws {
+        let archive = try expandedArchive(version: "0.2608100841.0")
+        defer { try? FileManager.default.removeItem(at: archive.directory) }
+        let bundle = try UpdateInstaller.applicationBundle(in: archive.directory, manager: .default)
+        XCTAssertThrowsError(try UpdateInstaller.verifyVersion(
+            of: bundle,
+            publishedAs: try XCTUnwrap(ReleaseVersion("v0.2608101202.0")),
+            installed: ReleaseVersion("0.2608100900.0")
+        )) { error in
+            guard case .versionMismatch = error as? UpdateError else {
+                return XCTFail("expected versionMismatch, got \(error)")
+            }
+        }
+    }
+
+    func testABundleThatIsNotNewerThanTheInstallIsRefused() throws {
+        let archive = try expandedArchive(version: "0.2608101202.0")
+        defer { try? FileManager.default.removeItem(at: archive.directory) }
+        let bundle = try UpdateInstaller.applicationBundle(in: archive.directory, manager: .default)
+        for installed in ["0.2608101202.0", "0.2608110000.0"] {
+            XCTAssertThrowsError(try UpdateInstaller.verifyVersion(
+                of: bundle,
+                publishedAs: try XCTUnwrap(ReleaseVersion("v0.2608101202.0")),
+                installed: ReleaseVersion(installed)
+            ), "installed \(installed) must not be replaced")
+        }
+    }
+
+    func testABundleWithNoVersionIsRefused() throws {
+        let archive = try expandedArchive(version: "")
+        defer { try? FileManager.default.removeItem(at: archive.directory) }
+        XCTAssertThrowsError(try UpdateInstaller.verifyVersion(
+            of: archive.bundle,
+            publishedAs: try XCTUnwrap(ReleaseVersion("v0.2608101202.0")),
+            installed: nil
+        ))
     }
 
     func testRelaunchWaitsForTheOldProcessAndUsesTheNormalAppLaunchPath() {

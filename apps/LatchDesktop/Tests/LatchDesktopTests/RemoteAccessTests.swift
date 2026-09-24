@@ -118,6 +118,23 @@ final class RemoteAccessTests: XCTestCase {
         XCTAssertEqual(pending.permission, .control)
         XCTAssertEqual(pending.comparison, "0123 4567 89ab cdef")
     }
+
+    func testApprovalKeepsThePeerNameAndTheRequestedGrantInSeparateFields() throws {
+        // A name the peer controls must never carry the sentence that states
+        // the grant; the prompt renders these as separate labeled rows.
+        let name = "Jake's iPhone requests Observe"
+        let progress = RemotePairingProgress.comparing(
+            name: name, permission: .control, code: "0123 4567 89ab cdef"
+        )
+        let approval = try XCTUnwrap(progress.approval)
+        XCTAssertEqual(approval.deviceName, name)
+        XCTAssertEqual(approval.permission, .control)
+        XCTAssertEqual(approval.accessRequested, DevicePermission.control.label)
+        XCTAssertEqual(approval.comparison, "0123 4567 89ab cdef")
+        XCTAssertFalse(approval.accessRequested.contains(name))
+        XCTAssertFalse(approval.deviceName.contains(DevicePermission.control.label))
+        XCTAssertNil(RemotePairingProgress.waiting.approval)
+    }
 }
 
 final class RemoteLinkLifecycleTests: XCTestCase {

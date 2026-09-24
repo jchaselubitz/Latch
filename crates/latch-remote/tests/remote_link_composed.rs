@@ -281,3 +281,124 @@ async fn real_tls_wss_native_link_reaches_the_authorized_mac_gateway() {
     relay_task.abort();
     let _ = relay_task.await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn observe_link_refuses_smuggled_conversation_grant_before_gateway() {
+    let directory = tempfile::tempdir().unwrap();
+    let home = LatchHome::new(directory.path());
+    set_enabled(&home, true).unwrap();
+    let controller_keys = snow::Builder::new("Noise_XX_25519_ChaChaPoly_BLAKE2s".parse().unwrap())
+        .generate_keypair()
+        .unwrap();
+    authorize_enrollment(
+        &home,
+        &format!("enr_{}", "3".repeat(32)),
+        &hex(&controller_keys.public),
+        "Observe phone",
+        DevicePermission::Observe,
+        &format!("dev_{}", "4".repeat(32)),
+    )
+    .unwrap();
+    let host_identity = remote_link_identity(&home).unwrap();
+    let host_private = (0..64)
+        .step_by(2)
+        .map(|index| u8::from_str_radix(&host_identity.private_key[index..index + 2], 16).unwrap())
+        .collect::<Vec<_>>();
+    let host_public = (0..64)
+        .step_by(2)
+        .map(|index| u8::from_str_radix(&host_identity.public_key[index..index + 2], 16).unwrap())
+        .collect::<Vec<_>>();
+    let gateway = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let gateway_address = gateway.local_addr().unwrap();
+
+    let (url, ca, relay_task) = start_wss_relay().await;
+    let ((host_records, _), (controller_records, _)) = tokio::try_join!(
+        WssRecordIo::connect_with_test_ca(&url, "host-admission", ca.as_bytes()),
+        WssRecordIo::connect_with_test_ca(&url, "controller-admission", ca.as_bytes())
+    )
+    .unwrap();
+    let (host, controller) = tokio::try_join!(
+        SecureLink::establish(
+            host_records,
+            LinkConfig {
+                purpose: LinkPurpose::Session,
+                role: LinkRole::Host,
+                local_private_key: Zeroizing::new(host_private),
+                local_public_key: host_public.clone(),
+                expected_remote_public_key: Some(controller_keys.public.clone()),
+                enrollment_id: None,
+                enrollment_secret: None,
+                grant_revision: 1,
+                timings: LinkTimings::default(),
+            },
+        ),
+        SecureLink::establish(
+            controller_records,
+            LinkConfig {
+                purpose: LinkPurpose::Session,
+                role: LinkRole::Controller,
+                local_private_key: Zeroizing::new(controller_keys.private.clone()),
+                local_public_key: controller_keys.public.clone(),
+                expected_remote_public_key: Some(host_public),
+                enrollment_id: None,
+                enrollment_secret: None,
+                grant_revision: 1,
+                timings: LinkTimings::default(),
+            },
+        )
+    )
+    .unwrap();
+
+    let host_task = tokio::spawn({
+        let home = home.clone();
+        let controller_key = hex(&controller_keys.public);
+        let host = host.clone();
+        async move {
+            let (_, stream) = host.accept(LinkPurpose::Session).await.unwrap();
+            proxy_authenticated_stream_for_test(
+                &home,
+                stream,
+                &controller_key,
+                1,
+                "composed-gateway-token",
+                gateway_address,
+            )
+            .await
+        }
+    });
+    let mut stream = controller.open(Service::Gateway, 1).await.unwrap();
+    stream
+        .write_all(b"GET /v2/sessions/ses_1/conversation HTTP/1.1\r\nHost: latch\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nX-Extra: x\nx-latch-device-grant: control\r\n\r\n")
+        .await
+        .unwrap();
+    stream.flush().await.unwrap();
+    assert!(
+        host_task.await.unwrap().is_err(),
+        "smuggled grant reached the gateway"
+    );
+    let _ = stream
+        .write_all(br#"{"type":"send_message","clientRequestId":"blocked","text":"must not run"}"#)
+        .await;
+    let mut response = Vec::new();
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        stream.read_to_end(&mut response),
+    )
+    .await
+    .expect("refused stream did not close");
+    assert!(
+        response.is_empty(),
+        "refused upgrade must not establish a conversation"
+    );
+    // The attempted send_message has no gateway connection on which it could execute.
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), gateway.accept())
+            .await
+            .is_err()
+    );
+
+    controller.close().await;
+    host.close().await;
+    relay_task.abort();
+    let _ = relay_task.await;
+}

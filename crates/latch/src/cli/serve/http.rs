@@ -45,7 +45,6 @@ struct AppState {
     home: LatchHome,
     token_file: std::path::PathBuf,
     latch_bin: std::path::PathBuf,
-    bind_is_loopback: bool,
     gateway_instance_id: String,
     /// Also keeps the exclusive Hub writer lock alive for the gateway lifetime.
     conversation_hub: ConversationHub,
@@ -119,7 +118,6 @@ pub async fn run(options: ServeOptions) -> anyhow::Result<()> {
         home: options.home,
         token_file: options.token_file,
         latch_bin: options.latch_bin,
-        bind_is_loopback: options.bind.ip().is_loopback(),
         gateway_instance_id: gateway_instance_id.clone(),
         conversation_hub,
         terminal_resumes: ResumeRegistry::default(),
@@ -182,7 +180,6 @@ pub(crate) fn test_router(
         home,
         token_file,
         latch_bin,
-        bind_is_loopback: true,
         gateway_instance_id: "gw-test".to_owned(),
         conversation_hub,
         terminal_resumes: ResumeRegistry::default(),
@@ -260,10 +257,7 @@ async fn require_token(
     if request.method() == Method::OPTIONS {
         return Ok(next.run(request).await);
     }
-    if !origin_allowed(
-        request.headers().get(header::ORIGIN),
-        state.bind_is_loopback,
-    ) {
+    if !origin_allowed(request.headers().get(header::ORIGIN)) {
         return Err(ApiError::new(StatusCode::FORBIDDEN, "origin not allowed"));
     }
     let expected = load_token(&state.token_file).unwrap_or_default();
@@ -272,40 +266,39 @@ async fn require_token(
         return Err(ApiError::new(StatusCode::UNAUTHORIZED, "invalid token"));
     }
 
+    let grant_header = unique_authority_header(request.headers(), DEVICE_GRANT_HEADER)?;
+    let device_header = unique_authority_header(request.headers(), DEVICE_ID_HEADER)?;
+
+    // The listener itself is loopback-only (see `refuse_non_loopback`), so a
+    // missing `ConnectInfo` (the in-process test router) means loopback. The
+    // per-peer check stays as defense in depth against a future bind change.
     let peer_is_loopback = request
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map(|ConnectInfo(address)| address.ip().is_loopback())
-        .unwrap_or(state.bind_is_loopback);
-    let grant =
-        match request.headers().get(DEVICE_GRANT_HEADER) {
-            Some(value) if peer_is_loopback => value
-                .to_str()
-                .ok()
-                .and_then(Grant::from_header_value)
-                .ok_or_else(|| ApiError::new(StatusCode::BAD_REQUEST, "invalid device grant"))?,
-            Some(_) => {
-                return Err(ApiError::new(
-                    StatusCode::FORBIDDEN,
-                    "device grant header is trusted only from the loopback proxy",
-                ))
-            }
-            None if peer_is_loopback => Grant::Control,
-            None => {
-                return Err(ApiError::new(
-                    StatusCode::FORBIDDEN,
-                    "non-loopback requests require the paired proxy",
-                ))
-            }
-        };
+        .unwrap_or(true);
+    let grant = match grant_header {
+        Some(value) if peer_is_loopback => Grant::from_header_value(&value)
+            .ok_or_else(|| ApiError::new(StatusCode::BAD_REQUEST, "invalid device grant"))?,
+        Some(_) => {
+            return Err(ApiError::new(
+                StatusCode::FORBIDDEN,
+                "device grant header is trusted only from the loopback proxy",
+            ))
+        }
+        None if peer_is_loopback => Grant::Control,
+        None => {
+            return Err(ApiError::new(
+                StatusCode::FORBIDDEN,
+                "non-loopback requests require the paired proxy",
+            ))
+        }
+    };
     request.headers_mut().remove(DEVICE_GRANT_HEADER);
-    let device = match request.headers().get(DEVICE_ID_HEADER) {
+    let device = match device_header {
         Some(value) if peer_is_loopback => Some(
-            value
-                .to_str()
-                .ok()
-                .filter(|value| is_device_id(value))
-                .map(str::to_owned)
+            is_device_id(&value)
+                .then_some(value)
                 .ok_or_else(|| ApiError::new(StatusCode::BAD_REQUEST, "invalid device id"))?,
         ),
         Some(_) => {
@@ -334,6 +327,35 @@ async fn require_token(
     }
     request.extensions_mut().insert(grant);
     Ok(next.run(request).await)
+}
+
+fn unique_authority_header(
+    headers: &HeaderMap,
+    name: &'static str,
+) -> Result<Option<String>, ApiError> {
+    let mut values = headers.get_all(name).iter();
+    let first = values.next();
+    if values.next().is_some() {
+        eprintln!("latch serve: duplicate remote authority header ({name})");
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "duplicate device authority header",
+        ));
+    }
+    first
+        .map(|value| {
+            let text = value.to_str().map_err(|_| {
+                ApiError::new(StatusCode::BAD_REQUEST, "invalid device authority header")
+            })?;
+            if text.contains(['\r', '\n']) {
+                return Err(ApiError::new(
+                    StatusCode::BAD_REQUEST,
+                    "invalid device authority header",
+                ));
+            }
+            Ok(text.to_owned())
+        })
+        .transpose()
 }
 
 #[derive(Serialize)]
@@ -965,6 +987,27 @@ mod tests {
         body: &str,
     ) -> (u16, serde_json::Value) {
         send(harness, "POST", "/v2/sessions", grant, body).await
+    }
+
+    #[tokio::test]
+    async fn loopback_gateway_rejects_duplicate_grant_headers() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let harness = harness().await;
+        let request = format!(
+            "GET /v2/sessions HTTP/1.1\r\nHost: gateway\r\nAuthorization: Bearer gateway-token\r\n{DEVICE_GRANT_HEADER}: observe\r\n{DEVICE_GRANT_HEADER}: control\r\nConnection: close\r\n\r\n"
+        );
+        let mut stream = tokio::net::TcpStream::connect(harness.address)
+            .await
+            .unwrap();
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).await.unwrap();
+        assert!(
+            response.starts_with(b"HTTP/1.1 400 "),
+            "{}",
+            String::from_utf8_lossy(&response)
+        );
     }
 
     async fn send(

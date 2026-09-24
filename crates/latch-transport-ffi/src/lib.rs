@@ -188,17 +188,17 @@ impl RemoteLink {
         enrollment_secret: Option<Vec<u8>>,
         grant_revision: u64,
     ) -> Result<Arc<Self>, TransportError> {
-        if host.is_empty() || host.len() > 255 || port == 0 {
+        let Some(address) = lan_address(&host).filter(|_| port != 0) else {
             return Err(TransportError::Failure {
                 message: "invalid LAN target".into(),
             });
-        }
+        };
         let started = std::time::Instant::now();
-        // One second: a LAN connect is milliseconds, but the target may be a
-        // `.local` name whose resolution takes longer than that.
+        // One second: a LAN connect is milliseconds; the bound covers a
+        // published address that is no longer on this network.
         let stream = tokio::time::timeout(
             std::time::Duration::from_millis(1000),
-            tokio::net::TcpStream::connect((host.as_str(), port)),
+            tokio::net::TcpStream::connect((address, port)),
         )
         .await
         .map_err(|_| TransportError::Timeout)?
@@ -400,6 +400,23 @@ fn failure(error: LinkError) -> TransportError {
     }
 }
 
+/// Parses a LAN target, accepting only an IP literal in a range a phone and
+/// Mac can share without routing: IPv4 private (RFC 1918) or link-local, and
+/// IPv6 unique-local (`fc00::/7`) or link-local (`fe80::/10`). Names are
+/// refused so a Bonjour TXT record cannot point the phone at a resolver's
+/// choice, and public addresses are refused so it cannot point it off-LAN.
+fn lan_address(host: &str) -> Option<std::net::IpAddr> {
+    let address: std::net::IpAddr = host.parse().ok()?;
+    let shared = match address {
+        std::net::IpAddr::V4(ip) => ip.is_private() || ip.is_link_local(),
+        std::net::IpAddr::V6(ip) => {
+            let first = ip.segments()[0];
+            (first & 0xfe00) == 0xfc00 || (first & 0xffc0) == 0xfe80
+        }
+    };
+    shared.then_some(address)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -476,6 +493,86 @@ mod tests {
             Err(error) => error,
         };
         assert_eq!(error.to_string(), "invalid LAN target");
+    }
+
+    #[test]
+    fn lan_targets_are_private_ip_literals_only() {
+        for host in [
+            "192.168.1.20",
+            "10.0.0.5",
+            "172.16.4.1",
+            "169.254.10.2",
+            "fd12:3456::1",
+            "fe80::1",
+        ] {
+            assert!(lan_address(host).is_some(), "{host} should be accepted");
+        }
+        for host in [
+            "",
+            "8.8.8.8",
+            "172.32.0.1",
+            "127.0.0.1",
+            "0.0.0.0",
+            "100.64.0.1",
+            "2001:4860:4860::8888",
+            "::1",
+            "::ffff:192.168.1.20",
+            "latch-abc.local",
+            "evil.example.com",
+            "192.168.1.20:22",
+        ] {
+            assert!(lan_address(host).is_none(), "{host} should be refused");
+        }
+    }
+
+    #[tokio::test]
+    async fn public_or_named_lan_target_fails_before_connecting() {
+        for host in ["8.8.8.8", "latch-abc.local"] {
+            let result = RemoteLink::connect_lan(
+                host.into(),
+                7777,
+                RemoteLinkPurpose::Session,
+                RemoteLinkRole::Controller,
+                vec![],
+                vec![],
+                None,
+                None,
+                None,
+                1,
+            )
+            .await;
+            match result {
+                Ok(_) => panic!("{host} was accepted"),
+                Err(error) => assert_eq!(error.to_string(), "invalid LAN target"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn cleartext_relay_url_fails_before_connecting() {
+        let result = RemoteLink::connect_wss(
+            "ws://relay.invalid/v1/connect".into(),
+            "admission".into(),
+            RemoteLinkPurpose::Session,
+            RemoteLinkRole::Controller,
+            vec![],
+            vec![],
+            None,
+            None,
+            None,
+            1,
+            1,
+        )
+        .await;
+        let error = match result {
+            Ok(_) => panic!("cleartext relay url was accepted"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, TransportError::Failure { .. }));
+        assert_eq!(
+            error.to_string(),
+            "invalid remote-link configuration: relay url must use wss://"
+        );
     }
 
     #[tokio::test]

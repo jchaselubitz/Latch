@@ -100,9 +100,9 @@ that package manager instead.
 ## Local gateway and remote access
 
 `latch serve` provides a local HTTP/WebSocket gateway for clients. It listens
-on `127.0.0.1:4610` by default and uses a bearer token. Keep it on loopback and
-reach it through an SSH tunnel when needed; a non-loopback bind is plaintext
-and requires the explicit `--allow-remote` opt-in.
+on `127.0.0.1:4610` by default and uses a bearer token. It only binds loopback;
+a non-loopback `--bind` is refused. Remote devices use Remote Link
+(`latch remote-access`), or reach the loopback port through an SSH tunnel.
 
 ```bash
 latch serve token                    # mint or rotate the bearer token

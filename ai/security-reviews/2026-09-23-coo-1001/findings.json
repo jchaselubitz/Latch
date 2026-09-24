@@ -1,0 +1,674 @@
+{
+  "documentType": "codex-security.findings",
+  "findings": [
+    {
+      "attackPath": {
+        "dataflow": {
+          "evidenceRefs": [
+            "proxy-split",
+            "proxy-inject",
+            "gateway-grant",
+            "conversation-grant",
+            "hub-grant",
+            "connector-write"
+          ],
+          "outcome": "Unauthorized conversation messages and resolution of available agent requests",
+          "sink": "Unauthorized conversation messages and resolution of available agent requests",
+          "source": "Remote Link conversation WebSocket upgrade",
+          "summary": "authorize_and_inject splits on CRLF but preserves bare LF inside values. Locked httparse 1.10.1 accepts bare LF as a header delimiter (src/lib.rs:1204-1210); hyper 1.11.0 appends parsed headers in wire order (src/proto/h1/role.rs:340); http 1.5.0 HeaderMap::get returns the first value (src/header/map.rs:786-790,814-821). Thus a hidden grant or identity header precedes the proxy-appended value. Conversation GET requires Observe, so the real route grant check passes. The gateway stores the stronger first grant and the Hub uses it for Interact actions."
+        },
+        "impact": {
+          "level": "high",
+          "why": "Unauthorized conversation messages and resolution of available agent requests"
+        },
+        "likelihood": {
+          "level": "high",
+          "why": "An authenticated lower-privilege device can reliably cross an explicit read/write boundary using its existing connection. It does not need the host bearer token. Impact is limited to conversation actions admitted by the connector; direct Control routes remain checked by the proxy."
+        },
+        "limitations": [
+          "Not unauthenticated access. The endpoint Noise handshake and paired key are still required.",
+          "Direct terminal, session-create, and stop routes independently require Control at the outer proxy; this finding does not prove access to them.",
+          "Operation epochs and live connector availability remain enforced. Periodic proxy checks compare the real grant to the Observe route requirement, so they do not repair the spoofed subscriber grant.",
+          "The same parsing discrepancy permits a forged device identity; receipt impersonation additionally requires relevant target identifiers."
+        ],
+        "reachability": {
+          "attacker": "A paired Observe controller with its own valid endpoint key",
+          "entrypoint": "Remote Link conversation WebSocket upgrade",
+          "outcome": "Unauthorized conversation messages and resolution of available agent requests",
+          "summary": "A paired Observe controller with its own valid endpoint key reaches Remote Link conversation WebSocket upgrade"
+        },
+        "summary": "A paired Observe device can exploit inconsistent HTTP header parsing to supply a stronger conversation grant. The Conversation Hub then permits Interact actions, including sending messages and resolving available requests."
+      },
+      "codeEvidence": [
+        {
+          "code": "fn authorize_and_inject(\n    request: Vec<u8>,\n    permission: DevicePermission,\n    device_id: &str,\n    token: &str,\n) -> anyhow::Result<(Vec<u8>, DevicePermission)> {\n    let end = request\n        .windows(4)\n        .position(|window| window == b\"\\r\\n\\r\\n\")\n        .ok_or_else(|| anyhow!(\"missing HTTP headers\"))?;\n    let headers = std::str::from_utf8(&request[..end]).context(\"request headers are not UTF-8\")?;\n    let mut lines = headers.split(\"\\r\\n\");\n    let request_line = lines\n        .next()\n        .ok_or_else(|| anyhow!(\"missing HTTP request line\"))?;\n    let mut words = request_line.split_whitespace();\n    let method = words.next().ok_or_else(|| anyhow!(\"missing HTTP method\"))?;\n    let target = words.next().ok_or_else(|| anyhow!(\"missing HTTP target\"))?;\n    let version = words\n        .next()\n        .ok_or_else(|| anyhow!(\"missing HTTP version\"))?;\n    if words.next().is_some()\n        || version != \"HTTP/1.1\"\n        || !target.starts_with(\"/v2/\")\n        || target.contains(\"..\")\n        || target.to_ascii_lowercase().contains(\"%2e\")\n    {\n        bail!(\"request target is not permitted\");\n    }\n    let mut websocket_upgrade = false;\n    for line in lines {\n        if line.starts_with(' ') || line.starts_with('\\t') || !line.contains(':') {\n            bail!(\"malformed HTTP header\");\n        }\n        let (name, value) = line.split_once(':').expect(\"header delimiter checked\");\n        if name.eq_ignore_ascii_case(\"authorization\")\n            || name.eq_ignore_ascii_case(\"proxy-authorization\")\n            || name.eq_ignore_ascii_case(\"transfer-encoding\")\n            || name.eq_ignore_ascii_case(DEVICE_GRANT_HEADER)\n            || name.eq_ignore_ascii_case(DEVICE_ID_HEADER)\n        {\n            bail!(\"remote request contains a forbidden HTTP header\");\n        }",
+          "endLine": 802,
+          "explanation": "The controller supplies request bytes. Bare LF within a header value is not recognized as a second header by this check.",
+          "id": "proxy-split",
+          "label": "Proxy checks CRLF-delimited header names",
+          "path": "crates/latch/src/cli/remote_access.rs",
+          "role": "root_control",
+          "startLine": 760
+        },
+        {
+          "code": "    }\n    let (_, required) = route_for(method, target)\n        .ok_or_else(|| anyhow!(\"HTTP operation is not permitted through Remote Link\"))?;\n    if !permission.permits(required) {\n        bail!(\"device permission does not allow this operation\");\n    }\n    let mut injected = Vec::with_capacity(request.len() + token.len() + 64);\n    injected.extend_from_slice(&request[..end]);\n    injected.extend_from_slice(b\"\\r\\nAuthorization: Bearer \");\n    injected.extend_from_slice(token.as_bytes());\n    injected.extend_from_slice(b\"\\r\\n\");\n    injected.extend_from_slice(DEVICE_GRANT_HEADER.as_bytes());\n    injected.extend_from_slice(b\": \");\n    injected.extend_from_slice(permission.as_header_value().as_bytes());\n    injected.extend_from_slice(b\"\\r\\n\");\n    injected.extend_from_slice(DEVICE_ID_HEADER.as_bytes());\n    injected.extend_from_slice(b\": \");\n    injected.extend_from_slice(device_id.as_bytes());\n    if !websocket_upgrade {\n        injected.extend_from_slice(b\"\\r\\nConnection: close\");\n    }\n    injected.extend_from_slice(&request[end..]);\n    Ok((injected, required))",
+          "endLine": 831,
+          "explanation": "The proxy checks the real device grant for the route, then copies original header bytes before its own grant and identity headers.",
+          "id": "proxy-inject",
+          "label": "Original bytes precede trusted headers",
+          "path": "crates/latch/src/cli/remote_access.rs",
+          "role": "root_control",
+          "startLine": 809
+        },
+        {
+          "code": "        .map(|ConnectInfo(address)| address.ip().is_loopback())\n        .unwrap_or(state.bind_is_loopback);\n    let grant =\n        match request.headers().get(DEVICE_GRANT_HEADER) {\n            Some(value) if peer_is_loopback => value\n                .to_str()\n                .ok()\n                .and_then(Grant::from_header_value)\n                .ok_or_else(|| ApiError::new(StatusCode::BAD_REQUEST, \"invalid device grant\"))?,\n            Some(_) => {\n                return Err(ApiError::new(\n                    StatusCode::FORBIDDEN,\n                    \"device grant header is trusted only from the loopback proxy\",",
+          "endLine": 290,
+          "explanation": "The loopback request is trusted and HeaderMap::get takes the first value, which can be attacker-supplied after downstream parsing.",
+          "id": "gateway-grant",
+          "label": "Gateway takes the first grant header",
+          "path": "crates/latch/src/cli/serve/http.rs",
+          "role": "root_control",
+          "startLine": 278
+        },
+        {
+          "code": "        return;\n    }\n    let Some((subscriber, outcome)) =\n        hub.subscribe_device(&id, grant, device.clone(), query.position())\n    else {\n        let _ = send(\n            &mut socket,\n            ConversationServerMessage::Error {",
+          "endLine": 132,
+          "explanation": "The grant selected at upgrade becomes the subscriber grant used for later actions.",
+          "id": "conversation-grant",
+          "label": "Conversation subscription carries the chosen grant",
+          "path": "crates/latch/src/cli/serve/conversation.rs",
+          "role": "propagation",
+          "startLine": 125
+        },
+        {
+          "code": "        let subscriber_record = actor\n            .subscribers\n            .get(&subscriber)\n            .ok_or_else(|| anyhow::anyhow!(\"unknown subscriber\"))?;\n        let grant = subscriber_record.grant;\n        let device = subscriber_record.device.clone();\n        let payload_digest = Some(action_digest(action));\n        if let Some(old) = actor.operations.iter().find(|r| r.id == operation_id) {\n            if old.device != device || old.payload_digest != payload_digest {\n                return Ok(OperationOutcome::Refused {\n                    reason: \"operation id conflict: another device or payload already used this id\"\n                        .into(),\n                });\n            }\n            return Ok(match &old.outcome {\n                OperationOutcome::Started => OperationOutcome::Ambiguous,\n                v => v.clone(),\n            });\n        }\n        let descriptor = actor\n            .actions\n            .iter()\n            .find(|d| d.id == action.id)\n            .cloned()\n            .ok_or_else(|| anyhow::anyhow!(\"unknown action\"))?;\n        // Authorization is decided before availability so an observe-only\n        // device is refused for the same reason whatever the connector's state.\n        if !grant.permits(descriptor.required_grant) {\n            return Ok(OperationOutcome::Refused {\n                reason: \"device grant does not permit this action\".into(),\n            });",
+          "endLine": 769,
+          "explanation": "Action authorization checks the spoofed subscriber grant, not the underlying device store.",
+          "id": "hub-grant",
+          "label": "Hub trusts the stored subscriber grant",
+          "path": "crates/latch/src/conversation/hub.rs",
+          "role": "root_control",
+          "startLine": 739
+        },
+        {
+          "code": "        let screen = self.current_screen(remaining()?)?;\n        if action.id == ACTION_SEND_MESSAGE {\n            if !screen.lines().any(|line| is_empty_composer(self.id, line)) {\n                return Ok(ApplyResult::Refused {\n                    reason: format!(\"the {} composer is no longer empty\", self.id),\n                });\n            }\n            self.control()?.submit(text, remaining()?)?;",
+          "endLine": 1533,
+          "explanation": "When live composer checks pass, the action submits text to the hosted process.",
+          "id": "connector-write",
+          "label": "Allowed action writes into the hosted composer",
+          "path": "crates/latch/src/conversation/connectors/jsonl.rs",
+          "role": "sink",
+          "startLine": 1526
+        }
+      ],
+      "confidence": {
+        "level": "high",
+        "rationale": "Independently reviewed source dataflow and effective controls; no runtime reproduction."
+      },
+      "findingId": "csf_b9019a4d0aa6fa7ba97aed17",
+      "fingerprints": {
+        "algorithm": "codex-security/v1",
+        "primary": "codex-security/v1:sha256:c64ccfffdf363818b03cae60e69c02050d91cedd6bf7bcb86a6108b37af52014"
+      },
+      "identity": {
+        "anchor": "authorization.http-parser-disagreement"
+      },
+      "locations": [
+        {
+          "endLine": 802,
+          "path": "crates/latch/src/cli/remote_access.rs",
+          "role": "root_control",
+          "startLine": 760
+        },
+        {
+          "endLine": 831,
+          "path": "crates/latch/src/cli/remote_access.rs",
+          "role": "root_control",
+          "startLine": 809
+        },
+        {
+          "endLine": 290,
+          "path": "crates/latch/src/cli/serve/http.rs",
+          "role": "root_control",
+          "startLine": 278
+        },
+        {
+          "endLine": 132,
+          "path": "crates/latch/src/cli/serve/conversation.rs",
+          "role": "propagation",
+          "startLine": 125
+        },
+        {
+          "endLine": 769,
+          "path": "crates/latch/src/conversation/hub.rs",
+          "role": "root_control",
+          "startLine": 739
+        },
+        {
+          "endLine": 1533,
+          "path": "crates/latch/src/conversation/connectors/jsonl.rs",
+          "role": "sink",
+          "startLine": 1526
+        }
+      ],
+      "occurrenceId": "occ_0d1eba6bc132eb7f8ea5bb3c",
+      "provenance": {
+        "candidateId": "authorization.http-parser-disagreement",
+        "source": "parent_and_independent_investigator"
+      },
+      "remediation": "Use the same HTTP parser as the gateway and reconstruct outbound headers from validated fields; remove all caller-supplied authority fields before injecting them. Reject bare CR/LF and duplicate trusted grant/identity headers as defense in depth.",
+      "remediationTests": [
+        "An Observe peer using mixed line endings must be rejected or remain unable to perform any Interact action.",
+        "Reject duplicate or hidden device identity and grant headers; retain legitimate CRLF upgrade behavior."
+      ],
+      "rootCause": {
+        "evidenceRefs": [
+          "proxy-split",
+          "proxy-inject",
+          "gateway-grant",
+          "conversation-grant",
+          "hub-grant",
+          "connector-write"
+        ],
+        "summary": "authorize_and_inject splits on CRLF but preserves bare LF inside values. Locked httparse 1.10.1 accepts bare LF as a header delimiter (src/lib.rs:1204-1210); hyper 1.11.0 appends parsed headers in wire order (src/proto/h1/role.rs:340); http 1.5.0 HeaderMap::get returns the first value (src/header/map.rs:786-790,814-821). Thus a hidden grant or identity header precedes the proxy-appended value. Conversation GET requires Observe, so the real route grant check passes. The gateway stores the stronger first grant and the Hub uses it for Interact actions."
+      },
+      "ruleId": "authorization.http-parser-disagreement",
+      "severity": {
+        "level": "high",
+        "rationale": "An authenticated lower-privilege device can reliably cross an explicit read/write boundary using its existing connection. It does not need the host bearer token. Impact is limited to conversation actions admitted by the connector; direct Control routes remain checked by the proxy."
+      },
+      "summary": "A paired Observe device can exploit inconsistent HTTP header parsing to supply a stronger conversation grant. The Conversation Hub then permits Interact actions, including sending messages and resolving available requests.",
+      "taxonomy": {
+        "category": "authorization",
+        "cwe": [
+          "CWE-436"
+        ]
+      },
+      "title": "Read-only paired devices can gain conversation write permissions",
+      "validation": {
+        "counterEvidence": [
+          "Not unauthenticated access. The endpoint Noise handshake and paired key are still required.",
+          "Direct terminal, session-create, and stop routes independently require Control at the outer proxy; this finding does not prove access to them.",
+          "Operation epochs and live connector availability remain enforced. Periodic proxy checks compare the real grant to the Observe route requirement, so they do not repair the spoofed subscriber grant.",
+          "The same parsing discrepancy permits a forged device identity; receipt impersonation additionally requires relevant target identifiers."
+        ],
+        "evidenceRefs": [
+          "proxy-split",
+          "proxy-inject",
+          "gateway-grant",
+          "conversation-grant",
+          "hub-grant",
+          "connector-write"
+        ],
+        "limitations": [
+          "No application code or exploit was executed; production exposure was not tested."
+        ],
+        "method": "offline static source trace",
+        "summary": "authorize_and_inject splits on CRLF but preserves bare LF inside values. Locked httparse 1.10.1 accepts bare LF as a header delimiter (src/lib.rs:1204-1210); hyper 1.11.0 appends parsed headers in wire order (src/proto/h1/role.rs:340); http 1.5.0 HeaderMap::get returns the first value (src/header/map.rs:786-790,814-821). Thus a hidden grant or identity header precedes the proxy-appended value. Conversation GET requires Observe, so the real route grant check passes. The gateway stores the stronger first grant and the Hub uses it for Interact actions."
+      }
+    },
+    {
+      "attackPath": {
+        "dataflow": {
+          "evidenceRefs": [
+            "relay-limit",
+            "relay-admit",
+            "relay-listeners",
+            "enrollment-admission"
+          ],
+          "outcome": "Relay process termination and loss of all active rooms",
+          "sink": "Relay process termination and loss of all active rooms",
+          "source": "/v1/connect followed by malformed WebSocket traffic",
+          "summary": "After claim verification and redemption, admit registers no WebSocket error listener. Installed ws Receiver.haveLength reports WS_ERR_UNSUPPORTED_MESSAGE_LENGTH when its maxPayload is exceeded (services/relay/node_modules/ws/lib/receiver.js:438-451). receiverOnError emits error on the WebSocket (websocket.js:1201-1218). With no listener, the error escapes the event emitter and terminates the process. The upgrade try/catch has already returned and cannot catch later receiver events."
+        },
+        "impact": {
+          "level": "high",
+          "why": "Relay process termination and loss of all active rooms"
+        },
+        "likelihood": {
+          "level": "high",
+          "why": "One admitted client can cause a process-wide availability failure without completing the endpoint Noise handshake. Admission limits and single-use claims restrict access but do not contain malformed-frame errors."
+        },
+        "limitations": [
+          "Signature verification and single-use redemption block anonymous clients.",
+          "The application forward() record-size guard is not reached for parser-level rejection.",
+          "No runtime crash was induced; the finding is supported by application and installed dependency source."
+        ],
+        "reachability": {
+          "attacker": "A client holding a valid relay admission, including a holder of a current enrollment code before host approval",
+          "entrypoint": "/v1/connect followed by malformed WebSocket traffic",
+          "outcome": "Relay process termination and loss of all active rooms",
+          "summary": "A client holding a valid relay admission, including a holder of a current enrollment code before host approval reaches /v1/connect followed by malformed WebSocket traffic"
+        },
+        "summary": "Malformed or oversized WebSocket traffic from one admitted client triggers an unhandled error and terminates the relay process, disconnecting unrelated rooms."
+      },
+      "codeEvidence": [
+        {
+          "code": "  const server = options.tls\n    ? createHttpsServer({ cert: readFileSync(options.tls.certPath), key: readFileSync(options.tls.keyPath) }, listener)\n    : createHttpServer(listener);\n  const websocket = new WebSocketServer({ noServer: true, perMessageDeflate: false, maxPayload: MAX_RECORD_BYTES });",
+          "endLine": 114,
+          "explanation": "The parser rejects oversized frames before the application message handler runs.",
+          "id": "relay-limit",
+          "label": "WebSocket parser has a payload limit",
+          "path": "services/relay/src/server.ts",
+          "role": "entrypoint",
+          "startLine": 111
+        },
+        {
+          "code": "    try {\n      const claim = verifyAdmissionClaim(match[1]!, options.publicKeys, options.issuer, Math.floor(now() / 1000));\n      const attemptId = randomBytes(16).toString('hex');\n      const lease = await options.redeem(claim, attemptId);\n      websocket.handleUpgrade(request, socket, head, (ws) => admit(ws, claim, lease, attemptId, sourceIp));",
+          "endLine": 165,
+          "explanation": "A signed and redeemed admission is required.",
+          "id": "relay-admit",
+          "label": "Verified admission reaches the WebSocket",
+          "path": "services/relay/src/server.ts",
+          "role": "propagation",
+          "startLine": 161
+        },
+        {
+          "code": "  function admit(socket: WebSocket, claim: AdmissionClaim, lease: Lease, attemptId: string, sourceIp: string): void {\n    let room = rooms.get(claim.roomId);\n    if (!room) {\n      room = {};\n      rooms.set(claim.roomId, room);\n    }\n    const existing = peer(room, claim.role);\n    if (existing && existing.claim.generation >= claim.generation) {\n      socket.close(4004, 'stale generation');\n      return;\n    }\n    if (existing) closeRoom(claim.roomId, 4001, 'role replaced');\n    room = rooms.get(claim.roomId) ?? {};\n    rooms.set(claim.roomId, room);\n    const delay = Math.max(0, lease.expiresAt * 1000 - now());\n    const value: Peer = {\n      socket, claim, lease, attemptId, alive: true, bytesForwarded: 0, sourceIp,\n      leaseTimer: setTimeout(() => closeRoom(claim.roomId, 4002, 'lease expired'), delay),\n    };\n    setPeer(room, claim.role, value);\n    connectionsByIp.set(sourceIp, (connectionsByIp.get(sourceIp) ?? 0) + 1);\n    socket.binaryType = 'arraybuffer';\n    socket.send(JSON.stringify({ type: 'lease_started', leaseId: lease.leaseId, expiresAt: lease.expiresAt }));\n    socket.on('pong', () => { value.alive = true; });\n    socket.on('message', (data, isBinary) => forward(value, data, isBinary));\n    socket.on('close', () => {\n      const remaining = (connectionsByIp.get(sourceIp) ?? 1) - 1;\n      if (remaining <= 0) connectionsByIp.delete(sourceIp); else connectionsByIp.set(sourceIp, remaining);\n      const current = rooms.get(claim.roomId);\n      if (!current || peer(current, claim.role) !== value) return;\n      closeRoom(claim.roomId, 1000, 'peer gone');\n    });",
+          "endLine": 203,
+          "explanation": "Only pong, message, and close handlers are installed; the stale-generation branch also lacks an error handler.",
+          "id": "relay-listeners",
+          "label": "Upgraded sockets lack an error listener",
+          "path": "services/relay/src/server.ts",
+          "role": "root_control",
+          "startLine": 172
+        },
+        {
+          "code": "    if (!claimed) throw new HttpError(409, 'enrollment_unavailable', 'enrollment is invalid, expired, or already claimed');\n    const enrollment = await store.getRemoteEnrollment(enrollmentId, unixSeconds(now));\n    if (!enrollment) throw new HttpError(409, 'enrollment_unavailable', 'enrollment is unavailable');\n    requireAdmissionBudget(context, enrollment.accountId, provisionalDeviceId);\n    const controllerAdmission = await issueRemoteAdmission({\n      linkId: null, enrollmentId, roomId: enrollment.roomId,\n      role: 'controller', purpose: 'enrollment', generation: 1,\n    });\n    await audit(enrollment.accountId, provisionalDeviceId, 'enrollment.claim', 'allowed');\n    return {\n      status: 201,\n      body: {\n        version: 1, enrollmentId, provisionalDeviceId,\n        provisionalToken: provisionalCredential.token,\n        relayUrl: config.relayUrl, controllerAdmission: controllerAdmission.claim,\n      },",
+          "endLine": 558,
+          "explanation": "An enrollment code holder receives admission before the separate host completion operation.",
+          "id": "enrollment-admission",
+          "label": "Enrollment claims already receive relay admission",
+          "path": "services/control-plane/src/api.ts",
+          "role": "entrypoint",
+          "startLine": 543
+        }
+      ],
+      "confidence": {
+        "level": "high",
+        "rationale": "Independently reviewed source dataflow and effective controls; no runtime reproduction."
+      },
+      "findingId": "csf_792f3943216dc8bb4d0ef58c",
+      "fingerprints": {
+        "algorithm": "codex-security/v1",
+        "primary": "codex-security/v1:sha256:b043b761c91019452b9edb6953c6601b6714fdb789b8e832e80196ee637028d9"
+      },
+      "identity": {
+        "anchor": "denial-of-service.unhandled-websocket-error"
+      },
+      "locations": [
+        {
+          "endLine": 114,
+          "path": "services/relay/src/server.ts",
+          "role": "entrypoint",
+          "startLine": 111
+        },
+        {
+          "endLine": 165,
+          "path": "services/relay/src/server.ts",
+          "role": "propagation",
+          "startLine": 161
+        },
+        {
+          "endLine": 203,
+          "path": "services/relay/src/server.ts",
+          "role": "root_control",
+          "startLine": 172
+        },
+        {
+          "endLine": 558,
+          "path": "services/control-plane/src/api.ts",
+          "role": "entrypoint",
+          "startLine": 543
+        }
+      ],
+      "occurrenceId": "occ_9bf17626982cf9ad7299dc8e",
+      "provenance": {
+        "candidateId": "denial-of-service.unhandled-websocket-error",
+        "source": "independent_baseline_and_focused_investigator"
+      },
+      "remediation": "Attach an error handler immediately to every upgraded WebSocket, including sockets later rejected as stale. Terminate and clean up only the affected peer or room.",
+      "remediationTests": [
+        "In an isolated process, verify malformed and oversized frames close the offending connection while another room and health checks remain available."
+      ],
+      "rootCause": {
+        "evidenceRefs": [
+          "relay-limit",
+          "relay-admit",
+          "relay-listeners",
+          "enrollment-admission"
+        ],
+        "summary": "After claim verification and redemption, admit registers no WebSocket error listener. Installed ws Receiver.haveLength reports WS_ERR_UNSUPPORTED_MESSAGE_LENGTH when its maxPayload is exceeded (services/relay/node_modules/ws/lib/receiver.js:438-451). receiverOnError emits error on the WebSocket (websocket.js:1201-1218). With no listener, the error escapes the event emitter and terminates the process. The upgrade try/catch has already returned and cannot catch later receiver events."
+      },
+      "ruleId": "denial-of-service.unhandled-websocket-error",
+      "severity": {
+        "level": "high",
+        "rationale": "One admitted client can cause a process-wide availability failure without completing the endpoint Noise handshake. Admission limits and single-use claims restrict access but do not contain malformed-frame errors."
+      },
+      "summary": "Malformed or oversized WebSocket traffic from one admitted client triggers an unhandled error and terminates the relay process, disconnecting unrelated rooms.",
+      "taxonomy": {
+        "category": "denial-of-service",
+        "cwe": [
+          "CWE-248"
+        ]
+      },
+      "title": "An admitted client can crash the shared relay",
+      "validation": {
+        "counterEvidence": [
+          "Signature verification and single-use redemption block anonymous clients.",
+          "The application forward() record-size guard is not reached for parser-level rejection.",
+          "No runtime crash was induced; the finding is supported by application and installed dependency source."
+        ],
+        "evidenceRefs": [
+          "relay-limit",
+          "relay-admit",
+          "relay-listeners",
+          "enrollment-admission"
+        ],
+        "limitations": [
+          "No application code or exploit was executed; production exposure was not tested."
+        ],
+        "method": "offline static source trace",
+        "summary": "After claim verification and redemption, admit registers no WebSocket error listener. Installed ws Receiver.haveLength reports WS_ERR_UNSUPPORTED_MESSAGE_LENGTH when its maxPayload is exceeded (services/relay/node_modules/ws/lib/receiver.js:438-451). receiverOnError emits error on the WebSocket (websocket.js:1201-1218). With no listener, the error escapes the event emitter and terminates the process. The upgrade try/catch has already returned and cannot catch later receiver events."
+      }
+    },
+    {
+      "attackPath": {
+        "dataflow": {
+          "evidenceRefs": [
+            "cap-before-await",
+            "cap-increment",
+            "issuance-budget"
+          ],
+          "outcome": "Bypass of shared-service connection budgets and excess redemption work",
+          "sink": "Bypass of shared-service connection budgets and excess redemption work",
+          "source": "Concurrent /v1/connect upgrades",
+          "summary": "The upgrade handler reads connectionsByIp, checks the limits, then awaits redeem without reserving capacity. admit increments the count only after that await and does not recheck. Concurrent valid admissions for distinct rooms can therefore exceed the intended cap; replayed claims still consume concurrent redemption work although only one succeeds."
+        },
+        "impact": {
+          "level": "medium",
+          "why": "Bypass of shared-service connection budgets and excess redemption work"
+        },
+        "likelihood": {
+          "level": "medium",
+          "why": "The race is deterministic in source, but meaningful impact needs multiple admissions and sufficient concurrency. Per-record, buffer and lease limits still apply; service exhaustion was not demonstrated."
+        },
+        "limitations": [
+          "One ticket cannot create multiple successful connections because redemption is single-use.",
+          "Actual process exhaustion has not been demonstrated.",
+          "Record-size, buffer and bandwidth bounds remain active."
+        ],
+        "reachability": {
+          "attacker": "An authorized host or clients possessing multiple fresh admissions for distinct rooms",
+          "entrypoint": "Concurrent /v1/connect upgrades",
+          "outcome": "Bypass of shared-service connection budgets and excess redemption work",
+          "summary": "An authorized host or clients possessing multiple fresh admissions for distinct rooms reaches Concurrent /v1/connect upgrades"
+        },
+        "summary": "Connection limits count only admitted sockets. Concurrent requests can pass those limits while awaiting redemption and subsequently exceed the configured per-IP or global cap."
+      },
+      "codeEvidence": [
+        {
+          "code": "    const sourceIp = (socket as import('node:net').Socket).remoteAddress ?? 'unknown';\n    const active = [...connectionsByIp.values()].reduce((sum, count) => sum + count, 0);\n    if (active >= (options.maxConnections ?? DEFAULT_MAX_CONNECTIONS) ||\n        (connectionsByIp.get(sourceIp) ?? 0) >= (options.maxConnectionsPerIp ?? DEFAULT_MAX_CONNECTIONS_PER_IP)) {\n      socket.write('HTTP/1.1 429 Too Many Requests\\r\\nConnection: close\\r\\n\\r\\n');\n      socket.destroy();\n      return;\n    }\n    const match = /^Bearer\\s+([A-Za-z0-9._-]+)$/.exec(request.headers.authorization ?? '');\n    if (!match) {\n      socket.write('HTTP/1.1 401 Unauthorized\\r\\nConnection: close\\r\\n\\r\\n');\n      socket.destroy();\n      return;\n    }\n    try {\n      const claim = verifyAdmissionClaim(match[1]!, options.publicKeys, options.issuer, Math.floor(now() / 1000));\n      const attemptId = randomBytes(16).toString('hex');\n      const lease = await options.redeem(claim, attemptId);\n      websocket.handleUpgrade(request, socket, head, (ws) => admit(ws, claim, lease, attemptId, sourceIp));",
+          "endLine": 165,
+          "explanation": "No pending slot is reserved before awaiting the control-plane response.",
+          "id": "cap-before-await",
+          "label": "Capacity is checked before async redemption",
+          "path": "services/relay/src/server.ts",
+          "role": "root_control",
+          "startLine": 147
+        },
+        {
+          "code": "    const delay = Math.max(0, lease.expiresAt * 1000 - now());\n    const value: Peer = {\n      socket, claim, lease, attemptId, alive: true, bytesForwarded: 0, sourceIp,\n      leaseTimer: setTimeout(() => closeRoom(claim.roomId, 4002, 'lease expired'), delay),\n    };\n    setPeer(room, claim.role, value);\n    connectionsByIp.set(sourceIp, (connectionsByIp.get(sourceIp) ?? 0) + 1);\n    socket.binaryType = 'arraybuffer';\n    socket.send(JSON.stringify({ type: 'lease_started', leaseId: lease.leaseId, expiresAt: lease.expiresAt }));\n    socket.on('pong', () => { value.alive = true; });\n    socket.on('message', (data, isBinary) => forward(value, data, isBinary));",
+          "endLine": 196,
+          "explanation": "Several requests that passed the old count can all become active.",
+          "id": "cap-increment",
+          "label": "Admission increments without rechecking",
+          "path": "services/relay/src/server.ts",
+          "role": "sink",
+          "startLine": 186
+        },
+        {
+          "code": "    maxDevicesPerAccount: integer(env, 'MAX_DEVICES_PER_ACCOUNT', 32, 2, 256),\n    rateLimitPerMinute: integer(env, 'RATE_LIMIT_PER_MINUTE', 240, 10, 10_000),\n    admissionRatePerDevice: integer(env, 'REMOTE_ADMISSION_RATE_PER_DEVICE', 60, 4, 1_000),\n    admissionRatePerOwner: integer(env, 'REMOTE_ADMISSION_RATE_PER_OWNER', 180, 8, 5_000),\n    admissionRatePerIp: integer(env, 'REMOTE_ADMISSION_RATE_PER_IP', 120, 4, 5_000),\n    admissionRateGlobal: integer(env, 'REMOTE_ADMISSION_RATE_GLOBAL', 1_000, 16, 100_000),",
+          "endLine": 153,
+          "explanation": "The default per-device admission rate is 60/minute; the relay per-IP cap is 16, so distinct enrollment admissions can exceed it.",
+          "id": "issuance-budget",
+          "label": "Issuance allows more than the per-IP socket cap",
+          "path": "services/control-plane/src/config.ts",
+          "role": "propagation",
+          "startLine": 148
+        }
+      ],
+      "confidence": {
+        "level": "high",
+        "rationale": "Independently reviewed source dataflow and effective controls; no runtime reproduction."
+      },
+      "findingId": "csf_50f968ae23aad9c13fdba19e",
+      "fingerprints": {
+        "algorithm": "codex-security/v1",
+        "primary": "codex-security/v1:sha256:647e59f7b19060879de6fa2f6e5ba86fab390ce1b2d8ea9b06e0d1ade8138662"
+      },
+      "identity": {
+        "anchor": "resource-limit.concurrent-admission"
+      },
+      "locations": [
+        {
+          "endLine": 165,
+          "path": "services/relay/src/server.ts",
+          "role": "root_control",
+          "startLine": 147
+        },
+        {
+          "endLine": 196,
+          "path": "services/relay/src/server.ts",
+          "role": "sink",
+          "startLine": 186
+        },
+        {
+          "endLine": 153,
+          "path": "services/control-plane/src/config.ts",
+          "role": "propagation",
+          "startLine": 148
+        }
+      ],
+      "occurrenceId": "occ_b8a910d63371cafc6a214e03",
+      "provenance": {
+        "candidateId": "resource-limit.concurrent-admission",
+        "source": "focused_investigator_parent_validated"
+      },
+      "remediation": "Reserve global and per-IP capacity before awaiting redemption, release it on every failure/disconnect path, and apply a bounded redemption timeout.",
+      "remediationTests": [
+        "Hold multiple redemption promises pending and verify excess requests are refused before redemption begins.",
+        "Verify reservations are released after rejection, timeout, malformed upgrade and disconnect."
+      ],
+      "rootCause": {
+        "evidenceRefs": [
+          "cap-before-await",
+          "cap-increment",
+          "issuance-budget"
+        ],
+        "summary": "The upgrade handler reads connectionsByIp, checks the limits, then awaits redeem without reserving capacity. admit increments the count only after that await and does not recheck. Concurrent valid admissions for distinct rooms can therefore exceed the intended cap; replayed claims still consume concurrent redemption work although only one succeeds."
+      },
+      "ruleId": "resource-limit.concurrent-admission",
+      "severity": {
+        "level": "low",
+        "rationale": "The race is deterministic in source, but meaningful impact needs multiple admissions and sufficient concurrency. Per-record, buffer and lease limits still apply; service exhaustion was not demonstrated."
+      },
+      "summary": "Connection limits count only admitted sockets. Concurrent requests can pass those limits while awaiting redemption and subsequently exceed the configured per-IP or global cap.",
+      "taxonomy": {
+        "category": "resource-limit",
+        "cwe": [
+          "CWE-362"
+        ]
+      },
+      "title": "Concurrent upgrades bypass relay connection budgets",
+      "validation": {
+        "counterEvidence": [
+          "One ticket cannot create multiple successful connections because redemption is single-use.",
+          "Actual process exhaustion has not been demonstrated.",
+          "Record-size, buffer and bandwidth bounds remain active."
+        ],
+        "evidenceRefs": [
+          "cap-before-await",
+          "cap-increment",
+          "issuance-budget"
+        ],
+        "limitations": [
+          "No application code or exploit was executed; production exposure was not tested."
+        ],
+        "method": "offline static source trace",
+        "summary": "The upgrade handler reads connectionsByIp, checks the limits, then awaits redeem without reserving capacity. admit increments the count only after that await and does not recheck. Concurrent valid admissions for distinct rooms can therefore exceed the intended cap; replayed claims still consume concurrent redemption work although only one succeeds."
+      }
+    },
+    {
+      "attackPath": {
+        "dataflow": {
+          "evidenceRefs": [
+            "installer-download",
+            "installer-execute",
+            "updater-team"
+          ],
+          "outcome": "Execution of substituted code as the installing user",
+          "sink": "Execution of substituted code as the installing user",
+          "source": "Initial install through scripts/install-cli.sh",
+          "summary": "The authentic install script downloads the archive and checksums from one GitHub release, verifies a matching manifest and generic code-signature validity, then executes each downloaded binary for a version check. No pinned Developer ID requirement or publisher team comparison precedes those executions. A release-asset attacker can replace both archive and checksum with payloads signed under a different identity."
+        },
+        "impact": {
+          "level": "high",
+          "why": "Execution of substituted code as the installing user"
+        },
+        "likelihood": {
+          "level": "low",
+          "why": "Impact is arbitrary user-level code execution, but exploitation requires compromise of release assets and their checksum file while the victim uses an authentic installer. This is a conditional supply-chain boundary, not an anonymous network exploit."
+        },
+        "limitations": [
+          "The initial download URLs are fixed GitHub HTTPS URLs. Ordinary network tampering is not established.",
+          "The legitimate release workflow signs binaries. This finding requires artifact substitution outside that legitimate signing path.",
+          "Existing signed installations use a team comparison in the Rust updater; this finding concerns initial installation.",
+          "Native codesign/notarization behavior and release infrastructure permissions were not dynamically tested."
+        ],
+        "reachability": {
+          "attacker": "An attacker able to replace release assets and checksums but lacking Latch's signing key",
+          "entrypoint": "Initial install through scripts/install-cli.sh",
+          "outcome": "Execution of substituted code as the installing user",
+          "summary": "An attacker able to replace release assets and checksums but lacking Latch's signing key reaches Initial install through scripts/install-cli.sh"
+        },
+        "summary": "The installer executes downloaded binaries after generic signature verification, without requiring Latch's signing identity. Replacement release assets can therefore run code without the genuine Latch signing key."
+      },
+      "codeEvidence": [
+        {
+          "code": "curl -fL \"$release_base/$archive\" -o \"$work_dir/$archive\"\ncurl -fL \"$release_base/checksums.txt\" -o \"$work_dir/checksums.txt\"\nawk -v archive=\"$archive\" '$2 == archive { print }' \"$work_dir/checksums.txt\" > \"$work_dir/archive.sha256\"\nif [[ ! -s \"$work_dir/archive.sha256\" ]]; then\n    echo \"The release checksum does not list $archive.\" >&2\n    exit 1\nfi\n(cd \"$work_dir\" && shasum -a 256 -c archive.sha256)\nditto -x -k \"$work_dir/$archive\" \"$work_dir/extracted\"\n/usr/bin/python3 -c 'import json,sys; p=json.load(open(sys.argv[1])); expected=[\"latch\",\"latch-remote\",\"latchd\"]; assert p == {\"formatVersion\":1,\"version\":sys.argv[2],\"target\":sys.argv[3],\"binaries\":expected}' \\\n    \"$work_dir/extracted/latch-payload.json\" \"$version\" \"$target\"\ncodesign --verify --strict \"$work_dir/extracted/latch\"\ncodesign --verify --strict \"$work_dir/extracted/latch-remote\"\ncodesign --verify --strict \"$work_dir/extracted/latchd\"",
+          "endLine": 38,
+          "explanation": "The archive and checksum come from the same release; codesign --verify --strict does not specify the expected publisher.",
+          "id": "installer-download",
+          "label": "Checksum and generic signatures do not pin publisher",
+          "path": "scripts/install-cli.sh",
+          "role": "root_control",
+          "startLine": 25
+        },
+        {
+          "code": "\"$work_dir/extracted/latch\" --version | grep -F \" $version\"\n\"$work_dir/extracted/latch-remote\" --version | grep -F \" $version\"\n\"$work_dir/extracted/latchd\" version | grep -Fx \"latchd $version protocol 1\"\nmkdir -p \"$HOME/.local/bin\"\ninstall -m 0755 \"$work_dir/extracted/latch-remote\" \"$HOME/.local/bin/latch-remote\"\ninstall -m 0755 \"$work_dir/extracted/latchd\" \"$HOME/.local/bin/latchd\"\ninstall -m 0755 \"$work_dir/extracted/latch\" \"$HOME/.local/bin/latch\"",
+          "endLine": 45,
+          "explanation": "All three downloaded programs execute before installation.",
+          "id": "installer-execute",
+          "label": "Version checks execute downloaded code",
+          "path": "scripts/install-cli.sh",
+          "role": "sink",
+          "startLine": 39
+        },
+        {
+          "code": "fn verify_signature(current: &Path, replacement: &Path) -> Result<()> {\n    let expected_team = match signing_team(current) {\n        Some(team) => team,\n        None => return Ok(()),\n    };\n    match signing_team(replacement) {\n        Some(team) if team == expected_team => Ok(()),\n        Some(team) => bail!(\n            \"the downloaded binary is signed by team {team}, but this install is signed by \\\n             {expected_team}; nothing was installed\"\n        ),\n        None => bail!(\n            \"the downloaded binary is not validly signed, but this install is (team \\\n             {expected_team}); nothing was installed\"\n        ),",
+          "endLine": 582,
+          "explanation": "The Rust updater compares teams, illustrating a stronger control absent from initial installation.",
+          "id": "updater-team",
+          "label": "Existing signed installations check the team",
+          "path": "crates/latch/src/cli/update/mod.rs",
+          "role": "expected_control",
+          "startLine": 568
+        }
+      ],
+      "confidence": {
+        "level": "high",
+        "rationale": "Independently reviewed source dataflow and effective controls; no runtime reproduction."
+      },
+      "findingId": "csf_6a0b7cdc2a71b4aa803dd323",
+      "fingerprints": {
+        "algorithm": "codex-security/v1",
+        "primary": "codex-security/v1:sha256:0ac3612e00d7bf1d8da838caa9fae8acf7dcd4bf56af204a952c372c1caf8c71"
+      },
+      "identity": {
+        "anchor": "signature-verification.installer-publisher"
+      },
+      "locations": [
+        {
+          "endLine": 38,
+          "path": "scripts/install-cli.sh",
+          "role": "root_control",
+          "startLine": 25
+        },
+        {
+          "endLine": 45,
+          "path": "scripts/install-cli.sh",
+          "role": "sink",
+          "startLine": 39
+        },
+        {
+          "endLine": 582,
+          "path": "crates/latch/src/cli/update/mod.rs",
+          "role": "expected_control",
+          "startLine": 568
+        }
+      ],
+      "occurrenceId": "occ_43d358d002644672a5ab3abb",
+      "provenance": {
+        "candidateId": "signature-verification.installer-publisher",
+        "source": "focused_investigator_parent_validated"
+      },
+      "remediation": "Before running any downloaded payload, require a pinned Latch Developer ID signing requirement with the trusted Apple anchor and expected Team ID. Retain checksum and exact-manifest checks as additional integrity controls.",
+      "remediationTests": [
+        "Reject payloads signed by a different team or ad-hoc signed before any version command executes.",
+        "Accept a legitimate release signed by the pinned identity."
+      ],
+      "rootCause": {
+        "evidenceRefs": [
+          "installer-download",
+          "installer-execute",
+          "updater-team"
+        ],
+        "summary": "The authentic install script downloads the archive and checksums from one GitHub release, verifies a matching manifest and generic code-signature validity, then executes each downloaded binary for a version check. No pinned Developer ID requirement or publisher team comparison precedes those executions. A release-asset attacker can replace both archive and checksum with payloads signed under a different identity."
+      },
+      "ruleId": "signature-verification.installer-publisher",
+      "severity": {
+        "level": "low",
+        "rationale": "Impact is arbitrary user-level code execution, but exploitation requires compromise of release assets and their checksum file while the victim uses an authentic installer. This is a conditional supply-chain boundary, not an anonymous network exploit."
+      },
+      "summary": "The installer executes downloaded binaries after generic signature verification, without requiring Latch's signing identity. Replacement release assets can therefore run code without the genuine Latch signing key.",
+      "taxonomy": {
+        "category": "signature-verification",
+        "cwe": [
+          "CWE-347"
+        ]
+      },
+      "title": "Initial installer does not verify the release publisher before executing binaries",
+      "validation": {
+        "counterEvidence": [
+          "The initial download URLs are fixed GitHub HTTPS URLs. Ordinary network tampering is not established.",
+          "The legitimate release workflow signs binaries. This finding requires artifact substitution outside that legitimate signing path.",
+          "Existing signed installations use a team comparison in the Rust updater; this finding concerns initial installation.",
+          "Native codesign/notarization behavior and release infrastructure permissions were not dynamically tested."
+        ],
+        "evidenceRefs": [
+          "installer-download",
+          "installer-execute",
+          "updater-team"
+        ],
+        "limitations": [
+          "No application code or exploit was executed; production exposure was not tested."
+        ],
+        "method": "offline static source trace",
+        "summary": "The authentic install script downloads the archive and checksums from one GitHub release, verifies a matching manifest and generic code-signature validity, then executes each downloaded binary for a version check. No pinned Developer ID requirement or publisher team comparison precedes those executions. A release-asset attacker can replace both archive and checksum with payloads signed under a different identity."
+      }
+    }
+  ],
+  "scanId": "scan_latch_coo1001_aep3_20260923",
+  "schemaVersion": "1.0"
+}

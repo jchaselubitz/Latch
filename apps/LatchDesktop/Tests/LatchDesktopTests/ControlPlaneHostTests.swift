@@ -128,6 +128,11 @@ final class ControlPlaneHostTests: XCTestCase {
     func testAddressNormalizationAndInvitationValidation() throws {
         XCTAssertEqual(try ControlPlaneHost.normalize("control.example").absoluteString, "https://control.example")
         XCTAssertEqual(try ControlPlaneHost.normalize("http://127.0.0.1:8080/").absoluteString, "http://127.0.0.1:8080")
+        XCTAssertEqual(try ControlPlaneHost.normalize("http://[::1]:8080").host, "::1")
+        XCTAssertEqual(try ControlPlaneHost.normalize("http://localhost:8080").host, "localhost")
+        XCTAssertThrowsError(try ControlPlaneHost.normalize("http://control.example"))
+        XCTAssertThrowsError(try ControlPlaneHost.normalize("http://127.example.com"))
+        XCTAssertThrowsError(try ControlPlaneHost.normalize("http://192.168.1.2"))
         XCTAssertThrowsError(try ControlPlaneHost.normalize("ftp://control.example"))
         XCTAssertThrowsError(try host(api: StubControlPlaneHostAPI()).setOwnerInvitation("not-an-invitation"))
     }

@@ -16,6 +16,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: ./scripts/check-boundaries.sh
+      - name: Remote Link contract and device-name policy
+        run: ./scripts/check-remote-link-contract.sh
       - name: Generated v2 contracts
         run: python3 scripts/generate-remote-access-types.py --check
       # The mobile app generates its Swift types from the same schemas and
@@ -77,3 +79,52 @@ jobs:
         run: cargo test --workspace --all-targets
       - name: Doc tests
         run: cargo test --workspace --doc
+
+  dependency-audit:
+    name: Dependency audits
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # cargo-audit reads the workspace lockfile and the RustSec advisory DB.
+      - name: Cargo audit (Rust workspace)
+        uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: npm audit (production dependencies)
+        run: |
+          for directory in services/control-plane services/relay packages/*; do
+            (cd "$directory" && npm audit --omit=dev)
+          done
+
+  remote-link-security:
+    name: Remote Link security gate
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios,aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Rust proxy and loopback security tests
+        run: |
+          cargo test --locked --package latch --test security
+          cargo test --locked --package latch remote_access::tests
+          cargo test --locked --package latch loopback_gateway_rejects_duplicate_grant_headers
+      - name: Relay containment tests
+        working-directory: services/relay
+        run: |
+          npm ci
+          node --experimental-strip-types --test --test-name-pattern=containment "src/**/*.test.ts"
+      - name: Build owned transport XCFramework
+        run: ./scripts/build-latch-transport-xcframework.sh
+      - name: Desktop Remote Link security tests
+        run: |
+          swift test --package-path apps/LatchDesktop --filter RemoteAccessTests
+          swift test --package-path apps/LatchDesktop --filter UpdaterTests
+      - name: Mobile Remote Link security tests
+        run: swift test --package-path apps/LatchMobile --filter GatewayTransportTests

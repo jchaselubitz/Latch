@@ -17,6 +17,13 @@ describe('configuration', () => {
     assert.equal(config.admissionRatePerIp, 120);
     assert.equal(config.admissionRateGlobal, 1_000);
     assert.equal(config.trustProxy, false);
+    assert.equal(config.databaseSslRejectUnauthorized, true);
+  });
+
+  it('verifies database certificates unless explicitly opted out', () => {
+    assert.equal(loadConfig({ ...base, DATABASE_SSL_REJECT_UNAUTHORIZED: '' }).databaseSslRejectUnauthorized, true);
+    assert.equal(loadConfig({ ...base, DATABASE_SSL_REJECT_UNAUTHORIZED: 'false' }).databaseSslRejectUnauthorized, false);
+    assert.throws(() => loadConfig({ ...base, DATABASE_SSL_REJECT_UNAUTHORIZED: 'off' }), ConfigError);
   });
 
   it('fails fast without a database url', () => {

@@ -337,8 +337,8 @@ or trigger a new protocol major if they alter existing behavior.
 
 ### Network exposure
 
-- Preserve the default loopback-only bind for `latch serve`.
-- Do not use `--allow-remote` in the product flow.
+- Preserve the loopback-only bind for `latch serve`. There is no opt-in for a
+  non-loopback bind; the former `--allow-remote` flag was removed.
 - Require encrypted and mutually authenticated remote connections.
 - Reject unknown devices before forwarding any HTTP or WebSocket data.
 - Do not allow the remote tunnel to choose an arbitrary destination.
