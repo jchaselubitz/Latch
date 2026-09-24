@@ -75,6 +75,37 @@ final class AppModelRecoveryTests: XCTestCase {
         LatchGateway(link: try! GatewayLink(address: "https://mac.local:8787", token: "token"), session: StubProtocol.session())
     }
 
+    func testReconnectAppliesCurrentGrantBeforeOfferingSessions() async {
+        StubProtocol.reset()
+        StubProtocol.stub(path: "/v2/capabilities", body: Self.capabilities)
+        StubProtocol.stub(path: "/v2/sessions", body: Self.sessions)
+        let connector = ScriptedConnector([
+            .connect(.relay),
+            .connectWithPermission(.local, .observe),
+        ])
+        let model = AppModel(
+            linkConnector: connector,
+            gatewayFactory: { _, _, _ in Self.stubGateway() },
+            presentationStore: MemorySessionPresentationStore(),
+            terminalSizeStore: MemoryTerminalSizeStore()
+        )
+        await model.connectPairedDevice(record())
+        await waitForLinked(model)
+        XCTAssertTrue(model.surface.chat)
+
+        connector.latest?.drop()
+        for _ in 0..<200 {
+            if model.linkSnapshot.generation == 2, model.linkState.isUsable { break }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(model.linkSnapshot.permission, .observe)
+        XCTAssertTrue(model.surface.chat)
+        XCTAssertFalse(model.surface.composer)
+        XCTAssertFalse(model.surface.interactionControls)
+        XCTAssertFalse(model.surface.terminal)
+        model.unlink()
+    }
+
     func testLinkLossKeepsStaleSessionsAndReconnectionRediscoversOncePerGeneration() async throws {
         StubProtocol.reset()
         StubProtocol.stub(path: "/v2/capabilities", body: Self.capabilities)

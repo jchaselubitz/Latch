@@ -207,6 +207,12 @@ struct RootView: View {
                 }
             }
         }
+        .onChange(of: model.linkSnapshot.generation) { _, _ in
+            guard model.linkSnapshot.state == .ready,
+                  let permission = model.linkSnapshot.permission,
+                  permission != pairing.record?.permission else { return }
+            Task { await pairing.refreshPermission() }
+        }
     }
 }
 

@@ -28,7 +28,7 @@ public enum ConversationViewState: String, CaseIterable, Equatable, Sendable {
     /// No conversation state has arrived yet.
     case loading
     /// The Hub recognized the agent but is waiting for its first source record.
-    /// Codex can accept the first message in this state.
+    /// The first message can be accepted in this state.
     case starting
     /// Connected, idle, and nothing has been said.
     case empty

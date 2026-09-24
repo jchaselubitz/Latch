@@ -250,16 +250,7 @@ public final class NativeRemoteLinkConnector: RemoteLinkConnecting, @unchecked S
         LinkTrace.shared.mark("connector.directory.begin")
         let directory = try await signaling.remoteLinks(accessToken: accessToken)
         LinkTrace.shared.mark("connector.directory.end")
-        guard let descriptor = directory.first(where: { $0.peerDeviceId == macDeviceID }),
-              descriptor.version == 1,
-              descriptor.peerPublicKey == record.mac.publicKey,
-              descriptor.permission == record.permission.rawValue,
-              descriptor.grantRevision > 0
-        else {
-            throw RemoteLinkFailure.revoked(
-                "The Remote Link directory does not match this locally pinned pairing. Pair again from a new code on your Mac."
-            )
-        }
+        let (descriptor, permission) = try Self.verifiedDirectoryEntry(directory, for: record, macDeviceID: macDeviceID)
         let key = try identityStore.privateKey()
         let pin = try Self.bytes(record.mac.publicKey)
         let privateKey = key.rawRepresentation
@@ -284,7 +275,7 @@ public final class NativeRemoteLinkConnector: RemoteLinkConnecting, @unchecked S
                 pathReporter.report(.local)
                 let stage = link.stageTimings()
                 return NativeRemoteLinkConnection(
-                    link: link, path: .local, revision: revision,
+                    link: link, path: .local, revision: revision, permission: permission,
                     timings: LatchMobileKit.RemoteLinkStageTimings(
                         admissionMs: 0, connectMs: stage.connectMs,
                         peerWaitMs: stage.peerWaitMs, authenticateMs: stage.authenticateMs
@@ -333,6 +324,7 @@ public final class NativeRemoteLinkConnector: RemoteLinkConnecting, @unchecked S
             link: link,
             path: path,
             revision: revision,
+            permission: permission,
             timings: LatchMobileKit.RemoteLinkStageTimings(
                 admissionMs: admissionMs,
                 connectMs: stage.connectMs,
@@ -342,6 +334,25 @@ public final class NativeRemoteLinkConnector: RemoteLinkConnecting, @unchecked S
             signaling: signaling,
             accessToken: accessToken
         )
+    }
+
+    /// The saved permission is a UI projection, not part of the Mac's pinned
+    /// identity. A live grant may change without requiring a new pairing.
+    static func verifiedDirectoryEntry(
+        _ directory: [RemoteLinkDirectoryEntry],
+        for record: PairedDeviceRecord,
+        macDeviceID: String
+    ) throws -> (RemoteLinkDirectoryEntry, DevicePermission) {
+        guard let descriptor = directory.first(where: { $0.peerDeviceId == macDeviceID }),
+              descriptor.version == 1,
+              descriptor.peerPublicKey == record.mac.publicKey,
+              let permission = DevicePermission(rawValue: descriptor.permission),
+              descriptor.grantRevision > 0 else {
+            throw RemoteLinkFailure.revoked(
+                "The Remote Link directory does not match this locally pinned pairing. Pair again from a new code on your Mac."
+            )
+        }
+        return (descriptor, permission)
     }
 
     /// How long the phone waits for a matching Mac to appear in the Bonjour
@@ -437,6 +448,7 @@ private enum NativeLinkAttempt: @unchecked Sendable {
 private final class NativeRemoteLinkConnection: RemoteLinkConnection, @unchecked Sendable {
     let path: RemotePath
     let grantRevision: UInt64
+    let permission: DevicePermission
     let timings: LatchMobileKit.RemoteLinkStageTimings
     private let link: RemoteLink
     private let leaseTask: Task<Void, Never>
@@ -445,6 +457,7 @@ private final class NativeRemoteLinkConnection: RemoteLinkConnection, @unchecked
         link: RemoteLink,
         path: RemotePath,
         revision: UInt64,
+        permission: DevicePermission,
         timings: LatchMobileKit.RemoteLinkStageTimings,
         signaling: any SignalingClient,
         accessToken: String
@@ -452,6 +465,7 @@ private final class NativeRemoteLinkConnection: RemoteLinkConnection, @unchecked
         self.link = link
         self.path = path
         self.grantRevision = revision
+        self.permission = permission
         self.timings = timings
         self.leaseTask = Task {
             while !Task.isCancelled, let event = await link.nextRelayEvent() {

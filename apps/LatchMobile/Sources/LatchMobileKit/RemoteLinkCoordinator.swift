@@ -64,6 +64,8 @@ public enum RemoteLinkFailure: Error, Equatable, Sendable {
 public protocol RemoteLinkConnection: AnyObject, Sendable {
     var path: RemotePath { get }
     var grantRevision: UInt64 { get }
+    /// Current grant from the directory entry used for this authenticated link.
+    var permission: DevicePermission { get }
     var timings: RemoteLinkStageTimings { get }
     func openGatewayChannel() async throws -> any AuthenticatedGatewayChannel
     /// Resolves once the link has stopped for any reason.
@@ -128,6 +130,7 @@ public struct RemoteLinkSnapshot: Equatable, Sendable {
     /// Increments for every authenticated link. Discovery runs once per value.
     public var generation: Int
     public var path: RemotePath?
+    public var permission: DevicePermission?
     public var timings: RemoteLinkStageTimings?
     /// Set once a link is authenticated and cleared when it is lost.
     public var connectedAt: Date?
@@ -136,12 +139,14 @@ public struct RemoteLinkSnapshot: Equatable, Sendable {
         state: RemoteLinkState = .disabled,
         generation: Int = 0,
         path: RemotePath? = nil,
+        permission: DevicePermission? = nil,
         timings: RemoteLinkStageTimings? = nil,
         connectedAt: Date? = nil
     ) {
         self.state = state
         self.generation = generation
         self.path = path
+        self.permission = permission
         self.timings = timings
         self.connectedAt = connectedAt
     }
@@ -383,6 +388,7 @@ public actor RemoteLinkCoordinator {
                     state: .ready,
                     generation: snapshot.generation + 1,
                     path: link.path,
+                    permission: link.permission,
                     timings: link.timings,
                     connectedAt: connectedAt
                 ))

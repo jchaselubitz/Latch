@@ -785,6 +785,13 @@ public final class AppModel {
     private func apply(_ snapshot: RemoteLinkSnapshot) async {
         LinkTrace.shared.mark("app.apply.\(RemoteLinkCoordinator.traceWord(snapshot.state))")
         linkSnapshot = snapshot
+        if snapshot.state == .ready,
+           let permission = snapshot.permission,
+           var updated = pairedDevice,
+           updated.permission != permission {
+            updated.permission = permission
+            _ = applyPairedDeviceRecord(updated)
+        }
         coldOpen.observe(path: snapshot.path)
         coldOpen.observe(snapshot.state)
         switch snapshot.state {
@@ -1138,8 +1145,10 @@ final class AlwaysReadyLinkConnector: RemoteLinkConnecting, @unchecked Sendable 
     final class Connection: RemoteLinkConnection, @unchecked Sendable {
         let path: RemotePath = .local
         let grantRevision: UInt64 = 1
+        let permission: DevicePermission
         let timings = RemoteLinkStageTimings()
         private let closed = AsyncStream<Void>.makeStream()
+        init(permission: DevicePermission) { self.permission = permission }
         func openGatewayChannel() async throws -> any AuthenticatedGatewayChannel {
             throw RemoteLinkTransportError.listenerUnavailable
         }
@@ -1148,6 +1157,6 @@ final class AlwaysReadyLinkConnector: RemoteLinkConnecting, @unchecked Sendable 
     }
 
     func connect(record: PairedDeviceRecord, options: RemoteLinkConnectOptions) async throws -> any RemoteLinkConnection {
-        Connection()
+        Connection(permission: record.permission)
     }
 }

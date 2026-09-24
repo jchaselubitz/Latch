@@ -8,6 +8,7 @@ import XCTest
 final class ScriptedConnector: RemoteLinkConnecting, @unchecked Sendable {
     enum Step {
         case connect(RemotePath)
+        case connectWithPermission(RemotePath, DevicePermission)
         case fail(RemoteLinkFailure)
         case failWith(Error)
     }
@@ -15,6 +16,7 @@ final class ScriptedConnector: RemoteLinkConnecting, @unchecked Sendable {
     final class Connection: RemoteLinkConnection, @unchecked Sendable {
         let path: RemotePath
         let grantRevision: UInt64 = 1
+        let permission: DevicePermission
         let timings = RemoteLinkStageTimings(admissionMs: 40, connectMs: 120, peerWaitMs: 5, authenticateMs: 30)
         private let lock = NSLock()
         private var closedFlag = false
@@ -22,7 +24,10 @@ final class ScriptedConnector: RemoteLinkConnecting, @unchecked Sendable {
         var channels = 0
         var closedByOwner = false
 
-        init(path: RemotePath) { self.path = path }
+        init(path: RemotePath, permission: DevicePermission = .control) {
+            self.path = path
+            self.permission = permission
+        }
 
         var isClosed: Bool { lock.withLock { closedFlag } }
 
@@ -85,7 +90,11 @@ final class ScriptedConnector: RemoteLinkConnecting, @unchecked Sendable {
         }
         switch step {
         case .connect(let path)?:
-            let connection = Connection(path: path)
+            let connection = Connection(path: path, permission: record.permission)
+            lock.withLock { connections.append(connection) }
+            return connection
+        case .connectWithPermission(let path, let permission)?:
+            let connection = Connection(path: path, permission: permission)
             lock.withLock { connections.append(connection) }
             return connection
         case .fail(let failure)?:
@@ -247,6 +256,24 @@ final class RemoteLinkCoordinatorTests: XCTestCase {
             }
             await coordinator.stop()
         }
+    }
+
+    func testReadySnapshotCarriesChangedGrantAfterReconnect() async {
+        let connector = ScriptedConnector([
+            .connect(.relay),
+            .connectWithPermission(.local, .observe),
+        ])
+        let coordinator = RemoteLinkCoordinator(connector: connector, random: { 0 })
+        await coordinator.start(record: record())
+        _ = await waitFor(coordinator) { $0 == .ready }
+        let first = await coordinator.current
+        XCTAssertEqual(first.permission, .control)
+        connector.latest?.drop()
+        _ = await waitFor(coordinator) { $0 == .ready && connector.attempts == 2 }
+        let snapshot = await coordinator.current
+        XCTAssertEqual(snapshot.permission, .observe)
+        XCTAssertEqual(snapshot.generation, 2)
+        await coordinator.stop()
     }
 
     func testMacOfflineKeepsRetryingUnderItsOwnLabel() async {
