@@ -128,6 +128,25 @@ public struct SessionSummary: Decodable, Equatable, Identifiable, Sendable {
 /// single exclusive surface; the cost is that it stops being true the moment
 /// the session repaints. A screen showing one has to say when it was taken.
 ///
+/// Where the Mac placed one uploaded attachment. The message the phone sends
+/// next names `path`, which the agent can open from any directory.
+public struct AttachmentReceipt: Codable, Equatable, Sendable {
+    /// Absolute path on the Mac.
+    public let path: String
+    /// Path relative to the session's working directory.
+    public let relativePath: String
+    /// The file name the Mac chose, which may differ from the one suggested.
+    public let name: String
+    public let bytes: Int
+
+    public init(path: String, relativePath: String, name: String, bytes: Int) {
+        self.path = path
+        self.relativePath = relativePath
+        self.name = name
+        self.bytes = bytes
+    }
+}
+
 /// Unlike the session list, the preview is a gateway document and so is
 /// camelCase on the wire.
 public struct SessionPreview: Decodable, Equatable, Sendable {

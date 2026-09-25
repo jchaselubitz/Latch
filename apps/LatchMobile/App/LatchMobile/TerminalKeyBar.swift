@@ -50,11 +50,24 @@ final class TerminalKeyBarState {
     }
 }
 
-struct TerminalKeyBar: View {
+/// The row itself.
+///
+/// UIKit rather than SwiftUI, and that is the fix rather than a preference. A
+/// cap has to know when the finger went down — the haptic, the key and the
+/// repeat timer all start there — and the only SwiftUI gesture that reports
+/// that is a zero-distance drag, which claims the touch the moment it lands.
+/// The row then never scrolled: every swipe began on a cap. A `UIScrollView`
+/// full of `UIControl`s gets the arbitration for free. With
+/// `delaysContentTouches` it holds a new touch for a moment to see whether it
+/// is a swipe; a swipe pans and the cap never hears of it, a press is handed
+/// to the cap as `.touchDown`. A quick tap is delivered the moment it lifts,
+/// so nothing a user can feel is lost — and a swipe that starts on `esc` does
+/// not send one, which firing on raw finger-down would.
+final class TerminalKeyBarView: UIView, UIScrollViewDelegate {
     /// A logical key press, already control-modified if the sticky modifier
     /// was armed. The caller encodes it through the surface.
-    let onKey: (TerminalKey) -> Void
-    let onDismiss: () -> Void
+    private let onKey: (TerminalKey) -> Void
+    private let onDismiss: () -> Void
     /// The sticky modifier's state, held outside the view.
     ///
     /// It lives in a reference type because the *surface* also resets it: a
@@ -65,87 +78,186 @@ struct TerminalKeyBar: View {
     /// The space budget, as numbers rather than as an intention. One row is
     /// the whole allowance: a second would be a third of the visible terminal
     /// on a small phone.
-    private enum Metrics {
+    fileprivate enum Metrics {
         static let barHeight: CGFloat = 34
         static let keyHeight: CGFloat = 28
         static let keyPadding: CGFloat = 10
         static let spacing: CGFloat = 6
-        static let font = Font.system(size: 13, weight: .medium, design: .monospaced)
+        static let dismissWidth: CGFloat = 40
+        /// How far the row fades out at an edge that has more keys past it.
+        /// Narrow enough that `→` stays whole on a 375 pt phone.
+        static let fadeWidth: CGFloat = 18
+        static let font = UIFont.monospacedSystemFont(ofSize: 13, weight: .medium)
+
+        static let repeatDelay: TimeInterval = 0.4
+        static let repeatInterval: TimeInterval = 0.06
+        static let longPressDuration: TimeInterval = 0.5
     }
 
-    var body: some View {
-        HStack(spacing: 0) {
-            // The whole row scrolls, with no leading pinned group: pinning both
-            // ends would cost ~90 pt of scrollable width to save one swipe.
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: Metrics.spacing) {
-                    // `esc  ctrl  tab  ← ↓ ↑ →  ⌃C  …`. `ctrl` is built
-                    // separately from the rest because it is a modifier with
-                    // its own state, not an entry in the key table.
-                    cap(Self.escape)
-                    controlCap
-                    ForEach(Self.keys) { entry in
-                        cap(entry)
-                    }
-                }
-                .padding(.horizontal, Metrics.spacing)
-            }
+    private let scrollView = KeyBarScrollView()
+    private let fadeContainer = UIView()
+    private let fadeMask = CAGradientLayer()
+    private let controlCap = KeyCapButton(glyph: "ctrl")
+    private let haptics = UIImpactFeedbackGenerator(style: .light)
+    private var repeatTimer: Timer?
 
-            // Pinned to the trailing edge so it never scrolls away: a user
-            // reading output gets the whole screen back, and a tap on the
-            // terminal brings the keyboard and this row back together.
-            Divider()
-            Button(action: onDismiss) {
-                Image(systemName: "keyboard.chevron.compact.down")
-                    .font(.system(size: 15, weight: .medium))
-                    .frame(width: 40, height: Metrics.barHeight)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Hide keyboard")
-        }
-        .frame(height: Metrics.barHeight)
-        .background(.bar)
+    init(
+        state: TerminalKeyBarState,
+        onKey: @escaping (TerminalKey) -> Void,
+        onDismiss: @escaping () -> Void
+    ) {
+        self.state = state
+        self.onKey = onKey
+        self.onDismiss = onDismiss
+        super.init(frame: .zero)
+        build()
+        observeControl()
     }
 
-    private func cap(_ entry: Entry) -> some View {
-        KeyCap(
-            glyph: entry.glyph,
-            font: Metrics.font,
-            height: Metrics.keyHeight,
-            padding: Metrics.keyPadding,
-            isOn: false,
-            repeats: entry.repeats,
-            action: { press(entry.key) }
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("not from a nib") }
+
+    deinit { repeatTimer?.invalidate() }
+
+    // MARK: - Layout
+
+    private func build() {
+        let background = UIVisualEffectView(effect: UIBlurEffect(style: .systemChromeMaterial))
+
+        scrollView.showsHorizontalScrollIndicator = false
+        scrollView.showsVerticalScrollIndicator = false
+        scrollView.alwaysBounceHorizontal = true
+        scrollView.alwaysBounceVertical = false
+        scrollView.delaysContentTouches = true
+        scrollView.canCancelContentTouches = true
+        scrollView.scrollsToTop = false
+        scrollView.delegate = self
+
+        // `esc  ctrl  tab  ← ↓ ↑ →  ⌃C  …`. `ctrl` is built separately from
+        // the rest because it is a modifier with its own state, not an entry in
+        // the key table.
+        let row = UIStackView(arrangedSubviews: [cap(Self.escape), controlCap] + Self.keys.map(cap))
+        row.axis = .horizontal
+        row.alignment = .center
+        row.spacing = Metrics.spacing
+        // The order is a layout, not reading-order text: `←` stays on the left.
+        row.semanticContentAttribute = .forceLeftToRight
+        configureControlCap()
+
+        // The whole row scrolls, with no leading pinned group: pinning both
+        // ends would cost ~90 pt of scrollable width to save one swipe.
+        fadeContainer.layer.mask = fadeMask
+        fadeMask.startPoint = CGPoint(x: 0, y: 0.5)
+        fadeMask.endPoint = CGPoint(x: 1, y: 0.5)
+
+        // Pinned to the trailing edge so it never scrolls away: a user reading
+        // output gets the whole screen back, and a tap on the terminal brings
+        // the keyboard and this row back together.
+        let divider = UIView()
+        divider.backgroundColor = .separator
+        let dismiss = UIButton(type: .system)
+        dismiss.setImage(
+            UIImage(
+                systemName: "keyboard.chevron.compact.down",
+                withConfiguration: UIImage.SymbolConfiguration(pointSize: 15, weight: .medium)
+            ),
+            for: .normal
         )
-    }
+        dismiss.tintColor = .label
+        dismiss.accessibilityLabel = "Hide keyboard"
+        dismiss.addAction(UIAction { [weak self] _ in self?.onDismiss() }, for: .touchUpInside)
 
-    // MARK: - The sticky modifier
-
-    /// `ctrl` is a modifier rather than a key so the bar needs one `⌃` and not
-    /// a control variant of every letter. Tap arms it for the next press;
-    /// long-press locks it until tapped again.
-    private var controlCap: some View {
-        KeyCap(
-            glyph: "ctrl",
-            font: Metrics.font,
-            height: Metrics.keyHeight,
-            padding: Metrics.keyPadding,
-            isOn: state.control.isOn,
-            repeats: false,
-            longPressDuration: 0.5,
-            action: { state.setControl(state.control.isOn ? .off : .armed) },
-            onLongPress: { state.setControl(state.control == .locked ? .off : .locked) }
-        )
-        .accessibilityLabel("Control")
-        .accessibilityValue(accessibilityValueForControl)
-    }
-
-    private var accessibilityValueForControl: String {
-        switch state.control {
-        case .off: "off"
-        case .armed: "armed for the next key"
-        case .locked: "locked"
+        for view in [background, fadeContainer, scrollView, row, divider, dismiss] as [UIView] {
+            view.translatesAutoresizingMaskIntoConstraints = false
         }
+        addSubview(background)
+        addSubview(fadeContainer)
+        fadeContainer.addSubview(scrollView)
+        scrollView.addSubview(row)
+        addSubview(divider)
+        addSubview(dismiss)
+
+        let content = scrollView.contentLayoutGuide
+        let frame = scrollView.frameLayoutGuide
+        NSLayoutConstraint.activate([
+            background.leadingAnchor.constraint(equalTo: leadingAnchor),
+            background.trailingAnchor.constraint(equalTo: trailingAnchor),
+            background.topAnchor.constraint(equalTo: topAnchor),
+            background.bottomAnchor.constraint(equalTo: bottomAnchor),
+
+            fadeContainer.leadingAnchor.constraint(equalTo: leadingAnchor),
+            fadeContainer.topAnchor.constraint(equalTo: topAnchor),
+            fadeContainer.bottomAnchor.constraint(equalTo: bottomAnchor),
+            fadeContainer.trailingAnchor.constraint(equalTo: divider.leadingAnchor),
+
+            scrollView.leadingAnchor.constraint(equalTo: fadeContainer.leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: fadeContainer.trailingAnchor),
+            scrollView.topAnchor.constraint(equalTo: fadeContainer.topAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: fadeContainer.bottomAnchor),
+
+            row.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: Metrics.spacing),
+            row.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -Metrics.spacing),
+            row.topAnchor.constraint(equalTo: content.topAnchor),
+            row.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+            row.heightAnchor.constraint(equalTo: frame.heightAnchor),
+
+            divider.topAnchor.constraint(equalTo: topAnchor),
+            divider.bottomAnchor.constraint(equalTo: bottomAnchor),
+            divider.widthAnchor.constraint(equalToConstant: 1 / max(traitCollection.displayScale, 1)),
+            divider.trailingAnchor.constraint(equalTo: dismiss.leadingAnchor),
+
+            dismiss.topAnchor.constraint(equalTo: topAnchor),
+            dismiss.bottomAnchor.constraint(equalTo: bottomAnchor),
+            dismiss.trailingAnchor.constraint(equalTo: trailingAnchor),
+            dismiss.widthAnchor.constraint(equalToConstant: Metrics.dismissWidth),
+
+            heightAnchor.constraint(equalToConstant: Metrics.barHeight).withPriority(.defaultHigh)
+        ])
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        updateFades()
+    }
+
+    func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        updateFades()
+    }
+
+    /// Fades an edge only while there are keys past it, so a faded `⌃C` at
+    /// the trailing edge is what says the row goes on.
+    private func updateFades() {
+        let width = fadeContainer.bounds.width
+        guard width > 0 else { return }
+        let offset = scrollView.contentOffset.x
+        let maxOffset = scrollView.contentSize.width - scrollView.bounds.width
+        let opaque = UIColor.black.cgColor
+        let clear = UIColor.clear.cgColor
+        let edge = NSNumber(value: Double(min(Metrics.fadeWidth / width, 0.5)))
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        fadeMask.frame = fadeContainer.bounds
+        fadeMask.colors = [offset > 0.5 ? clear : opaque, opaque, opaque, offset < maxOffset - 0.5 ? clear : opaque]
+        fadeMask.locations = [0, edge, NSNumber(value: 1 - edge.doubleValue), 1]
+        CATransaction.commit()
+    }
+
+    // MARK: - Caps
+
+    /// Press-down rather than tap-up, and a light impact with it, because that
+    /// is what the system keyboard does and a terminal key that fires on
+    /// release feels broken next to it.
+    private func cap(_ entry: Entry) -> KeyCapButton {
+        let button = KeyCapButton(glyph: entry.glyph)
+        button.addAction(UIAction { [weak self] _ in
+            guard let self else { return }
+            haptic()
+            press(entry.key)
+            if entry.repeats { startRepeating(entry.key) }
+        }, for: .touchDown)
+        button.addAction(UIAction { [weak self] _ in self?.stopRepeating() }, for: [.touchUpInside, .touchUpOutside, .touchCancel])
+        return button
     }
 
     private func press(_ key: TerminalKey) {
@@ -156,10 +268,81 @@ struct TerminalKeyBar: View {
         if state.control == .armed { state.setControl(.off) }
     }
 
+    /// Only the arrows and pages repeat; see `Entry.repeats`. Timers run in the
+    /// common modes so a held arrow keeps going while UIKit is tracking.
+    private func startRepeating(_ key: TerminalKey) {
+        stopRepeating()
+        let delay = Timer(timeInterval: Metrics.repeatDelay, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            let interval = Timer(timeInterval: Metrics.repeatInterval, repeats: true) { [weak self] _ in
+                self?.press(key)
+            }
+            repeatTimer = interval
+            RunLoop.main.add(interval, forMode: .common)
+            press(key)
+        }
+        repeatTimer = delay
+        RunLoop.main.add(delay, forMode: .common)
+    }
+
+    private func stopRepeating() {
+        repeatTimer?.invalidate()
+        repeatTimer = nil
+    }
+
+    private func haptic() {
+        haptics.impactOccurred()
+        haptics.prepare()
+    }
+
+    // MARK: - The sticky modifier
+
+    /// `ctrl` is a modifier rather than a key so the bar needs one `⌃` and not
+    /// a control variant of every letter. Tap arms it for the next press;
+    /// long-press locks it until tapped again.
+    ///
+    /// It cannot fire on press-down like the other caps: it would act before
+    /// the user finished saying which they meant. The long-press recognizer
+    /// cancels the button's touch when it fires, so a lock never also toggles.
+    private func configureControlCap() {
+        controlCap.accessibilityLabel = "Control"
+        controlCap.addAction(UIAction { [weak self] _ in self?.haptic() }, for: .touchDown)
+        controlCap.addAction(UIAction { [weak self] _ in
+            guard let self else { return }
+            state.setControl(state.control.isOn ? .off : .armed)
+        }, for: .touchUpInside)
+
+        let longPress = UILongPressGestureRecognizer(target: self, action: #selector(controlLongPressed(_:)))
+        longPress.minimumPressDuration = Metrics.longPressDuration
+        longPress.cancelsTouchesInView = true
+        controlCap.addGestureRecognizer(longPress)
+    }
+
+    @objc private func controlLongPressed(_ recognizer: UILongPressGestureRecognizer) {
+        guard recognizer.state == .began else { return }
+        haptic()
+        state.setControl(state.control == .locked ? .off : .locked)
+    }
+
+    /// Repaints the cap whenever the modifier changes, from either side — the
+    /// cap, or the surface spending it on a system-keyboard letter.
+    private func observeControl() {
+        withObservationTracking {
+            let control = state.control
+            controlCap.isOn = control.isOn
+            controlCap.accessibilityValue = switch control {
+            case .off: "off"
+            case .armed: "armed for the next key"
+            case .locked: "locked"
+            }
+        } onChange: { [weak self] in
+            DispatchQueue.main.async { self?.observeControl() }
+        }
+    }
+
     // MARK: - The row
 
-    fileprivate struct Entry: Identifiable {
-        let id: Int
+    fileprivate struct Entry {
         let glyph: String
         let key: TerminalKey
         /// Only the arrows repeat: scrolling a long agent output one line per
@@ -178,14 +361,12 @@ struct TerminalKeyBar: View {
     /// keys the plan names are visible there with 39 pt to spare, and `⌃C` is
     /// the first key that costs a swipe. It stops costing one at 390 pt.
     /// The whole row is 1157 pt; nothing else is meant to be reachable without
-    /// scrolling.
-    fileprivate static let escape = Entry(id: -1, glyph: "esc", key: .escape, repeats: false)
+    /// scrolling. The 18 pt trailing fade sits inside those 39 pt.
+    fileprivate static let escape = Entry(glyph: "esc", key: .escape, repeats: false)
 
     fileprivate static let keys: [Entry] = {
-        var index = 0
         func entry(_ glyph: String, _ key: TerminalKey, repeats: Bool = false) -> Entry {
-            defer { index += 1 }
-            return Entry(id: index, glyph: glyph, key: key, repeats: repeats)
+            Entry(glyph: glyph, key: key, repeats: repeats)
         }
         return [
             entry("tab", .tab),
@@ -221,101 +402,56 @@ struct TerminalKeyBar: View {
     }()
 }
 
-/// One capsule.
+/// Lets a swipe that outlasts the touch delay still become a scroll.
 ///
-/// Press-down rather than tap-up, and a light impact with it, because that is
-/// what the system keyboard does and a terminal key that fires on release
-/// feels broken next to it.
-private struct KeyCap: View {
-    let glyph: String
-    let font: Font
-    let height: CGFloat
-    let padding: CGFloat
-    let isOn: Bool
-    let repeats: Bool
-    var longPressDuration: Double?
-    let action: () -> Void
-    var onLongPress: (() -> Void)?
+/// `UIScrollView` refuses to cancel a touch a `UIControl` already holds, so a
+/// finger that rested on a cap and then moved would be stuck on that cap. The
+/// cap has already sent its key by then; cancelling only stops its repeat.
+private final class KeyBarScrollView: UIScrollView {
+    override func touchesShouldCancel(in view: UIView) -> Bool { true }
+}
 
-    @State private var pressed = false
-    @State private var longPressFired = false
-    @State private var repeatTask: Task<Void, Never>?
-    @State private var longPressTask: Task<Void, Never>?
+/// One capsule.
+private final class KeyCapButton: UIButton {
+    typealias Metrics = TerminalKeyBarView.Metrics
 
-    private static let repeatDelay = Duration.milliseconds(400)
-    private static let repeatInterval = Duration.milliseconds(60)
-
-    var body: some View {
-        Text(glyph)
-            .font(font)
-            .foregroundStyle(isOn ? Color.white : Color.primary)
-            .padding(.horizontal, padding)
-            .frame(height: height)
-            .background(
-                Capsule().fill(
-                    isOn
-                        ? AnyShapeStyle(Color.accentColor)
-                        : AnyShapeStyle(pressed ? .quaternary : .quinary)
-                )
-            )
-            .contentShape(Capsule())
-            // A zero-distance drag rather than a tap: a tap gesture cannot tell
-            // us when the finger went down, and both the haptic and the repeat
-            // timer start there.
-            .gesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { _ in begin() }
-                    .onEnded { _ in end() }
-            )
-            .accessibilityAddTraits(.isButton)
-            .accessibilityLabel(glyph)
+    /// Lit: the sticky modifier is armed or locked.
+    var isOn = false {
+        didSet { if isOn != oldValue { setNeedsUpdateConfiguration() } }
     }
 
-    private func begin() {
-        guard !pressed else { return }
-        pressed = true
-        longPressFired = false
-        haptic()
-
-        if let longPressDuration, onLongPress != nil {
-            // A key with a long-press meaning cannot also fire on press-down;
-            // it would emit before the user finished saying which they meant.
-            longPressTask = Task { @MainActor in
-                try? await Task.sleep(for: .seconds(longPressDuration))
-                guard !Task.isCancelled else { return }
-                longPressFired = true
-                haptic()
-                onLongPress?()
-            }
-        } else {
-            action()
-            if repeats { startRepeating() }
+    init(glyph: String) {
+        super.init(frame: .zero)
+        var config = UIButton.Configuration.plain()
+        config.attributedTitle = AttributedString(glyph, attributes: AttributeContainer([.font: Metrics.font]))
+        config.contentInsets = NSDirectionalEdgeInsets(
+            top: 0, leading: Metrics.keyPadding, bottom: 0, trailing: Metrics.keyPadding
+        )
+        config.titlePadding = 0
+        config.cornerStyle = .capsule
+        configuration = config
+        configurationUpdateHandler = { button in
+            guard let cap = button as? KeyCapButton, var config = cap.configuration else { return }
+            config.baseForegroundColor = cap.isOn ? .white : .label
+            config.background.backgroundColor = cap.isOn
+                ? cap.tintColor
+                : (cap.isHighlighted ? .systemFill : .tertiarySystemFill)
+            cap.configuration = config
         }
+        heightAnchor.constraint(equalToConstant: Metrics.keyHeight).isActive = true
+        setContentCompressionResistancePriority(.required, for: .horizontal)
+        setContentHuggingPriority(.required, for: .horizontal)
+        accessibilityLabel = glyph
     }
 
-    private func end() {
-        pressed = false
-        repeatTask?.cancel()
-        repeatTask = nil
-        longPressTask?.cancel()
-        longPressTask = nil
-        if longPressDuration != nil, onLongPress != nil, !longPressFired {
-            action()
-        }
-    }
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("not from a nib") }
+}
 
-    private func startRepeating() {
-        repeatTask = Task { @MainActor in
-            try? await Task.sleep(for: Self.repeatDelay)
-            while !Task.isCancelled {
-                action()
-                try? await Task.sleep(for: Self.repeatInterval)
-            }
-        }
-    }
-
-    private func haptic() {
-        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+private extension NSLayoutConstraint {
+    func withPriority(_ priority: UILayoutPriority) -> NSLayoutConstraint {
+        self.priority = priority
+        return self
     }
 }
 
@@ -325,18 +461,17 @@ private struct KeyCap: View {
 /// Phase 5 hands this to SwiftTerm's iOS view, replacing the accessory toolbar
 /// that ships with it.
 final class TerminalKeyBarAccessory: UIInputView {
-    private let host: UIHostingController<TerminalKeyBar>
+    private let bar: TerminalKeyBarView
 
     /// The sticky modifier, reachable from the surface that has to reset it.
-    let state: TerminalKeyBarState
+    var state: TerminalKeyBarState { bar.state }
 
     init(
         state: TerminalKeyBarState = TerminalKeyBarState(),
         onKey: @escaping (TerminalKey) -> Void,
         onDismiss: @escaping () -> Void
     ) {
-        self.state = state
-        host = UIHostingController(rootView: TerminalKeyBar(onKey: onKey, onDismiss: onDismiss, state: state))
+        bar = TerminalKeyBarView(state: state, onKey: onKey, onDismiss: onDismiss)
         super.init(
             frame: CGRect(x: 0, y: 0, width: UIScreen.main.bounds.width, height: Self.height),
             inputViewStyle: .keyboard
@@ -349,10 +484,10 @@ final class TerminalKeyBarAccessory: UIInputView {
         allowsSelfSizing = true
         autoresizingMask = .flexibleWidth
 
-        host.view.backgroundColor = .clear
-        host.view.frame = bounds
-        host.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        addSubview(host.view)
+        bar.translatesAutoresizingMaskIntoConstraints = true
+        bar.frame = bounds
+        bar.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        addSubview(bar)
     }
 
     /// The bar is exactly one row tall, whatever the keyboard is doing.
@@ -360,10 +495,22 @@ final class TerminalKeyBarAccessory: UIInputView {
         CGSize(width: UIView.noIntrinsicMetric, height: Self.height)
     }
 
-    static let height: CGFloat = 34
+    static let height: CGFloat = TerminalKeyBarView.Metrics.barHeight
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("not from a nib") }
+}
+
+/// The bar in a SwiftUI canvas.
+private struct TerminalKeyBarPreview: UIViewRepresentable {
+    let state: TerminalKeyBarState
+    let onKey: (TerminalKey) -> Void
+
+    func makeUIView(context: Context) -> TerminalKeyBarView {
+        TerminalKeyBarView(state: state, onKey: onKey, onDismiss: {})
+    }
+
+    func updateUIView(_ uiView: TerminalKeyBarView, context: Context) {}
 }
 
 #Preview {
@@ -372,10 +519,7 @@ final class TerminalKeyBarAccessory: UIInputView {
     state.onControlChange = { surface.setControlModifier($0) }
     return VStack(spacing: 0) {
         StubTerminalSurfaceView(surface: surface)
-        TerminalKeyBar(
-            onKey: { surface.onInput(ArraySlice(surface.encode($0))) },
-            onDismiss: {},
-            state: state
-        )
+        TerminalKeyBarPreview(state: state, onKey: { surface.onInput(ArraySlice(surface.encode($0))) })
+            .frame(height: TerminalKeyBarAccessory.height)
     }
 }

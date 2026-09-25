@@ -31,7 +31,8 @@
         "conversation": { "type": "boolean" },
         "browseDirectories": { "type": "boolean", "description": "Browse canonical host directories at the control grant. Absence means unavailable." },
         "createSession": { "type": "boolean", "description": "Create a standard host shell at the control grant. Absence means unavailable." },
-        "stopSession": { "type": "boolean", "description": "Stop one running session at the control grant. Absence means unavailable." }
+        "stopSession": { "type": "boolean", "description": "Stop one running session at the control grant. Absence means unavailable." },
+        "attachments": { "type": "boolean", "description": "Upload one file into the session's working directory at the interact grant, so a message can reference it by path. Absence means unavailable." }
       },
       "additionalProperties": false
     },
@@ -45,6 +46,11 @@
           "items": { "type": "string", "enum": ["claude", "codex"] },
           "uniqueItems": true,
           "description": "Hosted agent kinds the create route accepts in its `agent` field. Absence means the gateway creates standard shells only. Whether the agent is actually installed is answered at creation time, not here."
+        },
+        "attachmentMaxBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Largest file body the attachments route accepts, in bytes. Present exactly when `endpoints.attachments` is true."
         }
       },
       "additionalProperties": false

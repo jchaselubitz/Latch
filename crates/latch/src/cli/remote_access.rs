@@ -693,8 +693,8 @@ where
         }
         initial.extend_from_slice(&bytes[..read]);
     }
-    let required_len = complete_initial_request_len(&initial)?;
-    while initial.len() < required_len {
+    let framing = request_framing(&initial)?;
+    while initial.len() < framing.buffered {
         if initial.len() >= MAX_INITIAL_REQUEST {
             bail!("initial request exceeds limit");
         }
@@ -705,6 +705,12 @@ where
         }
         initial.extend_from_slice(&bytes[..read]);
     }
+    // The body bytes a streamed route still owes, relayed after authorization.
+    // `authorize_and_inject` refuses a buffer longer than the declared request,
+    // so this cannot underflow once it has succeeded.
+    let streamed_remaining = framing
+        .streamed
+        .then(|| framing.total.saturating_sub(initial.len()) as u64);
     let (initial, required) =
         authorize_and_inject(initial, device.permission, &device.device_id, gateway_token)?;
     let gateway = TcpStream::connect(gateway_addr)
@@ -727,7 +733,21 @@ where
         Ok::<(), anyhow::Error>(())
     });
     let mut inbound = tokio::spawn(async move {
-        tokio::io::copy(&mut remote_reader, &mut gateway_writer).await?;
+        if let Some(remaining) = streamed_remaining {
+            let copied = tokio::io::copy(
+                &mut (&mut remote_reader).take(remaining),
+                &mut gateway_writer,
+            )
+            .await?;
+            if copied != remaining {
+                bail!("Remote Link stream closed during a streamed request body");
+            }
+            // Nothing after the declared body reaches the gateway. A second
+            // request riding the same stream would never have been authorized.
+            tokio::io::copy(&mut remote_reader, &mut tokio::io::sink()).await?;
+        } else {
+            tokio::io::copy(&mut remote_reader, &mut gateway_writer).await?;
+        }
         gateway_writer.shutdown().await?;
         Ok::<(), anyhow::Error>(())
     });
@@ -849,12 +869,23 @@ fn authorize_and_inject(
         websocket_upgrade |= name.eq_ignore_ascii_case("upgrade")
             && value.trim_ascii().eq_ignore_ascii_case(b"websocket");
     }
-    let required_len = complete_initial_request_len(&request)?;
-    if required_len != request.len() {
+    let framing = request_framing(&request)?;
+    if request.len() > framing.total {
         bail!("HTTP pipelining is not permitted through Remote Link");
     }
-    let (_, required) = route_for(method, target)
+    if request.len() < framing.buffered {
+        bail!("incomplete HTTP request");
+    }
+    let (spec, required) = route_for(method, target)
         .ok_or_else(|| anyhow!("HTTP operation is not permitted through Remote Link"))?;
+    // The framing was chosen from a plain split of the request line before
+    // httparse saw it. Both readings must name the same kind of route, or a
+    // request could be buffered as one and authorized as the other.
+    if spec.streamed_body_limit.is_some() != framing.streamed
+        || (framing.streamed && websocket_upgrade)
+    {
+        bail!("request framing does not match its route");
+    }
     if !permission.permits(required) {
         bail!("device permission does not allow this operation");
     }
@@ -892,7 +923,27 @@ fn authorize_and_inject(
     Ok((injected, required))
 }
 
-fn complete_initial_request_len(request: &[u8]) -> anyhow::Result<usize> {
+/// How much of one request the proxy holds before authorizing it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RequestFraming {
+    /// Headers plus the whole declared body.
+    total: usize,
+    /// Bytes buffered before authorization: the whole request for an ordinary
+    /// route, the headers alone for a streamed one.
+    buffered: usize,
+    /// Whether the body is relayed after authorization rather than buffered.
+    streamed: bool,
+}
+
+/// Frames one request from its headers.
+///
+/// Every route but one carries a small JSON body, and the proxy buffers the
+/// whole request under `MAX_INITIAL_REQUEST` so it is inspected before a byte
+/// reaches the gateway. A route with a `streamed_body_limit` carries a file:
+/// its headers are inspected the same way, it must declare a
+/// `Content-Length` within that limit, and exactly that many body bytes are
+/// relayed afterwards.
+fn request_framing(request: &[u8]) -> anyhow::Result<RequestFraming> {
     let header_end = request
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
@@ -913,11 +964,37 @@ fn complete_initial_request_len(request: &[u8]) -> anyhow::Result<usize> {
     if lengths.len() > 1 {
         bail!("multiple Content-Length headers are not permitted");
     }
-    let total = header_end + 4 + lengths.first().copied().unwrap_or(0);
+    let header_len = header_end + 4;
+    if let Some(limit) = streamed_body_limit(headers) {
+        let Some(&body) = lengths.first() else {
+            bail!("a streamed request must declare its Content-Length");
+        };
+        if body as u64 > limit {
+            bail!("request body exceeds the route's limit");
+        }
+        return Ok(RequestFraming {
+            total: header_len + body,
+            buffered: header_len,
+            streamed: true,
+        });
+    }
+    let total = header_len + lengths.first().copied().unwrap_or(0);
     if total > MAX_INITIAL_REQUEST {
         bail!("initial request exceeds limit");
     }
-    Ok(total)
+    Ok(RequestFraming {
+        total,
+        buffered: total,
+        streamed: false,
+    })
+}
+
+/// The body allowance of the route a request line names, if it streams one.
+fn streamed_body_limit(headers: &str) -> Option<u64> {
+    let request_line = headers.split("\r\n").next()?;
+    let mut parts = request_line.split(' ');
+    let (method, target) = (parts.next()?, parts.next()?);
+    route_for(method, target)?.0.streamed_body_limit
 }
 
 async fn wait_readiness(path: &Path) -> anyhow::Result<Readiness> {
@@ -1343,6 +1420,125 @@ mod tests {
             .unwrap()
             .to_ascii_lowercase()
             .contains("x-latch-device-grant: control"));
+    }
+
+    /// The attachments route is the one route whose body is not buffered.
+    /// Its headers still pass through every check above, it is still gated by
+    /// the route table's grant, and its body is bounded by what it declares.
+    #[test]
+    fn streamed_attachment_requests_are_authorized_from_their_headers() {
+        let upload = |length: &str, body: &[u8]| {
+            let mut request = format!(
+                "POST /v2/sessions/ses_1/attachments?name=a.png HTTP/1.1\r\nHost: latch\r\n{length}\r\n"
+            )
+            .into_bytes();
+            request.extend_from_slice(body);
+            request
+        };
+        // A large declared body is framed as headers-only, not refused under
+        // the 32 KiB whole-request bound.
+        let framing = request_framing(&upload("Content-Length: 1048576\r\n", b"")).unwrap();
+        assert!(framing.streamed);
+        assert_eq!(framing.buffered + 1_048_576, framing.total);
+
+        let (injected, required) = authorize_and_inject(
+            upload("Content-Length: 1048576\r\n", b"first-bytes"),
+            DevicePermission::Interact,
+            "phone-local-id",
+            "internal-token",
+        )
+        .unwrap();
+        assert_eq!(required, DevicePermission::Interact);
+        assert!(injected.ends_with(b"\r\n\r\nfirst-bytes"));
+
+        // An observing phone may not place files, whatever it declares.
+        assert!(authorize_and_inject(
+            upload("Content-Length: 1\r\n", b"x"),
+            DevicePermission::Observe,
+            "phone-local-id",
+            "internal-token",
+        )
+        .is_err());
+        // No length, a length over the route's limit, or bytes past the
+        // declared body are all refused before the gateway sees anything.
+        let over = format!(
+            "Content-Length: {}\r\n",
+            crate::cli::serve::routes::ATTACHMENT_MAX_BYTES + 1
+        );
+        for request in [
+            upload("", b""),
+            upload(&over, b""),
+            upload(
+                "Content-Length: 2\r\n",
+                b"abcGET /v2/sessions HTTP/1.1\r\n\r\n",
+            ),
+        ] {
+            assert!(authorize_and_inject(
+                request,
+                DevicePermission::Control,
+                "phone-local-id",
+                "internal-token",
+            )
+            .is_err());
+        }
+        // Every other route keeps the whole-request bound.
+        let big = format!(
+            "POST /v2/sessions HTTP/1.1\r\nContent-Length: {}\r\n\r\n",
+            MAX_INITIAL_REQUEST
+        );
+        assert!(request_framing(big.as_bytes()).is_err());
+    }
+
+    /// End to end through the proxy: the gateway receives the declared body
+    /// in full and not one byte after it.
+    #[tokio::test]
+    async fn a_streamed_body_is_relayed_exactly_and_nothing_follows_it() {
+        let (_directory, home, key) = enrolled_home(DevicePermission::Interact);
+        let gateway = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = gateway.local_addr().unwrap();
+        let body = vec![b'z'; 200_000];
+        let expected = body.clone();
+        let gateway_seen = tokio::spawn(async move {
+            let (mut stream, _) = gateway.accept().await.unwrap();
+            let mut received = Vec::new();
+            stream.read_to_end(&mut received).await.unwrap();
+            let split = received
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+                .unwrap();
+            let headers = String::from_utf8_lossy(&received[..split]).to_ascii_lowercase();
+            assert!(headers.contains("x-latch-device-grant: interact"));
+            assert_eq!(&received[split + 4..], expected.as_slice());
+        });
+        let (mut client, server) = tokio::io::duplex(64 * 1024);
+        let proxy = tokio::spawn(async move {
+            proxy_authenticated_stream(
+                server,
+                &Paths::new(&home),
+                &key,
+                1,
+                "internal-token",
+                address,
+                &Arc::new(AtomicUsize::new(0)),
+            )
+            .await
+        });
+        let mut request = format!(
+            "POST /v2/sessions/ses_1/attachments?name=z.bin HTTP/1.1\r\nHost: latch\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        request.extend_from_slice(&body);
+        // A second request smuggled after the body must never arrive.
+        request.extend_from_slice(b"POST /v2/sessions/ses_1/stop HTTP/1.1\r\n\r\n");
+        client.write_all(&request).await.unwrap();
+        client.shutdown().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), gateway_seen)
+            .await
+            .expect("gateway never saw the body end")
+            .unwrap();
+        drop(client);
+        let _ = tokio::time::timeout(Duration::from_secs(2), proxy).await;
     }
 
     #[test]

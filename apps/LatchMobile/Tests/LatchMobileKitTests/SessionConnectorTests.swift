@@ -55,4 +55,12 @@ final class SessionConnectorTests: XCTestCase {
         let report = try JSONDecoder().decode(ListReport.self, from: Data(json.utf8))
         XCTAssertEqual(report.sessions.map(\.connector), [.none, .named("claude")])
     }
+
+    func testTheComposerPlaceholderNamesTheAgentOrAsksAShellForACommand() {
+        XCTAssertEqual(SessionConnector.named("claude").composerPlaceholder, "Message Claude Code")
+        XCTAssertEqual(SessionConnector.named("codex").composerPlaceholder, "Message Codex")
+        XCTAssertEqual(SessionConnector.none.composerPlaceholder, "Type a command")
+        XCTAssertEqual(SessionConnector.unknown.composerPlaceholder, "Message")
+        XCTAssertEqual(SessionConnector.named("gemini").composerPlaceholder, "Message gemini")
+    }
 }

@@ -20,6 +20,24 @@
 	<string>0.1.0</string>
 	<key>CFBundleVersion</key>
 	<string>1</string>
+	<!--
+	  `latch://sessions/<id>` opens one session on the paired Mac. Overlord
+	  Mobile links a mission's live terminal session here. The link carries
+	  only a session id; see SessionDeepLink.
+	-->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>dev.cooperativ.latch.mobile</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>latch</string>
+			</array>
+		</dict>
+	</array>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>UILaunchScreen</key>
@@ -50,11 +68,12 @@
 		<true/>
 	</dict>
 	<!--
-	  The camera is used for exactly one thing: reading the short-lived pairing
-	  code your Mac displays. Nothing is recorded, kept, or sent anywhere.
+	  The camera is used for two things: reading the short-lived pairing code
+	  your Mac displays, and taking a photo the person chooses to attach to a
+	  message. A photo goes only to the paired Mac, into that session's folder.
 	-->
 	<key>NSCameraUsageDescription</key>
-	<string>Latch uses the camera to scan the pairing code shown on your Mac.</string>
+	<string>Latch uses the camera to scan the pairing code shown on your Mac, and to take photos you choose to send to a session on it.</string>
 	<!--
 	  The paired LAN route browses for the authenticated listener published by
 	  Latch Desktop. iOS requires every Bonjour type an app browses for to be

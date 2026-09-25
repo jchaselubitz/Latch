@@ -1,5 +1,5 @@
 // Generated from schemas/remote-access/v2/*.schema.json; do not edit by hand.
-// Canonical schema set SHA-256: d5efabb3331ad7f5148b34aef3aacf571f30d7c3bd9345587bc550bcfa71448d
+// Canonical schema set SHA-256: 9f94c11e814da0e39c4aa89cfa5276a5c1dcd9cee0a5c0c9a7bbfeae974be75c
 
 
 export type TerminalCloseReason =
@@ -20,8 +20,13 @@ export const TERMINAL_CLOSE_CODES = {
 export type SessionAgent = 'claude' | 'codex';
 export type CreateSessionRequest = { requestId: string; cwd: string; agent?: SessionAgent };
 /** `sessionAgents` is absent on a gateway that predates agent creation; read
- * that as shells only. */
-export type GatewayFeatures = { exclusiveTerminal: boolean; sessionAgents?: SessionAgent[] };
+ * that as shells only. `attachmentMaxBytes` is present exactly when the
+ * gateway serves the attachments route. */
+export type GatewayFeatures = {
+  exclusiveTerminal: boolean;
+  sessionAgents?: SessionAgent[];
+  attachmentMaxBytes?: number;
+};
 export type GatewayReadiness = {
   formatVersion: 2;
   address: string;
@@ -39,5 +44,6 @@ export type GatewayEndpoints = {
   browseDirectories?: boolean;
   createSession?: boolean;
   stopSession?: boolean;
+  attachments?: boolean;
 };
-export type GatewayEndpointName = 'sessions' | 'preview' | 'terminal' | 'conversation' | 'browseDirectories' | 'createSession' | 'stopSession';
+export type GatewayEndpointName = 'sessions' | 'preview' | 'terminal' | 'conversation' | 'browseDirectories' | 'createSession' | 'stopSession' | 'attachments';

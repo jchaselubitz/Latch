@@ -155,8 +155,35 @@ enum ConversationPreviewFixtures {
 /// A stand-alone screen for one state, with its own draft and focus.
 private struct ConversationStatePreview: View {
     let viewState: ConversationViewState
-    @State private var draft = "Half-written follow-up kept across states"
+    var attachmentPhase: ConversationAttachmentPhase?
+    @State private var draft: String
+    @State private var attachments: [ConversationAttachment]
     @FocusState private var focused: Bool
+
+    init(
+        viewState: ConversationViewState,
+        draft: String = "Half-written follow-up kept across states",
+        attachmentPhase: ConversationAttachmentPhase? = nil
+    ) {
+        self.viewState = viewState
+        self.attachmentPhase = attachmentPhase
+        _draft = State(initialValue: draft)
+        _attachments = State(initialValue: attachmentPhase == nil ? [] : [
+            ConversationAttachment(name: "screenshot.png", data: Data(count: 4), kind: .image),
+            ConversationAttachment(name: "crash-report.txt", data: Data(count: 4), kind: .file),
+        ])
+    }
+
+    /// Attachment items appear in the "+" menu; the chips appear only in the
+    /// states that pass a phase.
+    private var attachmentControls: ConversationAttachmentControls {
+        ConversationAttachmentControls(
+            items: attachments,
+            phase: attachmentPhase ?? .idle,
+            add: { attachments.append($0) },
+            remove: { id in attachments.removeAll { $0.id == id } }
+        )
+    }
 
     private var content: ConversationScreenContent {
         ConversationPreviewFixtures.content(viewState)
@@ -168,10 +195,26 @@ private struct ConversationStatePreview: View {
                 content: content,
                 actions: ConversationScreenActions(),
                 draft: $draft,
-                composerFocused: $focused
+                composerFocused: $focused,
+                // Chat components name no provider, previews included; the
+                // real placeholder comes from the session's connector.
+                placeholder: "Message the agent",
+                sessionActions: ConversationSessionActions(
+                    takeTerminal: {},
+                    sessionLink: SessionDeepLink.url(forSession: "ses_preview"),
+                    stop: {}
+                ),
+                attachments: attachmentControls
             )
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ConversationToolbar(title: "latch-mobile", statusLine: content.statusLine) }
+            .safeAreaInset(edge: .top, spacing: 0) {
+                SessionChromeBar(
+                    title: "latch-mobile",
+                    status: content.statusLine,
+                    statusIdentifier: "conversation.toolbar.status",
+                    showDetails: {}
+                )
+            }
+            .toolbar(.hidden, for: .navigationBar)
         }
     }
 }
@@ -179,6 +222,15 @@ private struct ConversationStatePreview: View {
 #Preview("Loading") { ConversationStatePreview(viewState: .loading) }
 #Preview("Empty") { ConversationStatePreview(viewState: .empty) }
 #Preview("Ready") { ConversationStatePreview(viewState: .ready) }
+#Preview("Ready, no draft") { ConversationStatePreview(viewState: .ready, draft: "") }
+#Preview("Attachments") { ConversationStatePreview(viewState: .ready, draft: "What does this crash mean?", attachmentPhase: .idle) }
+#Preview("Attachments uploading") { ConversationStatePreview(viewState: .ready, draft: "", attachmentPhase: .uploading) }
+#Preview("Attachment failed") {
+    ConversationStatePreview(
+        viewState: .ready,
+        attachmentPhase: .failed("The attachment did not reach your Mac. The connection was lost.")
+    )
+}
 #Preview("Working") { ConversationStatePreview(viewState: .working) }
 #Preview("Awaiting input") { ConversationStatePreview(viewState: .awaitingInput) }
 #Preview("Interrupted") { ConversationStatePreview(viewState: .interrupted) }

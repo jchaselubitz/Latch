@@ -10,6 +10,7 @@
 //! authenticates the device and injects the bearer on loopback. An SSH tunnel
 //! to the loopback bind is the other supported remote path.
 
+mod attachments;
 pub mod attention;
 mod auth;
 #[allow(dead_code)] // Phase 0 generates the full v2 wire surface before the Hub consumes it.

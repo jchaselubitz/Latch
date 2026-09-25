@@ -202,14 +202,41 @@ mid-tool. Those are agent states, not errors, and are explained as such.
 The send control changes to **Stop** only when the Hub has authoritative
 evidence of a cancellable live turn.
 
+### Attachments by workspace file handoff
+
+The mobile composer attaches files by **workspace file handoff**: the file is
+uploaded to the host, placed in the workspace, and referenced by path in the
+message the agent receives. The conversation channel itself carries no file
+bytes, and no connector changes.
+
+- The gateway serves `POST /v2/sessions/{id}/attachments?name=…` at the
+  interact grant — the composer's grant — and advertises it as
+  `endpoints.attachments` with its size limit in
+  `features.attachmentMaxBytes` (25 MB).
+- The body is the raw file, streamed to disk. It lands in the session's
+  recorded working directory under `.latch-attachments/`, which holds a
+  `.gitignore` so uploads stay out of the repository. The gateway chooses the
+  final name: the suggestion is reduced to `[A-Za-z0-9._-]` and made unique,
+  and the file is never written through a symlink or over an existing file.
+  The answer carries the absolute path.
+- The phone uploads every pending file first and sends the message only once
+  all of them have landed, with the paths appended as plain text
+  (`Attached file: /…/.latch-attachments/photo.jpg`). A failure at any step
+  sends nothing, returns the text to the draft, and keeps the files; files the
+  Mac already has are not uploaded again on retry.
+- Photos are sent as JPEG, reduced to 2048 px on the long edge, because agent
+  image tools read JPEG and not HEIC.
+- The "+" menu shows Photo library, Take photo (when the device has a camera),
+  and File only when the Mac advertises the route and the device holds the
+  interact grant.
+
 A future enhanced composer may also expose:
 
 - **dictation** on mobile, which is an OS keyboard capability and costs nothing;
+  and
 - **advertised agent commands**, where the connector publishes a bounded catalog
   of commands it knows the installed agent accepts, and the client sends one as
-  an ordinary message rather than emulating a menu; and
-- **workspace file handoff**, where a file is uploaded to the host, placed in
-  the workspace, and referenced by path in the message the agent receives.
+  an ordinary message rather than emulating a menu.
 
 These are the shapes that fit the architecture. Inline image attachments,
 `@`-completion backed by live workspace search, and a provider-neutral model or
@@ -412,7 +439,8 @@ recorded blocker and candidate alternatives in
 - **Multi-select answers** to an agent question.
 - **Free-text answers** to an agent question.
 - **Inline image or file attachments** sent into the agent as attachments.
-  Workspace file handoff by path is the shape that fits.
+  Workspace file handoff by path is the shape that fits, and is what the
+  mobile composer implements.
 - **A provider-neutral model or reasoning-option picker.** An advertised command
   catalog is the shape that fits.
 - **`@`-completion backed by live workspace search.**

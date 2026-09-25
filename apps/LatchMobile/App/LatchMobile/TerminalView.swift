@@ -26,9 +26,14 @@ struct TerminalView: View {
     @State private var pump: Task<Void, Never>?
     @State private var didOpen = false
     @State private var showStealBanner = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// Set when the device-owner check refused, so the footer can say why the
     /// terminal did not open instead of the button appearing to do nothing.
     @State private var unlockRefusal: String?
+    @State private var showingDetails = false
+    @State private var openingConversation = false
+    @State private var confirmingStop = false
+    @State private var explainingStopGrant = false
 
     private enum PreviewState {
         case loading
@@ -49,32 +54,34 @@ struct TerminalView: View {
                 .onAppear { report(viewport: proxy.size) }
                 .onChange(of: proxy.size) { _, size in report(viewport: size) }
         }
-        .navigationTitle(session.displayName)
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Button {
-                    Task { await loadPreview() }
-                } label: {
-                    Image(systemName: "arrow.clockwise")
-                }
-                .disabled(isAttached)
-                .accessibilityLabel("Refresh the still")
-            }
-            // The default presentation is a default, not a trap: a session that
-            // could be a conversation can still be opened as one from here,
-            // without changing the setting for every other session.
-            if chatPossible {
-                ToolbarItem(placement: .topBarTrailing) {
-                    NavigationLink {
-                        ChatView(session: session)
-                    } label: {
-                        Image(systemName: "bubble.left.and.bubble.right")
-                    }
-                    .accessibilityLabel("Open the conversation instead")
-                }
+        .background(Color.black.ignoresSafeArea())
+        // Floating chrome in place of the navigation bar, the same as chat's:
+        // back, a chip naming the session and who holds its terminal, and a
+        // menu for the rest.
+        .sessionChrome(
+            session: currentSession,
+            status: chromeStatus.label,
+            showingDetails: $showingDetails,
+            details: detailsActions
+        ) {
+            SessionChromeBar(
+                title: session.displayName,
+                status: chromeStatus.label,
+                style: .terminal,
+                statusIdentifier: "terminal.chrome.status",
+                showDetails: { showingDetails = true }
+            ) {
+                moreMenu
             }
         }
+        .navigationDestination(isPresented: $openingConversation) {
+            ChatView(session: session)
+        }
+        .sessionStopPrompts(
+            session: currentSession,
+            confirming: $confirmingStop,
+            explainingGrant: $explainingStopGrant
+        )
         .task {
             guard !didOpen else { return }
             didOpen = true
@@ -114,6 +121,84 @@ struct TerminalView: View {
                 surface.setFocus(false)
             }
         }
+    }
+
+    // MARK: - Chrome
+
+    /// The newest copy of this session the list has, so Stop disappears once
+    /// the Mac reports the session ended.
+    private var currentSession: SessionSummary {
+        model.sessions.first { $0.id == session.id } ?? session
+    }
+
+    private var chromeStatus: TerminalChromeStatus {
+        TerminalChromeStatus(state: terminal?.state)
+    }
+
+    private var stopRequest: (() -> Void)? {
+        model.stopRequest(
+            for: currentSession,
+            confirm: { confirmingStop = true },
+            explainGrant: { explainingStopGrant = true }
+        )
+    }
+
+    /// A detached terminal's details lead with taking it back; the attach is
+    /// the same deliberate steal the footer's button makes.
+    private var detailsActions: SessionDetailsActions {
+        var actions = SessionDetailsActions(
+            stop: stopRequest,
+            isStopping: model.stoppingSessionIDs.contains(session.id)
+        )
+        if chromeStatus.offersReattach {
+            actions.primaryTitle = terminal == nil ? "Attach" : "Reattach"
+            actions.primary = { Task { await reattach() } }
+        }
+        return actions
+    }
+
+    private var moreMenu: some View {
+        Menu {
+            Button {
+                Task { await loadPreview() }
+            } label: {
+                Label("Refresh still", systemImage: "arrow.clockwise")
+            }
+            .disabled(isAttached)
+            .accessibilityLabel("Refresh the still")
+            // The default presentation is a default, not a trap: a session
+            // that could be a conversation can still be opened as one from
+            // here, without changing the setting for every other session.
+            if chatPossible {
+                Button {
+                    openingConversation = true
+                } label: {
+                    Label("Open conversation", systemImage: "bubble.left.and.bubble.right")
+                }
+                .accessibilityLabel("Open the conversation instead")
+            }
+            if let link = SessionDeepLink.url(forSession: session.id) {
+                Button {
+                    UIPasteboard.general.url = link
+                } label: {
+                    Label("Copy session link", systemImage: "link")
+                }
+            }
+            if let stop = stopRequest {
+                Divider()
+                Button(role: .destructive, action: stop) {
+                    Label("Stop session", systemImage: "stop.circle")
+                }
+                .disabled(model.stoppingSessionIDs.contains(session.id))
+            }
+        } label: {
+            FloatingControl(systemImage: "ellipsis")
+                .foregroundStyle(.primary)
+        }
+        // A menu label otherwise takes the accent colour.
+        .tint(.primary)
+        .accessibilityLabel("More")
+        .accessibilityIdentifier("terminal.chrome.more")
     }
 
     // MARK: - Screen states
@@ -446,10 +531,12 @@ struct TerminalView: View {
     }
 
     private func flashStealBanner() {
-        withAnimation { showStealBanner = true }
+        // The banner slides in, or just appears with Reduce Motion on.
+        let animation: Animation? = reduceMotion ? nil : .default
+        withAnimation(animation) { showStealBanner = true }
         Task {
             try? await Task.sleep(for: .seconds(3))
-            withAnimation { showStealBanner = false }
+            withAnimation(animation) { showStealBanner = false }
         }
     }
 

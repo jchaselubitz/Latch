@@ -11,6 +11,19 @@ test to weaken.
 - The proxy parses and validates caller-controlled request fields, then writes
   a fresh request. Caller-supplied header bytes are never forwarded to the
   gateway; the proxy alone adds the bearer, grant, and device-id headers.
+- Every request is buffered whole, under the 32 KiB initial-request bound,
+  and inspected before a byte reaches the gateway — except a route whose
+  table entry declares a `streamed_body_limit`, which today is only
+  `POST /v2/sessions/{id}/attachments`. That request is authorized from its
+  headers alone, must declare a `Content-Length` within the limit, and the
+  proxy relays exactly that many body bytes; anything after them is
+  discarded, so a second request can never ride the stream unauthorized.
+- An attachment lands only under the session's recorded working directory,
+  in `.latch-attachments/`, under a gateway-chosen name reduced to
+  `[A-Za-z0-9._-]`. The folder and file are opened relative to a directory
+  descriptor with `O_NOFOLLOW`, the file with `O_EXCL`, so neither a planted
+  symlink nor an existing file redirects or overwrites the write. A body that
+  ends short, runs long, or is abandoned leaves no file behind.
 - `latch serve` binds only a loopback address. Its plaintext bearer boundary
   must never be exposed through an opt-in public listener.
 - Every upgraded relay WebSocket and its raw upgrade socket has an error
@@ -21,9 +34,10 @@ test to weaken.
 
 ## Named CI gate
 
-The `Remote Link security gate` workflow job runs the Rust CLI security target
-and proxy tests, relay tests whose names are tagged `containment`, and the
-Swift `RemoteAccessTests`, `UpdaterTests`, and `GatewayTransportTests` suites.
+The `Remote Link security gate` workflow job runs the Rust CLI security target,
+proxy tests, attachment route tests, relay tests whose names are tagged
+`containment`, and the Swift `RemoteAccessTests`, `UpdaterTests`, and
+`GatewayTransportTests` suites.
 Run the same component tests when changing their corresponding boundary.
 
 ## Dependency-audit baseline

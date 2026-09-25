@@ -18,6 +18,7 @@ use axum::{Json, Router};
 use serde::Serialize;
 use tokio::net::TcpListener;
 
+use super::attachments::{self, AttachmentError};
 use super::attention::AttentionWatcher;
 use super::auth::{
     load_token, origin_allowed, presented_token, selected_subprotocol, token_matches,
@@ -29,7 +30,8 @@ use super::contract::{
 use super::conversation::{self, ConversationConnect, ConversationQuery};
 use super::directory::{self, BrowseError};
 use super::routes::{
-    route_for, Grant, RouteId, RouteSpec, DEVICE_GRANT_HEADER, DEVICE_ID_HEADER, ROUTES,
+    route_for, Grant, RouteId, RouteSpec, ATTACHMENT_MAX_BYTES, DEVICE_GRANT_HEADER,
+    DEVICE_ID_HEADER, ROUTES,
 };
 use super::terminal::{self, ResumeRegistry, TerminalConnect, TerminalQuery};
 use super::ServeOptions;
@@ -198,6 +200,7 @@ fn register(router: Router<AppState>, spec: RouteSpec) -> Router<AppState> {
         RouteId::StopSession => router.route(spec.pattern, post(stop_session)),
         RouteId::Terminal => router.route(spec.pattern, get(terminal_ws)),
         RouteId::Conversation => router.route(spec.pattern, get(conversation_ws)),
+        RouteId::Attachments => router.route(spec.pattern, post(upload_attachment)),
     }
 }
 
@@ -379,6 +382,7 @@ struct GatewayEndpoints {
     browse_directories: bool,
     create_session: bool,
     stop_session: bool,
+    attachments: bool,
 }
 
 async fn gateway_capabilities(State(state): State<AppState>) -> Response {
@@ -392,10 +396,12 @@ async fn gateway_capabilities(State(state): State<AppState>) -> Response {
             browse_directories: true,
             create_session: true,
             stop_session: true,
+            attachments: true,
         },
         features: GatewayFeatures {
             exclusive_terminal: true,
             session_agents: SESSION_AGENTS.to_vec(),
+            attachment_max_bytes: Some(ATTACHMENT_MAX_BYTES),
         },
         gateway_instance_id: state.gateway_instance_id,
         operation_retention_seconds: OPERATION_RETENTION_SECONDS,
@@ -641,6 +647,160 @@ async fn stop_session(
     Ok(Json(report).into_response())
 }
 
+#[derive(serde::Deserialize)]
+struct AttachmentQuery {
+    /// Suggested file name. The gateway reduces it to a safe alphabet and
+    /// makes it unique; the receipt says what it actually chose.
+    name: Option<String>,
+}
+
+/// Places one uploaded file under the session's working directory.
+///
+/// The body is the file itself, streamed to disk as it arrives rather than
+/// held in memory. It must declare its length up front, within
+/// `ATTACHMENT_MAX_BYTES`, and deliver exactly that many bytes; anything else
+/// removes what was written. The directory is the one recorded for the
+/// session, never a path from the request.
+async fn upload_attachment(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<AttachmentQuery>,
+    headers: HeaderMap,
+    body: axum::body::Body,
+) -> Result<Response, ApiError> {
+    let declared = declared_attachment_length(&headers)?;
+    let home = state.home.clone();
+    let pending = tokio::task::spawn_blocking(move || -> Result<_, ApiError> {
+        let session = manage::resolve_existing(&home, &id).map_err(map_engine_error)?;
+        let metadata = crate::session::meta::read(&home.session(&session))
+            .map_err(|error| map_engine_error(error.into()))?;
+        attachments::create(&metadata.cwd, query.name.as_deref()).map_err(map_attachment_error)
+    })
+    .await
+    .map_err(|_| internal("upload attachment"))??;
+
+    // The pending file removes itself if this handler returns early or is
+    // dropped because the phone went away; only `commit` keeps it.
+    let file = pending
+        .file
+        .try_clone()
+        .map_err(|_| internal("upload attachment"))?;
+    let mut file = tokio::fs::File::from_std(file);
+    let written = stream_body(body, &mut file, declared).await?;
+    file.sync_all()
+        .await
+        .map_err(|_| internal("upload attachment"))?;
+    drop(file);
+    let receipt = pending.commit(written);
+    Ok((StatusCode::CREATED, Json(receipt)).into_response())
+}
+
+fn declared_attachment_length(headers: &HeaderMap) -> Result<u64, ApiError> {
+    let declared = headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or_else(|| {
+            ApiError::coded(
+                StatusCode::LENGTH_REQUIRED,
+                "invalid_request",
+                "an attachment must declare its length",
+            )
+        })?;
+    if declared == 0 {
+        return Err(ApiError::coded(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "an attachment cannot be empty",
+        ));
+    }
+    if declared > ATTACHMENT_MAX_BYTES {
+        return Err(attachment_too_large());
+    }
+    Ok(declared)
+}
+
+fn attachment_too_large() -> ApiError {
+    ApiError::coded(
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "attachment_too_large",
+        format!(
+            "attachments are limited to {} MB",
+            ATTACHMENT_MAX_BYTES / (1024 * 1024)
+        ),
+    )
+}
+
+/// Copies exactly `declared` bytes of `body` into `file`. More than declared
+/// is refused as soon as it arrives; fewer is refused at the end.
+async fn stream_body(
+    mut body: axum::body::Body,
+    file: &mut tokio::fs::File,
+    declared: u64,
+) -> Result<u64, ApiError> {
+    use axum::body::HttpBody;
+    use tokio::io::AsyncWriteExt;
+
+    let mut written = 0_u64;
+    while let Some(frame) =
+        std::future::poll_fn(|cx| std::pin::Pin::new(&mut body).poll_frame(cx)).await
+    {
+        let frame = frame.map_err(|_| {
+            ApiError::coded(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "the attachment upload was interrupted",
+            )
+        })?;
+        let Ok(data) = frame.into_data() else {
+            continue;
+        };
+        written += data.len() as u64;
+        if written > declared {
+            return Err(attachment_too_large());
+        }
+        file.write_all(&data)
+            .await
+            .map_err(|_| internal("upload attachment"))?;
+    }
+    if written != declared {
+        return Err(ApiError::coded(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "the attachment upload was interrupted",
+        ));
+    }
+    Ok(written)
+}
+
+fn map_attachment_error(error: AttachmentError) -> ApiError {
+    match error {
+        AttachmentError::WorkspaceUnavailable => ApiError::coded(
+            StatusCode::CONFLICT,
+            "workspace_unavailable",
+            "the session's folder is no longer available on this Mac",
+        ),
+        AttachmentError::UnsafeFolder => ApiError::coded(
+            StatusCode::CONFLICT,
+            "attachments_folder_unsafe",
+            "the attachments folder in this session's folder is not a plain folder",
+        ),
+        AttachmentError::NameExhausted => ApiError::coded(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "attachment_failed",
+            "the attachment could not be saved",
+        ),
+        AttachmentError::Io(error) => {
+            eprintln!("latch serve: attachment write failed: {error}");
+            ApiError::coded(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "attachment_failed",
+                "the attachment could not be saved",
+            )
+        }
+    }
+}
+
 /// Upper bound on the scrollback a preview will read, matching the number
 /// `DECISION_SCROLLBACK.md` chose for the same reason: past a screen or two of
 /// history nothing is being decided, and the payload is not free.
@@ -874,7 +1034,7 @@ mod tests {
 
     #[test]
     fn every_registered_handler_comes_from_the_shared_route_table() {
-        assert_eq!(ROUTES.len(), 9);
+        assert_eq!(ROUTES.len(), 10);
         let mut ids = ROUTES.iter().map(|route| route.id).collect::<Vec<_>>();
         ids.sort_by_key(|id| *id as u8);
         ids.dedup();
@@ -905,6 +1065,7 @@ mod tests {
             browse_directories: true,
             create_session: true,
             stop_session: true,
+            attachments: true,
         })
         .unwrap();
         assert_eq!(value["browseDirectories"], true);
@@ -919,6 +1080,7 @@ mod tests {
         let value = serde_json::to_value(GatewayFeatures {
             exclusive_terminal: true,
             session_agents: SESSION_AGENTS.to_vec(),
+            attachment_max_bytes: None,
         })
         .unwrap();
         assert_eq!(
@@ -930,9 +1092,11 @@ mod tests {
         let none = serde_json::to_value(GatewayFeatures {
             exclusive_terminal: true,
             session_agents: Vec::new(),
+            attachment_max_bytes: None,
         })
         .unwrap();
         assert!(none.get("sessionAgents").is_none());
+        assert!(none.get("attachmentMaxBytes").is_none());
     }
 
     #[test]
@@ -1188,6 +1352,267 @@ mod tests {
         )
         .await;
         assert_eq!(status, 404);
+    }
+
+    const ATTACHMENT_SESSION: &str = "ses_attachtest";
+
+    /// Records one session whose working directory is the harness's `work`
+    /// folder. No daemon runs: the attachments route reads only the record.
+    fn record_attachment_session(harness: &Harness) {
+        use crate::session::manifest::{SourceInfo, TerminalSize};
+        use crate::session::meta::{self, SessionMeta};
+        use crate::session::paths::SessionId;
+
+        let id = SessionId::parse(ATTACHMENT_SESSION).expect("session id");
+        let paths = harness.home.session(&id);
+        paths.ensure().expect("session dir");
+        meta::write_once(
+            &paths,
+            &SessionMeta {
+                format_version: 1,
+                id: id.as_str().to_owned(),
+                name: "attach".into(),
+                title: None,
+                cwd: harness.work.clone(),
+                command_label: "claude".into(),
+                harness: None,
+                created_at: "2026-09-25T00:00:00Z".into(),
+                initial_size: TerminalSize::new(80, 24),
+                source: SourceInfo {
+                    kind: "test".into(),
+                    external_run_id: None,
+                },
+            },
+        )
+        .expect("write meta");
+    }
+
+    /// Sends raw bytes, so a test can lie about `Content-Length` or omit it.
+    async fn send_raw(harness: &Harness, request: Vec<u8>) -> (u16, serde_json::Value) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let mut stream = tokio::net::TcpStream::connect(harness.address)
+            .await
+            .expect("connect");
+        stream.write_all(&request).await.expect("write request");
+        let mut response = Vec::new();
+        stream
+            .read_to_end(&mut response)
+            .await
+            .expect("read response");
+        let text = String::from_utf8_lossy(&response).into_owned();
+        let status = text
+            .split_whitespace()
+            .nth(1)
+            .and_then(|code| code.parse::<u16>().ok())
+            .expect("status line");
+        let payload = text
+            .split_once("\r\n\r\n")
+            .map(|(_, body)| body)
+            .unwrap_or_default();
+        (
+            status,
+            serde_json::from_str(payload).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    fn upload_request(
+        target: &str,
+        grant: Option<&str>,
+        length: Option<u64>,
+        body: &[u8],
+    ) -> Vec<u8> {
+        let grant = grant.map_or_else(String::new, |grant| {
+            format!("{DEVICE_GRANT_HEADER}: {grant}\r\n")
+        });
+        let length = length.map_or_else(String::new, |length| {
+            format!("Content-Length: {length}\r\n")
+        });
+        let mut request = format!(
+            "POST {target} HTTP/1.1\r\nHost: gateway\r\nAuthorization: Bearer gateway-token\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n{grant}{length}\r\n"
+        )
+        .into_bytes();
+        request.extend_from_slice(body);
+        request
+    }
+
+    fn attachments_in(harness: &Harness) -> Vec<String> {
+        let folder = harness.work.join(attachments::ATTACHMENTS_DIR);
+        let mut names = std::fs::read_dir(folder)
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                    .filter(|name| name != ".gitignore")
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        names.sort();
+        names
+    }
+
+    /// The happy path: the file lands under the session's own folder with a
+    /// sanitized name, and the receipt carries the path the message will use.
+    #[tokio::test]
+    async fn an_attachment_lands_in_the_session_workspace() {
+        let harness = harness().await;
+        record_attachment_session(&harness);
+        let target =
+            format!("/v2/sessions/{ATTACHMENT_SESSION}/attachments?name=Screen%20Shot.PNG");
+        let (status, receipt) = send_raw(
+            &harness,
+            upload_request(&target, Some("interact"), Some(5), b"hello"),
+        )
+        .await;
+        assert_eq!(status, 201, "{receipt}");
+        assert_eq!(receipt["name"], "Screen-Shot.png");
+        assert_eq!(
+            receipt["relativePath"],
+            ".latch-attachments/Screen-Shot.png"
+        );
+        assert_eq!(receipt["bytes"], 5);
+        let path = std::path::PathBuf::from(receipt["path"].as_str().unwrap());
+        assert!(path.starts_with(harness.work.canonicalize().unwrap()));
+        assert_eq!(std::fs::read(path).unwrap(), b"hello");
+    }
+
+    /// Writing into the workspace is part of sending a message: an observing
+    /// phone is refused before the engine or the filesystem is touched.
+    #[tokio::test]
+    async fn attachments_are_refused_below_the_interact_grant() {
+        let harness = harness().await;
+        record_attachment_session(&harness);
+        let target = format!("/v2/sessions/{ATTACHMENT_SESSION}/attachments?name=a.txt");
+        let (status, _) = send_raw(
+            &harness,
+            upload_request(&target, Some("observe"), Some(1), b"x"),
+        )
+        .await;
+        assert_eq!(status, 403);
+        assert!(!harness.work.join(attachments::ATTACHMENTS_DIR).exists());
+    }
+
+    #[tokio::test]
+    async fn attachment_bodies_must_declare_a_bounded_nonzero_length() {
+        let harness = harness().await;
+        record_attachment_session(&harness);
+        let target = format!("/v2/sessions/{ATTACHMENT_SESSION}/attachments?name=a.txt");
+        let cases = [
+            (None, b"x".as_slice(), 411, "invalid_request"),
+            (Some(0), b"".as_slice(), 400, "invalid_request"),
+            (
+                Some(ATTACHMENT_MAX_BYTES + 1),
+                b"x".as_slice(),
+                413,
+                "attachment_too_large",
+            ),
+        ];
+        for (length, body, status, code) in cases {
+            let (observed, payload) = send_raw(
+                &harness,
+                upload_request(&target, Some("interact"), length, body),
+            )
+            .await;
+            assert_eq!(observed, status, "{length:?}");
+            assert_eq!(payload["error"], code, "{length:?}");
+        }
+        // A refused length is refused before the folder is even created.
+        assert!(!harness.work.join(attachments::ATTACHMENTS_DIR).exists());
+    }
+
+    /// A body that stops short of what it declared leaves no partial file for
+    /// an agent to find.
+    #[tokio::test]
+    async fn a_truncated_attachment_leaves_nothing_behind() {
+        use tokio::io::AsyncWriteExt;
+
+        let harness = harness().await;
+        record_attachment_session(&harness);
+        let target = format!("/v2/sessions/{ATTACHMENT_SESSION}/attachments?name=a.txt");
+        // The phone promises ten bytes, sends five, and goes away.
+        let mut stream = tokio::net::TcpStream::connect(harness.address)
+            .await
+            .expect("connect");
+        stream
+            .write_all(&upload_request(
+                &target,
+                Some("interact"),
+                Some(10),
+                b"short",
+            ))
+            .await
+            .expect("write request");
+        let mut appeared = false;
+        for _ in 0..100 {
+            appeared = !attachments_in(&harness).is_empty();
+            if appeared {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(
+            appeared,
+            "the partial file is created while the body streams"
+        );
+        drop(stream);
+        // The handler cleans up when its future ends; give it a moment.
+        for _ in 0..100 {
+            if attachments_in(&harness).is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(attachments_in(&harness).is_empty());
+    }
+
+    #[tokio::test]
+    async fn attaching_to_an_unknown_session_is_a_plain_not_found() {
+        let harness = harness().await;
+        let (status, payload) = send_raw(
+            &harness,
+            upload_request(
+                "/v2/sessions/ses_missing/attachments?name=a.txt",
+                Some("interact"),
+                Some(1),
+                b"x",
+            ),
+        )
+        .await;
+        assert_eq!(status, 404);
+        assert_eq!(payload["error"], "session_not_found");
+    }
+
+    /// A symlink where the folder belongs would let a planted link send the
+    /// write outside the workspace. The route refuses it with a stable code
+    /// and writes nothing at the link's target.
+    #[tokio::test]
+    async fn a_symlinked_attachments_folder_is_refused() {
+        let harness = harness().await;
+        record_attachment_session(&harness);
+        let elsewhere = harness._dir.path().join("elsewhere");
+        std::fs::create_dir(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, harness.work.join(attachments::ATTACHMENTS_DIR))
+            .unwrap();
+        let target = format!("/v2/sessions/{ATTACHMENT_SESSION}/attachments?name=a.txt");
+        let (status, payload) = send_raw(
+            &harness,
+            upload_request(&target, Some("interact"), Some(1), b"x"),
+        )
+        .await;
+        assert_eq!(status, 409);
+        assert_eq!(payload["error"], "attachments_folder_unsafe");
+        assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn current_capabilities_advertise_attachments_with_their_limit() {
+        let value = serde_json::to_value(GatewayFeatures {
+            exclusive_terminal: true,
+            session_agents: Vec::new(),
+            attachment_max_bytes: Some(ATTACHMENT_MAX_BYTES),
+        })
+        .unwrap();
+        assert_eq!(value["attachmentMaxBytes"], ATTACHMENT_MAX_BYTES);
     }
 
     #[test]

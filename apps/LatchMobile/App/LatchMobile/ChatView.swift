@@ -13,15 +13,28 @@ import SwiftUI
 /// terminal socket is opened, the PTY is not resized, and the owner check is
 /// not raised: sends and answers travel through the Hub, which validates them
 /// against the screen at the last moment. The terminal is taken only by the
-/// explicit toolbar link (docs/DECISION_CONVERSATION_GEOMETRY.md).
+/// explicit Take terminal item in the composer's "+" menu
+/// (docs/DECISION_CONVERSATION_GEOMETRY.md).
 struct ChatView: View {
     let session: SessionSummary
 
     @Environment(AppModel.self) private var appModel
     @State private var store: ConversationStore?
     @FocusState private var composerFocused: Bool
+    @State private var takingTerminal = false
+    @State private var showingDetails = false
+    /// Set while the Stop confirmation is up; ending the agent's work is
+    /// never one tap.
+    @State private var confirmingStop = false
+    @State private var explainingStopGrant = false
 
-    /// Nil until the store exists; the toolbar then shows the Hub-derived
+    /// The newest copy of this session the list has, so Stop disappears once
+    /// the Mac reports the session ended.
+    private var currentSession: SessionSummary {
+        appModel.sessions.first { $0.id == session.id } ?? session
+    }
+
+    /// Nil until the store exists; the status chip then shows the Hub-derived
     /// status, including the newest running tool when appropriate.
     @MainActor
     private var screenContent: ConversationScreenContent? {
@@ -41,22 +54,30 @@ struct ChatView: View {
                 )
             }
         }
-        .navigationTitle(session.displayName)
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ConversationToolbar(title: session.displayName, statusLine: screenContent?.statusLine)
-            if appModel.surface.terminal {
-                ToolbarItem(placement: .topBarTrailing) {
-                    NavigationLink {
-                        TerminalView(session: session, autoAttach: session.isRunning)
-                    } label: {
-                        Image(systemName: "terminal")
-                    }
-                    .accessibilityLabel("Take terminal")
-                    .accessibilityHint("Opens the live terminal here and detaches it from your Mac.")
-                }
-            }
+        // The navigation bar gives way to floating chrome: the transcript
+        // scrolls beneath a back button and a status chip, and the chip opens
+        // the session's details.
+        .sessionChrome(
+            session: currentSession,
+            status: screenContent?.statusLine,
+            showingDetails: $showingDetails,
+            details: SessionDetailsActions(stop: stopRequest, isStopping: isStopping)
+        ) {
+            SessionChromeBar(
+                title: session.displayName,
+                status: screenContent?.statusLine,
+                statusIdentifier: "conversation.toolbar.status",
+                showDetails: { showingDetails = true }
+            )
         }
+        .navigationDestination(isPresented: $takingTerminal) {
+            TerminalView(session: session, autoAttach: currentSession.isRunning)
+        }
+        .sessionStopPrompts(
+            session: currentSession,
+            confirming: $confirmingStop,
+            explainingGrant: $explainingStopGrant
+        )
         .task {
             guard store == nil else { return }
             store = appModel.conversationStore(for: session)
@@ -76,9 +97,53 @@ struct ChatView: View {
                 content: screenContent ?? ConversationScreenContent(store: store),
                 actions: ConversationScreenActions(store: store),
                 draft: Binding(get: { store.draft }, set: { store.draft = $0 }),
-                composerFocused: $composerFocused
+                composerFocused: $composerFocused,
+                placeholder: session.connector.composerPlaceholder,
+                sessionActions: sessionActions,
+                attachments: attachmentControls(store)
             )
         }
+    }
+
+    /// The composer's "+" menu, holding only what this phone can do here.
+    /// Stop stays offered without the grant so the alert can say what to
+    /// change on the Mac, the same bargain the session list makes.
+    private var sessionActions: ConversationSessionActions {
+        var actions = ConversationSessionActions(sessionLink: SessionDeepLink.url(forSession: session.id))
+        if appModel.surface.terminal {
+            actions.takeTerminal = { takingTerminal = true }
+        }
+        actions.stop = stopRequest
+        actions.isStopping = isStopping
+        return actions
+    }
+
+    /// Files for the next message. Offered only when the Mac serves the
+    /// attachments route and this device may write messages; otherwise `add`
+    /// stays nil and the "+" menu shows no attachment items.
+    private func attachmentControls(_ store: ConversationStore) -> ConversationAttachmentControls {
+        var controls = ConversationAttachmentControls(
+            items: store.attachments,
+            phase: store.attachmentPhase,
+            remove: { store.removeAttachment($0) }
+        )
+        if appModel.attachmentLimit != nil {
+            let limit = appModel.attachmentLimit
+            controls.add = { store.addAttachment($0, maximumBytes: limit) }
+        }
+        return controls
+    }
+
+    private var stopRequest: (() -> Void)? {
+        appModel.stopRequest(
+            for: currentSession,
+            confirm: { confirmingStop = true },
+            explainGrant: { explainingStopGrant = true }
+        )
+    }
+
+    private var isStopping: Bool {
+        appModel.stoppingSessionIDs.contains(session.id)
     }
 
     /// Both dead ends keep their explanation and gain a way out.

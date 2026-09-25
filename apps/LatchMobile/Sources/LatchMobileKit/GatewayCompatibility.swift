@@ -45,7 +45,8 @@ public enum GatewayCompatibility {
             chat: conversation,
             composer: conversation,
             interactionControls: conversation,
-            terminal: supports(endpoint: .terminal, capabilities: capabilities)
+            terminal: supports(endpoint: .terminal, capabilities: capabilities),
+            attachments: conversation && supports(endpoint: .attachments, capabilities: capabilities)
         )
     }
 }
@@ -112,19 +113,25 @@ public struct SessionSurface: Equatable, Sendable {
     /// `terminal == false`, and the screen explaining the refusal has to tell
     /// them apart — one is answered by pairing again, the other by updating.
     public let terminalAdvertised: Bool
+    /// Whether the composer may place files in the session's workspace. It
+    /// rides with the composer: a device that may not send a message has no
+    /// message to attach a file to.
+    public let attachments: Bool
 
     public init(
         chat: Bool,
         composer: Bool,
         interactionControls: Bool,
         terminal: Bool = false,
-        terminalAdvertised: Bool? = nil
+        terminalAdvertised: Bool? = nil,
+        attachments: Bool = false
     ) {
         self.chat = chat
         self.composer = composer
         self.interactionControls = interactionControls
         self.terminal = terminal
         self.terminalAdvertised = terminalAdvertised ?? terminal
+        self.attachments = attachments
     }
 
     /// A missing current grant fails closed. Every supported route is paired.
@@ -149,7 +156,8 @@ public struct SessionSurface: Equatable, Sendable {
                 composer: composer,
                 interactionControls: interactionControls,
                 terminal: terminal,
-                terminalAdvertised: terminalAdvertised
+                terminalAdvertised: terminalAdvertised,
+                attachments: attachments
             )
         }
         return SessionSurface(

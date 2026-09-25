@@ -21,6 +21,7 @@
 		ABCDEF0123456789ABCD0035 /* SwiftTermSurface.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD0034 /* SwiftTermSurface.swift */; };
 		ABCDEF0123456789ABCD0041 /* TerminalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD0040 /* TerminalView.swift */; };
 		ABCDEF0123456789ABCD0051 /* FolderPickerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD0050 /* FolderPickerView.swift */; };
+		ABCDEF0123456789ABCD00E1 /* SessionChrome.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD00E0 /* SessionChrome.swift */; };
 		ABCDEF0123456789ABCD0038 /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = ABCDEF0123456789ABCD0037 /* SwiftTerm */; };
 		ABCDEF0123456789ABCD0072 /* ConversationScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD0071 /* ConversationScreen.swift */; };
 		ABCDEF0123456789ABCD0074 /* ConversationTranscript.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD0073 /* ConversationTranscript.swift */; };
@@ -29,9 +30,10 @@
 		ABCDEF0123456789ABCD007A /* ConversationActivityDisclosure.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD0079 /* ConversationActivityDisclosure.swift */; };
 		ABCDEF0123456789ABCD007C /* ConversationRequestCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD007B /* ConversationRequestCard.swift */; };
 		ABCDEF0123456789ABCD007E /* ConversationComposer.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD007D /* ConversationComposer.swift */; };
+		ABCDEF0123456789ABCD00F1 /* ConversationAttachmentViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD00F0 /* ConversationAttachmentViews.swift */; };
 		ABCDEF0123456789ABCD0080 /* ConversationNotices.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD007F /* ConversationNotices.swift */; };
-		ABCDEF0123456789ABCD0082 /* ConversationToolbar.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD0081 /* ConversationToolbar.swift */; };
 		ABCDEF0123456789ABCD0084 /* ConversationPreviews.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD0083 /* ConversationPreviews.swift */; };
+		ABCDEF0123456789ABCD0102 /* FloatingControl.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD0101 /* FloatingControl.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -50,6 +52,7 @@
 		ABCDEF0123456789ABCD0034 /* SwiftTermSurface.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SwiftTermSurface.swift; sourceTree = "<group>"; };
 		ABCDEF0123456789ABCD0040 /* TerminalView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalView.swift; sourceTree = "<group>"; };
 		ABCDEF0123456789ABCD0050 /* FolderPickerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FolderPickerView.swift; sourceTree = "<group>"; };
+		ABCDEF0123456789ABCD00E0 /* SessionChrome.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionChrome.swift; sourceTree = "<group>"; };
 		ABCDEF0123456789ABCD0071 /* ConversationScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationScreen.swift; sourceTree = "<group>"; };
 		ABCDEF0123456789ABCD0073 /* ConversationTranscript.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationTranscript.swift; sourceTree = "<group>"; };
 		ABCDEF0123456789ABCD0075 /* ConversationMessageRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationMessageRow.swift; sourceTree = "<group>"; };
@@ -57,9 +60,10 @@
 		ABCDEF0123456789ABCD0079 /* ConversationActivityDisclosure.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationActivityDisclosure.swift; sourceTree = "<group>"; };
 		ABCDEF0123456789ABCD007B /* ConversationRequestCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationRequestCard.swift; sourceTree = "<group>"; };
 		ABCDEF0123456789ABCD007D /* ConversationComposer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationComposer.swift; sourceTree = "<group>"; };
+		ABCDEF0123456789ABCD00F0 /* ConversationAttachmentViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationAttachmentViews.swift; sourceTree = "<group>"; };
 		ABCDEF0123456789ABCD007F /* ConversationNotices.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationNotices.swift; sourceTree = "<group>"; };
-		ABCDEF0123456789ABCD0081 /* ConversationToolbar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationToolbar.swift; sourceTree = "<group>"; };
 		ABCDEF0123456789ABCD0083 /* ConversationPreviews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationPreviews.swift; sourceTree = "<group>"; };
+		ABCDEF0123456789ABCD0101 /* FloatingControl.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FloatingControl.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -99,6 +103,8 @@
 				ABCDEF0123456789ABCD0034 /* SwiftTermSurface.swift */,
 				ABCDEF0123456789ABCD0040 /* TerminalView.swift */,
 				ABCDEF0123456789ABCD0050 /* FolderPickerView.swift */,
+				ABCDEF0123456789ABCD00E0 /* SessionChrome.swift */,
+				ABCDEF0123456789ABCD0100 /* Support */,
 				ABCDEF0123456789ABCD001C /* Assets.xcassets */,
 				ABCDEF0123456789ABCD0014 /* Info.plist */,
 				ABCDEF0123456789ABCD0060 /* LatchMobile.entitlements */,
@@ -124,11 +130,19 @@
 				ABCDEF0123456789ABCD0079 /* ConversationActivityDisclosure.swift */,
 				ABCDEF0123456789ABCD007B /* ConversationRequestCard.swift */,
 				ABCDEF0123456789ABCD007D /* ConversationComposer.swift */,
+				ABCDEF0123456789ABCD00F0 /* ConversationAttachmentViews.swift */,
 				ABCDEF0123456789ABCD007F /* ConversationNotices.swift */,
-				ABCDEF0123456789ABCD0081 /* ConversationToolbar.swift */,
 				ABCDEF0123456789ABCD0083 /* ConversationPreviews.swift */,
 			);
 			path = Conversation;
+			sourceTree = "<group>";
+		};
+		ABCDEF0123456789ABCD0100 /* Support */ = {
+			isa = PBXGroup;
+			children = (
+				ABCDEF0123456789ABCD0101 /* FloatingControl.swift */,
+			);
+			path = Support;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -224,8 +238,8 @@
 				ABCDEF0123456789ABCD007A /* ConversationActivityDisclosure.swift in Sources */,
 				ABCDEF0123456789ABCD007C /* ConversationRequestCard.swift in Sources */,
 				ABCDEF0123456789ABCD007E /* ConversationComposer.swift in Sources */,
+				ABCDEF0123456789ABCD00F1 /* ConversationAttachmentViews.swift in Sources */,
 				ABCDEF0123456789ABCD0080 /* ConversationNotices.swift in Sources */,
-				ABCDEF0123456789ABCD0082 /* ConversationToolbar.swift in Sources */,
 				ABCDEF0123456789ABCD0084 /* ConversationPreviews.swift in Sources */,
 				ABCDEF0123456789ABCD0018 /* SettingsView.swift in Sources */,
 				ABCDEF0123456789ABCD0032 /* SessionTerminalSurface.swift in Sources */,
@@ -233,6 +247,8 @@
 				ABCDEF0123456789ABCD0035 /* SwiftTermSurface.swift in Sources */,
 				ABCDEF0123456789ABCD0041 /* TerminalView.swift in Sources */,
 				ABCDEF0123456789ABCD0051 /* FolderPickerView.swift in Sources */,
+				ABCDEF0123456789ABCD00E1 /* SessionChrome.swift in Sources */,
+				ABCDEF0123456789ABCD0102 /* FloatingControl.swift in Sources */,
 				ABCDEF0123456789ABCD0021 /* PairingView.swift in Sources */,
 				ABCDEF0123456789ABCD0022 /* QRScannerView.swift in Sources */,
 			);

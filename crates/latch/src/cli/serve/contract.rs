@@ -1,5 +1,5 @@
 //! Generated from `schemas/remote-access/v2/*.schema.json`; do not edit by hand.
-//! Canonical schema set SHA-256: d5efabb3331ad7f5148b34aef3aacf571f30d7c3bd9345587bc550bcfa71448d
+//! Canonical schema set SHA-256: 9f94c11e814da0e39c4aa89cfa5276a5c1dcd9cee0a5c0c9a7bbfeae974be75c
 
 use serde::{Deserialize, Serialize};
 
@@ -94,6 +94,10 @@ pub struct GatewayFeatures {
     /// agent creation omits the key, which a client reads as shells only.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub session_agents: Vec<SessionAgent>,
+    /// Largest body the attachments route accepts. Present exactly when the
+    /// gateway serves that route; an older gateway omits the key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachment_max_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

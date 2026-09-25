@@ -1,17 +1,44 @@
 import LatchMobileKit
 import SwiftUI
 
-/// The settings tab: linking this phone to a computer, and what that link can do.
+enum AppearanceMode: String, CaseIterable, Identifiable {
+    case system
+    case dark
+    case light
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .system: return "System"
+        case .dark: return "Dark"
+        case .light: return "Light"
+        }
+    }
+
+    var colorScheme: ColorScheme? {
+        switch self {
+        case .system: return nil
+        case .dark: return .dark
+        case .light: return .light
+        }
+    }
+}
+
+/// The Settings sheet: linking this phone to a computer, and what that link can do.
 struct SettingsView: View {
     @Environment(AppModel.self) private var model
     @Environment(PairingModel.self) private var pairing
+    @AppStorage("appearanceMode") private var appearanceMode = AppearanceMode.system.rawValue
     @State private var confirmingUnlink = false
     @State private var choosingDefaultFolder = false
     @Environment(DiagnosticsRunner.self) private var diagnostics
+    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         NavigationStack {
             Form {
+                appearanceSection
                 sessionViewSection
                 newSessionSection
                 remoteAccessSection
@@ -27,6 +54,25 @@ struct SettingsView: View {
                 }
             }
             .navigationTitle("Settings")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                        .accessibilityIdentifier("settings.done")
+                }
+            }
+        }
+    }
+
+    // MARK: - Appearance
+
+    private var appearanceSection: some View {
+        Section {
+            Picker("Appearance", selection: $appearanceMode) {
+                ForEach(AppearanceMode.allCases) { mode in
+                    Text(mode.label).tag(mode.rawValue)
+                }
+            }
+            .pickerStyle(.segmented)
         }
     }
 
@@ -343,6 +389,7 @@ struct SettingsView: View {
         case .browseDirectories: return "Folder browser"
         case .createSession: return "Session creation"
         case .stopSession: return "Session stop"
+        case .attachments: return "Attachments"
         }
     }
 

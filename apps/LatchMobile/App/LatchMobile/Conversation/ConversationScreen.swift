@@ -113,6 +113,10 @@ extension ConversationScreenActions {
 /// The conversation itself: transcript, delivery outcomes, and one input
 /// surface, with connection status pinned above.
 ///
+/// The input surface floats over the bottom of the transcript as a safe-area
+/// inset rather than taking a slot beneath it, so the transcript scrolls
+/// under it and its newest row always settles just above the field.
+///
 /// While the host waits on a request, its controls replace the composer: the
 /// request is the one thing to answer, and it appears in full only there. The
 /// draft is kept underneath and comes back with the composer.
@@ -121,23 +125,38 @@ struct ConversationScreen: View {
     let actions: ConversationScreenActions
     @Binding var draft: String
     @FocusState.Binding var composerFocused: Bool
+    var placeholder = "Message"
+    var sessionActions = ConversationSessionActions()
+    var attachments = ConversationAttachmentControls()
+
+    /// Autofocus is decided once, the first time the screen knows enough.
+    @State private var consideredFocus = false
 
     var body: some View {
-        VStack(spacing: 0) {
-            ConversationTranscript(
-                transcript: content.transcript,
-                viewState: content.viewState,
-                tailItemID: content.tailItemID,
-                prependAnchor: content.prependAnchor,
-                paging: content.paging,
-                loadOlder: actions.loadOlder,
-                showNewer: actions.showNewer
-            )
+        ConversationTranscript(
+            transcript: content.transcript,
+            viewState: content.viewState,
+            tailItemID: content.tailItemID,
+            prependAnchor: content.prependAnchor,
+            paging: content.paging,
+            loadOlder: actions.loadOlder,
+            showNewer: actions.showNewer
+        )
+        .safeAreaInset(edge: .top, spacing: 0) {
+            ConversationConnectionBanner(error: content.connectionError, skippedUpdates: content.skippedUpdates)
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            inputSurface
+        }
+        .onAppear(perform: considerFocus)
+        .onChange(of: content.viewState) { _, _ in considerFocus() }
+    }
 
+    private var inputSurface: some View {
+        VStack(spacing: 0) {
             if !content.operations.isEmpty {
                 ConversationOperationRows(operations: content.operations, actions: actions)
             }
-
             if let request = content.transcript.pendingRequest {
                 ConversationRequestControls(
                     request: request,
@@ -150,12 +169,38 @@ struct ConversationScreen: View {
                     draft: $draft,
                     focused: $composerFocused,
                     presentation: content.composer,
+                    placeholder: placeholder,
+                    sessionActions: sessionActions,
+                    attachments: attachments,
                     send: actions.send
                 )
+                // A soft fade rather than a bar: the field floats, and the
+                // transcript passing beneath it stays out of the way.
+                .background {
+                    LinearGradient(
+                        stops: [
+                            .init(color: Color(.systemBackground).opacity(0), location: 0),
+                            .init(color: Color(.systemBackground).opacity(0.92), location: 0.45),
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                    .ignoresSafeArea(edges: .bottom)
+                }
             }
         }
-        .safeAreaInset(edge: .top, spacing: 0) {
-            ConversationConnectionBanner(error: content.connectionError, skippedUpdates: content.skippedUpdates)
-        }
+    }
+
+    /// Raises the keyboard on arrival only when the next move is the
+    /// person's; a conversation still loading waits until it has loaded.
+    private func considerFocus() {
+        guard !consideredFocus, content.viewState != .loading else { return }
+        consideredFocus = true
+        guard content.transcript.pendingRequest == nil,
+              ConversationComposerChrome.shouldFocusOnOpen(
+                  canSend: content.composer.canSend,
+                  transcript: content.transcript
+              ) else { return }
+        composerFocused = true
     }
 }

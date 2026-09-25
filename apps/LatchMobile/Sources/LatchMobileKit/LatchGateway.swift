@@ -147,6 +147,27 @@ public actor LatchGateway {
         return try await request(method: "POST", path: "/v2/sessions/\(sessionID)/stop")
     }
 
+    /// Places one file in the session's working directory on the Mac, under
+    /// its attachments folder, so the next message can name it by path.
+    ///
+    /// The Mac chooses the final name — `name` is a suggestion it reduces to
+    /// a safe alphabet and makes unique — and answers with where the file
+    /// landed. Nothing is sent to the agent here; the caller does that next.
+    public func uploadAttachment(
+        sessionID: String,
+        name: String,
+        data: Data
+    ) async throws -> AttachmentReceipt {
+        try await require(.attachments)
+        return try await request(
+            method: "POST",
+            path: "/v2/sessions/\(sessionID)/attachments",
+            queryItems: [URLQueryItem(name: "name", value: ConversationAttachment.suggestedName(name))],
+            body: data,
+            contentType: "application/octet-stream"
+        )
+    }
+
     /// Reads the session's live pane once, without attaching.
     ///
     /// This is the only terminal-shaped call an observing device may make. It
@@ -245,7 +266,8 @@ public actor LatchGateway {
         method: String,
         path: String,
         queryItems: [URLQueryItem] = [],
-        body: Data? = nil
+        body: Data? = nil,
+        contentType: String = "application/json"
     ) async throws -> T {
         guard var components = URLComponents(url: link.url, resolvingAgainstBaseURL: false) else {
             throw LatchError.invalidURL(link.url.absoluteString)
@@ -263,7 +285,7 @@ public actor LatchGateway {
         }
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         if body != nil {
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue(contentType, forHTTPHeaderField: "Content-Type")
         }
         let data: Data
         let response: URLResponse
@@ -312,6 +334,13 @@ public actor LatchGateway {
             return .refused(
                 reason.isEmpty ? "That agent is not installed on your Mac." : reason
             )
+        }
+        // An attachment the Mac would not place: too large, or the session's
+        // folder is gone. The reason is the sentence to show, and sending the
+        // same file again will not change it.
+        if let code, ["attachment_too_large", "workspace_unavailable", "attachments_folder_unsafe"]
+            .contains(code) {
+            return .refused(reason.isEmpty ? "Your Mac could not save that attachment." : reason)
         }
         if status == 401 || (status == 403 && code != "unreadable_directory") {
             return .unauthorized

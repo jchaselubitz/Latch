@@ -1,10 +1,12 @@
 import LatchMobileKit
 import SwiftUI
 
-/// The sessions tab: what is running on the linked computer.
+/// The root screen: what is running on the linked computer, with the new
+/// session pill and the Settings gear floating at the bottom.
 struct SessionsView: View {
     @Environment(AppModel.self) private var model
     @Environment(PairingModel.self) private var pairing
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var creatingSession = false
     /// What the open picker starts: a shell, or an agent the Mac listed.
     @State private var creatingMode: FolderBrowserMode = .create
@@ -15,9 +17,19 @@ struct SessionsView: View {
     /// Set when Stop was tapped on a Mac that serves the route but has not
     /// granted this phone control, so the reason can be said out loud.
     @State private var explainingStopGrant = false
+    /// What is pushed over the list. A `latch://` link lands here exactly as
+    /// a tap on its row would, and it clears this first so the linked session
+    /// is never pushed on top of another one.
+    @State private var path: [SessionPush] = []
+    /// The row each pushed session was opened from, for the moment the list
+    /// refreshes without it: the open screen keeps its session.
+    @State private var pushedSessions: [String: SessionSummary] = [:]
+    @State private var showingSettings = false
+    /// What the search field filters the list by: title, folder, or agent.
+    @State private var searchQuery = ""
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             Group {
                 switch model.linkState {
                 case .unlinked:
@@ -50,6 +62,10 @@ struct SessionsView: View {
                             detail: Self.interruptedDetail(link)
                         )
                     }
+                case .macOffline(let capabilities) where capabilities != nil && !model.sessions.isEmpty:
+                    // Same bargain as an interrupted link: the last known rows
+                    // stay readable, and the status line says they are stale.
+                    sessionList
                 case .macOffline:
                     MessageView(
                         icon: "laptopcomputer.slash",
@@ -70,10 +86,41 @@ struct SessionsView: View {
                     )
                 }
             }
-            .navigationTitle("Sessions")
-            .toolbar { newSessionButton }
+            .navigationTitle("Latch")
+            // Every state, the unpaired ones included: the gear is the only
+            // way to reach pairing now that there is no tab bar.
+            .safeAreaInset(edge: .bottom) { floatingActions }
+            .navigationDestination(for: SessionPush.self) { push in
+                // The live row when the list still has it, so the screen
+                // follows the session exactly as a row-built one did.
+                let session = model.sessions.first { $0.id == push.sessionID }
+                    ?? pushedSessions[push.sessionID]
+                if let session {
+                    destination(for: session, route: model.route(for: session))
+                }
+            }
+            .onChange(of: model.requestedSessionID, initial: true) { _, _ in openLinkedSession() }
+            .onChange(of: model.sessions) { _, _ in
+                rememberPushedSessions()
+                openLinkedSession()
+            }
+            .onChange(of: path) { _, _ in rememberPushedSessions() }
+            .alert(
+                "Can't open that session",
+                isPresented: Binding(
+                    get: { model.requestedSessionError != nil },
+                    set: { if !$0 { model.clearRequestedSessionError() } }
+                )
+            ) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(model.requestedSessionError ?? "")
+            }
             .sheet(isPresented: $creatingSession) {
                 FolderPickerView(mode: creatingMode)
+            }
+            .sheet(isPresented: $showingSettings) {
+                SettingsView()
             }
             .alert(
                 "This phone can't start a session",
@@ -117,63 +164,103 @@ struct SessionsView: View {
             }
         }
         .task { await refreshPermission() }
-    }
-
-    /// Shown whenever the Mac serves both new-session routes, and disabled
-    /// when this phone's grant does not reach them — a control that explains
-    /// itself is more use than one that quietly disappears.
-    ///
-    /// A Mac that lists agents turns the button into a menu: a shell, or
-    /// each agent it will launch directly. A Mac that lists none keeps the
-    /// one-tap shell button it always had.
-    @ToolbarContentBuilder
-    private var newSessionButton: some ToolbarContent {
-        ToolbarItem(placement: .primaryAction) {
-            if model.advertisesNewSessionCreation {
-                let agents = model.availableSessionAgents
-                Group {
-                    if agents.isEmpty {
-                        Button {
-                            startCreating(.create)
-                        } label: {
-                            newSessionLabel
-                        }
-                    } else {
-                        Menu {
-                            Button {
-                                startCreating(.create)
-                            } label: {
-                                Label("Shell", systemImage: "terminal")
-                            }
-                            ForEach(agents, id: \.self) { agent in
-                                Button {
-                                    startCreating(.createAgent(agent))
-                                } label: {
-                                    Label(agent.displayName, systemImage: "sparkles")
-                                }
-                            }
-                        } label: {
-                            newSessionLabel
-                        }
-                    }
-                }
-                .accessibilityLabel("New session")
-                .accessibilityHint(
-                    model.canCreateNewSession
-                        ? agents.isEmpty
-                            ? "Choose a folder on your Mac and start a shell there"
-                            : "Choose a shell or an agent, then a folder on your Mac to start it in"
-                        : "Unavailable until this phone has control of your Mac"
-                )
-                // Left tappable when the grant is missing so the alert can say
-                // what to change on the Mac.
-                .opacity(model.canCreateNewSession ? 1 : 0.4)
-            }
+        .onOpenURL { url in
+            // A `latch://sessions/<id>` link, usually from Overlord. Whatever
+            // is on screen goes first, so the session opens over the list and
+            // not under a sheet or on top of another session.
+            guard let sessionID = SessionDeepLink.sessionID(from: url) else { return }
+            showingSettings = false
+            creatingSession = false
+            stopping = nil
+            path.removeAll()
+            Task { await model.requestSession(id: sessionID) }
         }
     }
 
+    /// The pill that starts a session, and the gear that opens Settings.
+    private var floatingActions: some View {
+        HStack(alignment: .center) {
+            if model.advertisesNewSessionCreation {
+                newSessionPill
+            }
+            Spacer(minLength: 12)
+            Button {
+                showingSettings = true
+            } label: {
+                FloatingControl(systemImage: "gearshape", size: 48)
+                    .foregroundStyle(.primary)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Settings")
+            .accessibilityIdentifier("sessions.settings")
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 8)
+        .padding(.bottom, 8)
+    }
+
+    /// Shown whenever the Mac serves both new-session routes, and dimmed
+    /// when this phone's grant does not reach them — a control that explains
+    /// itself is more use than one that quietly disappears.
+    ///
+    /// A Mac that lists agents turns the pill into a menu: a shell, or each
+    /// agent it will launch directly. A Mac that lists none keeps a one-tap
+    /// shell button.
+    private var newSessionPill: some View {
+        let agents = model.availableSessionAgents
+        return Group {
+            if agents.isEmpty {
+                Button {
+                    startCreating(.create)
+                } label: {
+                    newSessionLabel
+                }
+            } else {
+                Menu {
+                    Button {
+                        startCreating(.create)
+                    } label: {
+                        Label("Shell", systemImage: "terminal")
+                    }
+                    ForEach(agents, id: \.self) { agent in
+                        Button {
+                            startCreating(.createAgent(agent))
+                        } label: {
+                            Label(agent.displayName, systemImage: "sparkles")
+                        }
+                    }
+                } label: {
+                    newSessionLabel
+                }
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("New session")
+        .accessibilityIdentifier("sessions.newSession")
+        .accessibilityHint(
+            model.canCreateNewSession
+                ? agents.isEmpty
+                    ? "Choose a folder on your Mac and start a shell there"
+                    : "Choose a shell or an agent, then a folder on your Mac to start it in"
+                : "Unavailable until this phone has control of your Mac"
+        )
+        // Left tappable when the grant is missing so the alert can say what
+        // to change on the Mac.
+        .opacity(model.canCreateNewSession ? 1 : 0.45)
+    }
+
     private var newSessionLabel: some View {
-        Label("New session", systemImage: "plus")
+        FloatingControl(shape: .capsule, size: 48, tint: .accentColor) {
+            HStack(spacing: 6) {
+                Image(systemName: "plus")
+                    .fontWeight(.semibold)
+                Text("Session")
+                    .lineLimit(1)
+            }
+            .font(.body.weight(.semibold))
+            .padding(.horizontal, 4)
+        }
+        .foregroundStyle(.white)
     }
 
     private func startCreating(_ mode: FolderBrowserMode) {
@@ -182,6 +269,28 @@ struct SessionsView: View {
             creatingSession = true
         } else {
             explainingGrant = true
+        }
+    }
+
+    /// Pushes the linked session once the list holds it. Nothing is attached
+    /// by the link itself: the destination is the one `route(for:)` picks, so
+    /// a terminal still asks for Face ID and a grant still gates it.
+    private func openLinkedSession() {
+        guard let session = model.takeRequestedSession() else { return }
+        push(session)
+    }
+
+    private func push(_ session: SessionSummary) {
+        pushedSessions[session.id] = session
+        path.append(SessionPush(sessionID: session.id))
+    }
+
+    /// Keeps the last known row for each pushed session, and only those.
+    private func rememberPushedSessions() {
+        let pushed = Set(path.map(\.sessionID))
+        pushedSessions = pushedSessions.filter { pushed.contains($0.key) }
+        for session in model.sessions where pushed.contains(session.id) {
+            pushedSessions[session.id] = session
         }
     }
 
@@ -205,55 +314,90 @@ struct SessionsView: View {
                 await model.refreshSessions()
             }
         } else {
+            let groups = SessionListGroup.grouped(model.sessions, matching: searchQuery)
             ScrollViewReader { proxy in
-                List(model.sessions) { session in
-                    let route = model.route(for: session)
-                    NavigationLink {
-                        destination(for: session, route: route)
-                    } label: {
-                        SessionRow(
-                            session: session,
-                            route: route,
-                            isHighlighted: session.id == model.highlightedSessionID,
-                            isStopping: model.stoppingSessionIDs.contains(session.id)
-                        )
+                List {
+                    if let status = SessionListLinkStatus(model.linkState) {
+                        LinkStatusLine(status: status)
+                            .listRowSeparator(.hidden)
+                            .listRowBackground(Color.clear)
                     }
-                    .id(session.id)
-                    .listRowBackground(
-                        session.id == model.highlightedSessionID
-                            ? Color.accentColor.opacity(0.15)
-                            : nil
-                    )
-                    // Both affordances, deliberately: the swipe is the fast
-                    // path people already expect from a list, and the long
-                    // press is the one that is discoverable without knowing
-                    // the swipe is there.
-                    .swipeActions(edge: .trailing) { stopButton(for: session) }
-                    .contextMenu { stopButton(for: session) }
+                    ForEach(groups) { group in
+                        Section(group.section.title) {
+                            ForEach(group.sessions) { session in
+                                row(for: session)
+                            }
+                        }
+                    }
+                }
+                .listStyle(.plain)
+                .overlay {
+                    if groups.isEmpty {
+                        ContentUnavailableView.search(text: searchQuery)
+                    }
                 }
                 // A created session is pointed at, not opened. Attaching would
                 // take the surface from the Mac, and creation never asked for
-                // that.
+                // that. A search that would hide it is cleared first.
                 .onChange(of: model.highlightedSessionID) { _, created in
                     guard let created else { return }
-                    withAnimation { proxy.scrollTo(created, anchor: .top) }
+                    searchQuery = ""
+                    if reduceMotion {
+                        proxy.scrollTo(created, anchor: .top)
+                    } else {
+                        withAnimation { proxy.scrollTo(created, anchor: .top) }
+                    }
                     Task {
                         try? await Task.sleep(for: .seconds(4))
                         model.clearNewSessionHighlight()
                     }
                 }
             }
+            .searchable(text: $searchQuery, prompt: "Search sessions")
             .refreshable {
                 await refreshPermission()
                 await model.refreshSessions()
             }
-            .overlay(alignment: .top) {
-                if model.sessionsStale {
-                    BannerView(text: Self.staleBanner(model.linkState))
-                } else if let error = model.sessionsError {
+            .overlay(alignment: .bottom) {
+                // Link trouble is the status line's job; this strip is left
+                // for a list request that failed on a working link.
+                if !model.sessionsStale, let error = model.sessionsError {
                     BannerView(text: error)
                 }
             }
+        }
+    }
+
+    private func row(for session: SessionSummary) -> some View {
+        let route = model.route(for: session)
+        let isHighlighted = session.id == model.highlightedSessionID
+        return NavigationLink(value: SessionPush(sessionID: session.id)) {
+            SessionRow(
+                session: session,
+                route: route,
+                isHighlighted: isHighlighted,
+                isStopping: model.stoppingSessionIDs.contains(session.id)
+            )
+        }
+        .id(session.id)
+        .listRowSeparator(.hidden)
+        .listRowBackground(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(isHighlighted ? Color.accentColor.opacity(0.15) : Color.clear)
+                .padding(.horizontal, 8)
+        )
+        // Both affordances, deliberately: the swipe is the fast path people
+        // already expect from a list, and the long press is the one that is
+        // discoverable without knowing the swipe is there. The long press
+        // also carries what the single-line row no longer says.
+        .swipeActions(edge: .trailing) { stopButton(for: session) }
+        .contextMenu {
+            Section {
+                Label(session.cwd, systemImage: "folder")
+                Label(session.commandLabel, systemImage: "chevron.left.forwardslash.chevron.right")
+                Label(session.connector.detailLabel, systemImage: "sparkles")
+            }
+            stopButton(for: session)
         }
     }
 
@@ -307,14 +451,6 @@ struct SessionsView: View {
         }
     }
 
-    static func staleBanner(_ state: AppModel.LinkState) -> String {
-        switch state {
-        case .macOffline: return "Your Mac is not reachable through the relay. This list is from before it went away."
-        case .interrupted(.suspended, _): return "Reconnecting…"
-        case .interrupted(.backoff(_, _, _), _): return "Connection lost. Showing the last known sessions."
-        default: return "Reconnecting. Showing the last known sessions."
-        }
-    }
 
     /// The screen a tap lands on. `AppModel.route(for:)` decides; this only
     /// builds what it named.
@@ -341,6 +477,12 @@ struct SessionsView: View {
             await model.connectPairedDevice(pairing.record)
         }
     }
+}
+
+/// One screen pushed over the list, named by session so the destination is
+/// built from the live row.
+private struct SessionPush: Hashable {
+    let sessionID: String
 }
 
 /// A Chat choice never opens a terminal by implication. When Chat cannot open,
@@ -463,8 +605,8 @@ private struct SessionUnavailableView: View {
 
 private struct SessionRow: View {
     let session: SessionSummary
-    /// Shown as a trailing glyph. On a build where the tap can be destructive,
-    /// telling the user where it goes is not decoration.
+    /// Not drawn: the section and the row say enough to choose by. It is
+    /// still spoken, because the two taps do different things to the Mac.
     let route: SessionRoute
     /// True for the session this phone just created, briefly after creation.
     var isHighlighted = false
@@ -474,56 +616,51 @@ private struct SessionRow: View {
     var isStopping = false
 
     var body: some View {
-        HStack(spacing: 12) {
-            Circle()
-                .fill(color)
-                .frame(width: 8, height: 8)
-                .accessibilityLabel(session.state)
+        HStack(spacing: 8) {
+            if session.isTransitioning {
+                Circle()
+                    .fill(.orange)
+                    .frame(width: 7, height: 7)
+                    .accessibilityHidden(true)
+            }
 
-            VStack(alignment: .leading, spacing: 3) {
-                Text(session.displayName)
-                    .font(.body.weight(.medium))
-                    .lineLimit(1)
-                HStack(spacing: 6) {
-                    Text(session.directoryName)
-                    Text("·")
-                    Text(session.commandLabel)
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            Text(session.displayName)
+                .font(.body)
                 .lineLimit(1)
+                .layoutPriority(1)
+
+            if session.connector == .none {
+                HStack(spacing: 4) {
+                    Image(systemName: "keyboard")
+                    Text(session.directoryName)
+                        .lineLimit(1)
+                }
+                .font(.footnote)
+                .foregroundStyle(.secondary)
             }
 
             Spacer(minLength: 8)
 
             if isStopping {
                 Text("Stopping…")
-                    .font(.caption2)
+                    .font(.footnote)
                     .foregroundStyle(.secondary)
-            } else if let idle = session.idleMs {
-                Text(Self.idleLabel(milliseconds: idle))
-                    .font(.caption2)
+            } else if let idle = session.idleLabel {
+                Text(idle)
+                    .font(.footnote)
                     .foregroundStyle(.tertiary)
                     .monospacedDigit()
             }
-
-            Image(systemName: destinationGlyph)
-                .font(.caption)
-                .foregroundStyle(.tertiary)
-                .accessibilityLabel(destinationLabel)
         }
-        .padding(.vertical, 2)
         .accessibilityElement(children: .combine)
+        .accessibilityValue(accessibilityState)
+        .accessibilityHint(destinationLabel)
         .accessibilityAddTraits(isHighlighted ? [.isSelected] : [])
     }
 
-    private var destinationGlyph: String {
-        switch route {
-        case .terminal: "terminal"
-        case .chat: "bubble.left.and.bubble.right"
-        case .chatUnavailable: "exclamationmark.bubble"
-        case .unavailable: "exclamationmark.circle"
-        }
+    private var accessibilityState: String {
+        if isStopping { return "Stopping" }
+        return session.connector == .none ? "Shell, \(session.state)" : session.state
     }
 
     private var destinationLabel: String {
@@ -537,24 +674,31 @@ private struct SessionRow: View {
         case .unavailable: "Cannot be opened"
         }
     }
+}
 
-    private var color: Color {
-        switch session.state {
-        case "running": return .green
-        case "creating": return .yellow
-        case "stopping": return .orange
-        case "exited": return .secondary
-        default: return .red
+/// The quiet line under the title that says whether the list is live.
+private struct LinkStatusLine: View {
+    let status: SessionListLinkStatus
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(color)
+                .frame(width: 6, height: 6)
+            Text(status.label)
         }
+        .font(.footnote)
+        .foregroundStyle(.secondary)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel([status.label, status.accessibilityDetail].compactMap(\.self).joined(separator: ". "))
     }
 
-    /// Idle time, at the precision a person actually reads at a glance.
-    static func idleLabel(milliseconds: Int) -> String {
-        let seconds = milliseconds / 1000
-        if seconds < 60 { return "\(seconds)s" }
-        if seconds < 3600 { return "\(seconds / 60)m" }
-        if seconds < 86_400 { return "\(seconds / 3600)h" }
-        return "\(seconds / 86_400)d"
+    private var color: Color {
+        switch status {
+        case .connected: .green
+        case .reconnecting: .orange
+        case .macUnavailable: .secondary
+        }
     }
 }
 
@@ -572,7 +716,7 @@ private struct UnlinkedView: View {
 
     private var detail: String {
         guard let pairedMac else {
-            return "Open Settings and pair this phone with your Mac."
+            return "Tap the gear to open Settings and pair this phone with your Mac."
         }
         return """
         Looking for \(pairedMac) over authenticated Remote Link. Keep Remote Access enabled \

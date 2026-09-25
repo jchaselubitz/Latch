@@ -115,6 +115,7 @@ jobs:
           cargo test --locked --package latch --test security
           cargo test --locked --package latch remote_access::tests
           cargo test --locked --package latch loopback_gateway_rejects_duplicate_grant_headers
+          cargo test --locked --package latch attachment
       - name: Relay containment tests
         working-directory: services/relay
         run: |

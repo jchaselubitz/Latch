@@ -82,6 +82,12 @@ public final class AppModel {
     /// The session most recently created from the folder browser. The view may
     /// highlight it without treating creation as permission to open or attach.
     public private(set) var highlightedSessionID: String?
+    /// The session a `latch://sessions/<id>` link asked to open, until the
+    /// list holds it. Kept here rather than in a view because a link usually
+    /// arrives on a cold launch, before the paired route has listed anything.
+    public private(set) var requestedSessionID: String?
+    /// Why the last linked session could not be opened, for the view to say.
+    public private(set) var requestedSessionError: String?
 
     /// Sessions this phone has asked the Mac to stop and has not yet heard
     /// back about. A stop can take several seconds — the Mac waits out its own
@@ -348,6 +354,14 @@ public final class AppModel {
         linkState = .unlinked
     }
 
+    /// The largest file the composer may attach, or nil when this phone may
+    /// not attach files at all: the Mac does not serve the route, or this
+    /// device's grant does not reach the composer.
+    public var attachmentLimit: Int? {
+        guard case .linked(let capabilities) = linkState, surface.attachments else { return nil }
+        return capabilities.features.attachmentMaxBytes
+    }
+
     /// Returns the one persistent conversation store for this session. This
     /// consumes discovery already performed during link setup; it never makes
     /// a separate interaction-capabilities preflight.
@@ -458,6 +472,29 @@ public final class AppModel {
 
     public func clearNewSessionHighlight() {
         highlightedSessionID = nil
+    }
+
+    /// A link named a session. The list is re-read when the route is usable —
+    /// the session is often seconds old — and otherwise the request waits for
+    /// the listing that follows discovery. Either way the view opens it through
+    /// `takeRequestedSession()`, the same route a tap on the row takes.
+    public func requestSession(id sessionID: String) async {
+        requestedSessionID = sessionID
+        requestedSessionError = nil
+        guard linkState.isUsable else { return }
+        await refreshSessions()
+    }
+
+    /// The requested session once the list holds it, clearing the request.
+    public func takeRequestedSession() -> SessionSummary? {
+        guard let sessionID = requestedSessionID,
+              let session = sessions.first(where: { $0.id == sessionID }) else { return nil }
+        requestedSessionID = nil
+        return session
+    }
+
+    public func clearRequestedSessionError() {
+        requestedSessionError = nil
     }
 
     /// Whether the linked Mac serves the stop route at all, independent of
@@ -924,6 +961,13 @@ public final class AppModel {
             record(LinkStageSample(stage: .sessionList, milliseconds: Self.millis(since: started)))
             sessionsStale = false
             sessionsError = nil
+            // A fresh list that still lacks a linked session means the Mac
+            // does not have it: it ended and was removed, or it belongs to a
+            // different computer than the one this phone is paired with.
+            if let requested = requestedSessionID, !sessions.contains(where: { $0.id == requested }) {
+                requestedSessionID = nil
+                requestedSessionError = "Session \(requested) isn't on \(pairedDevice?.mac.displayName ?? "your Mac"). It may have been removed, or it may be running on a different computer."
+            }
         } catch let error as LatchError {
             sessionsError = error.message
         } catch {

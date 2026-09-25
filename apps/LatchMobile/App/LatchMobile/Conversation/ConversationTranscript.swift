@@ -24,9 +24,6 @@ struct ConversationTranscript: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 12) {
                     earlierControl
-                    if transcript.turns.isEmpty {
-                        ConversationEmptyTranscript(viewState: viewState)
-                    }
                     ForEach(transcript.turns) { turn in
                         if let prompt = turn.prompt {
                             // Equatable rows let a tail update re-render only
@@ -61,6 +58,14 @@ struct ConversationTranscript: View {
                 .padding(.vertical, 12)
             }
             .coordinateSpace(name: "conversation.transcript.scroll")
+            // Centred in what the floating chrome and composer leave visible,
+            // not at the top of the scroll content.
+            .overlay {
+                if transcript.turns.isEmpty {
+                    ConversationEmptyTranscript(viewState: viewState)
+                        .allowsHitTesting(false)
+                }
+            }
             .background {
                 GeometryReader { geometry in
                     Color.clear
@@ -169,7 +174,10 @@ struct ConversationEntryRow: View, Equatable {
     }
 }
 
-/// What an empty transcript says depends on why it is empty.
+/// What an empty transcript shows depends on why it is empty. Only the
+/// states with something to explain say anything; an ordinary empty
+/// conversation is a faint Latch mark, and the composer below it is the
+/// invitation.
 private struct ConversationEmptyTranscript: View {
     let viewState: ConversationViewState
 
@@ -183,12 +191,33 @@ private struct ConversationEmptyTranscript: View {
             case .disconnected:
                 Label("Waiting for the connection to return.", systemImage: "antenna.radiowaves.left.and.right")
             case .starting, .empty, .ready, .working, .awaitingInput, .interrupted:
-                Text("No messages yet.")
+                LatchMark()
+                    .foregroundStyle(.quaternary)
+                    .frame(width: 52, height: 72)
+                    .accessibilityElement()
+                    .accessibilityLabel("No messages yet")
             }
         }
         .font(.callout)
         .foregroundStyle(.secondary)
-        .frame(maxWidth: .infinity)
-        .padding(.top, 40)
+        .multilineTextAlignment(.center)
+        .padding(.horizontal, 32)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+/// The Latch "L": a tall rounded bar with a shorter one along its foot,
+/// drawn as a shape so it takes any tint and stays sharp at any size.
+struct LatchMark: Shape {
+    func path(in rect: CGRect) -> Path {
+        // Proportions of the app mark: the stem is ~38% of the width, the
+        // foot ~22% of the height.
+        let stem = CGRect(x: rect.minX, y: rect.minY, width: rect.width * 0.38, height: rect.height)
+        let footHeight = rect.height * 0.22
+        let foot = CGRect(x: rect.minX, y: rect.maxY - footHeight, width: rect.width, height: footHeight)
+        var path = Path()
+        path.addRoundedRect(in: stem, cornerSize: CGSize(width: stem.width / 2, height: stem.width / 2))
+        path.addRoundedRect(in: foot, cornerSize: CGSize(width: footHeight / 2, height: footHeight / 2))
+        return path
     }
 }

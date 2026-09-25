@@ -121,6 +121,9 @@ public struct GatewayEndpoints: Codable, Equatable, Sendable {
     public var browseDirectories: Bool
     public var createSession: Bool
     public var stopSession: Bool
+    /// Upload one file into the session's working directory at the interact
+    /// grant. Absent on a Mac that predates the route.
+    public var attachments: Bool
 
     public init(
         sessions: Bool = false,
@@ -129,7 +132,8 @@ public struct GatewayEndpoints: Codable, Equatable, Sendable {
         conversation: Bool = false,
         browseDirectories: Bool = false,
         createSession: Bool = false,
-        stopSession: Bool = false
+        stopSession: Bool = false,
+        attachments: Bool = false
     ) {
         self.sessions = sessions
         self.preview = preview
@@ -138,6 +142,7 @@ public struct GatewayEndpoints: Codable, Equatable, Sendable {
         self.browseDirectories = browseDirectories
         self.createSession = createSession
         self.stopSession = stopSession
+        self.attachments = attachments
     }
 
     // Hand-written so an older Mac, whose document has no `preview` key at
@@ -153,6 +158,7 @@ public struct GatewayEndpoints: Codable, Equatable, Sendable {
         browseDirectories = try container.decodeIfPresent(Bool.self, forKey: .browseDirectories) ?? false
         createSession = try container.decodeIfPresent(Bool.self, forKey: .createSession) ?? false
         stopSession = try container.decodeIfPresent(Bool.self, forKey: .stopSession) ?? false
+        attachments = try container.decodeIfPresent(Bool.self, forKey: .attachments) ?? false
     }
 }
 
@@ -164,6 +170,7 @@ public enum GatewayEndpointsName: String, CaseIterable, Sendable {
     case browseDirectories
     case createSession
     case stopSession
+    case attachments
 }
 
 public extension GatewayEndpoints {
@@ -176,6 +183,7 @@ public extension GatewayEndpoints {
         case .browseDirectories: return browseDirectories
         case .createSession: return createSession
         case .stopSession: return stopSession
+        case .attachments: return attachments
         }
     }
 }
@@ -246,14 +254,22 @@ public struct GatewayFeatures: Codable, Equatable, Sendable {
     /// creation omits the key and decodes as shells only; a kind this build
     /// does not know is dropped rather than failing discovery.
     public var sessionAgents: [SessionAgent]
+    /// Largest body the attachments route accepts, in bytes. `nil` on a Mac
+    /// that does not serve the route.
+    public var attachmentMaxBytes: Int?
 
-    public init(exclusiveTerminal: Bool = false, sessionAgents: [SessionAgent] = []) {
+    public init(
+        exclusiveTerminal: Bool = false,
+        sessionAgents: [SessionAgent] = [],
+        attachmentMaxBytes: Int? = nil
+    ) {
         self.exclusiveTerminal = exclusiveTerminal
         self.sessionAgents = sessionAgents
+        self.attachmentMaxBytes = attachmentMaxBytes
     }
 
     private enum CodingKeys: String, CodingKey {
-        case exclusiveTerminal, sessionAgents
+        case exclusiveTerminal, sessionAgents, attachmentMaxBytes
     }
 
     public init(from decoder: Decoder) throws {
@@ -261,6 +277,7 @@ public struct GatewayFeatures: Codable, Equatable, Sendable {
         exclusiveTerminal = try container.decode(Bool.self, forKey: .exclusiveTerminal)
         let names = try container.decodeIfPresent([String].self, forKey: .sessionAgents) ?? []
         sessionAgents = names.compactMap(SessionAgent.init(rawValue:))
+        attachmentMaxBytes = try? container.decodeIfPresent(Int.self, forKey: .attachmentMaxBytes)
     }
 }
 

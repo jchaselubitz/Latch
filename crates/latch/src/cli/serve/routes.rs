@@ -64,6 +64,7 @@ pub(crate) enum RouteId {
     StopSession,
     Terminal,
     Conversation,
+    Attachments,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -73,7 +74,18 @@ pub(crate) struct RouteSpec {
     pub pattern: &'static str,
     pub method: &'static str,
     pub required_grant: Grant,
+    /// `Some(limit)` for the one kind of route whose body is a file rather
+    /// than a small JSON document. The paired proxy buffers and inspects every
+    /// other request whole, under its 32 KiB bound; a streamed route is
+    /// authorized from its headers alone and then relays exactly its declared
+    /// `Content-Length`, which may not exceed this limit.
+    pub streamed_body_limit: Option<u64>,
 }
+
+/// Largest file the attachments route accepts. A phone photo re-encoded as
+/// JPEG is a few megabytes; this leaves room for a screen recording or a PDF
+/// without letting one request fill the disk.
+pub const ATTACHMENT_MAX_BYTES: u64 = 25 * 1024 * 1024;
 
 pub(crate) const ROUTES: &[RouteSpec] = &[
     RouteSpec {
@@ -81,30 +93,35 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
         pattern: "/v2/capabilities",
         method: "GET",
         required_grant: Grant::Observe,
+        streamed_body_limit: None,
     },
     RouteSpec {
         id: RouteId::Sessions,
         pattern: "/v2/sessions",
         method: "GET",
         required_grant: Grant::Observe,
+        streamed_body_limit: None,
     },
     RouteSpec {
         id: RouteId::CreateSession,
         pattern: "/v2/sessions",
         method: "POST",
         required_grant: Grant::Control,
+        streamed_body_limit: None,
     },
     RouteSpec {
         id: RouteId::Directories,
         pattern: "/v2/directories",
         method: "GET",
         required_grant: Grant::Control,
+        streamed_body_limit: None,
     },
     RouteSpec {
         id: RouteId::Session,
         pattern: "/v2/sessions/{id}",
         method: "GET",
         required_grant: Grant::Observe,
+        streamed_body_limit: None,
     },
     // A capture, not an attach: reading the pane takes nothing from whoever
     // holds the surface, so an observing device may ask for it.
@@ -113,6 +130,7 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
         pattern: "/v2/sessions/{id}/preview",
         method: "GET",
         required_grant: Grant::Observe,
+        streamed_body_limit: None,
     },
     // Stopping is a write against the hosted process, so it sits at the same
     // grant as taking the terminal: a device that may not send bytes into the
@@ -122,18 +140,33 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
         pattern: "/v2/sessions/{id}/stop",
         method: "POST",
         required_grant: Grant::Control,
+        streamed_body_limit: None,
     },
     RouteSpec {
         id: RouteId::Terminal,
         pattern: "/v2/sessions/{id}/terminal",
         method: "GET",
         required_grant: Grant::Control,
+        streamed_body_limit: None,
     },
     RouteSpec {
         id: RouteId::Conversation,
         pattern: "/v2/sessions/{id}/conversation",
         method: "GET",
         required_grant: Grant::Observe,
+        streamed_body_limit: None,
+    },
+    // Placing a file in the workspace is part of sending a message, so it sits
+    // at the composer's grant. The file lands only under the session's own
+    // working directory, in one dedicated folder, under a name the gateway
+    // chooses; an interacting device can already ask the agent to write
+    // anything there, and this route can do strictly less.
+    RouteSpec {
+        id: RouteId::Attachments,
+        pattern: "/v2/sessions/{id}/attachments",
+        method: "POST",
+        required_grant: Grant::Interact,
+        streamed_body_limit: Some(ATTACHMENT_MAX_BYTES),
     },
 ];
 
@@ -209,5 +242,21 @@ mod tests {
         // Stopping is a POST and nothing else: a GET must not end a session.
         assert!(route_for("GET", "/v2/sessions/ses_1/stop").is_none());
         assert!(route_for("POST", "/v2/sessions/ses_1/conversation").is_none());
+        assert_eq!(
+            route_for("POST", "/v2/sessions/ses_1/attachments?name=a.png").map(|(_, grant)| grant),
+            Some(Grant::Interact)
+        );
+        assert!(route_for("GET", "/v2/sessions/ses_1/attachments").is_none());
+    }
+
+    /// Only the attachments route streams its body. Every other request stays
+    /// inside the proxy's whole-request buffer, where it is inspected before a
+    /// byte reaches the gateway.
+    #[test]
+    fn only_the_attachments_route_streams_a_body() {
+        for spec in ROUTES {
+            let expected = matches!(spec.id, RouteId::Attachments).then_some(ATTACHMENT_MAX_BYTES);
+            assert_eq!(spec.streamed_body_limit, expected, "{}", spec.pattern);
+        }
     }
 }

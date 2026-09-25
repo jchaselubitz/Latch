@@ -142,6 +142,10 @@ pub struct GatewayFeatures {
     /// agent creation omits the key, which a client reads as shells only.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub session_agents: Vec<SessionAgent>,
+    /// Largest body the attachments route accepts. Present exactly when the
+    /// gateway serves that route; an older gateway omits the key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachment_max_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -385,8 +389,13 @@ export const TERMINAL_CLOSE_CODES = {
 export type SessionAgent = 'claude' | 'codex';
 export type CreateSessionRequest = { requestId: string; cwd: string; agent?: SessionAgent };
 /** `sessionAgents` is absent on a gateway that predates agent creation; read
- * that as shells only. */
-export type GatewayFeatures = { exclusiveTerminal: boolean; sessionAgents?: SessionAgent[] };
+ * that as shells only. `attachmentMaxBytes` is present exactly when the
+ * gateway serves the attachments route. */
+export type GatewayFeatures = {
+  exclusiveTerminal: boolean;
+  sessionAgents?: SessionAgent[];
+  attachmentMaxBytes?: number;
+};
 export type GatewayReadiness = {
   formatVersion: 2;
   address: string;

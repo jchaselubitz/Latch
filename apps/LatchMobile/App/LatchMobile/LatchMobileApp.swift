@@ -116,27 +116,16 @@ struct RootView: View {
     @Environment(AppModel.self) private var model
     @Environment(PairingModel.self) private var pairing
     @Environment(\.scenePhase) private var scenePhase
-    @State private var selection = Tab.sessions
+    @AppStorage("appearanceMode") private var appearanceMode = AppearanceMode.system.rawValue
     /// Whether the last phase change actually suspended the app, so returning
     /// to the front only reconnects when there is something to reconnect.
     @State private var suspended = false
     @State private var pathMonitor = NetworkPathObserver()
 
-    enum Tab {
-        case sessions
-        case settings
-    }
-
     var body: some View {
-        TabView(selection: $selection) {
-            SessionsView()
-                .tabItem { Label("Sessions", systemImage: "bubble.left.and.bubble.right") }
-                .tag(Tab.sessions)
-
-            SettingsView()
-                .tabItem { Label("Settings", systemImage: "gearshape") }
-                .tag(Tab.settings)
-        }
+        // One screen at the root. Settings is a sheet over it, and a
+        // `latch://` link is handled there, where the sheet and the stack are.
+        SessionsView()
         .task {
             // A real path change is one immediate retry through the same
             // owner: a backoff is cut short, a live link is probed. There is
@@ -213,6 +202,7 @@ struct RootView: View {
                   permission != pairing.record?.permission else { return }
             Task { await pairing.refreshPermission() }
         }
+        .preferredColorScheme(AppearanceMode(rawValue: appearanceMode)?.colorScheme)
     }
 }
 
