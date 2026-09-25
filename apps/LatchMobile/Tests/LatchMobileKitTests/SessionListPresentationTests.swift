@@ -141,4 +141,40 @@ final class SessionListPresentationTests: XCTestCase {
         XCTAssertEqual(session("plain").headline.primary, "session-plain")
         XCTAssertEqual(session("titled", title: "coo:9.abcd — Ship it").headline.secondary, "coo:9.abcd")
     }
+
+    func testTheSubtitleReadsHandleThenAgentThenIdleTime() {
+        let claude = session(
+            "a", title: "coo:9.abcd — Ship it", idleMs: 120_000, connector: .named("claude"))
+        XCTAssertEqual(
+            claude.subtitleFields(),
+            [.handle("coo:9.abcd"), .agent("Claude Code"), .idle("2m")])
+        XCTAssertEqual(
+            session("b", idleMs: 5_000, connector: .named("codex")).subtitleFields(),
+            [.agent("Codex"), .idle("5s")])
+        XCTAssertEqual(claude.subtitleFields().map(\.text), ["coo:9.abcd", "Claude Code", "2m"])
+    }
+
+    func testTheSubtitleKeepsWhateverTheGatewayReported() {
+        // An agent this build has never heard of is named as the Mac spelled it.
+        XCTAssertEqual(session("a", connector: .named("gemini")).agentLabel, "gemini")
+        // No agent to name: a gateway that said nothing, and one that said "none".
+        XCTAssertNil(session("b", connector: .unknown).agentLabel)
+        XCTAssertNil(session("c", connector: .none).agentLabel)
+        XCTAssertNil(session("d", connector: .named("")).agentLabel)
+        XCTAssertEqual(session("e", connector: .unknown).subtitleFields(), [])
+    }
+
+    func testAShellSubtitleNamesItsFolderInsteadOfAnAgent() {
+        let shell = session("a", cwd: "/Users/me/src/latch", idleMs: 3_600_000, connector: .none)
+        XCTAssertEqual(shell.subtitleFields(), [.shellFolder("latch"), .idle("1h")])
+    }
+
+    func testIdleTimeLeavesTheSubtitleWhileAStopIsPending() {
+        let running = session("a", idleMs: 120_000, connector: .named("claude"))
+        XCTAssertEqual(running.subtitleFields(showingIdle: false), [.agent("Claude Code")])
+        // A stopped session's idle time only grows, so it never appears.
+        XCTAssertEqual(
+            session("b", state: "exited", idleMs: 120_000, connector: .named("claude")).subtitleFields(),
+            [.agent("Claude Code")])
+    }
 }

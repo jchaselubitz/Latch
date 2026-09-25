@@ -650,22 +650,11 @@ private struct SessionRow: View {
                 Text(headline.primary)
                     .font(.body)
                     .lineLimit(2)
-                if headline.secondary != nil || session.connector == .none {
-                    HStack(spacing: 6) {
-                        if let secondary = headline.secondary {
-                            Text(secondary)
-                                .lineLimit(1)
-                        }
-                        if session.connector == .none {
-                            HStack(spacing: 4) {
-                                Image(systemName: "keyboard")
-                                Text(session.directoryName)
-                                    .lineLimit(1)
-                            }
-                        }
-                    }
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+                if let subtitle {
+                    subtitle
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
                 }
             }
             .layoutPriority(1)
@@ -676,17 +665,31 @@ private struct SessionRow: View {
                 Text("Stopping…")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
-            } else if let idle = session.idleLabel {
-                Text(idle)
-                    .font(.footnote)
-                    .foregroundStyle(.tertiary)
-                    .monospacedDigit()
             }
         }
         .accessibilityElement(children: .combine)
         .accessibilityValue(accessibilityState)
         .accessibilityHint(destinationLabel)
         .accessibilityAddTraits(isHighlighted ? [.isSelected] : [])
+    }
+
+    /// The line under the description: handle, agent, then idle time, joined
+    /// by dots in one run of text so a narrow row shortens the tail rather
+    /// than wrapping. Nil when the session has nothing to say beneath it.
+    private var subtitle: Text? {
+        let fields = session.subtitleFields(showingIdle: !isStopping)
+        guard let first = fields.first else { return nil }
+        return fields.dropFirst().reduce(subtitleText(first)) { line, field in
+            line + Text(" · ") + subtitleText(field)
+        }
+    }
+
+    private func subtitleText(_ field: SessionSubtitleField) -> Text {
+        switch field {
+        case .shellFolder(let folder): Text("\(Image(systemName: "keyboard")) \(folder)")
+        case .idle(let idle): Text(idle).monospacedDigit()
+        case .handle(let text), .agent(let text): Text(text)
+        }
     }
 
     private var accessibilityState: String {

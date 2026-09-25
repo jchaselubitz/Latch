@@ -132,6 +132,47 @@ public extension SessionSummary {
     }
 }
 
+/// One piece of a row's secondary line. The row joins the pieces with a dot,
+/// so a session that has no handle, or no agent, simply has a shorter line.
+public enum SessionSubtitleField: Equatable, Sendable {
+    /// The ticket handle the title led with.
+    case handle(String)
+    /// The folder a shell was started in; a shell has no agent to name.
+    case shellFolder(String)
+    /// The agent the session runs, as a person knows it.
+    case agent(String)
+    /// How long the session has been idle, `2m` at a glance.
+    case idle(String)
+
+    public var text: String {
+        switch self {
+        case .handle(let text), .shellFolder(let text), .agent(let text), .idle(let text): text
+        }
+    }
+}
+
+public extension SessionSummary {
+    /// The agent's name for a row: the product name when this build knows the
+    /// connector, the raw name when it does not, and nothing for a shell or a
+    /// gateway that did not say.
+    var agentLabel: String? {
+        guard case .named(let raw) = connector, !raw.isEmpty else { return nil }
+        return SessionAgent(rawValue: raw)?.displayName ?? raw
+    }
+
+    /// The row's secondary line in reading order: handle, then agent, then
+    /// how long it has been idle. `showingIdle` is false while a stop is
+    /// pending, when the row says so instead and idle time means nothing.
+    func subtitleFields(showingIdle: Bool = true) -> [SessionSubtitleField] {
+        var fields: [SessionSubtitleField] = []
+        if let handle = headline.secondary { fields.append(.handle(handle)) }
+        if connector == .none { fields.append(.shellFolder(directoryName)) }
+        if let agent = agentLabel { fields.append(.agent(agent)) }
+        if showingIdle, let idle = idleLabel { fields.append(.idle(idle)) }
+        return fields
+    }
+}
+
 /// The pill beside the session list's title. It covers the link states in
 /// which the list itself stays on screen; every other state takes the whole
 /// screen with its own explanation.
