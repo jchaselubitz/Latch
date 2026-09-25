@@ -3,6 +3,32 @@ import XCTest
 @testable import LatchMobileKit
 
 final class StubProtocol: URLProtocol {
+    /// Holds a response until the test has applied an intervening state change.
+    final class ResponseGate: @unchecked Sendable {
+        private let lock = NSLock()
+        private var released = false
+        private var pending: (() -> Void)?
+
+        fileprivate func respond(_ response: @escaping () -> Void) {
+            let sendNow = lock.withLock {
+                if released { return true }
+                pending = response
+                return false
+            }
+            if sendNow { response() }
+        }
+
+        func release() {
+            let response = lock.withLock {
+                released = true
+                let response = pending
+                pending = nil
+                return response
+            }
+            response?()
+        }
+    }
+
     struct Reply { var status: Int; var body: String }
     private static let lock = NSLock()
     nonisolated(unsafe) private static var replies: [String: Reply] = [:]
@@ -19,7 +45,13 @@ final class StubProtocol: URLProtocol {
     /// stopped loopback adapter.
     nonisolated(unsafe) private static var hangs: [String: Int] = [:]
     static func hang(path: String, count: Int = 1) { lock.withLock { hangs[path] = count } }
-    static func reset() { lock.withLock { replies = [:]; seen = []; hangs = [:] } }
+    nonisolated(unsafe) private static var gates: [String: ResponseGate] = [:]
+    static func holdNextResponse(path: String) -> ResponseGate {
+        let gate = ResponseGate()
+        lock.withLock { gates[path] = gate }
+        return gate
+    }
+    static func reset() { lock.withLock { replies = [:]; seen = []; hangs = [:]; gates = [:] } }
     static var requests: [(method: String, path: String, query: String?, headers: [String: String], body: String)] {
         lock.withLock { seen }
     }
@@ -54,6 +86,14 @@ final class StubProtocol: URLProtocol {
         if hanging { return }
         let found = Self.lock.withLock { Self.replies["\(method) \(path)"] ?? Self.replies[path] }
             ?? Reply(status: 404, body: #"{"error":"not found"}"#)
+        if let gate = Self.lock.withLock({ Self.gates.removeValue(forKey: path) }) {
+            gate.respond { self.respond(found) }
+        } else {
+            respond(found)
+        }
+    }
+
+    private func respond(_ found: Reply) {
         let response = HTTPURLResponse(
             url: request.url!, statusCode: found.status, httpVersion: "HTTP/1.1",
             headerFields: ["Content-Type": "application/json"]

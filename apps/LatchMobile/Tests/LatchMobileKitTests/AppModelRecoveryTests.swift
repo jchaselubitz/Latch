@@ -50,6 +50,36 @@ final class AppModelRecoveryTests: XCTestCase {
 
     private static let pairedAt = Date(timeIntervalSince1970: 1_800_000_000)
 
+    /// Keep recovery paused until the test has inspected the interrupted UI.
+    private actor RecoveryConnector: RemoteLinkConnecting {
+        nonisolated let script: ScriptedConnector
+        private let gate = AsyncStream<Void>.makeStream()
+        private var attempts = 0
+
+        init(permission: DevicePermission) {
+            script = ScriptedConnector([.connect(.relay), .connectWithPermission(.relay, permission)])
+        }
+
+        func connect(record: PairedDeviceRecord, options: RemoteLinkConnectOptions) async throws -> any RemoteLinkConnection {
+            attempts += 1
+            if attempts == 2 {
+                for await _ in gate.stream { break }
+            }
+            return try await script.connect(record: record, options: options)
+        }
+
+        func recover() { gate.continuation.finish() }
+    }
+
+    private func waitFor(_ description: String, until condition: () -> Bool,
+                         file: StaticString = #filePath, line: UInt = #line) async throws {
+        let deadline = ContinuousClock.now + .seconds(3)
+        while !condition(), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertTrue(condition(), description, file: file, line: line)
+    }
+
     private func record(permission: DevicePermission = .control) -> PairedDeviceRecord {
         PairedDeviceRecord(
             deviceId: "phone", name: "Phone", devicePublicKey: String(repeating: "11", count: 32),
@@ -270,7 +300,7 @@ final class AppModelRecoveryTests: XCTestCase {
         StubProtocol.reset()
         StubProtocol.stub(path: "/v2/capabilities", body: Self.capabilities)
         StubProtocol.stub(path: "/v2/sessions", body: Self.sessions)
-        let connector = ScriptedConnector([.connect(.relay), .connect(.relay)])
+        let connector = RecoveryConnector(permission: .interact)
         let connection = HoldingConnection(capability: String(repeating: "ab", count: 32))
         let model = AppModel(
             linkConnector: connector,
@@ -281,22 +311,25 @@ final class AppModelRecoveryTests: XCTestCase {
             terminalUnlock: TerminalUnlock(authenticator: StubDeviceOwnerAuthenticator(), grace: 600)
         )
         await model.connectPairedDevice(record())
+        defer { model.unlink() }
         await waitForLinked(model)
+        try await waitFor("initial sessions loaded") { !model.sessions.isEmpty }
         _ = await model.unlockTerminal()
         let session = try XCTUnwrap(model.sessions.first)
         let terminal = try XCTUnwrap(model.terminalSession(for: session))
         terminal.attach(cols: 80, rows: 24)
-        await settle()
+        try await waitFor("terminal attached") { terminal.state == .attached }
         XCTAssertEqual(terminal.state, .attached)
 
         // Transport loss: the held surface becomes interrupted and resumable.
-        connector.latest?.drop()
+        connector.script.latest?.drop()
         connection.drop()
-        for _ in 0..<200 {
-            if case .interrupted = model.linkState { break }
-            try? await Task.sleep(for: .milliseconds(10))
+        try await waitFor("link and terminal interrupted") {
+            if case .interrupted = model.linkState {
+                return terminal.state == .interrupted(resumable: true)
+            }
+            return false
         }
-        await settle()
         XCTAssertEqual(terminal.state, .interrupted(resumable: true))
 
         // While away, the Mac downgraded this phone. Applying the record
@@ -305,11 +338,44 @@ final class AppModelRecoveryTests: XCTestCase {
         XCTAssertTrue(model.applyPairedDeviceRecord(record(permission: .interact)))
         XCTAssertEqual(terminal.state, .closed(.detached))
         XCTAssertFalse(terminal.canResume)
-        await waitForLinked(model)
+        XCTAssertEqual(StubProtocol.requests.filter { $0.path == "/v2/capabilities" }.count, 1)
+        await connector.recover()
+        try await waitFor("recovered with the current grant") {
+            model.linkSnapshot.generation == 2 && model.linkState.isUsable
+        }
         XCTAssertEqual(model.resumeInterruptedTerminals(), 0)
         XCTAssertFalse(model.surface.terminal)
         XCTAssertNil(model.terminalSession(for: session), "no new terminal under the lesser grant")
-        model.unlink()
+    }
+
+    func testPermissionDowngradeWhileRecoveryDiscoveryIsInFlightIsNotOverwritten() async throws {
+        StubProtocol.reset()
+        StubProtocol.stub(path: "/v2/capabilities", body: Self.capabilities)
+        StubProtocol.stub(path: "/v2/sessions", body: Self.sessions)
+        let connector = RecoveryConnector(permission: .control)
+        let model = AppModel(
+            linkConnector: connector,
+            gatewayFactory: { _, _, _ in Self.stubGateway() },
+            presentationStore: MemorySessionPresentationStore(),
+            terminalSizeStore: MemoryTerminalSizeStore()
+        )
+        await model.connectPairedDevice(record())
+        defer { model.unlink() }
+        try await waitFor("initial sessions loaded") { !model.sessions.isEmpty }
+        let gate = StubProtocol.holdNextResponse(path: "/v2/capabilities")
+        defer { gate.release() }
+        connector.script.latest?.drop()
+        try await waitFor("link interrupted") { !model.linkState.isUsable }
+        await connector.recover()
+        try await waitFor("recovery discovery started") {
+            StubProtocol.requests.filter { $0.path == "/v2/capabilities" }.count == 2
+        }
+        XCTAssertEqual(model.linkSnapshot.permission, .control)
+        XCTAssertTrue(model.applyPairedDeviceRecord(record(permission: .interact)))
+        gate.release()
+        try await waitFor("recovery discovery finished") { model.linkState.isUsable }
+        XCTAssertFalse(model.surface.terminal, "discovery must preserve the newer permission")
+        XCTAssertEqual(model.resumeInterruptedTerminals(), 0)
     }
 
     func testCreationRetriesReuseTheRequestIDAndNeverStartASecondShell() async throws {

@@ -898,7 +898,7 @@ public final class AppModel {
     private func discoverOnFreshLink() async {
         LinkTrace.shared.mark("app.discovery.begin")
         defer { LinkTrace.shared.mark("app.discovery.end") }
-        guard let gateway, let pairedDevice else { return }
+        guard let gateway, pairedDevice != nil else { return }
         let generation = pairedConnectionGeneration
         do {
             let started = Date()
@@ -907,7 +907,8 @@ public final class AppModel {
             guard generation == pairedConnectionGeneration else { return }
             let instanceChanged = gatewayInstanceID != nil && gatewayInstanceID != capabilities.gatewayInstanceId
             gatewayInstanceID = capabilities.gatewayInstanceId
-            self.pairedDevice = pairedDevice
+            // Permission refreshes can arrive while discovery is in flight.
+            // Keep the current record rather than restoring a pre-await grant.
             linkSource = .paired
             linkState = .linked(capabilities)
             if let timings = linkSnapshot.timings {
