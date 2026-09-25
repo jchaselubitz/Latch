@@ -109,6 +109,68 @@ pub fn capture_codex_hook(home: &LatchHome, reader: impl Read) -> anyhow::Result
     capture_hook(home, reader, "codex", None)
 }
 
+/// Captures a native Cursor hook in the session's private sidecar.
+pub fn capture_cursor_hook(home: &LatchHome, reader: impl Read) -> anyhow::Result<()> {
+    capture_hook(home, reader, "cursor", None)
+}
+
+/// Cursor loads native hooks from a private per-launch plugin. Never modify
+/// the user's ~/.cursor/hooks.json or the workspace's Cursor configuration.
+pub fn prepare_cursor_launch(
+    home: &LatchHome,
+    manifest: &mut LaunchManifest,
+) -> anyhow::Result<()> {
+    if crate::session::meta::launch_harness(&manifest.launch) != Some("cursor") {
+        return Ok(());
+    }
+    let root = home.root().join("observers/latch-cursor-observer-v1");
+    for directory in [
+        root.clone(),
+        root.join(".cursor-plugin"),
+        root.join("hooks"),
+    ] {
+        fs::create_dir_all(&directory)?;
+        fs::set_permissions(&directory, fs::Permissions::from_mode(DIR_MODE))?;
+    }
+    let executable = fs::canonicalize(std::env::current_exe()?)?;
+    let command = format!("{} __cursor-conversation-hook", shell_quote(&executable));
+    let hook = serde_json::json!({"command": command});
+    let hooks = serde_json::to_vec_pretty(&serde_json::json!({
+        "version": 1,
+        "hooks": {
+            "sessionStart": [hook.clone()],
+            "beforeSubmitPrompt": [hook.clone()],
+            "preToolUse": [hook.clone()],
+            "postToolUse": [hook.clone()],
+            "postToolUseFailure": [hook.clone()],
+            "stop": [hook.clone()],
+            "sessionEnd": [hook],
+        }
+    }))?;
+    write_private(PrivateWrite {
+        path: &root.join(".cursor-plugin/plugin.json"),
+        contents: br#"{"name":"latch-cursor-observer","version":"1.0.0","description":"Observes this Latch session for conversation chat."}"#,
+        mode: FILE_MODE,
+    })?;
+    write_private(PrivateWrite {
+        path: &root.join("hooks/hooks.json"),
+        contents: &hooks,
+        mode: FILE_MODE,
+    })?;
+    if !manifest
+        .launch
+        .argv
+        .windows(2)
+        .any(|pair| pair[0] == "--plugin-dir" && Path::new(&pair[1]) == root)
+    {
+        manifest.launch.argv.splice(
+            1..1,
+            ["--plugin-dir".to_owned(), root.display().to_string()],
+        );
+    }
+    Ok(())
+}
+
 /// Persists the optional source path supplied by the launching integration.
 /// The environment value is private launch material and is deliberately not
 /// copied into display metadata. Relative paths are rejected: a binding must
@@ -172,6 +234,7 @@ fn capture_hook(
         let agent_session_id = object
             .get("session_id")
             .or_else(|| object.get("sessionId"))
+            .or_else(|| object.get("conversation_id"))
             .and_then(Value::as_str);
         write_private(PrivateWrite {
             path: &paths.conversation_source_binding(),
@@ -318,6 +381,54 @@ mod tests {
 
     use super::*;
     use crate::session::manifest::{DisplayMetadata, LaunchSpec, TerminalSize};
+
+    #[test]
+    fn cursor_plugin_is_private_additive_and_idempotent() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = LatchHome::new(temp.path());
+        let mut manifest = LaunchManifest::new(crate::session::manifest::LaunchRequest {
+            argv: vec![
+                "agent".into(),
+                "--plugin-dir".into(),
+                "/existing/plugin".into(),
+            ],
+            cwd: PathBuf::from("/tmp"),
+            size: TerminalSize::new(80, 24),
+        });
+        prepare_cursor_launch(&home, &mut manifest).unwrap();
+        let once = manifest.clone();
+        prepare_cursor_launch(&home, &mut manifest).unwrap();
+        assert_eq!(manifest, once);
+        assert_eq!(
+            &manifest.launch.argv[3..],
+            &["--plugin-dir", "/existing/plugin"]
+        );
+        let root = PathBuf::from(&manifest.launch.argv[2]);
+        assert!(root.starts_with(home.root()));
+        let hooks: Value =
+            serde_json::from_slice(&fs::read(root.join("hooks/hooks.json")).unwrap()).unwrap();
+        for event in [
+            "sessionStart",
+            "beforeSubmitPrompt",
+            "preToolUse",
+            "postToolUse",
+            "postToolUseFailure",
+            "stop",
+        ] {
+            assert!(hooks["hooks"][event][0]["command"]
+                .as_str()
+                .unwrap()
+                .contains("__cursor-conversation-hook"));
+        }
+        assert_eq!(
+            fs::metadata(root.join("hooks/hooks.json"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            FILE_MODE
+        );
+    }
 
     #[test]
     fn codex_launch_binding_is_explicit_and_absolute() {

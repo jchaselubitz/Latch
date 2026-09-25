@@ -1,5 +1,5 @@
 //! Agent-specific adapters.  Nothing outside this module knows transcript
-//! fields, hook keys, or terminal conventions for Claude or Codex.
+//! fields, hook keys, or terminal conventions for Claude, Codex, or Cursor.
 
 mod jsonl;
 

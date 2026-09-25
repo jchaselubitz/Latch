@@ -102,10 +102,43 @@ final class SessionListPresentationTests: XCTestCase {
         XCTAssertEqual(SessionListLinkStatus(.macOffline(nil))?.label, "Mac unavailable")
         XCTAssertEqual(SessionListLinkStatus.connected.label, "Connected")
         XCTAssertNil(SessionListLinkStatus.connected.accessibilityDetail)
+        XCTAssertEqual(SessionListLinkStatus.connected.pillText(deviceName: "Jake's MacBook"), "Jake's MacBook")
+        XCTAssertEqual(SessionListLinkStatus.connected.pillText(deviceName: ""), "Connected")
+        XCTAssertEqual(SessionListLinkStatus.connected.pillText(deviceName: nil), "Connected")
+        XCTAssertEqual(SessionListLinkStatus.reconnecting.pillText(deviceName: "Jake's MacBook"), "Reconnecting…")
+        XCTAssertEqual(SessionListLinkStatus.macUnavailable.pillText(deviceName: "Jake's MacBook"), "Mac unavailable")
         XCTAssertNil(SessionListLinkStatus(.unlinked))
         XCTAssertNil(SessionListLinkStatus(.connecting))
         XCTAssertNil(SessionListLinkStatus(.revoked("gone")))
         XCTAssertNil(SessionListLinkStatus(.pairingRequired("again")))
         XCTAssertNil(SessionListLinkStatus(.failed("no")))
+    }
+
+    func testAHeadlineLeadsWithTheDescriptionAndDemotesTheHandle() {
+        let split = SessionHeadline(title: "coo:1056.wpbv — Align UI Colors and Extend Theme")
+        XCTAssertEqual(split.primary, "Align UI Colors and Extend Theme")
+        XCTAssertEqual(split.secondary, "coo:1056.wpbv")
+
+        XCTAssertEqual(SessionHeadline(title: "per:188.7ag0 - Split createApi()").secondary, "per:188.7ag0")
+        XCTAssertEqual(SessionHeadline(title: "per:188.7ag0 – Split createApi()").primary, "Split createApi()")
+
+        // The first dash splits; later ones belong to the description.
+        let nested = SessionHeadline(title: "coo:1 — Fix a — b")
+        XCTAssertEqual(nested.primary, "Fix a — b")
+        XCTAssertEqual(nested.secondary, "coo:1")
+    }
+
+    func testAHeadlineWithoutAHandleStaysOneLine() {
+        XCTAssertEqual(SessionHeadline(title: "Fix the relay"), SessionHeadline(title: "Fix the relay"))
+        XCTAssertNil(SessionHeadline(title: "Fix the relay").secondary)
+        XCTAssertEqual(SessionHeadline(title: "Fix the relay").primary, "Fix the relay")
+        // A hyphen inside a word is not a separator.
+        XCTAssertNil(SessionHeadline(title: "api-server").secondary)
+        // A dash with nothing on one side keeps the whole title.
+        XCTAssertNil(SessionHeadline(title: " — Fix the relay").secondary)
+        XCTAssertEqual(SessionHeadline(title: "coo:1 — ").primary, "coo:1 — ")
+
+        XCTAssertEqual(session("plain").headline.primary, "session-plain")
+        XCTAssertEqual(session("titled", title: "coo:9.abcd — Ship it").headline.secondary, "coo:9.abcd")
     }
 }

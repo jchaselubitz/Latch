@@ -226,6 +226,7 @@ pub fn harness_kind(argv: &[String]) -> Option<&'static str> {
     match redact_command(argv).as_str() {
         "claude" => Some("claude"),
         "codex" => Some("codex"),
+        "agent" | "cursor-agent" => Some("cursor"),
         _ => None,
     }
 }

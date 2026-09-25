@@ -54,7 +54,7 @@ struct TerminalView: View {
                 .onAppear { report(viewport: proxy.size) }
                 .onChange(of: proxy.size) { _, size in report(viewport: size) }
         }
-        .background(Color.black.ignoresSafeArea())
+        .terminalKeyboardBackdrop()
         // Floating chrome in place of the navigation bar, the same as chat's:
         // back, a chip naming the session and who holds its terminal, and a
         // menu for the rest.
@@ -65,7 +65,7 @@ struct TerminalView: View {
             details: detailsActions
         ) {
             SessionChromeBar(
-                title: session.displayName,
+                title: session.headline.primary,
                 status: chromeStatus.label,
                 style: .terminal,
                 statusIdentifier: "terminal.chrome.status",

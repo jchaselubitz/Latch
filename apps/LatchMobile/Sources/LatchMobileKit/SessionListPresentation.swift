@@ -90,9 +90,51 @@ public extension SessionSummary {
     }
 }
 
-/// The one quiet line under the session list's title. It covers the link
-/// states in which the list itself stays on screen; every other state takes
-/// the whole screen with its own explanation.
+/// A session's title split the way the list reads it: what the session is
+/// about first, and the handle it was launched under beneath.
+///
+/// Sessions started by an orchestrator arrive titled `coo:1056.wpbv — Align
+/// UI colors`, a ticket handle and a description joined by a dash. On a phone
+/// the handle is the least useful part of that line and it came first, so the
+/// description was what got truncated. The split puts the description on top
+/// and demotes the handle to a secondary line; a title with no dash stays a
+/// single line.
+public struct SessionHeadline: Equatable, Sendable {
+    /// The line that identifies the session: the description when the title
+    /// has one, otherwise the whole title.
+    public let primary: String
+    /// The handle the title led with, when it had one.
+    public let secondary: String?
+
+    /// The dashes a title may be joined by, tried in order; the em dash is
+    /// what Overlord writes and the others cover a title typed by hand.
+    static let separators = [" — ", " – ", " - "]
+
+    public init(title: String) {
+        for separator in Self.separators {
+            guard let range = title.range(of: separator) else { continue }
+            let handle = title[..<range.lowerBound].trimmingCharacters(in: .whitespaces)
+            let description = title[range.upperBound...].trimmingCharacters(in: .whitespaces)
+            guard !handle.isEmpty, !description.isEmpty else { break }
+            primary = description
+            secondary = handle
+            return
+        }
+        primary = title
+        secondary = nil
+    }
+}
+
+public extension SessionSummary {
+    /// The row's two lines, cut from `displayName`.
+    var headline: SessionHeadline {
+        SessionHeadline(title: displayName)
+    }
+}
+
+/// The pill beside the session list's title. It covers the link states in
+/// which the list itself stays on screen; every other state takes the whole
+/// screen with its own explanation.
 public enum SessionListLinkStatus: Equatable, Sendable {
     case connected
     case reconnecting
@@ -112,6 +154,19 @@ public enum SessionListLinkStatus: Equatable, Sendable {
         case .connected: "Connected"
         case .reconnecting: "Reconnecting…"
         case .macUnavailable: "Mac unavailable"
+        }
+    }
+
+    /// What the pill says. A live link is named by the Mac it reaches, since
+    /// the dot already says "connected"; the other states say what is wrong,
+    /// because the Mac's name would only be reassuring.
+    public func pillText(deviceName: String?) -> String {
+        switch self {
+        case .connected:
+            if let deviceName, !deviceName.isEmpty { return deviceName }
+            return label
+        case .reconnecting, .macUnavailable:
+            return label
         }
     }
 

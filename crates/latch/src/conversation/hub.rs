@@ -609,12 +609,16 @@ impl ConversationHub {
             Ok(Ok(Ok((result, checkpoint)))) => {
                 let checkpoint_delta =
                     (!result.checkpoint_delta.is_empty()).then_some(result.checkpoint_delta);
-                self.apply_poll_with_checkpoint(
+                if let Err(error) = self.apply_poll_with_checkpoint(
                     &id,
                     result.mutations,
                     checkpoint_delta,
                     Some(checkpoint),
-                )
+                ) {
+                    self.degrade(&id, format!("observation failed: {error}"))
+                } else {
+                    Ok(())
+                }
             }
             Ok(Ok(Err(error))) => self.degrade(&id, format!("observation failed: {error}")),
             Ok(Err(_)) => self.degrade(&id, "observation worker stopped".into()),
@@ -1276,6 +1280,47 @@ mod tests {
         }
     }
 
+    struct OversizeConnector;
+    impl Connector for OversizeConnector {
+        fn detect(&self) -> Detection {
+            FakeConnector.detect()
+        }
+        fn poll(&mut self, _: PollBudget) -> Result<PollResult> {
+            Ok(PollResult {
+                mutations: vec![ConnectorMutation::Upsert(ObservedItem {
+                    id: ConversationItemId::native("large"),
+                    created_at: "2026-09-25T08:38:00Z".into(),
+                    kind: super::super::ConversationItemKind::Message {
+                        role: MessageRole::User,
+                        text: "x".repeat(MAX_CONVERSATION_ITEM_BYTES),
+                        status: MessageStatus::Observed,
+                    },
+                })],
+                checkpoint_delta: CheckpointDelta {
+                    source_offsets: vec![],
+                    active_branch_delta: vec![],
+                    connector_state: None,
+                },
+            })
+        }
+        fn actions(&self) -> Vec<ActionDescriptor> {
+            FakeConnector.actions()
+        }
+        fn apply(&mut self, action: ConnectorAction, deadline: Duration) -> Result<ApplyResult> {
+            FakeConnector.apply(action, deadline)
+        }
+        fn reconcile(
+            &self,
+            outstanding: &[ConversationItemId],
+            observed: &[ConversationItemId],
+        ) -> Vec<ConnectorMutation> {
+            FakeConnector.reconcile(outstanding, observed)
+        }
+        fn checkpoint_snapshot(&self) -> Result<Vec<u8>> {
+            FakeConnector.checkpoint_snapshot()
+        }
+    }
+
     struct LaneConnector {
         slow_poll: bool,
     }
@@ -1566,6 +1611,36 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(std::fs::read(journal).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn rejected_observation_batch_exits_starting_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let hub = ConversationHub::new(temp.path()).unwrap();
+        let id = ConversationId::new("ses_oversize");
+        hub.watch(
+            id.clone(),
+            Box::new(OversizeConnector),
+            ConversationState::starting(None),
+        )
+        .unwrap();
+        hub.poll_once(
+            id.clone(),
+            PollBudget {
+                max_records: 1,
+                deadline: Duration::from_secs(1),
+            },
+        )
+        .await
+        .unwrap();
+        let state = hub.snapshot(&id, 0).unwrap().state;
+        assert_eq!(state.phase, super::super::ConversationPhase::Unavailable);
+        assert!(state
+            .send_message
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("conversation item exceeds aggregate byte budget"));
     }
 
     #[tokio::test]

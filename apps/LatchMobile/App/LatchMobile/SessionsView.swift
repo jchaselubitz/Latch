@@ -87,6 +87,17 @@ struct SessionsView: View {
                 }
             }
             .navigationTitle("Latch")
+            // The title is drawn by the list itself, up where the stock
+            // large title leaves a band of empty screen. The bar keeps only
+            // the back label of a pushed screen, and where the search field
+            // no longer lives in it, it goes altogether.
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .principal) {
+                    Color.clear.frame(width: 1, height: 1).accessibilityHidden(true)
+                }
+            }
+            .toolbar(Self.navigationBarVisibility, for: .navigationBar)
             // Every state, the unpaired ones included: the gear is the only
             // way to reach pairing now that there is no tab bar.
             .safeAreaInset(edge: .bottom) { floatingActions }
@@ -294,6 +305,14 @@ struct SessionsView: View {
         }
     }
 
+    /// Hidden from iOS 26, where the search field sits in the bottom bar and
+    /// an inline bar would only hold the list's title away from the top of
+    /// the screen. Earlier systems draw the search field in that bar, so
+    /// hiding it there would take search with it.
+    private static var navigationBarVisibility: Visibility {
+        if #available(iOS 26, *) { .hidden } else { .visible }
+    }
+
     /// The paired Mac's name, when this phone has finished pairing.
     private var pairedMacName: String? {
         guard case .paired(let record) = pairing.state else { return nil }
@@ -317,11 +336,13 @@ struct SessionsView: View {
             let groups = SessionListGroup.grouped(model.sessions, matching: searchQuery)
             ScrollViewReader { proxy in
                 List {
-                    if let status = SessionListLinkStatus(model.linkState) {
-                        LinkStatusLine(status: status)
-                            .listRowSeparator(.hidden)
-                            .listRowBackground(Color.clear)
-                    }
+                    SessionListHeader(
+                        status: SessionListLinkStatus(model.linkState),
+                        deviceName: pairedMacName
+                    )
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(Color.clear)
+                    .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 4, trailing: 16))
                     ForEach(groups) { group in
                         Section(group.section.title) {
                             ForEach(group.sessions) { session in
@@ -624,20 +645,30 @@ private struct SessionRow: View {
                     .accessibilityHidden(true)
             }
 
-            Text(session.displayName)
-                .font(.body)
-                .lineLimit(1)
-                .layoutPriority(1)
-
-            if session.connector == .none {
-                HStack(spacing: 4) {
-                    Image(systemName: "keyboard")
-                    Text(session.directoryName)
-                        .lineLimit(1)
+            let headline = session.headline
+            VStack(alignment: .leading, spacing: 2) {
+                Text(headline.primary)
+                    .font(.body)
+                    .lineLimit(2)
+                if headline.secondary != nil || session.connector == .none {
+                    HStack(spacing: 6) {
+                        if let secondary = headline.secondary {
+                            Text(secondary)
+                                .lineLimit(1)
+                        }
+                        if session.connector == .none {
+                            HStack(spacing: 4) {
+                                Image(systemName: "keyboard")
+                                Text(session.directoryName)
+                                    .lineLimit(1)
+                            }
+                        }
+                    }
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
                 }
-                .font(.footnote)
-                .foregroundStyle(.secondary)
             }
+            .layoutPriority(1)
 
             Spacer(minLength: 8)
 
@@ -676,21 +707,57 @@ private struct SessionRow: View {
     }
 }
 
-/// The quiet line under the title that says whether the list is live.
-private struct LinkStatusLine: View {
+/// The list's own title row: "Latch" on the left, and opposite it the pill
+/// that says whether the rows below are live and which Mac they come from.
+private struct SessionListHeader: View {
+    let status: SessionListLinkStatus?
+    let deviceName: String?
+
+    var body: some View {
+        HStack(alignment: .center) {
+            Text("Latch")
+                .font(.largeTitle.weight(.bold))
+                .accessibilityAddTraits(.isHeader)
+            Spacer(minLength: 12)
+            if let status {
+                LinkStatusPill(status: status, deviceName: deviceName)
+            }
+        }
+    }
+}
+
+/// An outlined pill: a colored dot for the link state and, when the link is
+/// live, the name of the Mac on the other end of it.
+private struct LinkStatusPill: View {
     let status: SessionListLinkStatus
+    let deviceName: String?
 
     var body: some View {
         HStack(spacing: 6) {
             Circle()
                 .fill(color)
-                .frame(width: 6, height: 6)
-            Text(status.label)
+                .frame(width: 8, height: 8)
+            Text(status.pillText(deviceName: deviceName))
+                .lineLimit(1)
         }
-        .font(.footnote)
+        .font(.footnote.weight(.medium))
         .foregroundStyle(.secondary)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .overlay(
+            Capsule(style: .continuous)
+                .strokeBorder(.secondary.opacity(0.35), lineWidth: 1)
+        )
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel([status.label, status.accessibilityDetail].compactMap(\.self).joined(separator: ". "))
+        .accessibilityLabel(accessibilityLabel)
+        .accessibilityIdentifier("sessions.linkStatus")
+    }
+
+    private var accessibilityLabel: String {
+        var parts = [status.label]
+        if status == .connected, let deviceName, !deviceName.isEmpty { parts.append("to \(deviceName)") }
+        if let detail = status.accessibilityDetail { parts.append(detail) }
+        return parts.joined(separator: ". ")
     }
 
     private var color: Color {
@@ -764,3 +831,4 @@ struct BannerView: View {
             .background(.thinMaterial)
     }
 }
+

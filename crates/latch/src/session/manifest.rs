@@ -74,15 +74,26 @@ pub enum AgentKind {
     Claude,
     /// OpenAI Codex CLI.
     Codex,
+    /// Cursor CLI (`agent`).
+    Cursor,
 }
 
 impl AgentKind {
     /// The harness marker persisted for sessions running this agent, which is
-    /// also the executable name `argv[0]` must carry.
+    /// independent of the executable name.
     pub const fn harness(self) -> &'static str {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
+            Self::Cursor => "cursor",
+        }
+    }
+
+    /// Preferred CLI executable, which can differ from the harness identity.
+    pub const fn executable(self) -> &'static str {
+        match self {
+            Self::Cursor => "agent",
+            _ => self.harness(),
         }
     }
 }
@@ -292,14 +303,16 @@ fn validate(manifest: &LaunchManifest) -> Result<(), ManifestError> {
         let program = std::path::Path::new(&manifest.launch.argv[0])
             .file_name()
             .and_then(|name| name.to_str());
-        if program != Some(agent.harness()) {
+        if program != Some(agent.executable())
+            && !(agent == AgentKind::Cursor && program == Some("cursor-agent"))
+        {
             return Err(ManifestError::InvalidField {
                 field: "launch.agent",
                 detail: format!(
                     "declares {} but launch.argv[0] is not the {} executable; \
                      pass the agent argv and use launch.login_shell for shell setup",
                     agent.harness(),
-                    agent.harness()
+                    agent.executable()
                 ),
             });
         }
@@ -364,6 +377,23 @@ mod tests {
         assert_eq!(json["launch"]["agent"], "codex");
         assert_eq!(json["launch"]["login_shell"]["path"], "/bin/zsh");
         assert_eq!(reads(&declared).unwrap(), declared);
+    }
+
+    #[test]
+    fn cursor_identity_uses_the_agent_executable() {
+        for executable in ["agent", "/opt/bin/agent", "cursor-agent"] {
+            let declared = manifest(&[executable], Some(AgentKind::Cursor));
+            assert_eq!(reads(&declared).unwrap(), declared);
+            assert_eq!(
+                crate::session::meta::launch_harness(&declared.launch),
+                Some("cursor")
+            );
+            assert_eq!(
+                crate::session::meta::harness_kind(&declared.launch.argv),
+                Some("cursor")
+            );
+        }
+        assert!(reads(&manifest(&["cursor"], Some(AgentKind::Cursor))).is_err());
     }
 
     #[test]

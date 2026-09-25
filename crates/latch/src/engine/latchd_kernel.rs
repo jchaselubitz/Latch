@@ -94,6 +94,7 @@ pub(super) fn create(request: CreateRequest) -> Result<CreateResult> {
     super::materialize_environment(&mut manifest);
     crate::observer::prepare_claude_launch(&request.home, &mut manifest)?;
     crate::observer::prepare_codex_launch(&mut manifest)?;
+    crate::observer::prepare_cursor_launch(&request.home, &mut manifest)?;
     let prepare = watch.lap();
 
     let (id, paths) = loop {

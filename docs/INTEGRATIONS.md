@@ -90,8 +90,9 @@ PATH, declare it and let Latch build the shell wrapper:
 }
 ```
 
-- `agent` is `claude` or `codex`. `argv[0]` must be that executable, as a bare
-  name or a path; anything else is rejected with `launch.agent`.
+- `agent` is `claude`, `codex`, or `cursor`. `argv[0]` must be the corresponding
+  executable, as a bare name or a path; Cursor uses `agent` (also accepts
+  `cursor-agent`). Anything else is rejected with `launch.agent`.
 - `login_shell.path` must be absolute. After recording the identity and adding
   the observer arguments to `argv`, Latch runs
   `[path, "-ilc", "<prelude>\nexec \"$@\"", "latch", argv...]`. The program and
@@ -101,6 +102,25 @@ PATH, declare it and let Latch build the shell wrapper:
 - Require the `agent-launch` entry in `latch capabilities --json`
   `capabilities.extensions` before sending these fields. Older builds ignore
   them and would run the agent argv directly, with no identity.
+
+### Cursor chat
+
+Launch Cursor with `latch run -- agent`, or use `"agent": "cursor"` and
+`"argv": ["agent"]` in the launch manifest. Latch advertises the `cursor`
+conversation connector to chat clients and injects a private native hook plugin
+using `--plugin-dir`. This requires a Cursor CLI version with local plugin
+support; live two-turn chat verified with `2026.09.23-86fc751`.
+
+The connector reads only the transcript path reported by that session's hooks.
+It projects user/assistant messages, observes tool activity and turn completion,
+and submits chat messages only when the live Cursor composer is empty. Cursor
+permission dialogs stay on the terminal surface. Existing sessions launched
+without the observer must be relaunched for transcript-backed chat. User and
+workspace Cursor settings are not modified.
+
+References: [Cursor CLI parameters](https://cursor.com/docs/cli/reference/parameters),
+[native hooks](https://cursor.com/docs/hooks), and
+[plugin format](https://cursor.com/docs/reference/plugins).
 
 A session's identity is fixed when it is created. Sessions started before a
 launcher adopted this path keep no harness marker and must be recreated to

@@ -127,6 +127,8 @@ fn send_and_resolve_at_desktop_phone_and_never_attached_geometry() {
         for (connector_id, paint, choice, refusal) in [
             ("claude", "❯", None, None),
             ("codex", "›", None, None),
+            ("cursor", "→ Add a follow-up", None, None),
+            ("cursor", "→ draft", None, Some("the cursor composer is no longer empty")),
             ("claude", "❯ draft", None, Some("the claude composer is no longer empty")),
             ("codex", "› draft", None, Some("the codex composer is no longer empty")),
             ("claude", "Permission required\n1. Yes\n2. No", Some("Yes"), None),

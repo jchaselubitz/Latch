@@ -309,6 +309,9 @@ enum Command {
     /// Capture one Codex source binding or observation record. Internal only.
     #[command(hide = true, name = "__codex-conversation-hook")]
     CodexConversationHook,
+    /// Capture one Cursor hook record. Internal only.
+    #[command(hide = true, name = "__cursor-conversation-hook")]
+    CursorConversationHook,
 }
 
 #[derive(Subcommand)]
@@ -859,6 +862,11 @@ fn dispatch(command: Option<Command>) -> Result<()> {
         }
         Some(Command::CodexConversationHook) => {
             latch::observer::capture_codex_hook(&LatchHome::from_env()?, std::io::stdin())
+        }
+        Some(Command::CursorConversationHook) => {
+            latch::observer::capture_cursor_hook(&LatchHome::from_env()?, std::io::stdin())?;
+            println!("{{}}");
+            Ok(())
         }
     }
 }

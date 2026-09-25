@@ -122,7 +122,11 @@ final class TerminalKeyBarView: UIView, UIScrollViewDelegate {
     // MARK: - Layout
 
     private func build() {
-        let background = UIVisualEffectView(effect: UIBlurEffect(style: .systemChromeMaterial))
+        // The keyboard's own colour rather than a material. A blur over the
+        // black terminal read as a grey band stacked on a lighter keyboard; a
+        // solid match makes bar and keyboard one surface.
+        let background = UIView()
+        background.backgroundColor = KeyboardPalette.background
 
         scrollView.showsHorizontalScrollIndicator = false
         scrollView.showsVerticalScrollIndicator = false
@@ -435,7 +439,7 @@ private final class KeyCapButton: UIButton {
             config.baseForegroundColor = cap.isOn ? .white : .label
             config.background.backgroundColor = cap.isOn
                 ? cap.tintColor
-                : (cap.isHighlighted ? .systemFill : .tertiarySystemFill)
+                : (cap.isHighlighted ? KeyboardPalette.pressedKey : KeyboardPalette.key)
             cap.configuration = config
         }
         heightAnchor.constraint(equalToConstant: Metrics.keyHeight).isActive = true
@@ -446,6 +450,48 @@ private final class KeyCapButton: UIButton {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("not from a nib") }
+}
+
+/// The system keyboard's colours, so the bar and the backdrop behind the
+/// keyboard read as part of it rather than as app chrome beside it.
+///
+/// Sampled, not named: UIKit publishes no keyboard colour. The keyboard is
+/// translucent, so these are what it shows over a backdrop of its own colour
+/// — which is what `TerminalView` puts behind it.
+enum KeyboardPalette {
+    static let background = UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(red: 0.125, green: 0.125, blue: 0.129, alpha: 1)
+            : UIColor(red: 0.847, green: 0.855, blue: 0.871, alpha: 1)
+    }
+
+    static let key = UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(white: 1, alpha: 0.16)
+            : UIColor(red: 0.988, green: 0.988, blue: 0.996, alpha: 1)
+    }
+
+    static let pressedKey = UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(white: 1, alpha: 0.35)
+            : UIColor(red: 0.690, green: 0.702, blue: 0.722, alpha: 1)
+    }
+}
+
+extension View {
+    /// Black down to the top of the keyboard, the keyboard's colour beneath.
+    ///
+    /// The keyboard's top corners are rounded, so whatever sits behind it
+    /// shows through them. A black that ignored the keyboard's safe area left
+    /// two dark notches under the bar; this layer ignores only the container's,
+    /// so it stops where the keyboard starts and the backdrop fills the rest.
+    func terminalKeyboardBackdrop() -> some View {
+        background {
+            Color.black
+                .ignoresSafeArea(.container)
+                .background(Color(uiColor: KeyboardPalette.background).ignoresSafeArea())
+        }
+    }
 }
 
 private extension NSLayoutConstraint {

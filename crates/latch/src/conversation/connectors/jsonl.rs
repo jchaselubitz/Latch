@@ -19,11 +19,15 @@ use super::super::{
     ConnectorMutation, ConversationItemId, ConversationItemKind, ConversationPhase,
     ConversationState, Detection, MessageRole, MessageStatus, ObservedItem, PollBudget, PollResult,
     RequestStatus, RequestType, ToolStatus, ACTION_RESOLVE_REQUEST, ACTION_SEND_MESSAGE,
+    MAX_CONVERSATION_ITEM_BYTES, MAX_MESSAGE_TEXT_BYTES,
 };
 
 const MAX_RECORD_BYTES: usize = 1024 * 1024;
 const MAX_READ_BYTES: usize = 2 * 1024 * 1024;
 
+mod cursor;
+#[cfg(test)]
+mod cursor_live_tests;
 #[cfg(test)]
 mod geometry_tests;
 
@@ -37,6 +41,7 @@ pub fn connector_kind(harness: Option<&str>) -> Option<&'static str> {
     match harness {
         Some("claude") => Some("claude"),
         Some("codex") => Some("codex"),
+        Some("cursor") => Some("cursor"),
         _ => None,
     }
 }
@@ -283,6 +288,10 @@ impl JsonlConnector {
 
     fn current_screen(&mut self, deadline: Duration) -> Result<String> {
         let snapshot = self.control()?.snapshot(deadline)?;
+        if self.id == "cursor" {
+            // An old empty composer in scrollback is not an input target.
+            return Ok(snapshot.lines.join("\n"));
+        }
         Ok(snapshot
             .history
             .into_iter()
@@ -300,6 +309,7 @@ impl JsonlConnector {
             return false;
         }
         let replacing = self.source.is_some();
+        let cursor_turn_open = self.id == "cursor" && !replacing && self.turn_open;
         self.source_identity = SourceIdentity::at(&source);
         self.source = Some(source);
         self.agent_session_id = agent_session_id;
@@ -313,7 +323,7 @@ impl JsonlConnector {
         // like `hook_offset`: both describe the one continuous hook sidecar
         // for this Latch session, not the specific source file currently
         // bound.
-        self.turn_open = false;
+        self.turn_open = cursor_turn_open;
         self.last_state = None;
         self.screen_can_send = None;
         self.last_screen_refresh = None;
@@ -321,48 +331,51 @@ impl JsonlConnector {
     }
 
     fn state(&self) -> ConversationState {
-        let (phase, send_message, resolve_request) = if self.source.is_none() {
-            // Codex creates its thread on the first prompt, so its
-            // SessionStart hook cannot bind a rollout before that prompt.
-            // The visible empty composer is enough to safely submit the
-            // first message without taking the terminal surface.
-            let can_start_codex = self.id == "codex" && self.screen_can_send == Some(true);
-            (
-                ConversationPhase::Starting,
+        let (phase, send_message, resolve_request) =
+            if self.source.is_none() && !(self.id == "cursor" && self.turn_open) {
+                // Codex creates its thread on the first prompt, so its
+                // SessionStart hook cannot bind a rollout before that prompt.
+                // The visible empty composer is enough to safely submit the
+                // first message without taking the terminal surface.
+                let can_start = matches!(self.id, "codex" | "cursor")
+                    && self.screen_can_send == Some(true)
+                    && !self.turn_open;
                 (
-                    can_start_codex,
-                    (!can_start_codex).then(|| "waiting for the agent's empty composer".to_owned()),
-                ),
+                    ConversationPhase::Starting,
+                    (
+                        can_start,
+                        (!can_start).then(|| "waiting for the agent's empty composer".to_owned()),
+                    ),
+                    (
+                        false,
+                        Some("waiting for the agent's authoritative source binding".to_owned()),
+                    ),
+                )
+            } else if self.pending_request.is_some() {
                 (
-                    false,
-                    Some("waiting for the agent's authoritative source binding".to_owned()),
-                ),
-            )
-        } else if self.pending_request.is_some() {
-            (
-                ConversationPhase::AwaitingInput,
-                (false, Some("resolve the pending request first".to_owned())),
-                (true, None),
-            )
-        } else if self.tool_running || self.turn_open {
-            (
-                ConversationPhase::Working,
-                (false, Some("agent is working".to_owned())),
-                (false, Some("no pending request".to_owned())),
-            )
-        } else if self.screen_can_send == Some(false) {
-            (
-                ConversationPhase::Idle,
-                (false, Some("the agent composer is not empty".to_owned())),
-                (false, Some("no pending request".to_owned())),
-            )
-        } else {
-            (
-                ConversationPhase::Idle,
-                (true, None),
-                (false, Some("no pending request".to_owned())),
-            )
-        };
+                    ConversationPhase::AwaitingInput,
+                    (false, Some("resolve the pending request first".to_owned())),
+                    (true, None),
+                )
+            } else if self.tool_running || self.turn_open {
+                (
+                    ConversationPhase::Working,
+                    (false, Some("agent is working".to_owned())),
+                    (false, Some("no pending request".to_owned())),
+                )
+            } else if self.screen_can_send == Some(false) {
+                (
+                    ConversationPhase::Idle,
+                    (false, Some("the agent composer is not empty".to_owned())),
+                    (false, Some("no pending request".to_owned())),
+                )
+            } else {
+                (
+                    ConversationPhase::Idle,
+                    (true, None),
+                    (false, Some("no pending request".to_owned())),
+                )
+            };
         ConversationState {
             phase,
             send_message: super::super::Availability {
@@ -418,6 +431,9 @@ impl JsonlConnector {
         if self.id == "claude" {
             return self.claude_record(object, &event, ordinal);
         }
+        if self.id == "cursor" {
+            return self.cursor_record(object, ordinal);
+        }
         if self.id == "codex" && event == "response_item" {
             // Raw user response items can contain injected AGENTS.md and
             // environment context. Codex's completed conversation items
@@ -461,16 +477,20 @@ impl JsonlConnector {
         let kind = match event.as_str() {
             "user_message" | "user" | "terminal_input" => Some(ConversationItemKind::Message {
                 role: MessageRole::User,
-                text: string(object, "text")
-                    .or_else(|| string(object, "message"))
-                    .unwrap_or_default(),
+                text: bounded_message_text(
+                    string(object, "text")
+                        .or_else(|| string(object, "message"))
+                        .unwrap_or_default(),
+                ),
                 status: MessageStatus::Observed,
             }),
             "assistant_message" | "assistant" => Some(ConversationItemKind::Message {
                 role: MessageRole::Assistant,
-                text: string(object, "text")
-                    .or_else(|| string(object, "message"))
-                    .unwrap_or_default(),
+                text: bounded_message_text(
+                    string(object, "text")
+                        .or_else(|| string(object, "message"))
+                        .unwrap_or_default(),
+                ),
                 status: message_status(object),
             }),
             "tool_call" | "tool_use" => {
@@ -613,7 +633,7 @@ impl JsonlConnector {
                 .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_owned()),
             kind: ConversationItemKind::Message {
                 role,
-                text,
+                text: bounded_message_text(text),
                 status: MessageStatus::Observed,
             },
         })]
@@ -712,7 +732,7 @@ impl JsonlConnector {
                         at.clone(),
                         ConversationItemKind::Message {
                             role: MessageRole::User,
-                            text,
+                            text: bounded_message_text(text),
                             status: MessageStatus::Observed,
                         },
                     ));
@@ -764,7 +784,7 @@ impl JsonlConnector {
                                     at.clone(),
                                     ConversationItemKind::Message {
                                         role: MessageRole::Assistant,
-                                        text,
+                                        text: bounded_message_text(text),
                                         status: MessageStatus::Complete,
                                     },
                                 ));
@@ -901,6 +921,41 @@ fn claude_text(content: Option<&Value>) -> String {
             .collect::<Vec<_>>()
             .join("\n"),
         _ => String::new(),
+    }
+}
+
+/// Agent transcripts can contain a long launch prompt or response. Keep the
+/// visible beginning and end within one wire message's text budget so a single
+/// source record cannot strand the Hub's first observation on its item limit.
+fn bounded_message_text(text: String) -> String {
+    const OMITTED: &str = "\n\n[… middle omitted from chat …]\n\n";
+    const ENCODED_TEXT_BUDGET: usize = MAX_CONVERSATION_ITEM_BYTES - 4 * 1024;
+    if text.len() <= MAX_MESSAGE_TEXT_BYTES
+        && serde_json::to_vec(&text).is_ok_and(|encoded| encoded.len() <= ENCODED_TEXT_BUDGET)
+    {
+        return text;
+    }
+    let mut available = MAX_MESSAGE_TEXT_BYTES.min(text.len()) - OMITTED.len();
+    loop {
+        let mut prefix_end = available / 2;
+        while !text.is_char_boundary(prefix_end) {
+            prefix_end -= 1;
+        }
+        let mut suffix_start = text.len() - (available - prefix_end);
+        while !text.is_char_boundary(suffix_start) {
+            suffix_start += 1;
+        }
+        let shortened = format!(
+            "{}{}{}",
+            &text[..prefix_end],
+            OMITTED,
+            &text[suffix_start..]
+        );
+        if serde_json::to_vec(&shortened).is_ok_and(|encoded| encoded.len() <= ENCODED_TEXT_BUDGET)
+        {
+            return shortened;
+        }
+        available /= 2;
     }
 }
 fn claude_question_prompt(input: Option<&Value>) -> String {
@@ -1164,6 +1219,9 @@ fn is_secret_shaped(token: &str) -> bool {
         && token.chars().any(|c| c.is_ascii_alphabetic())
 }
 fn is_empty_composer(connector: &str, line: &str) -> bool {
+    if connector == "cursor" {
+        return cursor::is_empty_composer(line);
+    }
     let line = line.trim_start();
     let markers: &[char] = if connector == "claude" {
         &['❯']
@@ -1275,7 +1333,7 @@ impl Connector for JsonlConnector {
         // authoritative SessionStart binding and out-of-band permissions, so
         // never fold them into the transcript offset or re-read either source
         // after an unrelated append.
-        if self.id == "claude" {
+        if matches!(self.id, "claude" | "cursor") {
             let hooks = self.home.session(&self.session).conversation_source_hooks();
             let hook_length = fs::metadata(&hooks).map(|meta| meta.len()).unwrap_or(0);
             if hook_length < self.hook_offset {
@@ -1429,7 +1487,7 @@ impl Connector for JsonlConnector {
             .as_ref()
             .is_some_and(ConversationControl::is_event_driven);
         let refresh_screen = self.live_screen
-            && (self.source.is_some() || self.id == "codex")
+            && (self.source.is_some() || matches!(self.id, "codex" | "cursor"))
             && if event_driven {
                 self.refresh_screen
             } else {
@@ -1483,9 +1541,10 @@ impl Connector for JsonlConnector {
     fn apply(&mut self, action: ConnectorAction, deadline: Duration) -> Result<ApplyResult> {
         let text = match action.id.as_str() {
             ACTION_SEND_MESSAGE
-                if (self.source.is_some() || self.id == "codex")
+                if (self.source.is_some() || matches!(self.id, "codex" | "cursor"))
                     && self.pending_request.is_none()
-                    && !self.tool_running =>
+                    && !self.tool_running
+                    && !(self.id == "cursor" && self.turn_open) =>
             {
                 action.payload.get("text").and_then(Value::as_str)
             }
@@ -1530,7 +1589,23 @@ impl Connector for JsonlConnector {
                     reason: format!("the {} composer is no longer empty", self.id),
                 });
             }
-            self.control()?.submit(text, remaining()?)?;
+            if self.id == "cursor" {
+                // Cursor coalesces an Enter arriving in the same input batch
+                // as bracketed paste into the paste. Give its input handler
+                // a separate event-loop turn before sending the submit key.
+                let settle = Duration::from_millis(100);
+                if remaining()? <= settle {
+                    return Ok(ApplyResult::Refused {
+                        reason: "not enough time to submit to Cursor".to_owned(),
+                    });
+                }
+                self.control()?.paste(text, remaining()?)?;
+                std::thread::sleep(settle);
+                self.control()?.key(&["Enter".to_owned()], remaining()?)?;
+                self.turn_open = true;
+            } else {
+                self.control()?.submit(text, remaining()?)?;
+            }
         } else {
             let request = self.pending_request.as_ref().expect("checked above");
             if !request
@@ -1731,6 +1806,7 @@ mod tests {
     fn only_the_recognized_harness_markers_select_a_connector() {
         assert_eq!(connector_kind(Some("claude")), Some("claude"));
         assert_eq!(connector_kind(Some("codex")), Some("codex"));
+        assert_eq!(connector_kind(Some("cursor")), Some("cursor"));
         assert_eq!(connector_kind(Some("bash")), None);
         assert_eq!(connector_kind(None), None);
     }
@@ -2260,6 +2336,31 @@ mod tests {
         assert!(connector.state().send_message.enabled);
         connector.observe_screen("› draft");
         assert!(!connector.state().send_message.enabled);
+    }
+
+    #[test]
+    fn long_claude_launch_prompt_stays_within_the_hub_item_budget() {
+        let mut connector = JsonlConnector::fixture("claude", PathBuf::from("unused"));
+        let long_prompt = format!("Start: {} :End", "😀\n".repeat(12_000));
+        let record = serde_json::json!({
+            "type": "user",
+            "uuid": "prompt-1",
+            "parentUuid": null,
+            "timestamp": "2026-09-25T08:38:00Z",
+            "message": { "content": long_prompt },
+        });
+        let mutations = connector.record(record, 1);
+        let ConnectorMutation::Upsert(item) = &mutations[0] else {
+            panic!("expected the launch prompt to be visible");
+        };
+        let ConversationItemKind::Message { text, .. } = &item.kind else {
+            panic!("expected a message");
+        };
+        assert!(text.starts_with("Start: "));
+        assert!(text.ends_with(" :End"));
+        assert!(text.contains("middle omitted from chat"));
+        assert!(text.len() <= MAX_MESSAGE_TEXT_BYTES);
+        assert!(serde_json::to_vec(item).unwrap().len() <= MAX_CONVERSATION_ITEM_BYTES);
     }
 
     #[test]

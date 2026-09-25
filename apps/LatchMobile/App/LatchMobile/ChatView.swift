@@ -64,11 +64,26 @@ struct ChatView: View {
             details: SessionDetailsActions(stop: stopRequest, isStopping: isStopping)
         ) {
             SessionChromeBar(
-                title: session.displayName,
+                title: session.headline.primary,
                 status: screenContent?.statusLine,
                 statusIdentifier: "conversation.toolbar.status",
                 showDetails: { showingDetails = true }
-            )
+            ) {
+                if appModel.surface.terminal {
+                    Button {
+                        takingTerminal = true
+                    } label: {
+                        FloatingControl(systemImage: "terminal")
+                            .foregroundStyle(.primary)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Switch to terminal")
+                    .accessibilityHint("Takes this session's terminal from the Mac")
+                    .accessibilityIdentifier("conversation.toolbar.terminal")
+                } else {
+                    EmptyView()
+                }
+            }
         }
         .navigationDestination(isPresented: $takingTerminal) {
             TerminalView(session: session, autoAttach: currentSession.isRunning)
