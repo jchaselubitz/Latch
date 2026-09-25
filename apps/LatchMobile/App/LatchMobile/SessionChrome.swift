@@ -20,18 +20,36 @@ struct SessionChromeBar<Trailing: View>: View {
     @ViewBuilder var trailing: Trailing
 
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.sessionBrowserLayout) private var browserLayout
+    @Environment(\.sessionPushedOverColumn) private var isPushedOverSession
+
+    /// Beside the session list, Back would only repeat a column that is
+    /// already on screen. A screen pushed over the session still needs it.
+    private var showsBackButton: Bool {
+        SessionBrowserLayoutPolicy.showsSessionBackButton(
+            layout: browserLayout,
+            isPushedOverSession: isPushedOverSession
+        )
+    }
 
     var body: some View {
         HStack(spacing: 10) {
-            Button {
-                dismiss()
-            } label: {
+            if showsBackButton {
+                Button {
+                    dismiss()
+                } label: {
+                    FloatingControl(systemImage: "chevron.backward")
+                        .foregroundStyle(.primary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Back")
+                .accessibilityIdentifier("session.chrome.back")
+            } else {
+                // Holds the chip in the centre, the same job the trailing slot does.
                 FloatingControl(systemImage: "chevron.backward")
-                    .foregroundStyle(.primary)
+                    .hidden()
+                    .accessibilityHidden(true)
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Back")
-            .accessibilityIdentifier("session.chrome.back")
 
             Spacer(minLength: 0)
 
@@ -226,6 +244,38 @@ extension View {
             details: details,
             bar: bar()
         ))
+    }
+}
+
+private struct SessionBrowserLayoutKey: EnvironmentKey {
+    static let defaultValue = SessionBrowserLayout.stack
+}
+
+private struct SessionPushedOverColumnKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    /// Set by the two-column session browser. The default is the stack, so
+    /// every other screen keeps its back button.
+    var sessionBrowserLayout: SessionBrowserLayout {
+        get { self[SessionBrowserLayoutKey.self] }
+        set { self[SessionBrowserLayoutKey.self] = newValue }
+    }
+
+    /// True on a screen pushed over the open session, such as the terminal
+    /// taken from chat. The column's own session leaves this false.
+    var sessionPushedOverColumn: Bool {
+        get { self[SessionPushedOverColumnKey.self] }
+        set { self[SessionPushedOverColumnKey.self] = newValue }
+    }
+}
+
+extension View {
+    /// Marks a destination that was pushed over the session in the two-column
+    /// layout, so its back button returns to that session.
+    func pushedOverSessionColumn() -> some View {
+        environment(\.sessionPushedOverColumn, true)
     }
 }
 

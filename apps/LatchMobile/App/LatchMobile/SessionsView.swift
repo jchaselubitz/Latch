@@ -3,10 +3,14 @@ import SwiftUI
 
 /// The root screen: what is running on the linked computer, with the new
 /// session pill and the Settings gear floating at the bottom.
+///
+/// A wide window keeps that list beside the open session. A narrow one
+/// pushes the session over the list, which is the phone and a slim iPad pane.
 struct SessionsView: View {
     @Environment(AppModel.self) private var model
     @Environment(PairingModel.self) private var pairing
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var creatingSession = false
     /// What the open picker starts: a shell, or an agent the Mac listed.
     @State private var creatingMode: FolderBrowserMode = .create
@@ -17,10 +21,10 @@ struct SessionsView: View {
     /// Set when Stop was tapped on a Mac that serves the route but has not
     /// granted this phone control, so the reason can be said out loud.
     @State private var explainingStopGrant = false
-    /// What is pushed over the list. A `latch://` link lands here exactly as
-    /// a tap on its row would, and it clears this first so the linked session
-    /// is never pushed on top of another one.
-    @State private var path: [SessionPush] = []
+    /// The session open on this screen. A narrow window pushes it over the
+    /// list; a wide one shows it in the second column. A `latch://` link
+    /// clears it first so the linked session replaces whatever was open.
+    @State private var selectedSessionID: String?
     /// The row each pushed session was opened from, for the moment the list
     /// refreshes without it: the open screen keeps its session.
     @State private var pushedSessions: [String: SessionSummary] = [:]
@@ -29,150 +33,75 @@ struct SessionsView: View {
     @State private var searchQuery = ""
 
     var body: some View {
-        NavigationStack(path: $path) {
-            Group {
-                switch model.linkState {
-                case .unlinked:
-                    UnlinkedView(pairedMac: pairedMacName)
-                case .connecting:
-                    ProgressView("Connecting…")
-                case .incompatible(let mismatch):
-                    MessageView(
-                        icon: mismatch.icon,
-                        title: mismatch.title,
-                        detail: mismatch.detail
-                    )
-                case .failed(let reason):
-                    MessageView(
-                        icon: "exclamationmark.triangle",
-                        title: "Cannot reach that computer",
-                        detail: reason
-                    )
-                case .linked:
-                    sessionList
-                case .interrupted(let link, let capabilities):
-                    if capabilities != nil, !model.sessions.isEmpty {
-                        // Cached rows stay readable and are marked stale;
-                        // nothing is fetched until the owner reports ready.
-                        sessionList
-                    } else {
-                        MessageView(
-                            icon: "arrow.triangle.2.circlepath",
-                            title: Self.interruptedTitle(link),
-                            detail: Self.interruptedDetail(link)
-                        )
-                    }
-                case .macOffline(let capabilities) where capabilities != nil && !model.sessions.isEmpty:
-                    // Same bargain as an interrupted link: the last known rows
-                    // stay readable, and the status line says they are stale.
-                    sessionList
-                case .macOffline:
-                    MessageView(
-                        icon: "laptopcomputer.slash",
-                        title: "Mac unavailable through the relay",
-                        detail: "This phone could not find your Mac on the relay. It may be asleep, disconnected, or have remote access turned off. This phone keeps checking; wake the Mac to continue."
-                    )
-                case .revoked(let reason):
-                    MessageView(
-                        icon: "xmark.shield",
-                        title: "This phone was unpaired",
-                        detail: reason
-                    )
-                case .pairingRequired(let reason):
-                    MessageView(
-                        icon: "qrcode",
-                        title: "Pair again",
-                        detail: reason
-                    )
-                }
+        Group {
+            if browserLayout == .columns {
+                columnBrowser
+            } else {
+                stackBrowser
             }
-            .navigationTitle("Latch")
-            // The title is drawn by the list itself, up where the stock
-            // large title leaves a band of empty screen. The bar keeps only
-            // the back label of a pushed screen, and where the search field
-            // no longer lives in it, it goes altogether.
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .principal) {
-                    Color.clear.frame(width: 1, height: 1).accessibilityHidden(true)
-                }
+        }
+        .onChange(of: model.requestedSessionID, initial: true) { _, _ in openLinkedSession() }
+        .onChange(of: model.sessions) { _, _ in
+            rememberSelectedSession()
+            openLinkedSession()
+        }
+        .onChange(of: selectedSessionID) { _, _ in rememberSelectedSession() }
+        .alert(
+            "Can't open that session",
+            isPresented: Binding(
+                get: { model.requestedSessionError != nil },
+                set: { if !$0 { model.clearRequestedSessionError() } }
+            )
+        ) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(model.requestedSessionError ?? "")
+        }
+        .sheet(isPresented: $creatingSession) {
+            FolderPickerView(mode: creatingMode)
+        }
+        .sheet(isPresented: $showingSettings) {
+            SettingsView()
+        }
+        .alert(
+            "This phone can't start a session",
+            isPresented: $explainingGrant
+        ) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(model.newSessionUnavailableExplanation ?? "")
+        }
+        .alert(
+            "This phone can't stop a session",
+            isPresented: $explainingStopGrant
+        ) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(model.sessionStopUnavailableExplanation ?? "")
+        }
+        // A stop ends whatever the session was doing on the Mac, so the
+        // name is repeated back before anything is sent.
+        .confirmationDialog(
+            stopping.map { "Stop \($0.displayName)?" } ?? "Stop this session?",
+            isPresented: Binding(
+                get: { stopping != nil },
+                set: { if !$0 { stopping = nil } }
+            ),
+            titleVisibility: .visible,
+            presenting: stopping
+        ) { session in
+            Button("Stop session", role: .destructive) {
+                stopping = nil
+                Task { await model.stopSession(session) }
             }
-            .toolbar(Self.navigationBarVisibility, for: .navigationBar)
-            // Every state, the unpaired ones included: the gear is the only
-            // way to reach pairing now that there is no tab bar.
-            .safeAreaInset(edge: .bottom) { floatingActions }
-            .navigationDestination(for: SessionPush.self) { push in
-                // The live row when the list still has it, so the screen
-                // follows the session exactly as a row-built one did.
-                let session = model.sessions.first { $0.id == push.sessionID }
-                    ?? pushedSessions[push.sessionID]
-                if let session {
-                    destination(for: session, route: model.route(for: session))
-                }
-            }
-            .onChange(of: model.requestedSessionID, initial: true) { _, _ in openLinkedSession() }
-            .onChange(of: model.sessions) { _, _ in
-                rememberPushedSessions()
-                openLinkedSession()
-            }
-            .onChange(of: path) { _, _ in rememberPushedSessions() }
-            .alert(
-                "Can't open that session",
-                isPresented: Binding(
-                    get: { model.requestedSessionError != nil },
-                    set: { if !$0 { model.clearRequestedSessionError() } }
-                )
-            ) {
-                Button("OK", role: .cancel) {}
-            } message: {
-                Text(model.requestedSessionError ?? "")
-            }
-            .sheet(isPresented: $creatingSession) {
-                FolderPickerView(mode: creatingMode)
-            }
-            .sheet(isPresented: $showingSettings) {
-                SettingsView()
-            }
-            .alert(
-                "This phone can't start a session",
-                isPresented: $explainingGrant
-            ) {
-                Button("OK", role: .cancel) {}
-            } message: {
-                Text(model.newSessionUnavailableExplanation ?? "")
-            }
-            .alert(
-                "This phone can't stop a session",
-                isPresented: $explainingStopGrant
-            ) {
-                Button("OK", role: .cancel) {}
-            } message: {
-                Text(model.sessionStopUnavailableExplanation ?? "")
-            }
-            // A stop ends whatever the session was doing on the Mac, so the
-            // name is repeated back before anything is sent.
-            .confirmationDialog(
-                stopping.map { "Stop \($0.displayName)?" } ?? "Stop this session?",
-                isPresented: Binding(
-                    get: { stopping != nil },
-                    set: { if !$0 { stopping = nil } }
-                ),
-                titleVisibility: .visible,
-                presenting: stopping
-            ) { session in
-                Button("Stop session", role: .destructive) {
-                    stopping = nil
-                    Task { await model.stopSession(session) }
-                }
-                Button("Cancel", role: .cancel) { stopping = nil }
-            } message: { session in
-                Text(
-                    """
-                    Whatever is running in \(session.directoryName) on your Mac ends. The session \
-                    itself stays in this list so you can still read what it left behind.
-                    """
-                )
-            }
+            Button("Cancel", role: .cancel) { stopping = nil }
+        } message: { session in
+            Text(
+                """
+                Whatever is running in \(session.directoryName) on your Mac ends. The session \
+                itself stays in this list so you can still read what it left behind.
+                """
+            )
         }
         .task { await refreshPermission() }
         .onOpenURL { url in
@@ -183,8 +112,203 @@ struct SessionsView: View {
             showingSettings = false
             creatingSession = false
             stopping = nil
-            path.removeAll()
+            selectedSessionID = nil
             Task { await model.requestSession(id: sessionID) }
+        }
+    }
+
+    /// Wide and listing sessions: the list keeps its column and the open
+    /// session fills the other. Anything else uses the stack below.
+    private var browserLayout: SessionBrowserLayout {
+        SessionBrowserLayoutPolicy.layout(
+            isRegularWidth: horizontalSizeClass == .regular,
+            showsSessionList: showsSessionList
+        )
+    }
+
+    /// The cases in `linkContent` that draw the list. The other states fill
+    /// the window on their own, so a second column would only sit empty.
+    private var showsSessionList: Bool {
+        switch model.linkState {
+        case .linked:
+            true
+        case .interrupted(_, let capabilities):
+            capabilities != nil && !model.sessions.isEmpty
+        case .macOffline(let capabilities):
+            capabilities != nil && !model.sessions.isEmpty
+        default:
+            false
+        }
+    }
+
+    /// The phone, and a narrow iPad pane: the list is the root, and a session
+    /// is pushed over it.
+    private var stackBrowser: some View {
+        NavigationStack(path: stackPath) {
+            framedList(navigationBar: Self.navigationBarVisibility) {
+                linkContent
+            }
+            .navigationDestination(for: SessionPush.self) { push in
+                // The live row when the list still has it, so the screen
+                // follows the session exactly as a row-built one did.
+                if let session = resolvedSession(id: push.sessionID) {
+                    destination(for: session, route: model.route(for: session))
+                }
+            }
+        }
+    }
+
+    /// iPad at regular width: sessions on the left, the open session on the right.
+    private var columnBrowser: some View {
+        NavigationSplitView(columnVisibility: .constant(.doubleColumn)) {
+            framedList(navigationBar: Self.navigationBarVisibility) {
+                linkContent
+            }
+            .navigationSplitViewColumnWidth(min: 260, ideal: 320, max: 400)
+            .accessibilityIdentifier("sessions.sidebar")
+        } detail: {
+            detailColumn
+                .accessibilityIdentifier("sessions.detail")
+        }
+        .navigationSplitViewStyle(.balanced)
+    }
+
+    /// The open session, or the prompt to choose one. A fresh stack per
+    /// session drops a terminal pushed over the previous conversation
+    /// instead of carrying it across.
+    private var detailColumn: some View {
+        NavigationStack {
+            if let session = selectedSession {
+                destination(for: session, route: model.route(for: session))
+                    .navigationBarBackButtonHidden(true)
+            } else {
+                ContentUnavailableView {
+                    Label(
+                        model.sessions.isEmpty ? "No session open" : "Select a session",
+                        systemImage: "rectangle.stack"
+                    )
+                } description: {
+                    Text(
+                        model.sessions.isEmpty
+                            ? "Sessions on your Mac are listed in the other column."
+                            : "Choose a session and it opens here."
+                    )
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color(.systemBackground))
+                .toolbar(.hidden, for: .navigationBar)
+                .accessibilityIdentifier("sessions.detail.empty")
+            }
+        }
+        .id(selectedSessionID ?? "none")
+        .environment(\.sessionBrowserLayout, .columns)
+    }
+
+    /// One session in the stack, or none. The column browser reads
+    /// `selectedSessionID` directly and never mounts this path.
+    private var stackPath: Binding<[SessionPush]> {
+        Binding(
+            get: {
+                guard let selectedSessionID else { return [] }
+                return [SessionPush(sessionID: selectedSessionID)]
+            },
+            set: { path in
+                let next = path.last?.sessionID
+                if next != selectedSessionID {
+                    selectedSessionID = next
+                }
+            }
+        )
+    }
+
+    private var selectedSession: SessionSummary? {
+        guard let selectedSessionID else { return nil }
+        return resolvedSession(id: selectedSessionID)
+    }
+
+    /// The live row when the list still has it, otherwise the copy kept when
+    /// the session was opened.
+    private func resolvedSession(id: String) -> SessionSummary? {
+        model.sessions.first { $0.id == id } ?? pushedSessions[id]
+    }
+
+    /// The title is drawn by the list itself, up where the stock large title
+    /// leaves a band of empty screen. The bar keeps only the back label of a
+    /// pushed screen, and where the search field no longer lives in it, it
+    /// goes altogether. The sidebar uses that same bar.
+    private func framedList<Content: View>(
+        navigationBar: Visibility,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        content()
+            .navigationTitle("Latch")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .principal) {
+                    Color.clear.frame(width: 1, height: 1).accessibilityHidden(true)
+                }
+            }
+            .toolbar(navigationBar, for: .navigationBar)
+            // Every state, the unpaired ones included: the gear is the only
+            // way to reach pairing now that there is no tab bar.
+            .safeAreaInset(edge: .bottom) { floatingActions }
+    }
+
+    @ViewBuilder
+    private var linkContent: some View {
+        switch model.linkState {
+        case .unlinked:
+            UnlinkedView(pairedMac: pairedMacName)
+        case .connecting:
+            ProgressView("Connecting…")
+        case .incompatible(let mismatch):
+            MessageView(
+                icon: mismatch.icon,
+                title: mismatch.title,
+                detail: mismatch.detail
+            )
+        case .failed(let reason):
+            MessageView(
+                icon: "exclamationmark.triangle",
+                title: "Cannot reach that computer",
+                detail: reason
+            )
+        case .linked:
+            sessionList
+        case .interrupted(let link, let capabilities):
+            if capabilities != nil, !model.sessions.isEmpty {
+                // Cached rows stay readable and are marked stale;
+                // nothing is fetched until the owner reports ready.
+                sessionList
+            } else {
+                MessageView(
+                    icon: "arrow.triangle.2.circlepath",
+                    title: Self.interruptedTitle(link),
+                    detail: Self.interruptedDetail(link)
+                )
+            }
+        case .macOffline(let capabilities) where capabilities != nil && !model.sessions.isEmpty:
+            // Same bargain as an interrupted link: the last known rows
+            // stay readable, and the status line says they are stale.
+            sessionList
+        case .macOffline:
+            MessageView(
+                icon: "laptopcomputer.slash",
+                title: "Mac unavailable through the relay",
+                detail: "This phone could not find your Mac on the relay. It may be asleep, disconnected, or have remote access turned off. This phone keeps checking; wake the Mac to continue."
+            )
+        case .revoked(let reason):
+            MessageView(
+                icon: "xmark.shield",
+                title: "This phone was unpaired",
+                detail: reason
+            )
+        case .pairingRequired(let reason):
+            MessageView(
+                icon: "qrcode",
+                title: "Pair again",
+                detail: reason
+            )
         }
     }
 
@@ -283,25 +407,29 @@ struct SessionsView: View {
         }
     }
 
-    /// Pushes the linked session once the list holds it. Nothing is attached
+    /// Opens the linked session once the list holds it. Nothing is attached
     /// by the link itself: the destination is the one `route(for:)` picks, so
     /// a terminal still asks for Face ID and a grant still gates it.
     private func openLinkedSession() {
         guard let session = model.takeRequestedSession() else { return }
-        push(session)
+        select(session)
     }
 
-    private func push(_ session: SessionSummary) {
+    private func select(_ session: SessionSummary) {
         pushedSessions[session.id] = session
-        path.append(SessionPush(sessionID: session.id))
+        selectedSessionID = session.id
     }
 
-    /// Keeps the last known row for each pushed session, and only those.
-    private func rememberPushedSessions() {
-        let pushed = Set(path.map(\.sessionID))
-        pushedSessions = pushedSessions.filter { pushed.contains($0.key) }
-        for session in model.sessions where pushed.contains(session.id) {
-            pushedSessions[session.id] = session
+    /// Keeps the last known row for the open session, and only that one.
+    private func rememberSelectedSession() {
+        guard let selectedSessionID else {
+            pushedSessions = [:]
+            return
+        }
+        if let session = model.sessions.first(where: { $0.id == selectedSessionID }) {
+            pushedSessions = [selectedSessionID: session]
+        } else {
+            pushedSessions = pushedSessions.filter { $0.key == selectedSessionID }
         }
     }
 
@@ -311,6 +439,16 @@ struct SessionsView: View {
     /// hiding it there would take search with it.
     private static var navigationBarVisibility: Visibility {
         if #available(iOS 26, *) { .hidden } else { .visible }
+    }
+
+    /// In a sidebar the search field stays open, because a pull-to-reveal
+    /// field is easy to miss beside the open session. iOS 26 draws search
+    /// in the bottom bar on its own, so the automatic placement stays.
+    private var searchPlacement: SearchFieldPlacement {
+        if browserLayout == .columns, Self.navigationBarVisibility == .visible {
+            return .navigationBarDrawer(displayMode: .always)
+        }
+        return .automatic
     }
 
     /// The paired Mac's name, when this phone has finished pairing.
@@ -374,7 +512,7 @@ struct SessionsView: View {
                     }
                 }
             }
-            .searchable(text: $searchQuery, prompt: "Search sessions")
+            .searchable(text: $searchQuery, placement: searchPlacement, prompt: "Search sessions")
             .refreshable {
                 await refreshPermission()
                 await model.refreshSessions()
@@ -392,19 +530,37 @@ struct SessionsView: View {
     private func row(for session: SessionSummary) -> some View {
         let route = model.route(for: session)
         let isHighlighted = session.id == model.highlightedSessionID
-        return NavigationLink(value: SessionPush(sessionID: session.id)) {
-            SessionRow(
-                session: session,
-                route: route,
-                isHighlighted: isHighlighted,
-                isStopping: model.stoppingSessionIDs.contains(session.id)
-            )
+        let isCurrent = browserLayout == .columns && session.id == selectedSessionID
+        let label = SessionRow(
+            session: session,
+            route: route,
+            isHighlighted: isHighlighted,
+            isStopping: model.stoppingSessionIDs.contains(session.id),
+            isCurrent: isCurrent
+        )
+        return Group {
+            if browserLayout == .columns {
+                // Selecting fills the other column. A link here would push a
+                // second copy of the session inside the sidebar.
+                Button {
+                    select(session)
+                } label: {
+                    label
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            } else {
+                NavigationLink(value: SessionPush(sessionID: session.id)) {
+                    label
+                }
+            }
         }
         .id(session.id)
         .listRowSeparator(.hidden)
         .listRowBackground(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(isHighlighted ? Color.accentColor.opacity(0.15) : Color.clear)
+                .fill(rowFill(isHighlighted: isHighlighted, isCurrent: isCurrent))
                 .padding(.horizontal, 8)
         )
         // Both affordances, deliberately: the swipe is the fast path people
@@ -449,6 +605,12 @@ struct SessionsView: View {
                     : "Unavailable until this phone has control of your Mac"
             )
         }
+    }
+
+    private func rowFill(isHighlighted: Bool, isCurrent: Bool) -> Color {
+        if isCurrent { return Color.accentColor.opacity(0.18) }
+        if isHighlighted { return Color.accentColor.opacity(0.15) }
+        return .clear
     }
 
     static func interruptedTitle(_ link: RemoteLinkState) -> String {
@@ -549,6 +711,7 @@ private struct ChatUnavailableView: View {
                 // Reaching this screen began with a Chat tap. The terminal is
                 // only taken after this second, explicit tap.
                 TerminalView(session: session, autoAttach: false)
+                    .pushedOverSessionColumn()
             }
             .buttonStyle(.borderedProminent)
         case .needsControlGrant:
@@ -635,6 +798,8 @@ private struct SessionRow: View {
     /// Mac waits out its own grace period first, so the wait is long enough
     /// that a row saying nothing would read as a tap that did nothing.
     var isStopping = false
+    /// True when this row's session is the one open in the other column.
+    var isCurrent = false
 
     var body: some View {
         HStack(spacing: 8) {
@@ -670,7 +835,7 @@ private struct SessionRow: View {
         .accessibilityElement(children: .combine)
         .accessibilityValue(accessibilityState)
         .accessibilityHint(destinationLabel)
-        .accessibilityAddTraits(isHighlighted ? [.isSelected] : [])
+        .accessibilityAddTraits(isHighlighted || isCurrent ? [.isSelected] : [])
     }
 
     /// The line under the description: handle, agent, then idle time, joined

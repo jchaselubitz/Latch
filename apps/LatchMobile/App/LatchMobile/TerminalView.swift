@@ -76,6 +76,7 @@ struct TerminalView: View {
         }
         .navigationDestination(isPresented: $openingConversation) {
             ChatView(session: session)
+                .pushedOverSessionColumn()
         }
         .sessionStopPrompts(
             session: currentSession,

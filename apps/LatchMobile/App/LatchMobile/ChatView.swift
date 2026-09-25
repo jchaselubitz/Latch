@@ -87,6 +87,7 @@ struct ChatView: View {
         }
         .navigationDestination(isPresented: $takingTerminal) {
             TerminalView(session: session, autoAttach: currentSession.isRunning)
+                .pushedOverSessionColumn()
         }
         .sessionStopPrompts(
             session: currentSession,
@@ -178,6 +179,7 @@ struct ChatView: View {
             } actions: {
                 NavigationLink("Take terminal") {
                     TerminalView(session: session, autoAttach: session.isRunning)
+                        .pushedOverSessionColumn()
                 }
                 .buttonStyle(.borderedProminent)
             }
