@@ -43,6 +43,17 @@ cp "$scratch_dir/generated/latch_transport_ffiFFI.h" "$scratch_dir/headers/"
 cp "$scratch_dir/generated/latch_transport_ffiFFI.modulemap" \
   "$scratch_dir/headers/module.modulemap"
 
+# UniFFI always includes <stdbool.h> and `use`s `_Builtin_stdbool`. Xcode 27's
+# explicit-module scan then demands a `_Builtin_stdbool` PCM whose hash the SDK
+# precompile task never emits, so the FFI clang module fails to build. When the
+# generated surface does not actually use bool, drop that dependency before the
+# headers are copied into the framework.
+if ! grep -Eq '(^|[^_[:alnum:]])bool([^_[:alnum:]]|$)' \
+  "$scratch_dir/headers/latch_transport_ffiFFI.h"; then
+  sed -i '' '/#include <stdbool.h>/d' "$scratch_dir/headers/latch_transport_ffiFFI.h"
+  sed -i '' '/use "_Builtin_stdbool"/d' "$scratch_dir/headers/module.modulemap"
+fi
+
 build_pids=()
 for target in "${required_targets[@]}"; do
   if [[ "$target" == *-apple-ios* ]]; then
