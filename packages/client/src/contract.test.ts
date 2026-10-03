@@ -53,3 +53,16 @@ test('conversation contract reserves partial and represents ambiguous operations
   assert.match(protocol, /"ambiguous"/);
   assert.doesNotMatch(protocol, /conversation_reset/);
 });
+
+
+test('conversation contract carries turn cancellation and queued delivery', () => {
+  const protocol = JSON.parse(readFileSync(join(root, 'schemas/remote-access/v2/conversation-protocol.schema.json'), 'utf8'));
+  const cancel = protocol.oneOf.find((frame: { properties: { type: { const: string } } }) => frame.properties.type.const === 'cancel_turn');
+  assert.deepEqual(cancel.required, ['type', 'operationEpoch', 'operationId']);
+  assert.equal(cancel.additionalProperties, false);
+  const result = protocol.oneOf.find((frame: { properties: { type: { const: string } } }) => frame.properties.type.const === 'operation_result');
+  assert.ok(result.properties.status.enum.includes('queued'));
+  const state = JSON.parse(readFileSync(join(root, 'schemas/remote-access/v2/conversation-state.schema.json'), 'utf8'));
+  assert.ok(state.properties.cancelTurn);
+  assert.ok(!state.required.includes('cancelTurn'), 'older gateways omit the capability');
+});

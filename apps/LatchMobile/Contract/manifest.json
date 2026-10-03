@@ -3,7 +3,7 @@
   "generator": "Tools/generate-contract.py",
   "generated": {
     "path": "Sources/LatchMobileKit/Generated/LatchContract.swift",
-    "sha256": "f276df3e264243e336443affc6d6fb45e10d316fcea5ed8b78f95aec18eb0ea0"
+    "sha256": "645c648eb4e13efe2a84c1f172ff7a727f4fbe369c77db436c80f1e22f7a31d2"
   },
   "schemas": [
     {
@@ -16,15 +16,15 @@
     },
     {
       "source": "schemas/remote-access/v2/conversation-item.schema.json",
-      "sha256": "7d7a861469a47ba340e66d609c260f1879a8f5e6f52a5cf2c9d5e857e2ffd46a"
+      "sha256": "77bdcf0947f647381fad3c72d1498f7a3e13f68ab37ff99b14be548fa838e4dc"
     },
     {
       "source": "schemas/remote-access/v2/conversation-state.schema.json",
-      "sha256": "9808c7ed56fad47e1692fec678d23a53bd1b44b909948e373073464998573171"
+      "sha256": "7f5d3871a5ed44153f4dfd482808449c60f46dafedd7206caaf55faaf10c2112"
     },
     {
       "source": "schemas/remote-access/v2/conversation-protocol.schema.json",
-      "sha256": "8221fcdadf61390c5a4acdc5d81e6bf5e83276bd8ab107c04cc7388538923031"
+      "sha256": "634528c9896dea10480c6b23a109b150350d89cb61df5bdedea7bc6a273f341a"
     },
     {
       "source": "schemas/remote-access/v2/gateway-capabilities.schema.json",

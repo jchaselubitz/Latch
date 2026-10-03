@@ -3,6 +3,7 @@ import Observation
 
 public enum ConversationOperationStatus: String, Codable, Equatable, Sendable {
     case sending
+    case queued
     case refused
     case ambiguous
     case manualReview = "manual_review"
@@ -423,6 +424,32 @@ public final class ConversationStore {
         publishRenderedItems()
     }
 
+    public private(set) var cancelAttempt: ConversationResolveAttempt?
+    public var canCancelTurn: Bool {
+        state?.cancelTurn?.enabled == true && operationEpoch != nil && socketState == .open && cancelAttempt?.isInFlight != true
+    }
+
+    public func cancelTurn() {
+        guard canCancelTurn, let operationEpoch else { return }
+        let attempt = ConversationResolveAttempt(id: UUID().uuidString, requestId: "cancel_turn", choice: "Stop")
+        cancelAttempt = attempt
+        let socket = socket
+        Task {
+            do {
+                guard let socket else { throw ConversationSocketError.notConnected }
+                try await socket.send(.cancelTurn(operationEpoch: operationEpoch, operationId: attempt.id))
+            } catch let error as ConversationSocketError where error == .notConnected {
+                guard cancelAttempt?.id == attempt.id, cancelAttempt?.status == .sending else { return }
+                cancelAttempt?.status = .notSent
+                cancelAttempt?.reason = "The conversation is not connected."
+            } catch {
+                guard cancelAttempt?.id == attempt.id, cancelAttempt?.status == .sending else { return }
+                cancelAttempt?.status = .ambiguous
+                cancelAttempt?.reason = error.localizedDescription
+            }
+        }
+    }
+
     public var canSend: Bool { state?.sendMessage.enabled == true && operationEpoch != nil }
     public var sendReason: String? { state?.sendMessage.reason ?? (operationEpoch == nil ? "Waiting for conversation state" : nil) }
     public var canResolve: Bool { state?.resolveRequest.enabled == true && operationEpoch != nil }
@@ -589,7 +616,7 @@ public final class ConversationStore {
     /// cannot be offered, and taken, twice.
     public func retry(_ operationID: String) {
         guard let operation = operations.first(where: { $0.id == operationID }),
-              operation.status != .sending,
+              operation.status != .sending, operation.status != .queued,
               canSend
         else { return }
         dismissOperation(operationID)
@@ -600,7 +627,7 @@ public final class ConversationStore {
     /// transcript row. One still sending stays: its outcome is still coming.
     public func dismissOperation(_ operationID: String) {
         guard let index = operations.firstIndex(where: { $0.id == operationID }),
-              operations[index].status != .sending
+              operations[index].status != .sending && operations[index].status != .queued
         else { return }
         let operation = operations.remove(at: index)
         removeItems([operation.optimisticItemID])
@@ -613,7 +640,7 @@ public final class ConversationStore {
     /// sent until the person sends it.
     public func editOperation(_ operationID: String) {
         guard let operation = operations.first(where: { $0.id == operationID }),
-              operation.status != .sending
+              operation.status != .sending && operation.status != .queued
         else { return }
         draft = draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? operation.text
@@ -679,6 +706,7 @@ public final class ConversationStore {
     /// has done its job; the transcript row now says how it settled. Refused
     /// and uncertain answers stay so the settled row can still explain them.
     private func pruneSettledResolveAttempts() {
+        if state?.cancelTurn?.enabled != true && cancelAttempt?.status == .accepted { cancelAttempt = nil }
         let pending = state?.pendingRequest
         resolveAttempts.removeAll { $0.status == .accepted && $0.requestId != pending }
     }
@@ -885,7 +913,7 @@ public final class ConversationStore {
     }
 
     private func mergeOptimisticItems() {
-        for operation in operations where operation.status == .sending && operation.itemId == nil {
+        for operation in operations where (operation.status == .sending || operation.status == .queued) && (operation.itemId.map { !transcript.contains($0) } ?? true) {
             let id = "operation:\(operation.id)"
             guard !transcript.contains(id) else { continue }
             upsert([ConversationItem(
@@ -898,13 +926,24 @@ public final class ConversationStore {
     }
 
     private func applyOperationResult(operationID: String, status: String, itemID: String?, reason: String?) {
+        if cancelAttempt?.id == operationID {
+            switch status {
+            case "accepted": cancelAttempt?.status = .accepted
+            case "refused": cancelAttempt?.status = .refused
+            default: cancelAttempt?.status = .ambiguous
+            }
+            cancelAttempt?.reason = reason
+            pruneSettledResolveAttempts()
+            return
+        }
         if resolveAttempts.contains(where: { $0.id == operationID }) {
             applyResolveResult(operationID: operationID, status: status, reason: reason)
             return
         }
         guard let index = operations.firstIndex(where: { $0.id == operationID }) else { return }
         switch status {
-        case "accepted":
+        case "accepted", "queued":
+            if status == "queued" { operations[index].status = .queued }
             operations[index].itemId = itemID
             // Keep the optimistic row until the canonical item is actually
             // observed. An accepted action precedes transcript observation and
@@ -962,7 +1001,7 @@ public final class ConversationStore {
         // Reconcile those submissions in order by exact normalized content
         // within the advertised retry window, as the architecture requires.
         var remaining = operations.filter {
-            $0.status == .sending
+            ($0.status == .sending || $0.status == .queued)
                 && $0.itemId == nil
                 && Date.now.timeIntervalSince($0.createdAt) <= retentionSeconds
         }
@@ -1002,7 +1041,10 @@ public final class ConversationStore {
     private func replayRetainedOperations() {
         let now = Date.now
         // Ambiguous outcomes are reconciled from the receipt, never redispatched.
-        for operation in operations where operation.status == .ambiguous {
+        if let attempt = cancelAttempt, attempt.isInFlight || attempt.status == .ambiguous {
+            Task { try? await socket?.send(.operationStatus(operationId: attempt.id)) }
+        }
+        for operation in operations where operation.status == .ambiguous || operation.status == .queued {
             Task { try? await socket?.send(.operationStatus(operationId: operation.id)) }
         }
         // An answer whose outcome was lost with the connection is asked

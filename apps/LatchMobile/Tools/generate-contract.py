@@ -329,7 +329,7 @@ public struct GatewayCapabilities: Decodable, Equatable, Sendable {
 }
 
 public enum MessageStatus: String, Codable, Sendable {
-    case submitted, observed, partial, complete, failed
+    case submitted, queued, observed, partial, complete, failed
 
     public init(from decoder: Decoder) throws {
         let value = try decoder.singleValueContainer().decode(String.self)
@@ -498,6 +498,7 @@ public struct ConnectorIdentity: Codable, Equatable, Sendable {
 public struct ConversationState: Codable, Equatable, Sendable {
     public let phase: String
     public let sendMessage: OperationAvailability
+    public var cancelTurn: OperationAvailability? = nil
     public let resolveRequest: OperationAvailability
     /// Derived from the newest pending request item.
     public let pendingRequest: String?
@@ -590,6 +591,7 @@ public enum ConversationServerMessage: Decodable, Equatable, Sendable {
 public enum ConversationClientMessage: Encodable, Equatable, Sendable {
     case resume(generation: String?, afterRevision: UInt64?)
     case sendMessage(operationEpoch: String, operationId: String, text: String)
+    case cancelTurn(operationEpoch: String, operationId: String)
     case resolveRequest(operationEpoch: String, operationId: String, requestId: String, choice: String)
     case historyRequest(requestId: String, beforeOrdinal: UInt64, limit: Int)
     case operationStatus(operationId: String)
@@ -611,6 +613,10 @@ public enum ConversationClientMessage: Encodable, Equatable, Sendable {
             try container.encode(operationEpoch, forKey: .operationEpoch)
             try container.encode(operationId, forKey: .operationId)
             try container.encode(text, forKey: .text)
+        case .cancelTurn(let operationEpoch, let operationId):
+            try container.encode("cancel_turn", forKey: .type)
+            try container.encode(operationEpoch, forKey: .operationEpoch)
+            try container.encode(operationId, forKey: .operationId)
         case .resolveRequest(let operationEpoch, let operationId, let requestId, let choice):
             try container.encode("resolve_request", forKey: .type)
             try container.encode(operationEpoch, forKey: .operationEpoch)

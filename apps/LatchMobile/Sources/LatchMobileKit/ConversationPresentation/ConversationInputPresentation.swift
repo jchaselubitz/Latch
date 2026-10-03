@@ -193,7 +193,7 @@ public struct ConversationOperationPresentation: Identifiable, Equatable, Sendab
         text = operation.text
         let reason = operation.reason.map(ConversationSentence.make)
         switch operation.status {
-        case .sending:
+        case .sending, .queued:
             return nil
         case .refused:
             kind = .refused

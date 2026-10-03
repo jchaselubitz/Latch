@@ -21,6 +21,17 @@ const MAX_HOOK_BYTES: usize = 1024 * 1024;
 const CLAUDE_PLUGIN_NAME: &str = "latch-conversation-observer";
 const OBSERVER_VERSION: u32 = 2;
 const CODEX_SOURCE_ENV: &str = "LATCH_CODEX_CONVERSATION_SOURCE";
+const CLAUDE_BRIDGE_PLUGIN_NAME: &str = "latch-conversation-bridge";
+/// Version of the bridge module and of the records and commands it exchanges
+/// with the connector. The plugin directory is stamped with it, for the same
+/// reason the observer's is: a running Claude keeps the module it loaded.
+pub const CLAUDE_BRIDGE_VERSION: u32 = 1;
+/// Set to `0` to launch Claude with the observer alone.
+const CLAUDE_BRIDGE_ENV: &str = "LATCH_CLAUDE_BRIDGE";
+/// `hook_event_name` of every record the bridge module writes.
+pub const CLAUDE_BRIDGE_EVENT: &str = "LatchBridge";
+const CLAUDE_BRIDGE_MODULE: &str = include_str!("../assets/claude-bridge/hooks/register.ts");
+const MAX_BRIDGE_COMMAND_BYTES: usize = 1024 * 1024 + 4096;
 
 /// The observer version that first registers a `Stop` hook. A session whose
 /// Claude process was launched with an older plugin directory never emits
@@ -46,20 +57,137 @@ pub fn prepare_claude_launch(
     if crate::session::meta::launch_harness(&manifest.launch) != Some("claude") {
         return Ok(());
     }
-    let plugin = ensure_claude_plugin(home)?;
-    if manifest
-        .launch
-        .argv
-        .windows(2)
-        .any(|pair| pair[0] == "--plugin-dir" && Path::new(&pair[1]) == plugin)
-    {
-        return Ok(());
+    let mut plugins = vec![ensure_claude_plugin(home)?];
+    if std::env::var(CLAUDE_BRIDGE_ENV).as_deref() != Ok("0") {
+        // A second, separate plugin: a Claude build that cannot load function
+        // hooks skips it and still runs the observer's command hooks.
+        plugins.push(ensure_claude_bridge(home)?);
     }
-    manifest.launch.argv.splice(
-        1..1,
-        ["--plugin-dir".to_owned(), plugin.display().to_string()],
-    );
+    let mut at = 1;
+    for plugin in plugins {
+        if manifest
+            .launch
+            .argv
+            .windows(2)
+            .any(|pair| pair[0] == "--plugin-dir" && Path::new(&pair[1]) == plugin)
+        {
+            continue;
+        }
+        manifest.launch.argv.splice(
+            at..at,
+            ["--plugin-dir".to_owned(), plugin.display().to_string()],
+        );
+        at += 2;
+    }
     Ok(())
+}
+
+/// Answers one request from the bridge module, which reaches the host only by
+/// running this binary. `hello` and `event` take one JSON record on stdin and
+/// append it to the session's hook sidecar; `hello` answers where commands
+/// are queued and `take` hands over, exactly once, every command queued so far.
+pub fn serve_claude_bridge(
+    home: &LatchHome,
+    action: &str,
+    reader: impl Read,
+) -> anyhow::Result<String> {
+    let latch_id = std::env::var(crate::session::paths::SESSION_ID_ENV)
+        .context("the Claude bridge did not inherit LATCH_SESSION_ID")?;
+    serve_claude_bridge_for(home, &SessionId::parse(&latch_id)?, action, reader)
+}
+
+fn serve_claude_bridge_for(
+    home: &LatchHome,
+    id: &SessionId,
+    action: &str,
+    reader: impl Read,
+) -> anyhow::Result<String> {
+    let inbox = home.session(id).conversation_bridge_inbox();
+    match action {
+        "hello" | "event" => {
+            let mut record: Value = serde_json::from_slice(&read_bounded_hook(reader)?)
+                .context("Claude bridge record is not JSON")?;
+            let object = record
+                .as_object_mut()
+                .context("Claude bridge record must be an object")?;
+            object.insert(
+                "hook_event_name".to_owned(),
+                Value::from(CLAUDE_BRIDGE_EVENT),
+            );
+            if action == "hello" {
+                object.insert("bridge_event".to_owned(), Value::from("hello"));
+                fs::create_dir_all(&inbox)?;
+                fs::set_permissions(&inbox, fs::Permissions::from_mode(DIR_MODE))?;
+            }
+            capture_record(home, id, record, "claude", Some(OBSERVER_VERSION))?;
+            Ok(serde_json::json!({ "inbox": inbox }).to_string())
+        }
+        "take" => {
+            let mut names: Vec<_> = match fs::read_dir(&inbox) {
+                Ok(entries) => entries
+                    .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+                    .filter(|name| name.ends_with(".json"))
+                    .collect(),
+                Err(_) => Vec::new(),
+            };
+            names.sort();
+            let mut commands = Vec::new();
+            for name in names {
+                let path = inbox.join(&name);
+                let raw = fs::read(&path);
+                // Removal is the hand-over. A command that cannot be removed
+                // was taken by someone else and must not run twice.
+                if fs::remove_file(&path).is_err() {
+                    continue;
+                }
+                if let Some(command) = raw
+                    .ok()
+                    .filter(|raw| raw.len() <= MAX_BRIDGE_COMMAND_BYTES)
+                    .and_then(|raw| serde_json::from_slice::<Value>(&raw).ok())
+                {
+                    commands.push(command);
+                }
+            }
+            Ok(Value::Array(commands).to_string())
+        }
+        _ => bail!("unknown Claude bridge action {action}"),
+    }
+}
+
+/// Queues one command for the session's bridge module and returns where it
+/// was written. The module takes it by removing the file, so its absence is
+/// the caller's proof the command was handed over.
+pub fn queue_claude_bridge_command(
+    paths: &SessionPaths,
+    id: &str,
+    kind: &str,
+    mut payload: serde_json::Map<String, Value>,
+) -> anyhow::Result<PathBuf> {
+    let inbox = paths.conversation_bridge_inbox();
+    fs::create_dir_all(&inbox)?;
+    fs::set_permissions(&inbox, fs::Permissions::from_mode(DIR_MODE))?;
+    payload.insert("id".to_owned(), Value::from(id));
+    payload.insert("kind".to_owned(), Value::from(kind));
+    let nanos = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let name = format!("{nanos:032}-{}", std::process::id());
+    let path = inbox.join(format!("{name}.json"));
+    // The module may take the command the instant it carries its final name,
+    // so everything, its mode included, is settled before the rename.
+    let staged = inbox.join(format!(".{name}.staged"));
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(FILE_MODE)
+        .open(&staged)
+        .with_context(|| format!("cannot write {}", staged.display()))?;
+    file.write_all(&serde_json::to_vec(&Value::Object(payload))?)?;
+    file.sync_all()?;
+    drop(file);
+    fs::rename(&staged, &path)?;
+    Ok(path)
 }
 
 /// Install a session-scoped Codex SessionStart hook. Codex supplies the exact
@@ -209,8 +337,18 @@ fn capture_hook(
     let latch_id = std::env::var(crate::session::paths::SESSION_ID_ENV)
         .context("conversation hook did not inherit LATCH_SESSION_ID")?;
     let id = SessionId::parse(&latch_id)?;
-    let mut record: Value =
+    let record: Value =
         serde_json::from_slice(&raw).context("conversation hook payload is not JSON")?;
+    capture_record(home, &id, record, connector, observer_version)
+}
+
+fn capture_record(
+    home: &LatchHome,
+    id: &SessionId,
+    mut record: Value,
+    connector: &str,
+    observer_version: Option<u32>,
+) -> anyhow::Result<()> {
     let object = record
         .as_object_mut()
         .context("conversation hook payload must be an object")?;
@@ -226,7 +364,7 @@ fn capture_hook(
             Value::from(observer_version),
         );
     }
-    let paths = home.session(&id);
+    let paths = home.session(id);
     if !paths.meta().is_file() {
         bail!("conversation hook belongs to unknown Latch session {id}");
     }
@@ -320,6 +458,52 @@ fn ensure_claude_plugin(home: &LatchHome) -> anyhow::Result<PathBuf> {
         contents: &hooks,
         mode: FILE_MODE,
     })?;
+    Ok(root)
+}
+
+/// Writes the function-hooks plugin that lets the conversation connector hear
+/// the engine's own turn boundaries and hand it commands without typing into
+/// the terminal. Everything it does is additive to the observer plugin.
+fn ensure_claude_bridge(home: &LatchHome) -> anyhow::Result<PathBuf> {
+    let root = home.root().join("observers").join(format!(
+        "{CLAUDE_BRIDGE_PLUGIN_NAME}-v{CLAUDE_BRIDGE_VERSION}"
+    ));
+    let metadata_dir = root.join(".claude-plugin");
+    let hooks_dir = root.join("hooks");
+    for directory in [&root, &metadata_dir, &hooks_dir] {
+        fs::create_dir_all(directory)
+            .with_context(|| format!("cannot create {}", directory.display()))?;
+        fs::set_permissions(directory, fs::Permissions::from_mode(DIR_MODE))?;
+    }
+    let executable =
+        fs::canonicalize(std::env::current_exe().context("cannot locate the latch executable")?)?;
+    let plugin = serde_json::to_vec_pretty(&serde_json::json!({
+        "name": CLAUDE_BRIDGE_PLUGIN_NAME,
+        "version": env!("CARGO_PKG_VERSION"),
+        "description": "Reports turn boundaries to Latch and carries out the messages its chat sends."
+    }))?;
+    let config = format!(
+        "// Written by latch at launch. Do not edit.\nexport const LATCH_BIN: string = {}\nexport const BRIDGE_VERSION: number = {CLAUDE_BRIDGE_VERSION}\n",
+        serde_json::to_string(&executable.display().to_string())?
+    );
+    for (path, contents) in [
+        (metadata_dir.join("plugin.json"), plugin.as_slice()),
+        (
+            hooks_dir.join("hooks.json"),
+            br#"{ "modules": ["./register.ts"] }"#.as_slice(),
+        ),
+        (hooks_dir.join("config.ts"), config.as_bytes()),
+        (
+            hooks_dir.join("register.ts"),
+            CLAUDE_BRIDGE_MODULE.as_bytes(),
+        ),
+    ] {
+        write_private(PrivateWrite {
+            path: &path,
+            contents,
+            mode: FILE_MODE,
+        })?;
+    }
     Ok(root)
 }
 
@@ -512,6 +696,7 @@ mod tests {
         };
         prepare_claude_launch(&home, &mut manifest).unwrap();
         let plugin = ensure_claude_plugin(&home).unwrap();
+        let bridge = ensure_claude_bridge(&home).unwrap();
         manifest.launch.apply_login_shell();
         assert_eq!(
             manifest.launch.argv,
@@ -523,6 +708,8 @@ mod tests {
                 "claude".to_owned(),
                 "--plugin-dir".to_owned(),
                 plugin.display().to_string(),
+                "--plugin-dir".to_owned(),
+                bridge.display().to_string(),
                 "--model".to_owned(),
                 "opus".to_owned(),
             ]
@@ -587,5 +774,125 @@ mod tests {
             display: DisplayMetadata::default(),
         };
         assert!(record_launch_source_binding(&paths, &manifest).is_err());
+    }
+
+    #[test]
+    fn a_claude_launch_loads_the_observer_and_the_bridge_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = LatchHome::new(temp.path());
+        let mut manifest = LaunchManifest::new(crate::session::manifest::LaunchRequest {
+            argv: vec!["claude".into(), "--model".into(), "opus".into()],
+            cwd: PathBuf::from("/tmp"),
+            size: TerminalSize::new(80, 24),
+        });
+        prepare_claude_launch(&home, &mut manifest).unwrap();
+        let once = manifest.clone();
+        prepare_claude_launch(&home, &mut manifest).unwrap();
+        assert_eq!(manifest, once);
+
+        let argv = &manifest.launch.argv;
+        assert_eq!(argv[1], "--plugin-dir");
+        assert_eq!(argv[3], "--plugin-dir");
+        assert_eq!(&argv[5..], &["--model", "opus"]);
+        assert!(argv[2].ends_with(&format!("{CLAUDE_PLUGIN_NAME}-v{OBSERVER_VERSION}")));
+        let bridge = PathBuf::from(&argv[4]);
+        assert!(bridge.ends_with(format!(
+            "observers/{CLAUDE_BRIDGE_PLUGIN_NAME}-v{CLAUDE_BRIDGE_VERSION}"
+        )));
+
+        let hooks: Value =
+            serde_json::from_slice(&fs::read(bridge.join("hooks/hooks.json")).unwrap()).unwrap();
+        assert_eq!(hooks["modules"][0], "./register.ts");
+        assert_eq!(
+            fs::read_to_string(bridge.join("hooks/register.ts")).unwrap(),
+            CLAUDE_BRIDGE_MODULE
+        );
+        let config = fs::read_to_string(bridge.join("hooks/config.ts")).unwrap();
+        let executable = fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
+        assert!(config.contains(&serde_json::to_string(&executable.display().to_string()).unwrap()));
+        assert!(config.contains(&format!("BRIDGE_VERSION: number = {CLAUDE_BRIDGE_VERSION}")));
+    }
+
+    fn bridged_session(home: &LatchHome) -> SessionId {
+        let id = SessionId::generate();
+        let paths = home.session(&id);
+        paths.ensure().unwrap();
+        fs::write(paths.meta(), b"{}").unwrap();
+        id
+    }
+
+    #[test]
+    fn bridge_records_join_the_hook_sidecar_under_one_event_name() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = LatchHome::new(temp.path());
+        let id = bridged_session(&home);
+
+        let answer: Value = serde_json::from_str(
+            &serve_claude_bridge_for(&home, &id, "hello", br#"{"bridge_version":1}"#.as_slice())
+                .unwrap(),
+        )
+        .unwrap();
+        let inbox = home.session(&id).conversation_bridge_inbox();
+        assert_eq!(answer["inbox"], inbox.display().to_string());
+        assert!(inbox.is_dir());
+        serve_claude_bridge_for(
+            &home,
+            &id,
+            "event",
+            br#"{"bridge_event":"turn.start","turn_id":"t1"}"#.as_slice(),
+        )
+        .unwrap();
+
+        let sidecar = fs::read_to_string(home.session(&id).conversation_source_hooks()).unwrap();
+        let records: Vec<Value> = sidecar
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0]["bridge_event"], "hello");
+        assert_eq!(records[1]["bridge_event"], "turn.start");
+        for record in &records {
+            assert_eq!(record["hook_event_name"], CLAUDE_BRIDGE_EVENT);
+            assert_eq!(record["connector"], "claude");
+        }
+        assert!(serve_claude_bridge_for(&home, &id, "reticulate", b"{}".as_slice()).is_err());
+    }
+
+    #[test]
+    fn a_queued_bridge_command_is_handed_over_exactly_once_in_order() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = LatchHome::new(temp.path());
+        let id = bridged_session(&home);
+        let paths = home.session(&id);
+
+        let text = |text: &str| {
+            let mut payload = serde_json::Map::new();
+            payload.insert("text".to_owned(), Value::from(text));
+            payload
+        };
+        let first =
+            queue_claude_bridge_command(&paths, "one", "submit_prompt", text("first")).unwrap();
+        queue_claude_bridge_command(&paths, "two", "submit_prompt", text("second")).unwrap();
+        assert_eq!(
+            fs::metadata(&first).unwrap().permissions().mode() & 0o777,
+            FILE_MODE
+        );
+
+        let taken: Value = serde_json::from_str(
+            &serve_claude_bridge_for(&home, &id, "take", b"".as_slice()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            taken,
+            serde_json::json!([
+                { "id": "one", "kind": "submit_prompt", "text": "first" },
+                { "id": "two", "kind": "submit_prompt", "text": "second" },
+            ])
+        );
+        assert!(!first.exists());
+        assert_eq!(
+            serve_claude_bridge_for(&home, &id, "take", b"".as_slice()).unwrap(),
+            "[]"
+        );
     }
 }

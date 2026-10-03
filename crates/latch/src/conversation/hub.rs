@@ -92,6 +92,9 @@ pub type ConnectorFactory = Arc<dyn Fn(&ConversationId) -> Box<dyn Connector> + 
 
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub enum OperationOutcome {
+    Queued {
+        correlation: Option<ConversationItemId>,
+    },
     Started,
     Accepted {
         correlation: Option<ConversationItemId>,
@@ -525,6 +528,9 @@ impl ConversationHub {
             .filter_map(|record| match &record.outcome {
                 OperationOutcome::Accepted {
                     correlation: Some(id),
+                }
+                | OperationOutcome::Queued {
+                    correlation: Some(id),
                 } if !record.reconciled => actor.projection.item(id).and_then(|item| {
                     if let super::ConversationItemKind::Message {
                         role: super::MessageRole::User,
@@ -567,7 +573,15 @@ impl ConversationHub {
                     }
                 }
             }
-            applied.push(actor.projection.apply_connector(mutation)?);
+            match actor.projection.apply_connector(mutation) {
+                Ok(change) => applied.push(change),
+                // A truncation aimed at an item this projection never held
+                // removes nothing. Failing the batch instead would discard
+                // the mutations already applied while the connector's
+                // offsets had moved past them.
+                Err(super::ProjectionError::UnknownTruncateTarget) => {}
+                Err(error) => return Err(error.into()),
+            }
         }
         if !applied.is_empty() || checkpoint_delta.is_some() {
             actor.cache.append(&super::CacheBatch {
@@ -707,6 +721,8 @@ impl ConversationHub {
         let mut state = actor.projection.snapshot(0).state;
         state.phase = super::ConversationPhase::Unavailable;
         state.send_message.enabled = false;
+        state.cancel_turn.enabled = false;
+        state.cancel_turn.reason = Some(reason.clone());
         state.send_message.reason = Some(reason);
         let applied = actor
             .projection
@@ -846,6 +862,7 @@ impl ConversationHub {
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("unknown conversation"))?;
         let connector_outcome = match result {
+            Ok(ApplyResult::Queued { correlation }) => OperationOutcome::Queued { correlation },
             Ok(ApplyResult::Accepted { correlation }) => OperationOutcome::Accepted { correlation },
             Ok(ApplyResult::Refused { reason }) => OperationOutcome::Refused { reason },
             Err(_) => OperationOutcome::Ambiguous,
@@ -855,6 +872,7 @@ impl ConversationHub {
             if let Some(record) = actor.operations.iter_mut().find(|r| r.id == operation_id) {
                 let outcome = match connector_outcome {
                     OperationOutcome::Accepted { correlation: None }
+                    | OperationOutcome::Queued { correlation: None }
                         if record
                             .action
                             .as_ref()
@@ -876,13 +894,26 @@ impl ConversationHub {
                                 kind: super::ConversationItemKind::Message {
                                     role: super::MessageRole::User,
                                     text,
-                                    status: super::MessageStatus::Submitted,
+                                    status: if matches!(
+                                        connector_outcome,
+                                        OperationOutcome::Queued { .. }
+                                    ) {
+                                        super::MessageStatus::Queued
+                                    } else {
+                                        super::MessageStatus::Submitted
+                                    },
                                 },
                             }),
                         )?;
                         published = Some(change);
-                        OperationOutcome::Accepted {
-                            correlation: Some(item_id),
+                        if matches!(connector_outcome, OperationOutcome::Queued { .. }) {
+                            OperationOutcome::Queued {
+                                correlation: Some(item_id),
+                            }
+                        } else {
+                            OperationOutcome::Accepted {
+                                correlation: Some(item_id),
+                            }
                         }
                     }
                     other => other,
@@ -1789,6 +1820,82 @@ mod tests {
             submitted.items[0].kind,
             super::super::ConversationItemKind::Message {
                 status: MessageStatus::Submitted,
+                ..
+            }
+        ));
+
+        hub.apply_poll(
+            &id,
+            vec![ConnectorMutation::Upsert(ObservedItem {
+                id: ConversationItemId::native("agent-native-id"),
+                created_at: "now".into(),
+                kind: super::super::ConversationItemKind::Message {
+                    role: MessageRole::User,
+                    text: "same text".into(),
+                    status: MessageStatus::Observed,
+                },
+            })],
+        )
+        .unwrap();
+        let observed = hub.snapshot(&id, 10).unwrap();
+        assert_eq!(observed.items.len(), 1);
+        assert_eq!(observed.items[0].id, item_id);
+        assert!(matches!(
+            observed.items[0].kind,
+            super::super::ConversationItemKind::Message {
+                status: MessageStatus::Observed,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn queued_send_atomically_publishes_and_reconciles_a_canonical_item() {
+        let temp = tempfile::tempdir().unwrap();
+        let id = ConversationId::new("ses_submitted");
+        let hub = ConversationHub::new(temp.path()).unwrap();
+        hub.watch(
+            id.clone(),
+            Box::new(FakeConnector),
+            ConversationState::starting(None),
+        )
+        .unwrap();
+        let (subscriber, snapshot) = hub.subscribe(&id, Grant::Interact).unwrap();
+        let action = ConnectorAction {
+            id: ACTION_SEND_MESSAGE.into(),
+            payload: json!({"text":"same text"}),
+        };
+        assert_eq!(
+            hub.begin_action(
+                &id,
+                subscriber,
+                &snapshot.operation_epoch,
+                "op-canonical".into(),
+                &action,
+            )
+            .unwrap(),
+            OperationOutcome::Started
+        );
+        let accepted = hub
+            .finish_action(
+                &id,
+                "op-canonical",
+                Ok(ApplyResult::Queued { correlation: None }),
+            )
+            .unwrap();
+        let OperationOutcome::Queued {
+            correlation: Some(item_id),
+        } = accepted
+        else {
+            panic!("accepted send must return its durable item id");
+        };
+        let submitted = hub.snapshot(&id, 10).unwrap();
+        assert_eq!(submitted.items.len(), 1);
+        assert_eq!(submitted.items[0].id, item_id);
+        assert!(matches!(
+            submitted.items[0].kind,
+            super::super::ConversationItemKind::Message {
+                status: MessageStatus::Queued,
                 ..
             }
         ));

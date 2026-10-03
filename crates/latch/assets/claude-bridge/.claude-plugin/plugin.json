@@ -1,0 +1,5 @@
+{
+  "name": "latch-conversation-bridge",
+  "version": "0.1.0",
+  "description": "Reports turn boundaries to Latch and carries out the messages its chat sends."
+}

@@ -8,10 +8,11 @@ use serde::{Deserialize, Serialize};
 use super::{ConnectorIdentity, ConnectorMutation, ConversationItemId};
 use crate::cli::serve::routes::Grant;
 
-/// Action ids every connector must recognise. They are the only two structured
+/// Action ids every connector must recognise. They are the three structured
 /// operations the v2 WebSocket can carry, so they are named here rather than in
 /// the gateway, which must stay agent-neutral.
 pub const ACTION_SEND_MESSAGE: &str = "send_message";
+pub const ACTION_CANCEL_TURN: &str = "cancel_turn";
 pub const ACTION_RESOLVE_REQUEST: &str = "resolve_request";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -49,7 +50,11 @@ pub struct SourceOffset {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct BranchEntry {
     pub source_id: String,
+    /// The record this one follows on the active branch after it was applied.
     pub parent_id: Option<String>,
+    /// The last conversation item the record emitted, when it emitted one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_id: Option<String>,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PollResult {
@@ -70,6 +75,9 @@ pub struct ConnectorAction {
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ApplyResult {
+    Queued {
+        correlation: Option<ConversationItemId>,
+    },
     Accepted {
         correlation: Option<ConversationItemId>,
     },

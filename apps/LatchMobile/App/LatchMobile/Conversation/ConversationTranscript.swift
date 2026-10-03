@@ -58,6 +58,9 @@ struct ConversationTranscript: View {
                 .padding(.vertical, 12)
             }
             .coordinateSpace(name: "conversation.transcript.scroll")
+            // Dragging down through the keyboard pulls it away with the finger,
+            // as in Messages; releasing above its top edge brings it back.
+            .scrollDismissesKeyboard(.interactively)
             // Centred in what the floating chrome and composer leave visible,
             // not at the top of the scroll content.
             .overlay {

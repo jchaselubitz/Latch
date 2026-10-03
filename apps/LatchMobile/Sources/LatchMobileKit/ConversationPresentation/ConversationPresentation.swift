@@ -136,10 +136,12 @@ public struct ConversationMessagePresentation: Identifiable, Equatable, Sendable
         case .ambiguous: return "Delivery unknown"
         case .manualReview: return "Not confirmed"
         case .refused: return "Not sent"
+        case .queued: return "Queued"
         case .sending, nil: break
         }
         switch status {
         case .submitted: return "Sending…"
+        case .queued: return "Queued"
         case .failed: return "Not delivered"
         case .observed, .partial, .complete: return nil
         }

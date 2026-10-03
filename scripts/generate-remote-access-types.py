@@ -165,7 +165,7 @@ pub enum MessageRole { User, Assistant }
 /// `Partial` is reserved in v2. Clients render unknown future statuses as complete.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum MessageStatus { Submitted, Observed, Partial, Complete, Failed }
+pub enum MessageStatus { Submitted, Queued, Observed, Partial, Complete, Failed }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -224,6 +224,8 @@ pub struct OperationAvailability {
     pub reason: Option<String>,
 }
 
+fn unavailable_cancel_turn() -> OperationAvailability { OperationAvailability { enabled: false, reason: None } }
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConnectorIdentity { pub id: String, pub version: String }
 
@@ -233,6 +235,8 @@ pub struct ConversationState {
     pub phase: ConversationPhase,
     pub send_message: OperationAvailability,
     pub resolve_request: OperationAvailability,
+    #[serde(default = "unavailable_cancel_turn")]
+    pub cancel_turn: OperationAvailability,
     /// Derived from the newest request item whose status is pending.
     pub pending_request: Option<String>,
     pub connector: Option<ConnectorIdentity>,
@@ -244,7 +248,7 @@ pub enum SnapshotReason { Initial, Generation, OperationEpoch, Overflow }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum OperationResultStatus { Accepted, Refused, Ambiguous, Unknown }
+pub enum OperationResultStatus { Accepted, Queued, Refused, Ambiguous, Unknown }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -303,6 +307,12 @@ pub enum ConversationClientMessage {
         #[serde(rename = "operationId")]
         operation_id: String,
         text: String,
+    },
+    CancelTurn {
+        #[serde(rename = "operationEpoch")]
+        operation_epoch: String,
+        #[serde(rename = "operationId")]
+        operation_id: String,
     },
     ResolveRequest {
         #[serde(rename = "operationEpoch")]
@@ -403,7 +413,45 @@ export type GatewayReadiness = {
   protocolVersion: 2;
   gatewayInstanceId: string;
 };
-''' + typescript_endpoints(capabilities)
+''' + typescript_endpoints(capabilities) + typescript_conversation()
+
+
+def typescript_conversation() -> str:
+    """Derive conversation payloads and both frame directions from the schemas."""
+    def render(node: dict, document: dict) -> str:
+        if "$ref" in node:
+            ref = node["$ref"]
+            if ref.startswith("#/"):
+                target = document
+                for part in ref[2:].split("/"):
+                    target = target[part]
+                return render(target, document)
+            return {"conversation-item.schema.json": "ConversationItem", "conversation-state.schema.json": "ConversationState"}[ref]
+        if "const" in node:
+            return json.dumps(node["const"])
+        if "enum" in node:
+            return " | ".join(json.dumps(value) for value in node["enum"])
+        for union in ("oneOf", "anyOf"):
+            if union in node:
+                return " | ".join(render(value, document) for value in node[union])
+        kind = node.get("type")
+        if isinstance(kind, list):
+            return " | ".join(render({**node, "type": value}, document) for value in kind)
+        if kind == "object":
+            required = node.get("required", [])
+            fields = [name + ("" if name in required else "?") + ": " + render(value, document) + ";" for name, value in node["properties"].items()]
+            return "{ " + " ".join(fields) + " }"
+        if kind == "array":
+            return "Array<" + render(node["items"], document) + ">"
+        return {"integer": "number", "number": "number", "string": "string", "boolean": "boolean", "null": "null"}[kind]
+
+    item = load("conversation-item.schema.json")
+    state = load("conversation-state.schema.json")
+    protocol = load("conversation-protocol.schema.json")
+    server_names = {"snapshot", "items_upserted", "items_removed", "state_changed", "operation_result", "history_page", "error"}
+    def frames(server: bool) -> str:
+        return "\n  | ".join(render(frame, protocol) for frame in protocol["oneOf"] if (frame["properties"]["type"]["const"] in server_names) == server)
+    return "\nexport type ConversationItem = " + render(item, item) + ";\n" + "export type ConversationState = " + render(state, state) + ";\n" + "export type ConversationServerMessage =\n  | " + frames(True) + ";\n" + "export type ConversationClientMessage =\n  | " + frames(False) + ";\n"
 
 
 def main() -> None:

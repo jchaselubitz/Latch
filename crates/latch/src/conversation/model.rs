@@ -109,6 +109,7 @@ pub enum MessageRole {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum MessageStatus {
     Submitted,
+    Queued,
     Observed,
     Partial,
     Complete,
@@ -180,6 +181,14 @@ pub enum ConversationPhase {
     Exited,
     Unavailable,
 }
+impl Default for Availability {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            reason: None,
+        }
+    }
+}
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Availability {
     pub enabled: bool,
@@ -195,6 +204,8 @@ pub struct ConversationState {
     pub phase: ConversationPhase,
     pub send_message: Availability,
     pub resolve_request: Availability,
+    #[serde(default)]
+    pub cancel_turn: Availability,
     pub pending_request: Option<String>,
     pub connector: Option<ConnectorIdentity>,
 }
@@ -210,6 +221,7 @@ impl ConversationState {
                 enabled: false,
                 reason: Some("no pending request".into()),
             },
+            cancel_turn: Availability::default(),
             pending_request: None,
             connector,
         }
@@ -227,6 +239,7 @@ impl ConversationState {
                 enabled: false,
                 reason: Some(reason),
             },
+            cancel_turn: Availability::default(),
             pending_request: None,
             connector,
         }

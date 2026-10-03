@@ -1,5 +1,5 @@
 //! Generated from `schemas/remote-access/v2/*.schema.json`; do not edit by hand.
-//! Canonical schema set SHA-256: 9f94c11e814da0e39c4aa89cfa5276a5c1dcd9cee0a5c0c9a7bbfeae974be75c
+//! Canonical schema set SHA-256: 3e9c2354c187a0b87b98a9dd634dc0d86bb3850f4e4004b92bb2ba1a2add2df1
 
 use serde::{Deserialize, Serialize};
 
@@ -122,6 +122,7 @@ pub enum MessageRole {
 #[serde(rename_all = "snake_case")]
 pub enum MessageStatus {
     Submitted,
+    Queued,
     Observed,
     Partial,
     Complete,
@@ -207,6 +208,13 @@ pub struct OperationAvailability {
     pub reason: Option<String>,
 }
 
+fn unavailable_cancel_turn() -> OperationAvailability {
+    OperationAvailability {
+        enabled: false,
+        reason: None,
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConnectorIdentity {
     pub id: String,
@@ -219,6 +227,8 @@ pub struct ConversationState {
     pub phase: ConversationPhase,
     pub send_message: OperationAvailability,
     pub resolve_request: OperationAvailability,
+    #[serde(default = "unavailable_cancel_turn")]
+    pub cancel_turn: OperationAvailability,
     /// Derived from the newest request item whose status is pending.
     pub pending_request: Option<String>,
     pub connector: Option<ConnectorIdentity>,
@@ -237,6 +247,7 @@ pub enum SnapshotReason {
 #[serde(rename_all = "snake_case")]
 pub enum OperationResultStatus {
     Accepted,
+    Queued,
     Refused,
     Ambiguous,
     Unknown,
@@ -310,6 +321,12 @@ pub enum ConversationClientMessage {
         #[serde(rename = "operationId")]
         operation_id: String,
         text: String,
+    },
+    CancelTurn {
+        #[serde(rename = "operationEpoch")]
+        operation_epoch: String,
+        #[serde(rename = "operationId")]
+        operation_id: String,
     },
     ResolveRequest {
         #[serde(rename = "operationEpoch")]

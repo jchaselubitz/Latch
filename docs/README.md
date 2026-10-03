@@ -28,6 +28,9 @@ More focused documentation:
 - [Mobile session creation](FEATURE_MOBILE_SESSION_CREATION.md), its
   [implementation plan](PLAN_MOBILE_SESSION_CREATION.md), and the
   [field check](FIELD_CHECK_MOBILE_SESSION_CREATION.md) that is still to run
+- [The Claude bridge](CLAUDE_BRIDGE.md) — the function-hooks plugin Latch loads
+  into Claude sessions, its records and commands, and which planned chat
+  feature each hook serves.
 - [Rich conversation view](FEATURE_RICH_CONVERSATION_UI.md) for mobile and an
   embeddable web SDK, plus its
   [phased implementation guide](../planning/RICH_CONVERSATION_UI_IMPLEMENTATION_PLAN.md)

@@ -442,4 +442,58 @@ final class ConversationStoreTests: XCTestCase {
         XCTAssertEqual(store.operations.last?.status, .ambiguous)
         XCTAssertEqual(store.operations.last?.text, "second")
     }
+    func testQueuedReceiptKeepsTheMessageUntilItsCanonicalRowArrives() async throws {
+        let store = ConversationStore(sessionID: "ses_queued", gateway: try gateway(), operationRetentionSeconds: 60, storage: MemoryStorage())
+        store.receive(.message(.snapshot(ConversationSnapshot(
+            generation: "g", revision: 1, operationEpoch: "e", items: [], state: state(), hasMoreBefore: false, reason: nil
+        ))))
+        store.send(text: "next task")
+        let id = try XCTUnwrap(store.operations.first?.id)
+        store.receive(.message(.operationResult(operationId: id, status: "queued", itemId: "hub-row", reason: nil)))
+        XCTAssertEqual(store.operations.first?.status, .queued)
+        XCTAssertTrue(ConversationOperationPresentation.rows(for: store.operations).isEmpty)
+        store.retry(id)
+        XCTAssertEqual(store.operations.count, 1, "queued messages must not be submitted again")
+        let queued = ConversationItem(id: "hub-row", ordinal: 1, createdAt: "now", kind: .message(role: "user", text: "next task", status: .queued))
+        store.receive(.message(.itemsUpserted(generation: "g", revision: 2, items: [queued])))
+        try await Task.sleep(for: .milliseconds(30))
+        XCTAssertTrue(store.operations.isEmpty)
+        XCTAssertEqual(store.items.map(\.id), ["hub-row"])
+        let presentation = ConversationMessagePresentation(id: "hub-row", ordinal: 1, role: .user, text: "next task", status: .queued)
+        XCTAssertEqual(presentation.deliveryCaption, "Queued")
+    }
+
+    func testStopRequiresConnectedAdvertisedAvailabilityAndWaitsForTurnClosure() async throws {
+        let store = ConversationStore(sessionID: "ses_stop", gateway: try gateway(), operationRetentionSeconds: 60, storage: MemoryStorage())
+        var live = state()
+        live.cancelTurn = OperationAvailability(enabled: true, reason: nil)
+        store.receive(.message(.snapshot(ConversationSnapshot(
+            generation: "g", revision: 1, operationEpoch: "e", items: [], state: live, hasMoreBefore: false, reason: nil
+        ))))
+        XCTAssertFalse(store.canCancelTurn, "cached host state cannot enable Stop offline")
+        store.receive(.state(.open))
+        XCTAssertTrue(store.canCancelTurn)
+        store.cancelTurn()
+        let id = try XCTUnwrap(store.cancelAttempt?.id)
+        XCTAssertFalse(store.canCancelTurn)
+        store.cancelTurn()
+        XCTAssertEqual(store.cancelAttempt?.id, id)
+        store.receive(.message(.operationResult(operationId: id, status: "accepted", itemId: nil, reason: nil)))
+        await Task.yield()
+        XCTAssertEqual(store.cancelAttempt?.status, .accepted)
+        XCTAssertTrue(store.items.isEmpty, "Stop never inserts a user message")
+        live.cancelTurn = OperationAvailability(enabled: false, reason: nil)
+        store.receive(.message(.stateChanged(generation: "g", revision: 2, state: live)))
+        XCTAssertNil(store.cancelAttempt)
+        XCTAssertFalse(store.canCancelTurn)
+    }
+
+    func testStopContractEncodesAndOlderStateKeepsItUnavailable() throws {
+        let encoded = try JSONEncoder().encode(ConversationClientMessage.cancelTurn(operationEpoch: "e", operationId: "stop"))
+        let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: String])
+        XCTAssertEqual(payload, ["type": "cancel_turn", "operationEpoch": "e", "operationId": "stop"])
+        let decoded = try JSONDecoder().decode(ConversationState.self, from: Data(#"{"phase":"working","sendMessage":{"enabled":false},"resolveRequest":{"enabled":false},"pendingRequest":null,"connector":null}"#.utf8))
+        XCTAssertNil(decoded.cancelTurn)
+    }
+
 }

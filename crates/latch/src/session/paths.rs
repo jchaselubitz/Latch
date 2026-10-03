@@ -237,6 +237,12 @@ impl SessionPaths {
         self.dir.join("conversation-source-hooks.jsonl")
     }
 
+    /// Commands queued for the agent's own bridge to carry out. Each is one
+    /// private file the bridge takes exactly once.
+    pub fn conversation_bridge_inbox(&self) -> PathBuf {
+        self.dir.join("conversation-bridge-inbox")
+    }
+
     /// Agent-supplied authoritative source binding for a conversation connector.
     /// This is intentionally a Latch sidecar, never a guessed path derived from
     /// a working directory.

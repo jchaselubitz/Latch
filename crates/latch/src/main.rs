@@ -306,6 +306,12 @@ enum Command {
         #[arg(long, default_value_t = 1)]
         observer_version: u32,
     },
+    /// Serve one request from Latch's Claude bridge module. Internal only.
+    #[command(hide = true, name = "__conversation-bridge")]
+    ConversationBridge {
+        /// `hello`, `event`, or `take`.
+        action: String,
+    },
     /// Capture one Codex source binding or observation record. Internal only.
     #[command(hide = true, name = "__codex-conversation-hook")]
     CodexConversationHook,
@@ -859,6 +865,15 @@ fn dispatch(command: Option<Command>) -> Result<()> {
                 std::io::stdin(),
                 observer_version,
             )
+        }
+        Some(Command::ConversationBridge { action }) => {
+            let answer = latch::observer::serve_claude_bridge(
+                &LatchHome::from_env()?,
+                &action,
+                std::io::stdin(),
+            )?;
+            println!("{answer}");
+            Ok(())
         }
         Some(Command::CodexConversationHook) => {
             latch::observer::capture_codex_hook(&LatchHome::from_env()?, std::io::stdin())

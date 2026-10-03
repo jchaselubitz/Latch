@@ -77,6 +77,10 @@ struct SavedCheckpoint {
     agent_session_id: Option<String>,
     offset: u64,
     active_chain: Vec<String>,
+    /// The last item each active-chain record emitted. Absent in older
+    /// checkpoints, which then fall back to truncating at the record id.
+    #[serde(default)]
+    chain_items: HashMap<String, String>,
     malformed_records: u64,
     #[serde(default)]
     hook_offset: u64,
@@ -135,6 +139,15 @@ struct RuntimeCheckpoint {
     /// this session, or `None` before any hook has been observed.
     #[serde(default)]
     hook_observer_version: Option<u32>,
+    /// Version the session's bridge module announced, while it is believed
+    /// to be loaded. `None` keeps every action on the terminal path.
+    #[serde(default)]
+    bridge_version: Option<u32>,
+    /// When the agent last reported a turn closed. The hook sidecar is read
+    /// before the transcript, so a replay sees every close before the prompts
+    /// that preceded them; a prompt older than this must not reopen a turn.
+    #[serde(default)]
+    last_turn_close: Option<String>,
     last_state: Option<ConversationState>,
     screen_can_send: Option<bool>,
 }
@@ -151,6 +164,9 @@ pub struct JsonlConnector {
     offset: u64,
     hook_offset: u64,
     active_chain: Vec<String>,
+    /// Source record id to the last conversation item that record emitted.
+    /// A rewind truncates after an item, and most source records own none.
+    chain_items: HashMap<String, String>,
     malformed_records: u64,
     pending_request: Option<PendingRequest>,
     tools: HashMap<String, (String, String)>,
@@ -158,6 +174,8 @@ pub struct JsonlConnector {
     tool_running: bool,
     turn_open: bool,
     hook_observer_version: Option<u32>,
+    bridge_version: Option<u32>,
+    last_turn_close: Option<String>,
     last_state: Option<ConversationState>,
     screen_can_send: Option<bool>,
     live_screen: bool,
@@ -189,6 +207,7 @@ impl JsonlConnector {
             offset: 0,
             hook_offset: 0,
             active_chain: Vec::new(),
+            chain_items: HashMap::new(),
             malformed_records: 0,
             pending_request: None,
             tools: HashMap::new(),
@@ -196,6 +215,8 @@ impl JsonlConnector {
             tool_running: false,
             turn_open: false,
             hook_observer_version: None,
+            bridge_version: None,
+            last_turn_close: None,
             last_state: None,
             screen_can_send: None,
             live_screen: true,
@@ -221,6 +242,7 @@ impl JsonlConnector {
             offset: 0,
             hook_offset: 0,
             active_chain: Vec::new(),
+            chain_items: HashMap::new(),
             malformed_records: 0,
             pending_request: None,
             tools: HashMap::new(),
@@ -228,6 +250,8 @@ impl JsonlConnector {
             tool_running: false,
             turn_open: false,
             hook_observer_version: None,
+            bridge_version: None,
+            last_turn_close: None,
             last_state: None,
             screen_can_send: None,
             live_screen: false,
@@ -254,6 +278,8 @@ impl JsonlConnector {
             tool_running: self.tool_running,
             turn_open: self.turn_open,
             hook_observer_version: self.hook_observer_version,
+            bridge_version: self.bridge_version,
+            last_turn_close: self.last_turn_close.clone(),
             last_state: self.last_state.clone(),
             screen_can_send: self.screen_can_send,
         }
@@ -266,6 +292,8 @@ impl JsonlConnector {
         self.tool_running = runtime.tool_running;
         self.turn_open = runtime.turn_open;
         self.hook_observer_version = runtime.hook_observer_version;
+        self.bridge_version = runtime.bridge_version;
+        self.last_turn_close = runtime.last_turn_close;
         self.last_state = runtime.last_state;
         self.screen_can_send = runtime.screen_can_send;
     }
@@ -277,6 +305,46 @@ impl JsonlConnector {
     fn stop_hook_supported(&self) -> bool {
         self.hook_observer_version
             .is_some_and(|version| version >= crate::observer::STOP_HOOK_MIN_OBSERVER_VERSION)
+    }
+
+    fn forget_chain(&mut self) {
+        self.active_chain.clear();
+        self.chain_items.clear();
+    }
+
+    /// Drops every active-chain record after `index` and reports the visible
+    /// consequence. The Hub truncates after an item, so the target is the
+    /// nearest surviving record that owns one: the rewind's parent is often a
+    /// record that never produced an item.
+    fn rewind_chain_to(&mut self, index: usize) -> Vec<ConnectorMutation> {
+        let parent = self.active_chain[index].clone();
+        let removed = self.active_chain.split_off(index + 1);
+        if self.chain_items.is_empty() {
+            // Restored from a checkpoint written before items were tracked.
+            return vec![ConnectorMutation::TruncateAfter(
+                ConversationItemId::native(parent),
+            )];
+        }
+        let mut removed_item = false;
+        for id in &removed {
+            removed_item |= self.chain_items.remove(id).is_some();
+        }
+        if !removed_item {
+            return Vec::new();
+        }
+        match self
+            .active_chain
+            .iter()
+            .rev()
+            .find_map(|id| self.chain_items.get(id))
+        {
+            Some(item) => vec![ConnectorMutation::TruncateAfter(
+                ConversationItemId::native(item.clone()),
+            )],
+            None => vec![ConnectorMutation::Rebuild {
+                reason: "Claude source rewound before its first item".to_owned(),
+            }],
+        }
     }
 
     fn control(&mut self) -> Result<&mut ConversationControl> {
@@ -314,7 +382,7 @@ impl JsonlConnector {
         self.source = Some(source);
         self.agent_session_id = agent_session_id;
         self.offset = 0;
-        self.active_chain.clear();
+        self.forget_chain();
         self.pending_request = None;
         self.tools.clear();
         self.tool_summaries.clear();
@@ -360,10 +428,17 @@ impl JsonlConnector {
             } else if self.tool_running || self.turn_open {
                 (
                     ConversationPhase::Working,
-                    (false, Some("agent is working".to_owned())),
+                    (
+                        self.bridge_version.is_some(),
+                        self.bridge_version
+                            .is_none()
+                            .then(|| "agent is working".to_owned()),
+                    ),
                     (false, Some("no pending request".to_owned())),
                 )
-            } else if self.screen_can_send == Some(false) {
+            } else if self.screen_can_send == Some(false) && self.bridge_version.is_none() {
+                // Only the terminal path types into the composer. The bridge
+                // submits through the agent itself and leaves a draft alone.
                 (
                     ConversationPhase::Idle,
                     (false, Some("the agent composer is not empty".to_owned())),
@@ -385,6 +460,11 @@ impl JsonlConnector {
             resolve_request: super::super::Availability {
                 enabled: resolve_request.0,
                 reason: resolve_request.1,
+            },
+            cancel_turn: super::super::Availability {
+                enabled: self.id == "claude" && self.bridge_version.is_some() && self.turn_open,
+                reason: (!(self.bridge_version.is_some() && self.turn_open))
+                    .then(|| "no running turn with a live bridge".to_owned()),
             },
             pending_request: self
                 .pending_request
@@ -655,13 +735,28 @@ impl JsonlConnector {
         }
         if event == "permission_request" || hook_event_name.as_deref() == Some("PermissionRequest")
         {
+            // Claude raises its permission hook for a question too. The
+            // bridge has already announced that question under its call id,
+            // with its real text; a generic permission must not replace it.
+            let question_is_open = self
+                .pending_request
+                .as_ref()
+                .is_some_and(|request| request.request_type == RequestType::Question);
+            if question_is_open && string(object, "tool_name").as_deref() == Some("AskUserQuestion")
+            {
+                return Vec::new();
+            }
             return self.claude_permission(object, ordinal);
+        }
+        if hook_event_name.as_deref() == Some(crate::observer::CLAUDE_BRIDGE_EVENT) {
+            return self.claude_bridge_record(object);
         }
         if hook_event_name.as_deref() == Some("Stop") {
             // Authoritative turn boundary: the agent itself reported that it
             // stopped responding, so the turn this session opened is closed
             // regardless of what the transcript or screen otherwise suggest.
             self.turn_open = false;
+            self.last_turn_close = string(object, "timestamp").or(self.last_turn_close.take());
             return Vec::new();
         }
         if hook_event_name.is_some() {
@@ -677,26 +772,48 @@ impl JsonlConnector {
         }
         let Some(uuid) = uuid else { return Vec::new() };
         let parent = string(object, "parentUuid").or_else(|| string(object, "parent_uuid"));
+        let content = object
+            .get("message")
+            .and_then(|message| message.get("content"));
+        // Claude files each result of a parallel tool batch under the
+        // assistant record that made that call, not under the newest record.
+        // That is a sibling of the active branch, never a rewind of it.
+        let carries_tool_result = event == "user"
+            && content.and_then(Value::as_array).is_some_and(|blocks| {
+                blocks
+                    .iter()
+                    .any(|block| string_map(block, "type").as_deref() == Some("tool_result"))
+            });
         let mut mutations = Vec::new();
-        if let Some(parent) = parent {
-            if self.active_chain.last() != Some(&parent) {
-                if let Some(index) = self.active_chain.iter().position(|id| id == &parent) {
-                    self.active_chain.truncate(index + 1);
-                    mutations.push(ConnectorMutation::TruncateAfter(
-                        ConversationItemId::native(parent),
-                    ));
-                } else {
-                    self.active_chain.clear();
-                    return vec![ConnectorMutation::Rebuild {
-                        reason: "Claude source parent is outside the active branch".to_owned(),
-                    }];
+        match parent {
+            Some(parent) if self.active_chain.last() != Some(&parent) => {
+                match self.active_chain.iter().position(|id| id == &parent) {
+                    Some(_) if carries_tool_result => {}
+                    Some(index) => mutations.extend(self.rewind_chain_to(index)),
+                    // Nothing observed yet contradicts this record, so it
+                    // simply becomes the start of the observed branch.
+                    None if self.active_chain.is_empty() || carries_tool_result => {}
+                    None => {
+                        // Rebuild once, then adopt this record below. Leaving
+                        // the chain empty would make every later record
+                        // unclassifiable and rebuild again without end.
+                        self.forget_chain();
+                        mutations.push(ConnectorMutation::Rebuild {
+                            reason: "Claude source parent is outside the active branch".to_owned(),
+                        });
+                    }
                 }
             }
-        } else if !self.active_chain.is_empty() {
-            self.active_chain.clear();
-            return vec![ConnectorMutation::Rebuild {
-                reason: "Claude source started an incompatible root".to_owned(),
-            }];
+            Some(_) => {}
+            // Compaction starts a new physical root that continues the same
+            // conversation, so the settled history stays.
+            None if self.active_chain.is_empty() || claude_compaction_boundary(object, event) => {}
+            None => {
+                self.forget_chain();
+                mutations.push(ConnectorMutation::Rebuild {
+                    reason: "Claude source started an incompatible root".to_owned(),
+                });
+            }
         }
 
         let at = string(object, "timestamp").unwrap_or_else(|| "1970-01-01T00:00:00Z".to_owned());
@@ -704,27 +821,48 @@ impl JsonlConnector {
         // it when it was not itself re-announced. Hooks are read before the
         // transcript, however, so replaying an older transcript record must
         // not instantly dismiss a permission prompt that is still on screen.
-        if self.pending_request.as_ref().is_some_and(|request| {
-            request
-                .announced_at
-                .as_deref()
-                .is_none_or(|announced_at| timestamp_is_after(&at, announced_at))
-        }) {
+        // A question the bridge announced is closed by the bridge: other
+        // calls of the same response may finish while it is still open.
+        let bridge_owns_request = self.bridge_version.is_some()
+            && self
+                .pending_request
+                .as_ref()
+                .is_some_and(|request| request.request_type == RequestType::Question);
+        if !bridge_owns_request
+            && self.pending_request.as_ref().is_some_and(|request| {
+                request
+                    .announced_at
+                    .as_deref()
+                    .is_none_or(|announced_at| timestamp_is_after(&at, announced_at))
+            })
+        {
             let request = self.pending_request.take().expect("request was present");
             mutations.push(request_mutation(&request, RequestStatus::Dismissed));
         }
         match event {
             "user" => {
-                let content = object
-                    .get("message")
-                    .and_then(|message| message.get("content"));
-                let text = claude_text(content);
+                // Skill bodies, reminders, and compaction summaries are
+                // user-role rows the person never typed.
+                let injected = ["isMeta", "isCompactSummary"]
+                    .into_iter()
+                    .any(|key| object.get(key).and_then(Value::as_bool).unwrap_or(false));
+                let text = if injected {
+                    String::new()
+                } else {
+                    claude_text(content)
+                };
                 if !text.is_empty() {
+                    self.chain_items.insert(uuid.clone(), uuid.clone());
                     // A real user turn starts here. It only stays open on the
                     // authority of a later `Stop` hook when this session is
                     // known to emit one; otherwise this flag never turns on
                     // and the pre-existing tool/screen inference is unchanged.
-                    if self.stop_hook_supported() {
+                    if self.stop_hook_supported()
+                        && !self
+                            .last_turn_close
+                            .as_deref()
+                            .is_some_and(|close| turn_closed_at_or_after(close, &at))
+                    {
                         self.turn_open = true;
                     }
                     mutations.push(upsert(
@@ -779,6 +917,7 @@ impl JsonlConnector {
                             if let Some(text) =
                                 string_value(block, "text").filter(|text| !text.is_empty())
                             {
+                                self.chain_items.insert(uuid.clone(), item_id.clone());
                                 mutations.push(upsert(
                                     &item_id,
                                     at.clone(),
@@ -804,6 +943,7 @@ impl JsonlConnector {
                             // record itself is authoritative for this half of
                             // the boundary regardless of Stop-hook support.
                             self.tool_running = true;
+                            self.chain_items.insert(uuid.clone(), item_id.clone());
                             mutations.push(upsert(
                                 &item_id,
                                 at.clone(),
@@ -816,7 +956,10 @@ impl JsonlConnector {
                                     )),
                                 },
                             ));
-                            if name == "AskUserQuestion" {
+                            // With a bridge the question was announced when it
+                            // opened; by the time its call is in the transcript
+                            // it has been answered.
+                            if name == "AskUserQuestion" && self.bridge_version.is_none() {
                                 let request = PendingRequest {
                                     id: call_id,
                                     request_type: RequestType::Question,
@@ -837,6 +980,112 @@ impl JsonlConnector {
         }
         self.active_chain.push(uuid);
         mutations
+    }
+
+    /// One record from the session's bridge module: what the engine itself
+    /// reported, as opposed to what the transcript or screen imply.
+    fn claude_bridge_record(
+        &mut self,
+        object: &serde_json::Map<String, Value>,
+    ) -> Vec<ConnectorMutation> {
+        match string(object, "bridge_event").as_deref() {
+            // The transcript gains a question's call only once it is answered,
+            // so the bridge is what knows one is open and under which id.
+            Some("question.open") => {
+                let Some(id) = string(object, "tool_use_id") else {
+                    return Vec::new();
+                };
+                let input = Value::Object(object.clone());
+                let request = PendingRequest {
+                    id,
+                    request_type: RequestType::Question,
+                    prompt: claude_question_prompt(Some(&input)),
+                    choices: claude_question_choices(Some(&input)),
+                    screen_seen: false,
+                    announced_at: string(object, "timestamp"),
+                };
+                self.pending_request = Some(request.clone());
+                return vec![request_mutation(&request, RequestStatus::Pending)];
+            }
+            Some("question.closed") => {
+                let closed = string(object, "tool_use_id");
+                if self.pending_request.as_ref().map(|request| &request.id) == closed.as_ref() {
+                    let request = self.pending_request.take().expect("request was present");
+                    return vec![request_mutation(&request, RequestStatus::Dismissed)];
+                }
+            }
+            Some("hello") => {
+                self.bridge_version = object
+                    .get("bridge_version")
+                    .and_then(Value::as_u64)
+                    .and_then(|version| u32::try_from(version).ok());
+            }
+            Some("turn.start") => self.turn_open = true,
+            Some("turn.complete") => {
+                // Answered, interrupted, refused, or failed: the main loop
+                // has stopped, so nothing of this turn is still running.
+                self.turn_open = false;
+                self.tool_running = false;
+                self.last_turn_close = string(object, "timestamp").or(self.last_turn_close.take());
+            }
+            // `/clear` ends the conversation and keeps the process, and with
+            // it the loaded module. Every other end takes the module along.
+            Some("session.end") if string(object, "reason").as_deref() != Some("clear") => {
+                self.bridge_version = None;
+                self.turn_open = false;
+            }
+            _ => {}
+        }
+        Vec::new()
+    }
+
+    /// Hands one command to the bridge module and waits for its word on it.
+    fn ask_bridge(
+        &mut self,
+        kind: &str,
+        payload: serde_json::Map<String, Value>,
+        budget: Duration,
+    ) -> Result<BridgeAnswer> {
+        let paths = self.home.session(&self.session);
+        let sidecar = paths.conversation_source_hooks();
+        let results_from = fs::metadata(&sidecar).map(|meta| meta.len()).unwrap_or(0);
+        let id = format!(
+            "{kind}-{:x}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let command = crate::observer::queue_claude_bridge_command(&paths, &id, kind, payload)?;
+        let started = Instant::now();
+        let pause = Duration::from_millis(40);
+        while command.exists() {
+            if started.elapsed() >= BRIDGE_CLAIM_TIMEOUT.min(budget) {
+                // Removing the command first is what makes the terminal
+                // fallback safe: a module that wakes later finds nothing.
+                if fs::remove_file(&command).is_ok() {
+                    return Ok(BridgeAnswer::NotTaken);
+                }
+                break;
+            }
+            std::thread::sleep(pause);
+        }
+        loop {
+            if let Some(result) = bridge_command_result(&sidecar, results_from, &id) {
+                return Ok(match string(&result, "outcome").as_deref() {
+                    Some("accepted") => BridgeAnswer::Accepted,
+                    Some("queued") => BridgeAnswer::Queued,
+                    _ => BridgeAnswer::Refused(
+                        string(&result, "detail")
+                            .unwrap_or_else(|| "the agent refused the request".to_owned()),
+                    ),
+                });
+            }
+            if started.elapsed() >= budget {
+                anyhow::bail!("the agent took the request but did not confirm it");
+            }
+            std::thread::sleep(pause);
+        }
     }
 
     fn claude_permission(
@@ -883,6 +1132,13 @@ impl JsonlConnector {
         self.pending_request = Some(request.clone());
         vec![request_mutation(&request, RequestStatus::Pending)]
     }
+}
+
+/// The record Claude writes when it compacts: a new physical root that names
+/// the branch it continues.
+fn claude_compaction_boundary(object: &serde_json::Map<String, Value>, event: &str) -> bool {
+    object.contains_key("logicalParentUuid")
+        || (event == "system" && string(object, "subtype").as_deref() == Some("compact_boundary"))
 }
 
 fn upsert(id: &str, created_at: String, kind: ConversationItemKind) -> ConnectorMutation {
@@ -1389,7 +1645,7 @@ impl Connector for JsonlConnector {
                 && self.source_identity != identity
             {
                 self.offset = 0;
-                self.active_chain.clear();
+                self.forget_chain();
                 self.pending_request = None;
                 self.tools.clear();
                 self.tool_summaries.clear();
@@ -1403,7 +1659,7 @@ impl Connector for JsonlConnector {
             let length = metadata.map(|meta| meta.len()).unwrap_or(0);
             if length < self.offset {
                 self.offset = 0;
-                self.active_chain.clear();
+                self.forget_chain();
                 mutations.push(ConnectorMutation::Rebuild {
                     reason: "authoritative source was truncated".to_owned(),
                 });
@@ -1448,14 +1704,6 @@ impl Connector for JsonlConnector {
                         Ok(value) => {
                             let before = self.active_chain.len();
                             let before_tail = self.active_chain.last().cloned();
-                            let parent = if self.id == "claude" {
-                                value.as_object().and_then(|object| {
-                                    string(object, "parentUuid")
-                                        .or_else(|| string(object, "parent_uuid"))
-                                })
-                            } else {
-                                None
-                            };
                             let record_mutations =
                                 self.record(value, self.offset + consumed as u64);
                             for mutation in record_mutations {
@@ -1464,12 +1712,20 @@ impl Connector for JsonlConnector {
                             if self.active_chain.len() > before
                                 || self.active_chain.last().cloned() != before_tail
                             {
-                                let source_id =
-                                    self.active_chain.last().cloned().unwrap_or_default();
-                                delta.active_branch_delta.push(super::super::BranchEntry {
-                                    source_id,
-                                    parent_id: parent,
-                                });
+                                // Journal where the record landed in the chain,
+                                // not its raw parent: a parallel tool result's
+                                // parent is an earlier record it never rewound to.
+                                if let Some(source_id) = self.active_chain.last().cloned() {
+                                    let parent_id = (self.id == "claude")
+                                        .then(|| self.active_chain.iter().rev().nth(1).cloned())
+                                        .flatten();
+                                    let item_id = self.chain_items.get(&source_id).cloned();
+                                    delta.active_branch_delta.push(super::super::BranchEntry {
+                                        source_id,
+                                        parent_id,
+                                        item_id,
+                                    });
+                                }
                             }
                         }
                         Err(_) => self.malformed_records += 1,
@@ -1524,6 +1780,12 @@ impl Connector for JsonlConnector {
         // touching the kernel; pushed `ConversationState` is the UI availability.
         vec![
             ActionDescriptor {
+                id: super::super::ACTION_CANCEL_TURN.to_owned(),
+                required_grant: Grant::Interact,
+                enabled: true,
+                reason: None,
+            },
+            ActionDescriptor {
                 id: ACTION_SEND_MESSAGE.to_owned(),
                 required_grant: Grant::Interact,
                 enabled: true,
@@ -1539,12 +1801,34 @@ impl Connector for JsonlConnector {
     }
 
     fn apply(&mut self, action: ConnectorAction, deadline: Duration) -> Result<ApplyResult> {
+        if action.id == super::super::ACTION_CANCEL_TURN {
+            if !self.state().cancel_turn.enabled {
+                return Ok(ApplyResult::Refused {
+                    reason: "no running turn with a live bridge".into(),
+                });
+            }
+            return Ok(
+                match self.ask_bridge("abort_turn", serde_json::Map::new(), deadline)? {
+                    BridgeAnswer::Accepted => ApplyResult::Accepted { correlation: None },
+                    BridgeAnswer::Refused(reason) => ApplyResult::Refused { reason },
+                    BridgeAnswer::NotTaken => {
+                        self.bridge_version = None;
+                        ApplyResult::Refused {
+                            reason: "the bridge is no longer live".into(),
+                        }
+                    }
+                    BridgeAnswer::Queued => ApplyResult::Refused {
+                        reason: "the bridge did not cancel the turn".into(),
+                    },
+                },
+            );
+        }
         let text = match action.id.as_str() {
             ACTION_SEND_MESSAGE
                 if (self.source.is_some() || matches!(self.id, "codex" | "cursor"))
                     && self.pending_request.is_none()
-                    && !self.tool_running
-                    && !(self.id == "cursor" && self.turn_open) =>
+                    && (self.bridge_version.is_some()
+                        || (!self.tool_running && !self.turn_open)) =>
             {
                 action.payload.get("text").and_then(Value::as_str)
             }
@@ -1582,6 +1866,59 @@ impl Connector for JsonlConnector {
                 .filter(|remaining| !remaining.is_zero())
                 .ok_or_else(|| anyhow::anyhow!("connector action deadline exceeded"))
         };
+        if self.id == "claude" && self.bridge_version.is_some() {
+            let mut payload = serde_json::Map::new();
+            let command = if action.id == ACTION_SEND_MESSAGE {
+                // A slash command is typed: the engine runs one only from its
+                // own prompt box, and reads a submitted `/name` as plain text.
+                (!text.trim_start().starts_with('/')).then(|| {
+                    payload.insert("text".to_owned(), Value::from(text));
+                    "submit_prompt"
+                })
+            } else {
+                // The bridge answers a question by its call id, so the answer
+                // cannot land on another prompt and need not be one of the
+                // offered labels: free text and comma-joined multi-select
+                // answers are the tool's own. Several questions in one call
+                // share a flattened prompt here and stay on the terminal.
+                self.pending_request
+                    .as_ref()
+                    .filter(|request| {
+                        request.request_type == RequestType::Question
+                            && !request.prompt.is_empty()
+                            && !request.prompt.contains('\n')
+                    })
+                    .map(|request| {
+                        payload.insert("tool_use_id".to_owned(), Value::from(request.id.clone()));
+                        payload.insert(
+                            "answers".to_owned(),
+                            serde_json::json!({ request.prompt.clone(): text }),
+                        );
+                        "answer_question"
+                    })
+            };
+            if let Some(kind) = command {
+                match self.ask_bridge(kind, payload, remaining()?)? {
+                    BridgeAnswer::Queued => return Ok(ApplyResult::Queued { correlation: None }),
+                    BridgeAnswer::Accepted => {
+                        if action.id == ACTION_RESOLVE_REQUEST {
+                            self.pending_request = None;
+                        }
+                        self.screen_can_send = Some(false);
+                        self.last_screen_refresh = None;
+                        return Ok(ApplyResult::Accepted { correlation: None });
+                    }
+                    BridgeAnswer::Refused(reason) => return Ok(ApplyResult::Refused { reason }),
+                    // Nothing reached the agent, so the terminal is still safe.
+                    BridgeAnswer::NotTaken => self.bridge_version = None,
+                }
+            }
+        }
+        if action.id == ACTION_SEND_MESSAGE && (self.tool_running || self.turn_open) {
+            return Ok(ApplyResult::Refused {
+                reason: "agent is working; terminal sending is unavailable".into(),
+            });
+        }
         let screen = self.current_screen(remaining()?)?;
         if action.id == ACTION_SEND_MESSAGE {
             if !screen.lines().any(|line| is_empty_composer(self.id, line)) {
@@ -1670,6 +2007,7 @@ impl Connector for JsonlConnector {
             self.source_identity = checkpoint.source_identity;
             self.hook_offset = checkpoint.hook_offset;
             self.active_chain = checkpoint.active_chain;
+            self.chain_items = checkpoint.chain_items;
             self.malformed_records = checkpoint.malformed_records;
             self.restore_runtime(checkpoint.runtime);
         }
@@ -1702,13 +2040,22 @@ impl Connector for JsonlConnector {
             }
         }
         for entry in &delta.active_branch_delta {
+            if entry.source_id.is_empty() {
+                continue;
+            }
             if let Some(parent) = entry.parent_id.as_ref() {
                 if let Some(index) = self.active_chain.iter().position(|id| id == parent) {
-                    self.active_chain.truncate(index + 1);
+                    for removed in self.active_chain.split_off(index + 1) {
+                        self.chain_items.remove(&removed);
+                    }
                 }
             }
             if self.active_chain.last() != Some(&entry.source_id) {
                 self.active_chain.push(entry.source_id.clone());
+            }
+            if let Some(item) = entry.item_id.as_ref() {
+                self.chain_items
+                    .insert(entry.source_id.clone(), item.clone());
             }
         }
         Ok(())
@@ -1721,6 +2068,7 @@ impl Connector for JsonlConnector {
             agent_session_id: self.agent_session_id.clone(),
             offset: self.offset,
             active_chain: self.active_chain.clone(),
+            chain_items: self.chain_items.clone(),
             malformed_records: self.malformed_records,
             hook_offset: self.hook_offset,
             runtime: self.runtime_checkpoint(),
@@ -1756,6 +2104,55 @@ fn read_binding(
 fn string(object: &serde_json::Map<String, Value>, key: &str) -> Option<String> {
     object.get(key).and_then(Value::as_str).map(str::to_owned)
 }
+/// How long the bridge module has to take a queued command. It looks twice a
+/// second, so a command still waiting after this long has no one to take it.
+const BRIDGE_CLAIM_TIMEOUT: Duration = Duration::from_millis(2_500);
+
+enum BridgeAnswer {
+    Accepted,
+    Queued,
+    Refused(String),
+    /// The module never took the command, and it has been withdrawn.
+    NotTaken,
+}
+
+/// The bridge module's answer to one command, read from the hook sidecar
+/// without disturbing the observation connector's own offset into it.
+fn bridge_command_result(
+    sidecar: &std::path::Path,
+    from: u64,
+    id: &str,
+) -> Option<serde_json::Map<String, Value>> {
+    let mut file = File::open(sidecar).ok()?;
+    file.seek(SeekFrom::Start(from)).ok()?;
+    let mut bytes = Vec::new();
+    file.take(MAX_READ_BYTES as u64)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    bytes
+        .split(|byte| *byte == b'\n')
+        .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
+        .filter_map(|value| match value {
+            Value::Object(object) => Some(object),
+            _ => None,
+        })
+        .find(|object| {
+            string(object, "bridge_event").as_deref() == Some("command.result")
+                && string(object, "command_id").as_deref() == Some(id)
+        })
+}
+
+/// Whether a turn close stamped `close` covers a prompt stamped `prompt`.
+/// Bridge records carry milliseconds, like the transcript; the `Stop` hook
+/// carries whole seconds, where only a strictly earlier second is certain.
+fn turn_closed_at_or_after(close: &str, prompt: &str) -> bool {
+    if close.len() > 20 && prompt.len() > 20 {
+        close >= prompt
+    } else {
+        close.get(..19).unwrap_or(close) > prompt.get(..19).unwrap_or(prompt)
+    }
+}
+
 fn timestamp_is_after(timestamp: &str, reference: &str) -> bool {
     // Permission hooks carry whole-second UTC timestamps while Claude JSONL
     // records normally include fractions. Comparing their raw strings would
@@ -1886,6 +2283,7 @@ mod tests {
     fn wire_status_message(status: &MessageStatus) -> &'static str {
         match status {
             MessageStatus::Submitted => "submitted",
+            MessageStatus::Queued => "queued",
             MessageStatus::Observed => "observed",
             MessageStatus::Partial => "partial",
             MessageStatus::Complete => "complete",
@@ -1991,15 +2389,10 @@ mod tests {
             ConversationState::starting(Some(connector.identity())),
         );
         for mutation in &mutations {
-            match projection.apply_connector(mutation.clone()) {
-                Ok(_) => {}
-                Err(super::super::super::ProjectionError::UnknownTruncateTarget) => {
-                    // A Claude attachment or thinking-only record occupies the
-                    // connector chain but never mints a projection id. Live
-                    // Hub polls fail the same way; cases that need a rewind
-                    // keep a parent that did mint an item.
-                }
-                Err(error) => panic!("projecting {} failed: {error}", connector.id),
+            // A rewind names the nearest record that minted an item, so a
+            // truncation the projection cannot place is a connector defect.
+            if let Err(error) = projection.apply_connector(mutation.clone()) {
+                panic!("projecting {} failed: {error}", connector.id);
             }
         }
         assert!(connector
@@ -2130,13 +2523,19 @@ mod tests {
         let multi: Value =
             serde_json::from_slice(&fs::read(cases.join("multi-tool-turn/expected.json")).unwrap())
                 .unwrap();
-        // Sibling tool_result records all parent the assistant, so today's
-        // connector TruncateAfters the earlier tools. The source still has
-        // three calls; expected.json records the current collapsed projection.
+        // Sibling tool_result records all parent the assistant. They are
+        // attached to the branch, so all three calls stay in the projection.
         assert!(
-            multi["truncateAfter"].as_array().unwrap().len() >= 2,
-            "parallel tool_result records currently rewind the branch"
+            multi["truncateAfter"].as_array().unwrap().is_empty(),
+            "parallel tool_result records must not rewind the branch"
         );
+        let tools = multi["snapshot"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item["kind"]["type"] == "tool")
+            .count();
+        assert_eq!(tools, 3, "every call of the parallel batch stays visible");
 
         let failed_source = fs::read_to_string(cases.join("failed-tool/source.jsonl")).unwrap();
         assert!(
@@ -2199,9 +2598,17 @@ mod tests {
             &fs::read(cases.join("branch-truncation/expected.json")).unwrap(),
         )
         .unwrap();
+        // The capture is a parallel tool batch: a result whose parent is an
+        // earlier assistant record. It is a sibling of the branch, so nothing
+        // is truncated and every call of the batch stays visible.
         assert!(
-            !truncation["truncateAfter"].as_array().unwrap().is_empty(),
-            "branch-truncation must emit TruncateAfter"
+            truncation["truncateAfter"].as_array().unwrap().is_empty(),
+            "a parallel tool result must not truncate the branch"
+        );
+        assert_eq!(
+            truncation["snapshot"]["items"].as_array().unwrap().len(),
+            4,
+            "every call of the parallel batch stays visible"
         );
 
         let interruption = fs::read_to_string(cases.join("interruption/source.jsonl")).unwrap();
@@ -2924,5 +3331,689 @@ mod tests {
 
         restored.claude_record(claude_hook("Stop", 2).as_object().unwrap(), "hook", 3);
         assert_eq!(restored.state().phase, ConversationPhase::Idle);
+    }
+
+    fn claude_assistant_text(uuid: &str, parent: &str, text: &str) -> Value {
+        serde_json::json!({
+            "type": "assistant",
+            "uuid": uuid,
+            "parentUuid": parent,
+            "timestamp": "2026-09-22T09:00:03Z",
+            "message": { "content": [{ "type": "text", "text": text }] },
+        })
+    }
+
+    fn claude_child(mut record: Value, parent: &str) -> Value {
+        record["parentUuid"] = Value::from(parent);
+        record
+    }
+
+    fn feed(connector: &mut JsonlConnector, records: &[Value]) -> Vec<ConnectorMutation> {
+        records
+            .iter()
+            .enumerate()
+            .flat_map(|(index, record)| {
+                let object = record.as_object().unwrap();
+                let event = string(object, "type").unwrap_or_default();
+                connector.claude_record(object, &event, index as u64 + 1)
+            })
+            .collect()
+    }
+
+    fn rebuilds(mutations: &[ConnectorMutation]) -> usize {
+        mutations
+            .iter()
+            .filter(|mutation| matches!(mutation, ConnectorMutation::Rebuild { .. }))
+            .count()
+    }
+
+    fn truncations(mutations: &[ConnectorMutation]) -> Vec<String> {
+        mutations
+            .iter()
+            .filter_map(|mutation| match mutation {
+                ConnectorMutation::TruncateAfter(id) => Some(id.as_str().to_owned()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Claude files each result of a parallel batch under the assistant record
+    /// that made the call. Reading that as a rewind removed the later calls and
+    /// then rebuilt the conversation on every following record.
+    #[test]
+    fn parallel_tool_results_are_siblings_not_a_rewind() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut connector = JsonlConnector::fixture("claude", dir.path().join("source.jsonl"));
+        let mutations = feed(
+            &mut connector,
+            &[
+                claude_user_message("user-1", "Look around"),
+                claude_tool_call("call-a", "user-1", "toolu_a"),
+                claude_tool_call("call-b", "call-a", "toolu_b"),
+                claude_tool_call("call-c", "call-b", "toolu_c"),
+                claude_tool_result("result-a", "call-a", "toolu_a"),
+                claude_tool_result("result-b", "call-b", "toolu_b"),
+                claude_tool_result("result-c", "call-c", "toolu_c"),
+                claude_assistant_text("answer", "result-c", "All three ran."),
+                claude_child(claude_user_message("user-2", "Thanks"), "answer"),
+            ],
+        );
+        assert_eq!(rebuilds(&mutations), 0);
+        assert!(truncations(&mutations).is_empty());
+        let succeeded = mutations
+            .iter()
+            .filter(|mutation| {
+                matches!(
+                    mutation,
+                    ConnectorMutation::Upsert(ObservedItem {
+                        kind: ConversationItemKind::Tool {
+                            status: ToolStatus::Succeeded,
+                            ..
+                        },
+                        ..
+                    })
+                )
+            })
+            .count();
+        assert_eq!(succeeded, 3);
+        assert!(connector.tools.is_empty());
+    }
+
+    #[test]
+    fn parallel_tool_results_survive_a_journal_replay() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.jsonl");
+        let records = [
+            claude_user_message("user-1", "Look around"),
+            claude_tool_call("call-a", "user-1", "toolu_a"),
+            claude_tool_call("call-b", "call-a", "toolu_b"),
+            claude_tool_result("result-a", "call-a", "toolu_a"),
+            claude_tool_result("result-b", "call-b", "toolu_b"),
+        ];
+        fs::write(
+            &source,
+            records
+                .iter()
+                .map(|record| format!("{record}\n"))
+                .collect::<String>(),
+        )
+        .unwrap();
+        let mut connector = JsonlConnector::fixture("claude", source.clone());
+        let poll = connector
+            .poll(PollBudget {
+                max_records: 64,
+                deadline: Duration::from_secs(1),
+            })
+            .unwrap();
+        assert_eq!(rebuilds(&poll.mutations), 0);
+
+        let mut replayed = JsonlConnector::fixture("claude", source);
+        replayed
+            .apply_checkpoint_delta(&poll.checkpoint_delta)
+            .unwrap();
+        assert_eq!(replayed.active_chain, connector.active_chain);
+        assert_eq!(replayed.chain_items, connector.chain_items);
+    }
+
+    /// A rewind's parent is usually a record that never produced an item, so
+    /// the truncation has to name the nearest surviving record that did.
+    #[test]
+    fn a_rewind_truncates_after_the_nearest_surviving_item() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut connector = JsonlConnector::fixture("claude", dir.path().join("source.jsonl"));
+        let note = serde_json::json!({
+            "type": "system",
+            "uuid": "note-1",
+            "parentUuid": "answer-1",
+            "timestamp": "2026-09-22T09:00:04Z",
+        });
+        let mutations = feed(
+            &mut connector,
+            &[
+                claude_user_message("user-1", "First"),
+                claude_assistant_text("answer-1", "user-1", "One."),
+                note,
+                claude_child(claude_user_message("user-2", "Second"), "note-1"),
+                claude_assistant_text("answer-2", "user-2", "Two."),
+                claude_child(claude_user_message("user-3", "Second, reworded"), "note-1"),
+            ],
+        );
+        assert_eq!(rebuilds(&mutations), 0);
+        assert_eq!(truncations(&mutations), ["answer-1"]);
+        assert_eq!(
+            connector.active_chain,
+            ["user-1", "answer-1", "note-1", "user-3"]
+        );
+    }
+
+    #[test]
+    fn an_unclassifiable_parent_rebuilds_once_and_then_continues() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut connector = JsonlConnector::fixture("claude", dir.path().join("source.jsonl"));
+        let mutations = feed(
+            &mut connector,
+            &[
+                claude_user_message("user-1", "First"),
+                claude_assistant_text("answer-1", "elsewhere", "From another branch."),
+                claude_child(claude_user_message("user-2", "Next"), "answer-1"),
+                claude_assistant_text("answer-2", "user-2", "Still here."),
+            ],
+        );
+        assert_eq!(rebuilds(&mutations), 1);
+        assert_eq!(connector.active_chain, ["answer-1", "user-2", "answer-2"]);
+        assert!(matches!(
+            mutations.last(),
+            Some(ConnectorMutation::Upsert(ObservedItem { id, .. })) if id.as_str() == "answer-2"
+        ));
+    }
+
+    #[test]
+    fn compaction_keeps_the_settled_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut connector = JsonlConnector::fixture("claude", dir.path().join("source.jsonl"));
+        let boundary = serde_json::json!({
+            "type": "system",
+            "subtype": "compact_boundary",
+            "uuid": "boundary",
+            "parentUuid": null,
+            "logicalParentUuid": "answer-1",
+            "timestamp": "2026-09-22T09:00:05Z",
+        });
+        let mut summary = claude_child(
+            claude_user_message("summary", "Summary of it all"),
+            "boundary",
+        );
+        summary["isCompactSummary"] = Value::Bool(true);
+        let mutations = feed(
+            &mut connector,
+            &[
+                claude_user_message("user-1", "First"),
+                claude_assistant_text("answer-1", "user-1", "One."),
+                boundary,
+                summary,
+                claude_child(claude_user_message("user-2", "Carry on"), "summary"),
+            ],
+        );
+        assert_eq!(rebuilds(&mutations), 0);
+        assert!(truncations(&mutations).is_empty());
+        let user_texts: Vec<_> = mutations
+            .iter()
+            .filter_map(|mutation| match mutation {
+                ConnectorMutation::Upsert(ObservedItem {
+                    kind:
+                        ConversationItemKind::Message {
+                            role: MessageRole::User,
+                            text,
+                            ..
+                        },
+                    ..
+                }) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(user_texts, ["First", "Carry on"]);
+    }
+
+    #[test]
+    fn injected_user_rows_are_not_presented_as_prompts() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut connector = JsonlConnector::fixture("claude", dir.path().join("source.jsonl"));
+        connector.claude_record(
+            claude_hook("SessionStart", 2).as_object().unwrap(),
+            "hook",
+            1,
+        );
+        let mut skill = claude_user_message("skill-body", "Base directory for this skill: /x");
+        skill["isMeta"] = Value::Bool(true);
+        let mutations = connector.claude_record(skill.as_object().unwrap(), "user", 2);
+        assert!(mutations.is_empty());
+        assert!(!connector.turn_open);
+    }
+
+    fn bridge_record(event: &str, at: &str) -> Value {
+        serde_json::json!({
+            "hook_event_name": crate::observer::CLAUDE_BRIDGE_EVENT,
+            "latch_observer_version": 2,
+            "bridge_event": event,
+            "bridge_version": 1,
+            "timestamp": at,
+        })
+    }
+
+    fn observe_bridge(connector: &mut JsonlConnector, event: &str, at: &str) {
+        connector.claude_record(bridge_record(event, at).as_object().unwrap(), "hook", 1);
+    }
+
+    /// The bridge reports the engine's own turn boundaries, so an interrupted
+    /// turn closes too: `Stop` never fires for one.
+    #[test]
+    fn bridge_turn_boundaries_open_and_close_the_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut connector = JsonlConnector::fixture("claude", dir.path().join("source.jsonl"));
+        observe_bridge(&mut connector, "hello", "2026-09-22T09:00:00.000Z");
+        assert_eq!(connector.bridge_version, Some(1));
+        assert_eq!(connector.state().phase, ConversationPhase::Idle);
+
+        observe_bridge(&mut connector, "turn.start", "2026-09-22T09:00:01.000Z");
+        assert_eq!(connector.state().phase, ConversationPhase::Working);
+        let call = claude_tool_call("assistant-1", "user-1", "toolu_1");
+        connector.claude_record(call.as_object().unwrap(), "assistant", 2);
+        assert!(connector.tool_running);
+
+        let mut interrupted = bridge_record("turn.complete", "2026-09-22T09:00:05.000Z");
+        interrupted["reason"] = Value::from("aborted");
+        connector.claude_record(interrupted.as_object().unwrap(), "hook", 3);
+        assert_eq!(connector.state().phase, ConversationPhase::Idle);
+        assert!(connector.state().send_message.enabled);
+    }
+
+    /// Hooks are read before the transcript, so a conversation opened late
+    /// sees every close before the prompts that preceded them.
+    #[test]
+    fn a_replayed_prompt_does_not_reopen_a_turn_that_already_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut connector = JsonlConnector::fixture("claude", dir.path().join("source.jsonl"));
+        observe_bridge(&mut connector, "hello", "2026-09-22T08:59:00.000Z");
+        observe_bridge(&mut connector, "turn.start", "2026-09-22T08:59:59.900Z");
+        observe_bridge(&mut connector, "turn.complete", "2026-09-22T09:00:30.000Z");
+
+        let earlier = claude_user_message("user-1", "Please run the build");
+        connector.claude_record(earlier.as_object().unwrap(), "user", 4);
+        assert_eq!(connector.state().phase, ConversationPhase::Idle);
+
+        let mut later = claude_child(claude_user_message("user-2", "And the tests"), "user-1");
+        later["timestamp"] = Value::from("2026-09-22T09:01:00.000Z");
+        connector.claude_record(later.as_object().unwrap(), "user", 5);
+        assert_eq!(connector.state().phase, ConversationPhase::Working);
+    }
+
+    #[test]
+    fn a_whole_second_stop_only_covers_prompts_from_an_earlier_second() {
+        assert!(turn_closed_at_or_after(
+            "2026-09-22T09:00:30Z",
+            "2026-09-22T09:00:29.900Z"
+        ));
+        assert!(!turn_closed_at_or_after(
+            "2026-09-22T09:00:30Z",
+            "2026-09-22T09:00:30.100Z"
+        ));
+        assert!(turn_closed_at_or_after(
+            "2026-09-22T09:00:30.500Z",
+            "2026-09-22T09:00:30.100Z"
+        ));
+        assert!(!turn_closed_at_or_after(
+            "2026-09-22T09:00:30.500Z",
+            "2026-09-22T09:00:30.900Z"
+        ));
+    }
+
+    #[test]
+    fn the_bridge_survives_a_clear_and_leaves_with_the_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut connector = JsonlConnector::fixture("claude", dir.path().join("source.jsonl"));
+        observe_bridge(&mut connector, "hello", "2026-09-22T09:00:00.000Z");
+        let mut cleared = bridge_record("session.end", "2026-09-22T09:00:01.000Z");
+        cleared["reason"] = Value::from("clear");
+        connector.claude_record(cleared.as_object().unwrap(), "hook", 2);
+        assert_eq!(connector.bridge_version, Some(1));
+
+        let mut exited = bridge_record("session.end", "2026-09-22T09:00:02.000Z");
+        exited["reason"] = Value::from("prompt_input_exit");
+        connector.claude_record(exited.as_object().unwrap(), "hook", 3);
+        assert_eq!(connector.bridge_version, None);
+
+        let checkpoint = {
+            observe_bridge(&mut connector, "hello", "2026-09-22T09:00:03.000Z");
+            connector.checkpoint_snapshot().unwrap()
+        };
+        let mut restored = JsonlConnector::fixture("claude", dir.path().join("source.jsonl"));
+        restored.restore_checkpoint(&checkpoint).unwrap();
+        assert_eq!(restored.bridge_version, Some(1));
+    }
+
+    fn bridged_connector(home: &std::path::Path) -> JsonlConnector {
+        let home = LatchHome::new(home);
+        let session = SessionId::generate();
+        let paths = home.session(&session);
+        paths.ensure().unwrap();
+        fs::write(paths.meta(), br#"{"harness":"claude"}"#).unwrap();
+        let source = home.root().join("source.jsonl");
+        fs::write(&source, b"").unwrap();
+        let mut connector = JsonlConnector::fixture("claude", source);
+        connector.home = home;
+        connector.session = session;
+        connector.bridge_version = Some(1);
+        connector
+    }
+
+    /// Plays the bridge module: takes the queued command and answers it.
+    fn answer_next_bridge_command(
+        connector: &JsonlConnector,
+        outcome: &'static str,
+    ) -> std::thread::JoinHandle<Value> {
+        let paths = connector.home.session(&connector.session);
+        std::thread::spawn(move || {
+            let inbox = paths.conversation_bridge_inbox();
+            let command = loop {
+                // A command is in the inbox once it carries its final name.
+                let waiting = fs::read_dir(&inbox).ok().and_then(|entries| {
+                    entries
+                        .filter_map(Result::ok)
+                        .find(|entry| entry.path().extension().is_some_and(|kind| kind == "json"))
+                });
+                if let Some(entry) = waiting {
+                    let raw = fs::read(entry.path()).unwrap();
+                    fs::remove_file(entry.path()).unwrap();
+                    break serde_json::from_slice::<Value>(&raw).unwrap();
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            };
+            let result = serde_json::json!({
+                "hook_event_name": crate::observer::CLAUDE_BRIDGE_EVENT,
+                "bridge_event": "command.result",
+                "command_id": command["id"],
+                "outcome": outcome,
+                "detail": "the agent said no",
+            });
+            let mut sidecar = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(paths.conversation_source_hooks())
+                .unwrap();
+            std::io::Write::write_all(&mut sidecar, format!("{result}\n").as_bytes()).unwrap();
+            command
+        })
+    }
+
+    fn send(text: &str) -> ConnectorAction {
+        ConnectorAction {
+            id: ACTION_SEND_MESSAGE.to_owned(),
+            payload: serde_json::json!({ "text": text }),
+        }
+    }
+
+    #[test]
+    fn live_bridge_queues_a_send_while_tools_and_a_turn_are_running() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut connector = bridged_connector(temp.path());
+        connector.turn_open = true;
+        connector.tool_running = true;
+        assert!(connector.state().send_message.enabled);
+        assert!(connector.state().cancel_turn.enabled);
+        let module = answer_next_bridge_command(&connector, "queued");
+        assert_eq!(
+            connector
+                .apply(send("next task"), Duration::from_secs(5))
+                .unwrap(),
+            ApplyResult::Queued { correlation: None }
+        );
+        assert_eq!(module.join().unwrap()["kind"], "submit_prompt");
+        connector.bridge_version = None;
+        assert!(!connector.state().send_message.enabled);
+        assert!(!connector.state().cancel_turn.enabled);
+        assert!(matches!(
+            connector
+                .apply(send("next task"), Duration::from_secs(1))
+                .unwrap(),
+            ApplyResult::Refused { .. }
+        ));
+    }
+
+    #[test]
+    fn stop_requires_a_live_bridge_and_open_turn_and_never_uses_the_terminal() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut connector = bridged_connector(temp.path());
+        let stop = || ConnectorAction {
+            id: super::super::super::ACTION_CANCEL_TURN.into(),
+            payload: serde_json::json!({}),
+        };
+        assert!(!connector.state().cancel_turn.enabled);
+        assert!(matches!(
+            connector.apply(stop(), Duration::from_secs(1)).unwrap(),
+            ApplyResult::Refused { .. }
+        ));
+        connector.turn_open = true;
+        let module = answer_next_bridge_command(&connector, "accepted");
+        assert_eq!(
+            connector.apply(stop(), Duration::from_secs(5)).unwrap(),
+            ApplyResult::Accepted { correlation: None }
+        );
+        assert_eq!(module.join().unwrap()["kind"], "abort_turn");
+        // An acknowledgement alone does not close the turn; the hook does.
+        assert!(connector.turn_open);
+        assert!(matches!(
+            connector.apply(stop(), Duration::from_millis(50)).unwrap(),
+            ApplyResult::Refused { .. }
+        ));
+        assert!(connector.bridge_version.is_none());
+        assert!(!connector.state().cancel_turn.enabled);
+        assert!(matches!(
+            connector.apply(stop(), Duration::from_secs(1)).unwrap(),
+            ApplyResult::Refused { .. }
+        ));
+    }
+
+    #[test]
+    fn slash_commands_are_not_typed_into_a_running_turn() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut connector = bridged_connector(temp.path());
+        connector.turn_open = true;
+        assert!(matches!(
+            connector
+                .apply(send("/clear"), Duration::from_secs(1))
+                .unwrap(),
+            ApplyResult::Refused { .. }
+        ));
+    }
+
+    #[test]
+    fn a_send_goes_through_the_bridge_without_touching_the_terminal() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut connector = bridged_connector(temp.path());
+        // No kernel exists for this session: reaching for the terminal fails.
+        let module = answer_next_bridge_command(&connector, "accepted");
+        let result = connector
+            .apply(send("run the tests"), Duration::from_secs(5))
+            .unwrap();
+        assert_eq!(result, ApplyResult::Accepted { correlation: None });
+        let command = module.join().unwrap();
+        assert_eq!(command["kind"], "submit_prompt");
+        assert_eq!(command["text"], "run the tests");
+    }
+
+    #[test]
+    fn a_bridge_refusal_is_reported_with_the_agents_reason() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut connector = bridged_connector(temp.path());
+        let module = answer_next_bridge_command(&connector, "refused");
+        let result = connector
+            .apply(send("run the tests"), Duration::from_secs(5))
+            .unwrap();
+        module.join().unwrap();
+        assert_eq!(
+            result,
+            ApplyResult::Refused {
+                reason: "the agent said no".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn an_untaken_bridge_command_is_withdrawn_before_the_terminal_is_tried() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut connector = bridged_connector(temp.path());
+        let inbox = connector
+            .home
+            .session(&connector.session)
+            .conversation_bridge_inbox();
+        // Nobody plays the module. The terminal path then fails for want of a
+        // kernel, which is the proof it was the path taken.
+        assert!(connector
+            .apply(send("run the tests"), Duration::from_secs(5))
+            .is_err());
+        assert_eq!(connector.bridge_version, None);
+        assert_eq!(fs::read_dir(&inbox).unwrap().count(), 0);
+    }
+
+    /// Diagnostic, not a regression test: projects the Claude transcript named
+    /// by `LATCH_REPLAY_TRANSCRIPT` and reports what a client would be shown.
+    /// `cargo test -p latch --lib replays_a_named_transcript -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs LATCH_REPLAY_TRANSCRIPT"]
+    fn replays_a_named_transcript() {
+        let source = PathBuf::from(
+            std::env::var_os("LATCH_REPLAY_TRANSCRIPT").expect("LATCH_REPLAY_TRANSCRIPT is set"),
+        );
+        let (mutations, projection) = project_case(source);
+        let items = projection.snapshot(usize::MAX).items;
+        let count = |wanted: fn(&ConversationItemKind) -> bool| {
+            items.iter().filter(|item| wanted(&item.kind)).count()
+        };
+        println!(
+            "mutations={} rebuilds={} truncations={} items={} messages={} tools={} open_tools={}",
+            mutations.len(),
+            rebuilds(&mutations),
+            truncations(&mutations).len(),
+            items.len(),
+            count(|kind| matches!(kind, ConversationItemKind::Message { .. })),
+            count(|kind| matches!(kind, ConversationItemKind::Tool { .. })),
+            count(|kind| matches!(
+                kind,
+                ConversationItemKind::Tool {
+                    status: ToolStatus::Running,
+                    ..
+                }
+            )),
+        );
+        assert_eq!(rebuilds(&mutations), 0);
+    }
+
+    #[test]
+    fn a_question_is_answered_through_the_bridge_by_its_call_id_with_free_text() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut connector = bridged_connector(temp.path());
+        connector.pending_request = Some(PendingRequest {
+            id: "toolu_q".to_owned(),
+            request_type: RequestType::Question,
+            prompt: "Which color?".to_owned(),
+            choices: vec!["Red".to_owned(), "Blue".to_owned()],
+            screen_seen: false,
+            announced_at: None,
+        });
+        let module = answer_next_bridge_command(&connector, "accepted");
+        let result = connector
+            .apply(
+                ConnectorAction {
+                    id: ACTION_RESOLVE_REQUEST.to_owned(),
+                    payload: serde_json::json!({ "requestId": "toolu_q", "choice": "Chartreuse" }),
+                },
+                Duration::from_secs(5),
+            )
+            .unwrap();
+        assert_eq!(result, ApplyResult::Accepted { correlation: None });
+        assert!(connector.pending_request.is_none());
+        let command = module.join().unwrap();
+        assert_eq!(command["kind"], "answer_question");
+        assert_eq!(command["tool_use_id"], "toolu_q");
+        assert_eq!(
+            command["answers"],
+            serde_json::json!({ "Which color?": "Chartreuse" })
+        );
+    }
+
+    #[test]
+    fn a_slash_command_and_a_permission_stay_on_the_terminal_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut connector = bridged_connector(temp.path());
+        let inbox = connector
+            .home
+            .session(&connector.session)
+            .conversation_bridge_inbox();
+        // No kernel exists, so the terminal path errors; the bridge is not asked.
+        assert!(connector
+            .apply(send("/compact"), Duration::from_secs(2))
+            .is_err());
+        assert!(!inbox.exists());
+
+        connector.pending_request = Some(PendingRequest {
+            id: "permission-1".to_owned(),
+            request_type: RequestType::Permission,
+            prompt: "Allow Bash?".to_owned(),
+            choices: vec!["Yes".to_owned(), "No".to_owned()],
+            screen_seen: true,
+            announced_at: None,
+        });
+        assert!(connector
+            .apply(
+                ConnectorAction {
+                    id: ACTION_RESOLVE_REQUEST.to_owned(),
+                    payload: serde_json::json!({ "requestId": "permission-1", "choice": "Yes" }),
+                },
+                Duration::from_secs(2),
+            )
+            .is_err());
+        assert!(!inbox.exists());
+        assert_eq!(connector.bridge_version, Some(1));
+    }
+
+    /// While a question is open the transcript does not hold its call yet.
+    /// The bridge announces it, and Claude's own permission hook for the same
+    /// call must not replace it with a generic prompt.
+    #[test]
+    fn the_bridge_announces_an_open_question_under_its_call_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut connector = JsonlConnector::fixture("claude", dir.path().join("source.jsonl"));
+        observe_bridge(&mut connector, "hello", "2026-09-22T09:00:00.000Z");
+
+        let mut open = bridge_record("question.open", "2026-09-22T09:00:01.000Z");
+        open["tool_use_id"] = Value::from("toolu_q");
+        open["questions"] = serde_json::json!([{
+            "question": "Which color?",
+            "header": "Color",
+            "multi_select": false,
+            "options": [{ "label": "Red" }, { "label": "Blue" }],
+        }]);
+        let mutations = connector.claude_record(open.as_object().unwrap(), "hook", 2);
+        assert!(matches!(
+            mutations.as_slice(),
+            [ConnectorMutation::Upsert(ObservedItem {
+                kind: ConversationItemKind::Request {
+                    request_id,
+                    request_type: RequestType::Question,
+                    prompt,
+                    choices,
+                    status: RequestStatus::Pending,
+                },
+                ..
+            })] if request_id == "toolu_q" && prompt == "Which color?" && choices == &["Red", "Blue"]
+        ));
+        assert_eq!(connector.state().phase, ConversationPhase::AwaitingInput);
+
+        let permission = serde_json::json!({
+            "hook_event_name": "PermissionRequest",
+            "latch_observer_version": 2,
+            "tool_name": "AskUserQuestion",
+            "prompt_id": "prompt-1",
+            "timestamp": "2026-09-22T09:00:01Z",
+        });
+        assert!(connector
+            .claude_record(permission.as_object().unwrap(), "hook", 3)
+            .is_empty());
+        assert_eq!(connector.pending_request.as_ref().unwrap().id, "toolu_q");
+
+        let mut closed = bridge_record("question.closed", "2026-09-22T09:00:09.000Z");
+        closed["tool_use_id"] = Value::from("toolu_q");
+        let mutations = connector.claude_record(closed.as_object().unwrap(), "hook", 4);
+        assert!(matches!(
+            mutations.as_slice(),
+            [ConnectorMutation::Upsert(ObservedItem {
+                kind: ConversationItemKind::Request {
+                    status: RequestStatus::Dismissed,
+                    ..
+                },
+                ..
+            })]
+        ));
+        assert!(connector.pending_request.is_none());
     }
 }

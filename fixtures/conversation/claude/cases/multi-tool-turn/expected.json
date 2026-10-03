@@ -1,5 +1,5 @@
 {
-  "projectedItemCount": 3,
+  "projectedItemCount": 5,
   "snapshot": {
     "generation": "generation-1",
     "hasMoreBefore": false,
@@ -27,6 +27,28 @@
         "ordinal": 2
       },
       {
+        "createdAt": "2026-09-03T14:18:41.441Z",
+        "id": "d7aac659-1880-44c3-a947-875fc6a2d062:block:1",
+        "kind": {
+          "name": "Read",
+          "status": "succeeded",
+          "summary": "/workspace · returned 9 lines",
+          "type": "tool"
+        },
+        "ordinal": 3
+      },
+      {
+        "createdAt": "2026-09-03T14:18:41.682Z",
+        "id": "d7aac659-1880-44c3-a947-875fc6a2d062:block:2",
+        "kind": {
+          "name": "Read",
+          "status": "succeeded",
+          "summary": "/workspace · returned 5 lines",
+          "type": "tool"
+        },
+        "ordinal": 4
+      },
+      {
         "createdAt": "2026-09-03T14:18:42.932Z",
         "id": "d7aac659-1880-44c3-a947-875fc6a2d062:block:3",
         "kind": {
@@ -35,12 +57,12 @@
           "summary": "List repo files and recent commits · returned 7 lines",
           "type": "tool"
         },
-        "ordinal": 7
+        "ordinal": 5
       }
     ],
     "operationEpoch": "fixture",
     "reason": "initial",
-    "revision": 11,
+    "revision": 9,
     "state": {
       "connector": {
         "id": "claude",
@@ -57,8 +79,5 @@
       }
     }
   },
-  "truncateAfter": [
-    "d7aac659-1880-44c3-a947-875fc6a2d062",
-    "d7aac659-1880-44c3-a947-875fc6a2d062"
-  ]
+  "truncateAfter": []
 }

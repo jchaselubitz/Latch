@@ -20,6 +20,7 @@
     "phase": { "enum": ["starting", "idle", "working", "awaiting_input", "exited", "unavailable"] },
     "sendMessage": { "$ref": "#/$defs/availability" },
     "resolveRequest": { "$ref": "#/$defs/availability" },
+    "cancelTurn": { "$ref": "#/$defs/availability" },
     "pendingRequest": { "type": ["string", "null"], "maxLength": 256 },
     "connector": {
       "oneOf": [

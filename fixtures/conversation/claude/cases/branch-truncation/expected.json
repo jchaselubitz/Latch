@@ -1,5 +1,5 @@
 {
-  "projectedItemCount": 1,
+  "projectedItemCount": 4,
   "snapshot": {
     "generation": "generation-1",
     "hasMoreBefore": false,
@@ -14,11 +14,47 @@
           "type": "tool"
         },
         "ordinal": 1
+      },
+      {
+        "createdAt": "2026-09-07T22:48:28.690Z",
+        "id": "cf4a1dc8-d45e-40ff-9802-e3e9fb60266b",
+        "kind": {
+          "name": "mcp__railway__list-domains",
+          "parentMessageId": "cf4a1dc8-d45e-40ff-9802-e3e9fb60266b",
+          "status": "running",
+          "summary": "",
+          "type": "tool"
+        },
+        "ordinal": 2
+      },
+      {
+        "createdAt": "2026-09-07T22:48:29.440Z",
+        "id": "dc84d357-4a4a-4599-aa53-920b1b7687bd",
+        "kind": {
+          "name": "mcp__railway__list-deployments",
+          "parentMessageId": "dc84d357-4a4a-4599-aa53-920b1b7687bd",
+          "status": "running",
+          "summary": "",
+          "type": "tool"
+        },
+        "ordinal": 3
+      },
+      {
+        "createdAt": "2026-09-07T22:48:31.808Z",
+        "id": "2e5adcbc-d822-4606-b31d-aa143148c886",
+        "kind": {
+          "name": "Bash",
+          "parentMessageId": "2e5adcbc-d822-4606-b31d-aa143148c886",
+          "status": "running",
+          "summary": "Read release and install script headers",
+          "type": "tool"
+        },
+        "ordinal": 4
       }
     ],
     "operationEpoch": "fixture",
     "reason": "initial",
-    "revision": 7,
+    "revision": 6,
     "state": {
       "connector": {
         "id": "claude",
@@ -35,7 +71,5 @@
       }
     }
   },
-  "truncateAfter": [
-    "c55eb0c4-2b24-4bea-b425-b1616c6dede1"
-  ]
+  "truncateAfter": []
 }

@@ -6,6 +6,8 @@ import SwiftUI
 /// Components below take these values and plain closures rather than the
 /// store, so each one can be previewed in any state without a connection.
 struct ConversationScreenContent {
+    var canCancelTurn = false
+    var cancelStatus: String? = nil
     var viewState: ConversationViewState
     var transcript: ConversationTranscriptPresentation
     /// Hub phase plus the newest live tool, when the phase is working.
@@ -32,6 +34,7 @@ struct ConversationPaging: Equatable {
 }
 
 struct ConversationScreenActions {
+    var cancelTurn: () -> Void = {}
     var loadOlder: () -> Void = {}
     var showNewer: () -> Void = {}
     var send: (String) -> Void = { _ in }
@@ -79,6 +82,15 @@ extension ConversationScreenContent {
             connectionError: store.connectionError,
             skippedUpdates: diagnostics.droppedItems + diagnostics.undecodableFrames
         )
+        canCancelTurn = store.canCancelTurn
+        if let attempt = store.cancelAttempt {
+            switch attempt.status {
+            case .sending, .accepted: cancelStatus = "Stopping…"
+            case .refused: cancelStatus = attempt.reason ?? "The agent did not stop."
+            case .ambiguous: cancelStatus = "Stop not confirmed. Check the agent before trying again."
+            case .notSent: cancelStatus = "Stop was not sent. Reconnect to try again."
+            }
+        }
         statusLine = viewState.statusLine(in: transcript)
     }
 }
@@ -99,6 +111,7 @@ extension ConversationScreenActions {
     @MainActor
     init(store: ConversationStore) {
         self.init(
+            cancelTurn: { store.cancelTurn() },
             loadOlder: { store.loadOlder() },
             showNewer: { store.showNewer() },
             send: { store.send(text: $0) },
@@ -154,6 +167,19 @@ struct ConversationScreen: View {
 
     private var inputSurface: some View {
         VStack(spacing: 0) {
+            if content.canCancelTurn || content.cancelStatus != nil {
+                HStack {
+                    if let status = content.cancelStatus { Text(status).font(.caption).foregroundStyle(.secondary) }
+                    Spacer()
+                    if content.canCancelTurn {
+                        Button(action: actions.cancelTurn) { Label("Stop", systemImage: "stop.fill") }
+                            .frame(minHeight: 44)
+                            .accessibilityLabel("Stop current turn")
+                            .accessibilityIdentifier("conversation.stopTurn")
+                    }
+                }
+                .padding(.horizontal, 20)
+            }
             if !content.operations.isEmpty {
                 ConversationOperationRows(operations: content.operations, actions: actions)
             }

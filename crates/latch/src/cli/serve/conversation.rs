@@ -270,6 +270,32 @@ async fn handle(
     results: &mpsc::Sender<ConversationServerMessage>,
 ) -> bool {
     match message {
+        ConversationClientMessage::CancelTurn {
+            operation_epoch,
+            operation_id,
+        } => {
+            if operation_id.is_empty() || operation_id.len() > MAX_ID {
+                return send(
+                    socket,
+                    protocol_error("invalid_message", "cancel_turn is out of bounds"),
+                )
+                .await
+                .is_ok();
+            }
+            dispatch(
+                hub,
+                id,
+                subscriber,
+                operation_epoch,
+                operation_id,
+                ConnectorAction {
+                    id: crate::conversation::ACTION_CANCEL_TURN.to_owned(),
+                    payload: serde_json::json!({}),
+                },
+                results,
+            );
+            true
+        }
         ConversationClientMessage::Resume {
             generation,
             after_revision,
@@ -452,6 +478,12 @@ fn dispatch(
 
 fn operation_result(operation_id: String, outcome: OperationOutcome) -> ConversationServerMessage {
     match outcome {
+        OperationOutcome::Queued { correlation } => ConversationServerMessage::OperationResult {
+            operation_id,
+            status: OperationResultStatus::Queued,
+            item_id: correlation.map(|id| id.as_str().to_owned()),
+            reason: None,
+        },
         OperationOutcome::Accepted { correlation } => ConversationServerMessage::OperationResult {
             operation_id,
             status: OperationResultStatus::Accepted,
@@ -586,6 +618,7 @@ fn wire_item(item: &crate::conversation::ConversationItem) -> super::contract::C
                 },
                 text: text.clone(),
                 status: match status {
+                    domain::MessageStatus::Queued => wire::MessageStatus::Queued,
                     domain::MessageStatus::Submitted => wire::MessageStatus::Submitted,
                     domain::MessageStatus::Observed => wire::MessageStatus::Observed,
                     domain::MessageStatus::Partial => wire::MessageStatus::Partial,
@@ -659,6 +692,10 @@ fn wire_state(
         resolve_request: wire::OperationAvailability {
             enabled: state.resolve_request.enabled,
             reason: state.resolve_request.reason.clone(),
+        },
+        cancel_turn: wire::OperationAvailability {
+            enabled: state.cancel_turn.enabled,
+            reason: state.cancel_turn.reason.clone(),
         },
         pending_request: state.pending_request.clone(),
         connector: state.connector.as_ref().map(|c| wire::ConnectorIdentity {
@@ -738,20 +775,25 @@ mod tests {
             })
         }
         fn actions(&self) -> Vec<ActionDescriptor> {
-            [ACTION_SEND_MESSAGE, ACTION_RESOLVE_REQUEST]
-                .into_iter()
-                .map(|id| ActionDescriptor {
-                    id: id.to_owned(),
-                    required_grant: Grant::Interact,
-                    enabled: self.enabled,
-                    reason: (!self.enabled).then(|| "scripted refusal".to_owned()),
-                })
-                .collect()
+            [
+                ACTION_SEND_MESSAGE,
+                ACTION_RESOLVE_REQUEST,
+                crate::conversation::ACTION_CANCEL_TURN,
+            ]
+            .into_iter()
+            .map(|id| ActionDescriptor {
+                id: id.to_owned(),
+                required_grant: Grant::Interact,
+                enabled: self.enabled,
+                reason: (!self.enabled).then(|| "scripted refusal".to_owned()),
+            })
+            .collect()
         }
-        fn apply(&mut self, _action: ConnectorAction, _deadline: Duration) -> Result<ApplyResult> {
+        fn apply(&mut self, action: ConnectorAction, _deadline: Duration) -> Result<ApplyResult> {
             self.applies.fetch_add(1, Ordering::SeqCst);
             Ok(ApplyResult::Accepted {
-                correlation: Some(ConversationItemId::native("submitted-1")),
+                correlation: (action.id != crate::conversation::ACTION_CANCEL_TURN)
+                    .then(|| ConversationItemId::native("submitted-1")),
             })
         }
         fn reconcile(
@@ -1023,6 +1065,26 @@ mod tests {
         })
         .await
         .expect("client");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stop_uses_the_interact_grant_and_operation_receipt_without_a_message_row() {
+        let harness = harness(true).await;
+        tokio::task::spawn_blocking(move || {
+            let mut observe = Client::open(&harness, "", "observe");
+            let snapshot = observe.next();
+            observe.send(json!({ "type": "cancel_turn", "operationEpoch": snapshot["operationEpoch"], "operationId": "stop-observe" }));
+            assert_eq!(observe.next_of("operation_result")["status"], "refused");
+            assert_eq!(harness.applies.load(Ordering::SeqCst), 0);
+            let mut interact = Client::open(&harness, "", "interact");
+            let snapshot = interact.next();
+            let command = json!({ "type": "cancel_turn", "operationEpoch": snapshot["operationEpoch"], "operationId": "stop-interact" });
+            interact.send(command.clone());
+            assert_eq!(interact.next_of("operation_result")["status"], "accepted");
+            interact.send(command);
+            assert_eq!(interact.next_of("operation_result")["status"], "accepted");
+            assert_eq!(harness.applies.load(Ordering::SeqCst), 1);
+        }).await.expect("client");
     }
 
     #[tokio::test(flavor = "multi_thread")]

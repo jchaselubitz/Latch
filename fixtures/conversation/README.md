@@ -36,11 +36,11 @@ behavioural change under review.
 | --- | --- | --- |
 | `markdown-prose` | Multi-paragraph assistant Markdown | Real Latch checkout session `0e920c11…`, pairing-debug turn. Intermediate tools omitted; `parentUuid` relinked so the slice is a valid main chain. |
 | `fenced-code` | Fenced blocks and command lines long enough to need horizontal scrolling | Real session `4eb7442e…`. Internal hostnames and IPv6 redacted. |
-| `multi-tool-turn` | Several `tool_use` blocks in one assistant record | Real session `ae5465f4…` (Read, Read, Bash, then three `tool_result` records). Today's connector `TruncateAfter`s sibling results that all parent the assistant, so `expected.json` currently keeps one tool. The source retains all three. |
+| `multi-tool-turn` | Several `tool_use` blocks in one assistant record | Real session `ae5465f4…` (Read, Read, Bash, then three `tool_result` records). Sibling results that parent the assistant are attached, not treated as a rewind, so all three tools stay. |
 | `failed-tool` | `tool_result` with `is_error` followed by a successful assistant answer | Real Latch session `0e920c11…`, `Exit code 1`. The connector cannot represent a failed tool yet (`status: succeeded`, `summary: "completed"`); the source keeps `is_error` for the later connector mission. |
 | `permission-request` | Claude `PermissionRequest` hook | Live Claude Code 2.1.228 capture already retained as `fixtures/harness/claude-code/live-2.1.228` and `live-permission-2.1.228` (2026-08-13). Stored inline because the connector also accepts hook records in the transcript stream. |
 | `ask-user-question` | `AskUserQuestion` with two questions, option descriptions, and `multiSelect` | Real session `08489850…`. The connector flattens this to `prompt` (newline-joined) plus choice labels. |
-| `branch-truncation` | A record whose `parentUuid` is an earlier assistant, not the previous record | Real Latch session `0e920c11…`. Emits `TruncateAfter`. |
+| `branch-truncation` | A parallel tool batch: a `tool_result` whose `parentUuid` is an earlier assistant, not the previous record | Real Latch session `0e920c11…`. This is a sibling, not a rewind: no `TruncateAfter`, and all four calls stay. The name is historical. A real rewind has no captured case yet; the connector unit tests cover it. |
 | `interruption` | Rejected tool use plus `[Request interrupted by user for tool use]` | Real Latch session `0e920c11…`, then the assistant's status summary. |
 | `long-transcript` | Scroll-measurement corpus | Same Latch session, full user+assistant chain, parents linearized onto one branch. `expected.json` is the ConversationStore published window: at most 300 items / 512 KiB, with `hasMoreBefore: true`. Do not assume 1,000 rows. |
 

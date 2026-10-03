@@ -19,7 +19,7 @@
             "role": { "enum": ["user", "assistant"] },
             "text": { "type": "string" },
             "status": {
-              "enum": ["submitted", "observed", "partial", "complete", "failed"],
+              "enum": ["submitted", "queued", "observed", "partial", "complete", "failed"],
               "description": "partial is reserved in v2 and is not emitted initially. Clients render an unknown future status as complete."
             }
           },

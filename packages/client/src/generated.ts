@@ -1,5 +1,5 @@
 // Generated from schemas/remote-access/v2/*.schema.json; do not edit by hand.
-// Canonical schema set SHA-256: 9f94c11e814da0e39c4aa89cfa5276a5c1dcd9cee0a5c0c9a7bbfeae974be75c
+// Canonical schema set SHA-256: 3e9c2354c187a0b87b98a9dd634dc0d86bb3850f4e4004b92bb2ba1a2add2df1
 
 
 export type TerminalCloseReason =
@@ -47,3 +47,21 @@ export type GatewayEndpoints = {
   attachments?: boolean;
 };
 export type GatewayEndpointName = 'sessions' | 'preview' | 'terminal' | 'conversation' | 'browseDirectories' | 'createSession' | 'stopSession' | 'attachments';
+
+export type ConversationItem = { id: string; ordinal: number; createdAt: string; kind: { type: "message"; role: "user" | "assistant"; text: string; status: "submitted" | "queued" | "observed" | "partial" | "complete" | "failed"; } | { type: "tool"; name: string; summary: string; status: "running" | "succeeded" | "failed"; parentMessageId?: string | null; } | { type: "request"; requestId: string; requestType: "permission" | "question"; prompt: string; choices: Array<string>; status: "pending" | "resolved" | "dismissed"; }; };
+export type ConversationState = { phase: "starting" | "idle" | "working" | "awaiting_input" | "exited" | "unavailable"; sendMessage: { enabled: boolean; reason?: string | null; }; resolveRequest: { enabled: boolean; reason?: string | null; }; cancelTurn?: { enabled: boolean; reason?: string | null; }; pendingRequest: string | null; connector: null | { id: string; version: string; }; };
+export type ConversationServerMessage =
+  | { type: "snapshot"; generation: string; revision: number; operationEpoch: string; items: Array<ConversationItem>; state: ConversationState; hasMoreBefore: boolean; reason?: "initial" | "generation" | "operation_epoch" | "overflow"; }
+  | { type: "items_upserted"; generation: string; revision: number; items: Array<ConversationItem>; }
+  | { type: "items_removed"; generation: string; revision: number; itemIds: Array<string>; }
+  | { type: "state_changed"; generation: string; revision: number; state: ConversationState; }
+  | { type: "operation_result"; operationId: string; status: "accepted" | "queued" | "refused" | "ambiguous" | "unknown"; itemId?: string | null; reason?: string | null; }
+  | { type: "history_page"; requestId: string; items: Array<ConversationItem>; hasMoreBefore: boolean; }
+  | { type: "error"; code: string; message: string; };
+export type ConversationClientMessage =
+  | { type: "resume"; generation?: string | null; afterRevision?: number | null; }
+  | { type: "send_message"; operationEpoch: string; operationId: string; text: string; }
+  | { type: "resolve_request"; operationEpoch: string; operationId: string; requestId: string; choice: string; }
+  | { type: "cancel_turn"; operationEpoch: string; operationId: string; }
+  | { type: "operation_status"; operationId: string; }
+  | { type: "history_request"; requestId: string; beforeOrdinal: number; limit: number; };
