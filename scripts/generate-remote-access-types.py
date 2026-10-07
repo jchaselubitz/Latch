@@ -179,6 +179,21 @@ pub enum RequestType { Permission, Question }
 #[serde(rename_all = "snake_case")]
 pub enum RequestStatus { Pending, Resolved, Dismissed }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestQuestion {
+    pub question: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<String>,
+    pub options: Vec<QuestionOption>,
+    pub multi_select: bool,
+}
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct QuestionOption {
+    pub label: String,
+    pub description: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ConversationItemKind {
@@ -197,6 +212,8 @@ pub enum ConversationItemKind {
         request_type: RequestType,
         prompt: String,
         choices: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        questions: Vec<RequestQuestion>,
         status: RequestStatus,
     },
 }
@@ -229,6 +246,21 @@ fn unavailable_cancel_turn() -> OperationAvailability { OperationAvailability { 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConnectorIdentity { pub id: String, pub version: String }
 
+/// Why the agent closed its newest turn: its own answer, an interruption, a
+/// refusal, or an error.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnOutcome { Answer, Aborted, Refusal, Error }
+
+/// A slash command the agent advertises for its composer.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AdvertisedCommand {
+    pub name: String,
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ConversationState {
@@ -237,6 +269,14 @@ pub struct ConversationState {
     pub resolve_request: OperationAvailability,
     #[serde(default = "unavailable_cancel_turn")]
     pub cancel_turn: OperationAvailability,
+    /// The agent's reason for closing its newest turn, while no turn is open.
+    /// Absent when the connector has no outcome to report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_outcome: Option<TurnOutcome>,
+    /// Slash commands the agent advertises while a live bridge reports them.
+    /// Absent means unknown, not none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commands: Option<Vec<AdvertisedCommand>>,
     /// Derived from the newest request item whose status is pending.
     pub pending_request: Option<String>,
     pub connector: Option<ConnectorIdentity>,
@@ -321,7 +361,10 @@ pub enum ConversationClientMessage {
         operation_id: String,
         #[serde(rename = "requestId")]
         request_id: String,
-        choice: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        choice: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        answers: Option<std::collections::BTreeMap<String, String>>,
     },
     HistoryRequest {
         #[serde(rename = "requestId")]
@@ -432,13 +475,27 @@ def typescript_conversation() -> str:
         if "enum" in node:
             return " | ".join(json.dumps(value) for value in node["enum"])
         for union in ("oneOf", "anyOf"):
-            if union in node:
+            if union in node and "properties" not in node:
                 return " | ".join(render(value, document) for value in node[union])
         kind = node.get("type")
         if isinstance(kind, list):
             return " | ".join(render({**node, "type": value}, document) for value in kind)
+        if kind == "object" and "oneOf" in node:
+            variants = []
+            for branch in node["oneOf"]:
+                excluded = branch.get("not", {}).get("required", [])
+                variant = {**node, "required": node.get("required", []) + branch.get("required", [])}
+                del variant["oneOf"]
+                variant["properties"] = {k: v for k, v in node["properties"].items() if k not in excluded}
+                rendered = render(variant, document)
+                if excluded:
+                    rendered = rendered[:-2] + " " + " ".join(k + "?: never;" for k in excluded) + " }"
+                variants.append(rendered)
+            return " | ".join(variants)
         if kind == "object":
             required = node.get("required", [])
+            if "properties" not in node:
+                return "Record<string, " + render(node["additionalProperties"], document) + ">"
             fields = [name + ("" if name in required else "?") + ": " + render(value, document) + ";" for name, value in node["properties"].items()]
             return "{ " + " ".join(fields) + " }"
         if kind == "array":

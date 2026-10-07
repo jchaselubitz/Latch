@@ -133,6 +133,21 @@ pub enum RequestStatus {
     Dismissed,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestQuestion {
+    pub question: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<String>,
+    pub options: Vec<QuestionOption>,
+    pub multi_select: bool,
+}
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct QuestionOption {
+    pub label: String,
+    pub description: String,
+}
+
 /// Renderable agent-neutral item payload.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum ConversationItemKind {
@@ -152,6 +167,8 @@ pub enum ConversationItemKind {
         request_type: RequestType,
         prompt: String,
         choices: Vec<String>,
+        #[serde(default)]
+        questions: Vec<RequestQuestion>,
         status: RequestStatus,
     },
 }
@@ -199,6 +216,23 @@ pub struct ConnectorIdentity {
     pub id: String,
     pub version: String,
 }
+/// Why the agent closed its newest turn, in its own words: it answered, it
+/// was interrupted, it refused, or it failed. Carried only while no turn is
+/// open, and only by a connector whose agent reports the reason.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum TurnOutcome {
+    Answer,
+    Aborted,
+    Refusal,
+    Error,
+}
+/// A slash command the agent advertises, as its bridge reported it.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AdvertisedCommand {
+    pub name: String,
+    pub description: String,
+    pub source: Option<String>,
+}
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ConversationState {
     pub phase: ConversationPhase,
@@ -208,6 +242,12 @@ pub struct ConversationState {
     pub cancel_turn: Availability,
     pub pending_request: Option<String>,
     pub connector: Option<ConnectorIdentity>,
+    /// Absent until a bridged turn closes, and while a turn is open.
+    #[serde(default)]
+    pub turn_outcome: Option<TurnOutcome>,
+    /// The catalog a live bridge advertised; `None` means unknown, not empty.
+    #[serde(default)]
+    pub commands: Option<Vec<AdvertisedCommand>>,
 }
 impl ConversationState {
     pub fn starting(connector: Option<ConnectorIdentity>) -> Self {
@@ -224,6 +264,8 @@ impl ConversationState {
             cancel_turn: Availability::default(),
             pending_request: None,
             connector,
+            turn_outcome: None,
+            commands: None,
         }
     }
     /// No connector can observe or act on this session yet. Terminal attach
@@ -242,6 +284,8 @@ impl ConversationState {
             cancel_turn: Availability::default(),
             pending_request: None,
             connector,
+            turn_outcome: None,
+            commands: None,
         }
     }
 }

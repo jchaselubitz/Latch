@@ -110,6 +110,8 @@ struct PendingRequest {
     request_type: RequestType,
     prompt: String,
     choices: Vec<String>,
+    #[serde(default)]
+    questions: Vec<super::super::RequestQuestion>,
     /// A permission hook can arrive a fraction before Claude paints its
     /// prompt. Do not mistake that first empty snapshot for a dismissal.
     #[serde(default)]
@@ -148,6 +150,13 @@ struct RuntimeCheckpoint {
     /// that preceded them; a prompt older than this must not reopen a turn.
     #[serde(default)]
     last_turn_close: Option<String>,
+    /// The agent's reason for closing the newest turn. Absent in older
+    /// checkpoints.
+    #[serde(default)]
+    turn_outcome: Option<crate::conversation::TurnOutcome>,
+    /// The catalog the bridge greeting carried. Absent in older checkpoints.
+    #[serde(default)]
+    commands: Option<Vec<crate::conversation::AdvertisedCommand>>,
     last_state: Option<ConversationState>,
     screen_can_send: Option<bool>,
 }
@@ -176,6 +185,12 @@ pub struct JsonlConnector {
     hook_observer_version: Option<u32>,
     bridge_version: Option<u32>,
     last_turn_close: Option<String>,
+    /// Why the agent closed its newest turn, from the bridge. Cleared when
+    /// any turn opens, so it only ever describes the turn that just ended.
+    turn_outcome: Option<crate::conversation::TurnOutcome>,
+    /// The slash commands the bridge greeting advertised. Dropped with the
+    /// bridge: a catalog nobody can vouch for is unknown, not empty.
+    commands: Option<Vec<crate::conversation::AdvertisedCommand>>,
     last_state: Option<ConversationState>,
     screen_can_send: Option<bool>,
     live_screen: bool,
@@ -217,6 +232,8 @@ impl JsonlConnector {
             hook_observer_version: None,
             bridge_version: None,
             last_turn_close: None,
+            turn_outcome: None,
+            commands: None,
             last_state: None,
             screen_can_send: None,
             live_screen: true,
@@ -252,6 +269,8 @@ impl JsonlConnector {
             hook_observer_version: None,
             bridge_version: None,
             last_turn_close: None,
+            turn_outcome: None,
+            commands: None,
             last_state: None,
             screen_can_send: None,
             live_screen: false,
@@ -280,6 +299,8 @@ impl JsonlConnector {
             hook_observer_version: self.hook_observer_version,
             bridge_version: self.bridge_version,
             last_turn_close: self.last_turn_close.clone(),
+            turn_outcome: self.turn_outcome,
+            commands: self.commands.clone(),
             last_state: self.last_state.clone(),
             screen_can_send: self.screen_can_send,
         }
@@ -294,6 +315,8 @@ impl JsonlConnector {
         self.hook_observer_version = runtime.hook_observer_version;
         self.bridge_version = runtime.bridge_version;
         self.last_turn_close = runtime.last_turn_close;
+        self.turn_outcome = runtime.turn_outcome;
+        self.commands = runtime.commands;
         self.last_state = runtime.last_state;
         self.screen_can_send = runtime.screen_can_send;
     }
@@ -399,58 +422,73 @@ impl JsonlConnector {
     }
 
     fn state(&self) -> ConversationState {
-        let (phase, send_message, resolve_request) =
-            if self.source.is_none() && !(self.id == "cursor" && self.turn_open) {
-                // Codex creates its thread on the first prompt, so its
-                // SessionStart hook cannot bind a rollout before that prompt.
-                // The visible empty composer is enough to safely submit the
-                // first message without taking the terminal surface.
-                let can_start = matches!(self.id, "codex" | "cursor")
-                    && self.screen_can_send == Some(true)
-                    && !self.turn_open;
+        let (phase, send_message, resolve_request) = if self.source.is_none()
+            && !(self.id == "cursor" && self.turn_open)
+        {
+            // Codex creates its thread on the first prompt, so its
+            // SessionStart hook cannot bind a rollout before that prompt.
+            // The visible empty composer is enough to safely submit the
+            // first message without taking the terminal surface.
+            let can_start = matches!(self.id, "codex" | "cursor")
+                && self.screen_can_send == Some(true)
+                && !self.turn_open;
+            (
+                ConversationPhase::Starting,
                 (
-                    ConversationPhase::Starting,
-                    (
-                        can_start,
-                        (!can_start).then(|| "waiting for the agent's empty composer".to_owned()),
-                    ),
+                    can_start,
+                    (!can_start).then(|| "waiting for the agent's empty composer".to_owned()),
+                ),
+                (
+                    false,
+                    Some("waiting for the agent's authoritative source binding".to_owned()),
+                ),
+            )
+        } else if self.pending_request.is_some() {
+            (
+                ConversationPhase::AwaitingInput,
+                (false, Some("resolve the pending request first".to_owned())),
+                if self
+                    .pending_request
+                    .as_ref()
+                    .is_some_and(|r| !r.questions.is_empty())
+                    && self.bridge_version.is_none()
+                {
                     (
                         false,
-                        Some("waiting for the agent's authoritative source binding".to_owned()),
-                    ),
-                )
-            } else if self.pending_request.is_some() {
+                        Some(
+                            "the question bridge is no longer live; answer at the terminal".into(),
+                        ),
+                    )
+                } else {
+                    (true, None)
+                },
+            )
+        } else if self.tool_running || self.turn_open {
+            (
+                ConversationPhase::Working,
                 (
-                    ConversationPhase::AwaitingInput,
-                    (false, Some("resolve the pending request first".to_owned())),
-                    (true, None),
-                )
-            } else if self.tool_running || self.turn_open {
-                (
-                    ConversationPhase::Working,
-                    (
-                        self.bridge_version.is_some(),
-                        self.bridge_version
-                            .is_none()
-                            .then(|| "agent is working".to_owned()),
-                    ),
-                    (false, Some("no pending request".to_owned())),
-                )
-            } else if self.screen_can_send == Some(false) && self.bridge_version.is_none() {
-                // Only the terminal path types into the composer. The bridge
-                // submits through the agent itself and leaves a draft alone.
-                (
-                    ConversationPhase::Idle,
-                    (false, Some("the agent composer is not empty".to_owned())),
-                    (false, Some("no pending request".to_owned())),
-                )
-            } else {
-                (
-                    ConversationPhase::Idle,
-                    (true, None),
-                    (false, Some("no pending request".to_owned())),
-                )
-            };
+                    self.bridge_version.is_some(),
+                    self.bridge_version
+                        .is_none()
+                        .then(|| "agent is working".to_owned()),
+                ),
+                (false, Some("no pending request".to_owned())),
+            )
+        } else if self.screen_can_send == Some(false) && self.bridge_version.is_none() {
+            // Only the terminal path types into the composer. The bridge
+            // submits through the agent itself and leaves a draft alone.
+            (
+                ConversationPhase::Idle,
+                (false, Some("the agent composer is not empty".to_owned())),
+                (false, Some("no pending request".to_owned())),
+            )
+        } else {
+            (
+                ConversationPhase::Idle,
+                (true, None),
+                (false, Some("no pending request".to_owned())),
+            )
+        };
         ConversationState {
             phase,
             send_message: super::super::Availability {
@@ -471,6 +509,17 @@ impl JsonlConnector {
                 .as_ref()
                 .map(|request| request.id.clone()),
             connector: Some(self.identity()),
+            // An open turn has no outcome yet; the last one's is history.
+            turn_outcome: if self.turn_open {
+                None
+            } else {
+                self.turn_outcome
+            },
+            commands: if self.bridge_version.is_some() {
+                self.commands.clone()
+            } else {
+                None
+            },
         }
     }
 
@@ -622,6 +671,7 @@ impl JsonlConnector {
                                 .collect()
                         })
                         .unwrap_or_default(),
+                    questions: Vec::new(),
                     screen_seen: false,
                     announced_at: None,
                 });
@@ -630,6 +680,7 @@ impl JsonlConnector {
                     request_type: self.pending_request.as_ref().unwrap().request_type.clone(),
                     prompt: self.pending_request.as_ref().unwrap().prompt.clone(),
                     choices: self.pending_request.as_ref().unwrap().choices.clone(),
+                    questions: Vec::new(),
                     status: RequestStatus::Pending,
                 })
             }
@@ -648,6 +699,7 @@ impl JsonlConnector {
                     request_type: RequestType::Permission,
                     prompt: string(object, "prompt").unwrap_or_default(),
                     choices: Vec::new(),
+                    questions: Vec::new(),
                     status: RequestStatus::Resolved,
                 })
             }
@@ -864,6 +916,7 @@ impl JsonlConnector {
                             .is_some_and(|close| turn_closed_at_or_after(close, &at))
                     {
                         self.turn_open = true;
+                        self.turn_outcome = None;
                     }
                     mutations.push(upsert(
                         &uuid,
@@ -965,6 +1018,7 @@ impl JsonlConnector {
                                     request_type: RequestType::Question,
                                     prompt: claude_question_prompt(block.get("input")),
                                     choices: claude_question_choices(block.get("input")),
+                                    questions: Vec::new(),
                                     screen_seen: false,
                                     announced_at: None,
                                 };
@@ -1001,6 +1055,7 @@ impl JsonlConnector {
                     request_type: RequestType::Question,
                     prompt: claude_question_prompt(Some(&input)),
                     choices: claude_question_choices(Some(&input)),
+                    questions: bridge_questions(&input),
                     screen_seen: false,
                     announced_at: string(object, "timestamp"),
                 };
@@ -1019,20 +1074,31 @@ impl JsonlConnector {
                     .get("bridge_version")
                     .and_then(Value::as_u64)
                     .and_then(|version| u32::try_from(version).ok());
+                // A greeting that names no commands leaves the catalog
+                // unknown rather than empty.
+                self.commands = object
+                    .get("commands")
+                    .and_then(Value::as_array)
+                    .map(|list| bridge_commands(list));
             }
-            Some("turn.start") => self.turn_open = true,
+            Some("turn.start") => {
+                self.turn_open = true;
+                self.turn_outcome = None;
+            }
             Some("turn.complete") => {
                 // Answered, interrupted, refused, or failed: the main loop
                 // has stopped, so nothing of this turn is still running.
                 self.turn_open = false;
                 self.tool_running = false;
                 self.last_turn_close = string(object, "timestamp").or(self.last_turn_close.take());
+                self.turn_outcome = turn_outcome(string(object, "reason").as_deref());
             }
             // `/clear` ends the conversation and keeps the process, and with
             // it the loaded module. Every other end takes the module along.
             Some("session.end") if string(object, "reason").as_deref() != Some("clear") => {
                 self.bridge_version = None;
                 self.turn_open = false;
+                self.commands = None;
             }
             _ => {}
         }
@@ -1126,6 +1192,7 @@ impl JsonlConnector {
                 .filter_map(Value::as_str)
                 .map(str::to_owned)
                 .collect(),
+            questions: Vec::new(),
             screen_seen: false,
             announced_at: string(object, "timestamp"),
         };
@@ -1157,6 +1224,7 @@ fn request_mutation(request: &PendingRequest, status: RequestStatus) -> Connecto
             request_type: request.request_type.clone(),
             prompt: request.prompt.clone(),
             choices: request.choices.clone(),
+            questions: request.questions.clone(),
             status,
         },
     )
@@ -1214,6 +1282,42 @@ fn bounded_message_text(text: String) -> String {
         available /= 2;
     }
 }
+fn bridge_questions(input: &Value) -> Vec<super::super::RequestQuestion> {
+    let questions: Vec<_> = input
+        .get("questions")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|q| {
+            Some(super::super::RequestQuestion {
+                question: q.get("question")?.as_str()?.to_owned(),
+                header: q.get("header").and_then(Value::as_str).map(str::to_owned),
+                multi_select: q
+                    .get("multi_select")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                options: q
+                    .get("options")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|o| {
+                        Some(super::super::QuestionOption {
+                            label: o.get("label")?.as_str()?.to_owned(),
+                            description: o
+                                .get("description")
+                                .and_then(Value::as_str)
+                                .unwrap_or("")
+                                .to_owned(),
+                        })
+                    })
+                    .collect(),
+            })
+        })
+        .collect();
+    questions
+}
+
 fn claude_question_prompt(input: Option<&Value>) -> String {
     input
         .and_then(|input| input.get("questions"))
@@ -1651,6 +1755,7 @@ impl Connector for JsonlConnector {
                 self.tool_summaries.clear();
                 self.tool_running = false;
                 self.turn_open = false;
+                self.turn_outcome = None;
                 mutations.push(ConnectorMutation::Rebuild {
                     reason: "authoritative source file was replaced".to_owned(),
                 });
@@ -1823,6 +1928,75 @@ impl Connector for JsonlConnector {
                 },
             );
         }
+        if action.id == ACTION_RESOLVE_REQUEST && action.payload.get("answers").is_some() {
+            let request_id = action.payload.get("requestId").and_then(Value::as_str);
+            let Some(request) = self.pending_request.as_ref().filter(|r| {
+                Some(r.id.as_str()) == request_id
+                    && r.request_type == RequestType::Question
+                    && !r.questions.is_empty()
+                    && self.bridge_version.is_some()
+            }) else {
+                return Ok(ApplyResult::Refused {
+                    reason: "structured answers require the current question and a live bridge"
+                        .into(),
+                });
+            };
+            let Some(answers) = action.payload.get("answers").and_then(Value::as_object) else {
+                return Ok(ApplyResult::Refused {
+                    reason: "answers must be a question-to-text map".into(),
+                });
+            };
+            let keys: std::collections::HashSet<_> = request
+                .questions
+                .iter()
+                .map(|q| q.question.as_str())
+                .collect();
+            if keys.len() != request.questions.len()
+                || answers.len() != keys.len()
+                || !keys.iter().all(|key| {
+                    answers
+                        .get(*key)
+                        .and_then(Value::as_str)
+                        .is_some_and(|v| !v.trim().is_empty() && v.len() <= 4096)
+                })
+            {
+                return Ok(ApplyResult::Refused {
+                    reason: "provide exactly one nonempty answer per question".into(),
+                });
+            }
+            let mut payload = serde_json::Map::new();
+            payload.insert("tool_use_id".into(), Value::from(request.id.clone()));
+            payload.insert("answers".into(), Value::Object(answers.clone()));
+            return Ok(
+                match self.ask_bridge("answer_question", payload, deadline)? {
+                    BridgeAnswer::Accepted => {
+                        self.pending_request = None;
+                        self.last_screen_refresh = None;
+                        ApplyResult::Accepted { correlation: None }
+                    }
+                    BridgeAnswer::Refused(reason) => ApplyResult::Refused { reason },
+                    BridgeAnswer::NotTaken => {
+                        self.bridge_version = None;
+                        ApplyResult::Refused {
+                            reason: "the bridge is no longer live; answer at the terminal".into(),
+                        }
+                    }
+                    BridgeAnswer::Queued => ApplyResult::Refused {
+                        reason: "the bridge did not answer the question".into(),
+                    },
+                },
+            );
+        }
+        if action.id == ACTION_RESOLVE_REQUEST
+            && self
+                .pending_request
+                .as_ref()
+                .is_some_and(|r| r.questions.len() > 1)
+        {
+            return Ok(ApplyResult::Refused {
+                reason: "this request requires one answer per question".into(),
+            });
+        }
         let text = match action.id.as_str() {
             ACTION_SEND_MESSAGE
                 if (self.source.is_some() || matches!(self.id, "codex" | "cursor"))
@@ -1879,14 +2053,14 @@ impl Connector for JsonlConnector {
                 // The bridge answers a question by its call id, so the answer
                 // cannot land on another prompt and need not be one of the
                 // offered labels: free text and comma-joined multi-select
-                // answers are the tool's own. Several questions in one call
-                // share a flattened prompt here and stay on the terminal.
+                // answers are the tool's own. Multi-question requests require
+                // the structured answer map handled above.
                 self.pending_request
                     .as_ref()
                     .filter(|request| {
                         request.request_type == RequestType::Question
                             && !request.prompt.is_empty()
-                            && !request.prompt.contains('\n')
+                            && (request.questions.len() == 1 || !request.prompt.contains('\n'))
                     })
                     .map(|request| {
                         payload.insert("tool_use_id".to_owned(), Value::from(request.id.clone()));
@@ -1940,6 +2114,7 @@ impl Connector for JsonlConnector {
                 std::thread::sleep(settle);
                 self.control()?.key(&["Enter".to_owned()], remaining()?)?;
                 self.turn_open = true;
+                self.turn_outcome = None;
             } else {
                 self.control()?.submit(text, remaining()?)?;
             }
@@ -2103,6 +2278,58 @@ fn read_binding(
 
 fn string(object: &serde_json::Map<String, Value>, key: &str) -> Option<String> {
     object.get(key).and_then(Value::as_str).map(str::to_owned)
+}
+
+/// The most commands a greeting may advertise, and how long each part may
+/// be, as the contract bounds them.
+const MAX_ADVERTISED_COMMANDS: usize = 200;
+const MAX_COMMAND_NAME_CHARS: usize = 128;
+const MAX_COMMAND_DESCRIPTION_CHARS: usize = 512;
+const MAX_COMMAND_SOURCE_CHARS: usize = 64;
+
+/// The command catalog a bridge greeting carries. An entry without a usable
+/// name is left out; the rest are bounded, not refused.
+fn bridge_commands(list: &[Value]) -> Vec<crate::conversation::AdvertisedCommand> {
+    list.iter()
+        .filter_map(|entry| {
+            let object = entry.as_object()?;
+            let name = string(object, "name")?;
+            if name.is_empty() || name.chars().count() > MAX_COMMAND_NAME_CHARS {
+                return None;
+            }
+            Some(crate::conversation::AdvertisedCommand {
+                name,
+                description: bounded_chars(
+                    string(object, "description").unwrap_or_default(),
+                    MAX_COMMAND_DESCRIPTION_CHARS,
+                ),
+                source: string(object, "source")
+                    .map(|source| bounded_chars(source, MAX_COMMAND_SOURCE_CHARS)),
+            })
+        })
+        .take(MAX_ADVERTISED_COMMANDS)
+        .collect()
+}
+
+fn bounded_chars(text: String, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        text
+    } else {
+        text.chars().take(max_chars).collect()
+    }
+}
+
+/// The bridge's `turn.complete` reason as the contract names it. A reason
+/// this Latch does not know is no outcome rather than a guess.
+fn turn_outcome(reason: Option<&str>) -> Option<crate::conversation::TurnOutcome> {
+    use crate::conversation::TurnOutcome;
+    match reason {
+        Some("answer") => Some(TurnOutcome::Answer),
+        Some("aborted") => Some(TurnOutcome::Aborted),
+        Some("refusal") => Some(TurnOutcome::Refusal),
+        Some("error") => Some(TurnOutcome::Error),
+        _ => None,
+    }
 }
 /// How long the bridge module has to take a queued command. It looks twice a
 /// second, so a command still waiting after this long has no one to take it.
@@ -2332,8 +2559,10 @@ mod tests {
                     request_type,
                     prompt,
                     choices,
+                    questions,
                     status,
-                } => serde_json::json!({
+                } => {
+                    let mut kind = serde_json::json!({
                     "type": "request",
                     "requestId": request_id,
                     "requestType": match request_type {
@@ -2347,7 +2576,10 @@ mod tests {
                         RequestStatus::Resolved => "resolved",
                         RequestStatus::Dismissed => "dismissed",
                     },
-                }),
+                    });
+                    if !questions.is_empty() { kind["questions"] = serde_json::to_value(questions).unwrap(); }
+                    kind
+                },
             },
         })
     }
@@ -2936,6 +3168,7 @@ mod tests {
             request_type: RequestType::Question,
             prompt: "Choose a mode".to_owned(),
             choices: vec!["Fast".to_owned(), "Careful".to_owned()],
+            questions: Vec::new(),
             screen_seen: true,
             announced_at: None,
         });
@@ -2963,6 +3196,7 @@ mod tests {
             request_type: RequestType::Permission,
             prompt: "Create empty permission marker file".to_owned(),
             choices: Vec::new(),
+            questions: Vec::new(),
             screen_seen: false,
             announced_at: None,
         });
@@ -2993,6 +3227,7 @@ mod tests {
             request_type: RequestType::Permission,
             prompt: "Create permission marker file".to_owned(),
             choices: Vec::new(),
+            questions: Vec::new(),
             screen_seen: false,
             announced_at: Some("2026-09-22T07:03:52Z".to_owned()),
         });
@@ -3584,6 +3819,119 @@ mod tests {
         connector.claude_record(bridge_record(event, at).as_object().unwrap(), "hook", 1);
     }
 
+    /// The greeting's catalog reaches the state while the bridge is live,
+    /// bounded as the contract bounds it, and leaves with the bridge.
+    #[test]
+    fn the_bridge_greeting_advertises_the_command_catalog_while_it_is_live() {
+        use crate::conversation::AdvertisedCommand;
+        let dir = tempfile::tempdir().unwrap();
+        let mut connector = JsonlConnector::fixture("claude", dir.path().join("source.jsonl"));
+        observe_bridge(&mut connector, "hello", "2026-09-22T08:00:00.000Z");
+        assert_eq!(
+            connector.state().commands,
+            None,
+            "a greeting without commands leaves the catalog unknown"
+        );
+
+        let mut hello = bridge_record("hello", "2026-09-22T09:00:00.000Z");
+        hello["commands"] = serde_json::json!([
+            { "name": "compact", "description": "Compacts the conversation.", "source": "builtin" },
+            { "name": "", "description": "nameless" },
+            { "name": "x".repeat(129), "description": "too long a name" },
+            { "name": "review", "description": "d".repeat(900) },
+            "not an object",
+        ]);
+        connector.claude_record(hello.as_object().unwrap(), "hook", 1);
+        let commands = connector.state().commands.expect("catalog");
+        assert_eq!(commands.len(), 2);
+        assert_eq!(
+            commands[0],
+            AdvertisedCommand {
+                name: "compact".into(),
+                description: "Compacts the conversation.".into(),
+                source: Some("builtin".into()),
+            }
+        );
+        assert_eq!(commands[1].name, "review");
+        assert_eq!(
+            commands[1].description.chars().count(),
+            MAX_COMMAND_DESCRIPTION_CHARS
+        );
+        assert_eq!(commands[1].source, None);
+
+        let mut end = bridge_record("session.end", "2026-09-22T09:10:00.000Z");
+        end["reason"] = Value::from("exit");
+        connector.claude_record(end.as_object().unwrap(), "hook", 2);
+        assert_eq!(connector.state().commands, None);
+    }
+
+    /// The outcome is the agent's own reason for closing the newest turn. It
+    /// is carried only between turns, and an unknown reason is no outcome.
+    #[test]
+    fn the_turn_outcome_is_the_agents_reason_and_lasts_until_the_next_turn() {
+        use crate::conversation::TurnOutcome;
+        let dir = tempfile::tempdir().unwrap();
+        let mut connector = JsonlConnector::fixture("claude", dir.path().join("source.jsonl"));
+        observe_bridge(&mut connector, "hello", "2026-09-22T09:00:00.000Z");
+        assert_eq!(connector.state().turn_outcome, None);
+
+        let mut complete = |connector: &mut JsonlConnector, reason: Option<&str>, at: &str| {
+            let mut record = bridge_record("turn.complete", at);
+            if let Some(reason) = reason {
+                record["reason"] = Value::from(reason);
+            }
+            connector.claude_record(record.as_object().unwrap(), "hook", 1);
+        };
+
+        observe_bridge(&mut connector, "turn.start", "2026-09-22T09:00:01.000Z");
+        complete(&mut connector, Some("aborted"), "2026-09-22T09:00:05.000Z");
+        assert_eq!(connector.state().phase, ConversationPhase::Idle);
+        assert_eq!(connector.state().turn_outcome, Some(TurnOutcome::Aborted));
+
+        observe_bridge(&mut connector, "turn.start", "2026-09-22T09:01:00.000Z");
+        assert_eq!(
+            connector.state().turn_outcome,
+            None,
+            "an open turn has no outcome yet"
+        );
+        complete(&mut connector, Some("refusal"), "2026-09-22T09:01:05.000Z");
+        assert_eq!(connector.state().turn_outcome, Some(TurnOutcome::Refusal));
+
+        observe_bridge(&mut connector, "turn.start", "2026-09-22T09:02:00.000Z");
+        complete(&mut connector, Some("error"), "2026-09-22T09:02:05.000Z");
+        assert_eq!(connector.state().turn_outcome, Some(TurnOutcome::Error));
+
+        observe_bridge(&mut connector, "turn.start", "2026-09-22T09:03:00.000Z");
+        complete(&mut connector, Some("answer"), "2026-09-22T09:03:05.000Z");
+        assert_eq!(connector.state().turn_outcome, Some(TurnOutcome::Answer));
+
+        observe_bridge(&mut connector, "turn.start", "2026-09-22T09:04:00.000Z");
+        complete(
+            &mut connector,
+            Some("something new"),
+            "2026-09-22T09:04:05.000Z",
+        );
+        assert_eq!(
+            connector.state().turn_outcome,
+            None,
+            "an unknown reason is not guessed at"
+        );
+
+        // The checkpoint keeps both facts, and one written before they
+        // existed still restores.
+        complete(&mut connector, Some("aborted"), "2026-09-22T09:05:00.000Z");
+        let checkpoint = connector.runtime_checkpoint();
+        let mut restored = JsonlConnector::fixture("claude", dir.path().join("source.jsonl"));
+        restored.restore_runtime(checkpoint);
+        assert_eq!(restored.state().turn_outcome, Some(TurnOutcome::Aborted));
+        let legacy: RuntimeCheckpoint = serde_json::from_str(
+            r#"{"pending_request":null,"tools":{},"tool_running":false,"last_state":null,"screen_can_send":null}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.turn_outcome, None);
+        assert_eq!(legacy.commands, None);
+    }
+
     /// The bridge reports the engine's own turn boundaries, so an interrupted
     /// turn closes too: `Stop` never fires for one.
     #[test]
@@ -3897,6 +4245,7 @@ mod tests {
             request_type: RequestType::Question,
             prompt: "Which color?".to_owned(),
             choices: vec!["Red".to_owned(), "Blue".to_owned()],
+            questions: Vec::new(),
             screen_seen: false,
             announced_at: None,
         });
@@ -3940,6 +4289,7 @@ mod tests {
             request_type: RequestType::Permission,
             prompt: "Allow Bash?".to_owned(),
             choices: vec!["Yes".to_owned(), "No".to_owned()],
+            questions: Vec::new(),
             screen_seen: true,
             announced_at: None,
         });
@@ -3982,10 +4332,11 @@ mod tests {
                     request_type: RequestType::Question,
                     prompt,
                     choices,
+                    questions,
                     status: RequestStatus::Pending,
                 },
                 ..
-            })] if request_id == "toolu_q" && prompt == "Which color?" && choices == &["Red", "Blue"]
+            })] if request_id == "toolu_q" && prompt == "Which color?" && choices == &["Red", "Blue"] && questions.len() == 1 && !questions[0].multi_select
         ));
         assert_eq!(connector.state().phase, ConversationPhase::AwaitingInput);
 
@@ -4015,5 +4366,91 @@ mod tests {
             })]
         ));
         assert!(connector.pending_request.is_none());
+    }
+    fn open_structured_questions(connector: &mut JsonlConnector) {
+        let mut open = bridge_record("question.open", "2026-09-22T09:00:01.000Z");
+        open["tool_use_id"] = Value::from("toolu_multi");
+        open["questions"] = serde_json::json!([
+            {"question": "Which colors?\nChoose freely.", "header": "Colors", "multi_select": true,
+             "options": [{"label": "Red", "description": "Warm"}, {"label": "Blue", "description": "Cool"}]},
+            {"question": "Why?", "multi_select": false, "options": []}
+        ]);
+        connector.claude_record(open.as_object().unwrap(), "hook", 2);
+    }
+
+    #[test]
+    fn structured_answers_preserve_question_keys_and_accept_free_text() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut connector = bridged_connector(temp.path());
+        open_structured_questions(&mut connector);
+        let request = connector.pending_request.as_ref().unwrap();
+        assert_eq!(request.questions.len(), 2);
+        assert!(request.questions[0].multi_select);
+        assert_eq!(request.questions[0].options[1].description, "Cool");
+        assert_eq!(request.questions[0].header.as_deref(), Some("Colors"));
+        let module = answer_next_bridge_command(&connector, "accepted");
+        let answers = serde_json::json!({"Which colors?\nChoose freely.": "Red, Blue", "Why?": "A custom explanation"});
+        let result = connector
+            .apply(
+                ConnectorAction {
+                    id: ACTION_RESOLVE_REQUEST.into(),
+                    payload: serde_json::json!({"requestId": "toolu_multi", "answers": answers}),
+                },
+                Duration::from_secs(5),
+            )
+            .unwrap();
+        assert_eq!(result, ApplyResult::Accepted { correlation: None });
+        let command = module.join().unwrap();
+        assert_eq!(command["tool_use_id"], "toolu_multi");
+        assert_eq!(command["answers"], answers);
+        assert!(connector.pending_request.is_none());
+    }
+
+    #[test]
+    fn structured_answers_refuse_incomplete_extra_stale_and_legacy_flattened_answers() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut connector = bridged_connector(temp.path());
+        open_structured_questions(&mut connector);
+        for payload in [
+            serde_json::json!({"requestId": "toolu_multi", "answers": {"Why?": "text"}}),
+            serde_json::json!({"requestId": "toolu_multi", "answers": {"Which colors?\nChoose freely.": "Red", "Why?": "text", "Extra": "text"}}),
+            serde_json::json!({"requestId": "old", "answers": {"Which colors?\nChoose freely.": "Red", "Why?": "text"}}),
+            serde_json::json!({"requestId": "toolu_multi", "answers": {"Which colors?\nChoose freely.": "Red", "Why?": "  "}}),
+            serde_json::json!({"requestId": "toolu_multi", "choice": "Red"}),
+        ] {
+            assert!(matches!(
+                connector
+                    .apply(
+                        ConnectorAction {
+                            id: ACTION_RESOLVE_REQUEST.into(),
+                            payload
+                        },
+                        Duration::from_millis(20)
+                    )
+                    .unwrap(),
+                ApplyResult::Refused { .. }
+            ));
+            assert!(connector.pending_request.is_some());
+        }
+        assert!(!connector
+            .home
+            .session(&connector.session)
+            .conversation_bridge_inbox()
+            .exists());
+    }
+
+    #[test]
+    fn structured_answers_never_fall_back_to_the_terminal() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut connector = bridged_connector(temp.path());
+        open_structured_questions(&mut connector);
+        let result = connector.apply(ConnectorAction {
+            id: ACTION_RESOLVE_REQUEST.into(),
+            payload: serde_json::json!({"requestId": "toolu_multi", "answers": {"Which colors?\nChoose freely.": "Red, Blue", "Why?": "text"}}),
+        }, Duration::from_millis(30)).unwrap();
+        assert!(matches!(result, ApplyResult::Refused { .. }));
+        assert!(connector.bridge_version.is_none());
+        assert!(connector.pending_request.is_some());
+        assert!(!connector.state().resolve_request.enabled);
     }
 }

@@ -153,6 +153,65 @@ final class ConversationInputTests: XCTestCase {
         )
     }
 
+    func testQuestionDraftSupportsMultiSelectionAndExclusiveFreeText() {
+        let multi = RequestQuestion(question: "Colors?", options: [QuestionOption(label: "Red", description: ""), QuestionOption(label: "Blue", description: "")], multiSelect: true)
+        let single = RequestQuestion(question: "Why?", options: multi.options, multiSelect: false)
+        var draft = ConversationQuestionDraft()
+        draft.toggle("Blue", for: multi)
+        draft.toggle("Red", for: multi)
+        draft.setText("  Chartreuse  ", for: multi)
+        XCTAssertEqual(draft.answers(for: [multi])["Colors?"], "Red, Blue, Chartreuse")
+        draft.toggle("Red", for: multi)
+        XCTAssertEqual(draft.answers(for: [multi])["Colors?"], "Blue, Chartreuse")
+        draft.toggle("Red", for: single)
+        draft.toggle("Blue", for: single)
+        XCTAssertEqual(draft.answers(for: [single])["Why?"], "Blue")
+        draft.setText("Custom answer", for: single)
+        XCTAssertEqual(draft.answers(for: [single])["Why?"], "Custom answer")
+        draft.toggle("Red", for: single)
+        XCTAssertEqual(draft.answers(for: [single])["Why?"], "Red")
+        XCTAssertEqual(draft.answers(for: [multi])["Colors?"], "Blue, Chartreuse", "each question retains independent edits")
+    }
+
+    func testStructuredQuestionsKeepMetadataAndRequireOneAnswerEach() throws {
+        let questions = [
+            RequestQuestion(question: "Colors?", header: "Palette", options: [QuestionOption(label: "Red", description: "Warm")], multiSelect: true),
+            RequestQuestion(question: "Why?", options: [], multiSelect: false)
+        ]
+        let item = ConversationItem(id: "r1", ordinal: 1, createdAt: "now", kind: .request(
+            requestId: "req-1", requestType: "question", prompt: "Colors?\nWhy?", choices: ["Red"], status: "pending", questions: questions
+        ))
+        let store = try store(items: [item], state: state(phase: "awaiting_input", pendingRequest: "req-1"))
+        let projected = ConversationProjection.project(items: store.items, state: store.state)
+        XCTAssertEqual(projected.pendingRequest?.questions, questions)
+        store.resolve(requestID: "req-1", answers: ["Colors?": "Red"])
+        store.resolve(requestID: "req-1", answers: ["Colors?": "Red", "Why?": " "])
+        store.resolve(requestID: "req-1", answers: ["Colors?": "Red", "Why?": "text", "extra": "text"])
+        store.resolve(requestID: "stale", answers: ["Colors?": "Red", "Why?": "text"])
+        XCTAssertTrue(store.resolveAttempts.isEmpty)
+        store.resolve(requestID: "req-1", answers: ["Colors?": "Red, Blue", "Why?": "Free text"])
+        let attempt = try XCTUnwrap(store.resolveAttempts.first)
+        XCTAssertEqual(attempt.choice, "Colors?: Red, Blue\nWhy?: Free text")
+        store.resolve(requestID: "req-1", answers: ["Colors?": "Blue", "Why?": "text"])
+        XCTAssertEqual(store.resolveAttempts.count, 1)
+        store.receive(.message(.operationResult(operationId: attempt.id, status: "accepted", itemId: nil, reason: nil)))
+        store.resolve(requestID: "req-1", answers: ["Colors?": "Blue", "Why?": "text"])
+        XCTAssertEqual(store.resolveAttempts.first?.id, attempt.id)
+    }
+
+    func testStructuredAnswerWireEncodingAndLegacyQuestionDecoding() throws {
+        let data = try JSONEncoder().encode(ConversationClientMessage.resolveRequest(
+            operationEpoch: "e", operationId: "o", requestId: "r", answers: ["Colors?": "Red, Blue", "Why?": "Free text"]
+        ))
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertNil(json["choice"])
+        XCTAssertEqual(json["answers"] as? [String: String], ["Colors?": "Red, Blue", "Why?": "Free text"])
+        let old = Data(#"{"type":"request","requestId":"r","requestType":"question","prompt":"Choose","choices":["Yes"],"status":"pending"}"#.utf8)
+        let kind = try JSONDecoder().decode(ConversationItemKind.self, from: old)
+        guard case .request(_, _, _, _, _, let questions) = kind else { return XCTFail("old request must decode") }
+        XCTAssertTrue(questions.isEmpty)
+    }
+
     // MARK: Delivery outcomes
 
     func testARefusedSendLeavesTheTranscriptAndKeepsItsExactText() throws {

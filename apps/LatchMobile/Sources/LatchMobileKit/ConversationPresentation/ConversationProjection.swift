@@ -68,7 +68,7 @@ public enum ConversationProjection {
                     ),
                     parentMessageId: parentMessageId
                 )
-            case .request(let requestId, let requestType, let prompt, let choices, let status):
+            case .request(let requestId, let requestType, let prompt, let choices, let status, let questions):
                 let request = ConversationRequestPresentation(
                     id: item.id,
                     ordinal: item.ordinal,
@@ -76,6 +76,7 @@ public enum ConversationProjection {
                     kind: requestKind(requestType),
                     prompt: prompt,
                     choices: choices,
+                    questions: questions,
                     status: requestStatus(status),
                     isAwaitingAnswer: status == "pending" && requestId == pendingRequestID,
                     answer: answers[requestId].map(ConversationRequestAnswerPresentation.init(attempt:))

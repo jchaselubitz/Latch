@@ -1,0 +1,1 @@
+{ "name": "latch-permission-probe", "version": "0.1.0", "description": "Experiment: answer a permission prompt by call id from tool.check and tool.call hooks." }

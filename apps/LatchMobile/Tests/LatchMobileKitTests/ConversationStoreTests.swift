@@ -496,4 +496,33 @@ final class ConversationStoreTests: XCTestCase {
         XCTAssertNil(decoded.cancelTurn)
     }
 
+    func testTurnOutcomeAndCommandCatalogDecodeAndOlderStatesHaveNeither() throws {
+        let older = try JSONDecoder().decode(ConversationState.self, from: Data(#"{"phase":"idle","sendMessage":{"enabled":true},"resolveRequest":{"enabled":false},"pendingRequest":null,"connector":null}"#.utf8))
+        XCTAssertNil(older.turnOutcome)
+        XCTAssertNil(older.commands, "an absent catalog is unknown, not empty")
+
+        let explicitNull = try JSONDecoder().decode(ConversationState.self, from: Data(#"{"phase":"idle","sendMessage":{"enabled":true},"resolveRequest":{"enabled":false},"pendingRequest":null,"connector":null,"turnOutcome":null}"#.utf8))
+        XCTAssertNil(explicitNull.turnOutcome)
+
+        let live = try JSONDecoder().decode(ConversationState.self, from: Data(#"""
+        {"phase":"idle","sendMessage":{"enabled":true},"resolveRequest":{"enabled":false},"pendingRequest":null,
+         "connector":{"id":"claude","version":"1"},"turnOutcome":"aborted",
+         "commands":[{"name":"compact","description":"Compacts the conversation.","source":"builtin"},{"name":"review","description":""}]}
+        """#.utf8))
+        XCTAssertEqual(live.turnOutcome, "aborted")
+        XCTAssertEqual(live.commands, [
+            AdvertisedCommand(name: "compact", description: "Compacts the conversation.", source: "builtin"),
+            AdvertisedCommand(name: "review", description: "", source: nil),
+        ])
+
+        let store = ConversationStore(sessionID: "ses_catalog", gateway: try gateway(), operationRetentionSeconds: 60, storage: MemoryStorage())
+        XCTAssertEqual(store.commands, [])
+        store.receive(.message(.snapshot(ConversationSnapshot(
+            generation: "g", revision: 1, operationEpoch: "e", items: [],
+            state: live, hasMoreBefore: false, reason: "initial"
+        ))))
+        XCTAssertEqual(store.commands.map(\.name), ["compact", "review"])
+        XCTAssertEqual(store.turnOutcome, "aborted")
+    }
+
 }

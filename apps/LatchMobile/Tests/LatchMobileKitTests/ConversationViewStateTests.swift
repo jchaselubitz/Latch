@@ -102,6 +102,17 @@ final class ConversationViewStateTests: XCTestCase {
         XCTAssertEqual(ConversationViewState.ready.statusLine(in: transcript), nil)
     }
 
+    func testTheTurnOutcomeIsShownOnlyBetweenTurns() {
+        let transcript = ConversationTranscriptPresentation.empty
+        XCTAssertEqual(ConversationViewState.ready.statusLine(in: transcript, turnOutcome: "aborted"), "Stopped")
+        XCTAssertEqual(ConversationViewState.empty.statusLine(in: transcript, turnOutcome: "refusal"), "Agent declined the last request")
+        XCTAssertEqual(ConversationViewState.ready.statusLine(in: transcript, turnOutcome: "error"), "Last turn failed")
+        XCTAssertNil(ConversationViewState.ready.statusLine(in: transcript, turnOutcome: "answer"), "an ordinary answer needs no label")
+        XCTAssertNil(ConversationViewState.ready.statusLine(in: transcript, turnOutcome: "something new"), "an unknown outcome is not guessed at")
+        XCTAssertEqual(ConversationViewState.working.statusLine(in: transcript, turnOutcome: "aborted"), "Working", "a stale outcome never outranks the live phase")
+        XCTAssertEqual(ConversationViewState.awaitingInput.statusLine(in: transcript, turnOutcome: "aborted"), "Waiting for your answer")
+    }
+
     private func state(_ phase: String, pending: String? = nil) -> ConversationState {
         ConversationState(
             phase: phase,

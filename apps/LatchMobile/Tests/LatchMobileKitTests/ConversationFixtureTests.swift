@@ -86,7 +86,7 @@ final class ConversationFixtureTests: XCTestCase {
             XCTAssertEqual(store.state, expected.snapshot.state, directory.lastPathComponent)
             XCTAssertEqual(store.state?.pendingRequest, expected.snapshot.state.pendingRequest)
             if let pendingID = expected.snapshot.state.pendingRequest {
-                guard case .request(let requestID, _, _, _, _) = store.pendingRequest?.kind else {
+                guard case .request(let requestID, _, _, _, _, _) = store.pendingRequest?.kind else {
                     XCTFail("\(directory.lastPathComponent) pending request missing")
                     continue
                 }

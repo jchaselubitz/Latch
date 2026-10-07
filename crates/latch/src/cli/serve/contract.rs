@@ -1,5 +1,5 @@
 //! Generated from `schemas/remote-access/v2/*.schema.json`; do not edit by hand.
-//! Canonical schema set SHA-256: 3e9c2354c187a0b87b98a9dd634dc0d86bb3850f4e4004b92bb2ba1a2add2df1
+//! Canonical schema set SHA-256: 9ed43d89589f8b43f9f28633b8edd7fe9aef38757b24711c68bf6e26ded71944
 
 use serde::{Deserialize, Serialize};
 
@@ -152,6 +152,21 @@ pub enum RequestStatus {
     Dismissed,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestQuestion {
+    pub question: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<String>,
+    pub options: Vec<QuestionOption>,
+    pub multi_select: bool,
+}
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct QuestionOption {
+    pub label: String,
+    pub description: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ConversationItemKind {
@@ -174,6 +189,8 @@ pub enum ConversationItemKind {
         request_type: RequestType,
         prompt: String,
         choices: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        questions: Vec<RequestQuestion>,
         status: RequestStatus,
     },
 }
@@ -221,6 +238,26 @@ pub struct ConnectorIdentity {
     pub version: String,
 }
 
+/// Why the agent closed its newest turn: its own answer, an interruption, a
+/// refusal, or an error.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnOutcome {
+    Answer,
+    Aborted,
+    Refusal,
+    Error,
+}
+
+/// A slash command the agent advertises for its composer.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AdvertisedCommand {
+    pub name: String,
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ConversationState {
@@ -229,6 +266,14 @@ pub struct ConversationState {
     pub resolve_request: OperationAvailability,
     #[serde(default = "unavailable_cancel_turn")]
     pub cancel_turn: OperationAvailability,
+    /// The agent's reason for closing its newest turn, while no turn is open.
+    /// Absent when the connector has no outcome to report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_outcome: Option<TurnOutcome>,
+    /// Slash commands the agent advertises while a live bridge reports them.
+    /// Absent means unknown, not none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commands: Option<Vec<AdvertisedCommand>>,
     /// Derived from the newest request item whose status is pending.
     pub pending_request: Option<String>,
     pub connector: Option<ConnectorIdentity>,
@@ -335,7 +380,10 @@ pub enum ConversationClientMessage {
         operation_id: String,
         #[serde(rename = "requestId")]
         request_id: String,
-        choice: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        choice: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        answers: Option<std::collections::BTreeMap<String, String>>,
     },
     HistoryRequest {
         #[serde(rename = "requestId")]

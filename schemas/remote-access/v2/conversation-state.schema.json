@@ -21,6 +21,25 @@
     "sendMessage": { "$ref": "#/$defs/availability" },
     "resolveRequest": { "$ref": "#/$defs/availability" },
     "cancelTurn": { "$ref": "#/$defs/availability" },
+    "turnOutcome": {
+      "description": "Why the agent closed its newest turn, in its own vocabulary, carried only while no turn is open. Absent or null when the connector has no outcome to report.",
+      "enum": ["answer", "aborted", "refusal", "error", null]
+    },
+    "commands": {
+      "description": "Slash commands the agent advertises for its composer, relayed from a live agent bridge. Absent means the Hub does not know them, not that there are none.",
+      "type": "array",
+      "maxItems": 200,
+      "items": {
+        "type": "object",
+        "required": ["name", "description"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "description": { "type": "string", "maxLength": 512 },
+          "source": { "type": "string", "maxLength": 64 }
+        },
+        "additionalProperties": false
+      }
+    },
     "pendingRequest": { "type": ["string", "null"], "maxLength": 256 },
     "connector": {
       "oneOf": [

@@ -237,3 +237,33 @@ enum ConversationSentence {
         return ".!?…".contains(capitalized.last!) ? capitalized : capitalized + "."
     }
 }
+
+/// Local edits for a structured question form. Selection order follows the
+/// offered options so multi-select answers are stable across taps.
+public struct ConversationQuestionDraft: Equatable, Sendable {
+    public private(set) var selected: [String: Set<String>] = [:]
+    public private(set) var text: [String: String] = [:]
+
+    public init() {}
+
+    public mutating func toggle(_ option: String, for question: RequestQuestion) {
+        var values = selected[question.question, default: []]
+        if values.contains(option) { values.remove(option) }
+        else if question.multiSelect { values.insert(option) }
+        else { values = [option]; text[question.question] = "" }
+        selected[question.question] = values
+    }
+
+    public mutating func setText(_ value: String, for question: RequestQuestion) {
+        text[question.question] = value
+        if !question.multiSelect && !value.isEmpty { selected[question.question] = [] }
+    }
+
+    public func answers(for questions: [RequestQuestion]) -> [String: String] {
+        questions.reduce(into: [:]) { result, question in
+            let labels = question.options.map(\.label).filter { selected[question.question, default: []].contains($0) }
+            let custom = text[question.question, default: ""].trimmingCharacters(in: .whitespacesAndNewlines)
+            result[question.question] = (labels + (custom.isEmpty ? [] : [custom])).joined(separator: ", ")
+        }
+    }
+}

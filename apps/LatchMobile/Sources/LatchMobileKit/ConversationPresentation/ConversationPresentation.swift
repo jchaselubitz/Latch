@@ -251,6 +251,7 @@ public struct ConversationRequestPresentation: Identifiable, Equatable, Sendable
     public let kind: ConversationRequestKind
     public let prompt: String
     public let choices: [String]
+    public let questions: [RequestQuestion]
     public let status: ConversationRequestStatus
     /// True only for the request the host's state names as pending: an older
     /// row still marked pending is history, not something to answer.
@@ -265,6 +266,7 @@ public struct ConversationRequestPresentation: Identifiable, Equatable, Sendable
         kind: ConversationRequestKind,
         prompt: String,
         choices: [String],
+        questions: [RequestQuestion] = [],
         status: ConversationRequestStatus,
         isAwaitingAnswer: Bool,
         answer: ConversationRequestAnswerPresentation? = nil
@@ -275,6 +277,7 @@ public struct ConversationRequestPresentation: Identifiable, Equatable, Sendable
         self.kind = kind
         self.prompt = prompt
         self.choices = choices
+        self.questions = questions
         self.status = status
         self.isAwaitingAnswer = isAwaitingAnswer
         self.answer = answer

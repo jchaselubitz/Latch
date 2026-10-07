@@ -402,9 +402,22 @@ async fn handle(
             operation_id,
             request_id,
             choice,
+            answers,
         } => {
-            if choice.is_empty()
-                || choice.len() > MAX_CHOICE
+            if choice.is_some() == answers.is_some()
+                || choice
+                    .as_ref()
+                    .is_some_and(|v| v.is_empty() || v.len() > MAX_CHOICE)
+                || answers.as_ref().is_some_and(|a| {
+                    a.is_empty()
+                        || a.len() > 16
+                        || a.iter().any(|(k, v)| {
+                            k.is_empty()
+                                || k.len() > MAX_CHOICE
+                                || v.trim().is_empty()
+                                || v.len() > MAX_CHOICE
+                        })
+                })
                 || request_id.len() > MAX_ID
                 || operation_id.len() > MAX_ID
             {
@@ -423,10 +436,16 @@ async fn handle(
                 operation_id,
                 ConnectorAction {
                     id: ACTION_RESOLVE_REQUEST.to_owned(),
-                    payload: serde_json::json!({
-                        "requestId": request_id,
-                        "choice": choice,
-                    }),
+                    payload: {
+                        let mut payload = serde_json::json!({ "requestId": request_id });
+                        if let Some(choice) = choice {
+                            payload["choice"] = choice.into();
+                        }
+                        if let Some(answers) = answers {
+                            payload["answers"] = serde_json::to_value(answers).expect("answer map");
+                        }
+                        payload
+                    },
                 },
                 results,
             );
@@ -647,6 +666,7 @@ fn wire_item(item: &crate::conversation::ConversationItem) -> super::contract::C
             request_type,
             prompt,
             choices,
+            questions,
             status,
         } => wire::ConversationItemKind::Request {
             request_id: request_id.clone(),
@@ -656,6 +676,22 @@ fn wire_item(item: &crate::conversation::ConversationItem) -> super::contract::C
             },
             prompt: prompt.clone(),
             choices: choices.clone(),
+            questions: questions
+                .iter()
+                .map(|q| wire::RequestQuestion {
+                    question: q.question.clone(),
+                    header: q.header.clone(),
+                    multi_select: q.multi_select,
+                    options: q
+                        .options
+                        .iter()
+                        .map(|o| wire::QuestionOption {
+                            label: o.label.clone(),
+                            description: o.description.clone(),
+                        })
+                        .collect(),
+                })
+                .collect(),
             status: match status {
                 domain::RequestStatus::Pending => wire::RequestStatus::Pending,
                 domain::RequestStatus::Resolved => wire::RequestStatus::Resolved,
@@ -702,6 +738,22 @@ fn wire_state(
             id: c.id.clone(),
             version: c.version.clone(),
         }),
+        turn_outcome: state.turn_outcome.map(|outcome| match outcome {
+            domain::TurnOutcome::Answer => wire::TurnOutcome::Answer,
+            domain::TurnOutcome::Aborted => wire::TurnOutcome::Aborted,
+            domain::TurnOutcome::Refusal => wire::TurnOutcome::Refusal,
+            domain::TurnOutcome::Error => wire::TurnOutcome::Error,
+        }),
+        commands: state.commands.as_ref().map(|commands| {
+            commands
+                .iter()
+                .map(|command| wire::AdvertisedCommand {
+                    name: command.name.clone(),
+                    description: command.description.clone(),
+                    source: command.source.clone(),
+                })
+                .collect()
+        }),
     }
 }
 
@@ -722,6 +774,33 @@ async fn send(socket: &mut WebSocket, message: ConversationServerMessage) -> Res
 
 #[cfg(test)]
 mod tests {
+    /// The turn outcome and command catalog cross the wire only when the
+    /// connector has them, so older clients and states read the same JSON.
+    #[test]
+    fn wire_state_carries_turn_outcome_and_commands_only_when_known() {
+        let mut state = crate::conversation::ConversationState::starting(None);
+        let bare = serde_json::to_value(super::wire_state(&state)).unwrap();
+        assert!(bare.get("turnOutcome").is_none());
+        assert!(bare.get("commands").is_none());
+
+        state.turn_outcome = Some(crate::conversation::TurnOutcome::Refusal);
+        state.commands = Some(vec![crate::conversation::AdvertisedCommand {
+            name: "compact".into(),
+            description: "Compacts the conversation.".into(),
+            source: Some("builtin".into()),
+        }]);
+        let full = serde_json::to_value(super::wire_state(&state)).unwrap();
+        assert_eq!(full["turnOutcome"], "refusal");
+        assert_eq!(
+            full["commands"],
+            serde_json::json!([{ "name": "compact", "description": "Compacts the conversation.", "source": "builtin" }])
+        );
+        let decoded: super::super::contract::ConversationState =
+            serde_json::from_value(bare).unwrap();
+        assert_eq!(decoded.turn_outcome, None);
+        assert_eq!(decoded.commands, None);
+    }
+
     use std::collections::VecDeque;
     use std::net::{SocketAddr, TcpStream};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1065,6 +1144,66 @@ mod tests {
         })
         .await
         .expect("client");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn structured_answers_use_interact_and_deduplicated_receipts() {
+        let harness = harness(true).await;
+        harness
+            .script
+            .lock()
+            .expect("script")
+            .push_back(ConnectorMutation::Upsert(ObservedItem {
+                id: ConversationItemId::native("rich-request"),
+                created_at: "2026-08-20T00:00:00Z".into(),
+                kind: ConversationItemKind::Request {
+                    request_id: "r".into(),
+                    request_type: crate::conversation::RequestType::Question,
+                    prompt: "Question?\nWhy?".into(),
+                    choices: vec!["Red".into()],
+                    status: crate::conversation::RequestStatus::Pending,
+                    questions: vec![
+                        crate::conversation::RequestQuestion {
+                            question: "Question?".into(),
+                            header: Some("Colors".into()),
+                            multi_select: true,
+                            options: vec![crate::conversation::QuestionOption {
+                                label: "Red".into(),
+                                description: "Warm".into(),
+                            }],
+                        },
+                        crate::conversation::RequestQuestion {
+                            question: "Why?".into(),
+                            header: None,
+                            multi_select: false,
+                            options: vec![],
+                        },
+                    ],
+                },
+            }));
+        tokio::task::spawn_blocking(move || {
+            let mut observe = Client::open(&harness, "", "observe");
+            let snapshot = observe.next();
+            let item = observe.next_of("items_upserted");
+            let questions = &item["items"][0]["kind"]["questions"];
+            assert_eq!(questions[0]["multiSelect"], true);
+            assert_eq!(questions[0]["options"][0]["description"], "Warm");
+            assert_eq!(questions[1]["question"], "Why?");
+            observe.send(json!({"type": "resolve_request", "operationEpoch": snapshot["operationEpoch"], "operationId": "structured-observe", "requestId": "r", "answers": {"Question?": "Free text"}}));
+            assert_eq!(observe.next_of("operation_result")["status"], "refused");
+            assert_eq!(harness.applies.load(Ordering::SeqCst), 0);
+            let mut interact = Client::open(&harness, "", "interact");
+            let snapshot = interact.next();
+            let action = json!({"type": "resolve_request", "operationEpoch": snapshot["operationEpoch"], "operationId": "structured-interact", "requestId": "r", "answers": {"Question?": "Red, Blue", "Why?": "Free text"}});
+            interact.send(action.clone());
+            assert_eq!(interact.next_of("operation_result")["status"], "accepted");
+            interact.send(action);
+            assert_eq!(interact.next_of("operation_result")["status"], "accepted");
+            assert_eq!(harness.applies.load(Ordering::SeqCst), 1);
+            interact.send(json!({"type": "resolve_request", "operationEpoch": snapshot["operationEpoch"], "operationId": "both", "requestId": "r", "choice": "Yes", "answers": {"Question?": "Yes"}}));
+            assert_eq!(interact.next_of("error")["code"], "payload_too_large");
+            assert_eq!(harness.applies.load(Ordering::SeqCst), 1);
+        }).await.expect("client");
     }
 
     #[tokio::test(flavor = "multi_thread")]

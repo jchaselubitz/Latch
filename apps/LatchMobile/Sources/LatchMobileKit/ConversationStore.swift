@@ -451,13 +451,19 @@ public final class ConversationStore {
     }
 
     public var canSend: Bool { state?.sendMessage.enabled == true && operationEpoch != nil }
+    /// The agent's own reason for closing its newest turn, while no turn is
+    /// open: `answer`, `aborted`, `refusal`, or `error`. Nil when unknown.
+    public var turnOutcome: String? { state?.turnOutcome }
+    /// Slash commands the agent advertises. Empty when the Hub does not know
+    /// them, so a composer may only offer what is listed, never assume.
+    public var commands: [AdvertisedCommand] { state?.commands ?? [] }
     public var sendReason: String? { state?.sendMessage.reason ?? (operationEpoch == nil ? "Waiting for conversation state" : nil) }
     public var canResolve: Bool { state?.resolveRequest.enabled == true && operationEpoch != nil }
     public var resolveReason: String? { state?.resolveRequest.reason }
     public var pendingRequest: ConversationItem? {
         guard let requestID = state?.pendingRequest else { return nil }
         return transcript.items.last { item in
-            if case .request(let id, _, _, _, _) = item.kind { return id == requestID }
+            if case .request(let id, _, _, _, _, _) = item.kind { return id == requestID }
             return false
         }
     }
@@ -657,6 +663,21 @@ public final class ConversationStore {
     /// is not answered again; after a refusal or an uncertain outcome only
     /// another explicit choice answers it.
     public func resolve(requestID: String, choice: String) {
+        resolve(requestID: requestID, choice: choice, answers: nil)
+    }
+
+    public func resolve(requestID: String, answers: [String: String]) {
+        guard case .request(_, _, _, _, _, let questions) = pendingRequest?.kind,
+              !questions.isEmpty,
+              Set(questions.map(\.question)).count == questions.count,
+              Set(answers.keys) == Set(questions.map(\.question)),
+              answers.values.allSatisfy({ !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
+        else { return }
+        let summary = questions.map { "\($0.question): \(answers[$0.question] ?? "")" }.joined(separator: "\n")
+        resolve(requestID: requestID, choice: summary, answers: answers)
+    }
+
+    private func resolve(requestID: String, choice: String, answers: [String: String]?) {
         guard canResolve,
               let operationEpoch,
               state?.pendingRequest == requestID,
@@ -679,7 +700,8 @@ public final class ConversationStore {
                     operationEpoch: operationEpoch,
                     operationId: attempt.id,
                     requestId: requestID,
-                    choice: choice
+                    choice: answers == nil ? choice : nil,
+                    answers: answers
                 ))
             } catch let error as ConversationSocketError where error == .notConnected {
                 sendFailed(attempt.id, status: .notSent, reason: "The conversation is not connected.")

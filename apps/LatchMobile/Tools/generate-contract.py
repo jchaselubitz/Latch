@@ -337,10 +337,31 @@ public enum MessageStatus: String, Codable, Sendable {
     }
 }
 
+public struct QuestionOption: Equatable, Sendable, Codable {
+    public let label: String
+    public let description: String
+    public init(label: String, description: String) {
+        self.label = label
+        self.description = description
+    }
+}
+public struct RequestQuestion: Equatable, Sendable, Codable {
+    public let question: String
+    public let header: String?
+    public let options: [QuestionOption]
+    public let multiSelect: Bool
+    public init(question: String, header: String? = nil, options: [QuestionOption], multiSelect: Bool) {
+        self.question = question
+        self.header = header
+        self.options = options
+        self.multiSelect = multiSelect
+    }
+}
+
 public enum ConversationItemKind: Equatable, Sendable, Codable {
     case message(role: String, text: String, status: MessageStatus)
     case tool(name: String, summary: String, status: String, parentMessageId: String?)
-    case request(requestId: String, requestType: String, prompt: String, choices: [String], status: String)
+    case request(requestId: String, requestType: String, prompt: String, choices: [String], status: String, questions: [RequestQuestion] = [])
     /// A kind this build cannot present: a `type` added after it shipped, or a
     /// known `type` whose fields do not decode. `type` is the wire value when
     /// it was readable. Forward compatibility is a property of the installed
@@ -350,7 +371,7 @@ public enum ConversationItemKind: Equatable, Sendable, Codable {
 
     private enum CodingKeys: String, CodingKey {
         case type, role, text, status, name, summary, parentMessageId
-        case requestId, requestType, prompt, choices
+        case requestId, requestType, prompt, choices, questions
     }
 
     /// Never throws: an unreadable kind becomes `.unrecognized`.
@@ -384,7 +405,8 @@ public enum ConversationItemKind: Equatable, Sendable, Codable {
                 requestType: try container.decode(String.self, forKey: .requestType),
                 prompt: try container.decode(String.self, forKey: .prompt),
                 choices: try container.decode([String].self, forKey: .choices),
-                status: try container.decode(String.self, forKey: .status)
+                status: try container.decode(String.self, forKey: .status),
+                questions: try container.decodeIfPresent([RequestQuestion].self, forKey: .questions) ?? []
             )
         default:
             throw DecodingError.dataCorruptedError(forKey: .type, in: container, debugDescription: "unknown conversation item kind")
@@ -405,12 +427,13 @@ public enum ConversationItemKind: Equatable, Sendable, Codable {
             try container.encode(summary, forKey: .summary)
             try container.encode(status, forKey: .status)
             try container.encodeIfPresent(parentMessageId, forKey: .parentMessageId)
-        case .request(let requestId, let requestType, let prompt, let choices, let status):
+        case .request(let requestId, let requestType, let prompt, let choices, let status, let questions):
             try container.encode("request", forKey: .type)
             try container.encode(requestId, forKey: .requestId)
             try container.encode(requestType, forKey: .requestType)
             try container.encode(prompt, forKey: .prompt)
             try container.encode(choices, forKey: .choices)
+            if !questions.isEmpty { try container.encode(questions, forKey: .questions) }
             try container.encode(status, forKey: .status)
         case .unrecognized(let type):
             // Round-trips through the store cache back to `.unrecognized`.
@@ -495,6 +518,13 @@ public struct ConnectorIdentity: Codable, Equatable, Sendable {
     public let version: String
 }
 
+/// A slash command the agent advertises, as the Hub relays its bridge's catalog.
+public struct AdvertisedCommand: Codable, Equatable, Sendable {
+    public let name: String
+    public let description: String
+    public let source: String?
+}
+
 public struct ConversationState: Codable, Equatable, Sendable {
     public let phase: String
     public let sendMessage: OperationAvailability
@@ -503,6 +533,12 @@ public struct ConversationState: Codable, Equatable, Sendable {
     /// Derived from the newest pending request item.
     public let pendingRequest: String?
     public let connector: ConnectorIdentity?
+    /// Why the agent closed its newest turn (answer, aborted, refusal, error),
+    /// carried only while no turn is open. Nil when the Hub has no outcome.
+    public var turnOutcome: String? = nil
+    /// Slash commands a live bridge advertises. Nil when the Hub does not
+    /// know them, which is not the same as none.
+    public var commands: [AdvertisedCommand]? = nil
 }
 
 public struct ConversationSnapshot: Codable, Equatable, Sendable {
@@ -592,13 +628,13 @@ public enum ConversationClientMessage: Encodable, Equatable, Sendable {
     case resume(generation: String?, afterRevision: UInt64?)
     case sendMessage(operationEpoch: String, operationId: String, text: String)
     case cancelTurn(operationEpoch: String, operationId: String)
-    case resolveRequest(operationEpoch: String, operationId: String, requestId: String, choice: String)
+    case resolveRequest(operationEpoch: String, operationId: String, requestId: String, choice: String? = nil, answers: [String: String]? = nil)
     case historyRequest(requestId: String, beforeOrdinal: UInt64, limit: Int)
     case operationStatus(operationId: String)
 
     private enum CodingKeys: String, CodingKey {
         case type, generation, afterRevision, operationEpoch, operationId, text
-        case requestId, choice, beforeOrdinal, limit
+        case requestId, choice, answers, beforeOrdinal, limit
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -617,12 +653,13 @@ public enum ConversationClientMessage: Encodable, Equatable, Sendable {
             try container.encode("cancel_turn", forKey: .type)
             try container.encode(operationEpoch, forKey: .operationEpoch)
             try container.encode(operationId, forKey: .operationId)
-        case .resolveRequest(let operationEpoch, let operationId, let requestId, let choice):
+        case .resolveRequest(let operationEpoch, let operationId, let requestId, let choice, let answers):
             try container.encode("resolve_request", forKey: .type)
             try container.encode(operationEpoch, forKey: .operationEpoch)
             try container.encode(operationId, forKey: .operationId)
             try container.encode(requestId, forKey: .requestId)
-            try container.encode(choice, forKey: .choice)
+            try container.encodeIfPresent(choice, forKey: .choice)
+            try container.encodeIfPresent(answers, forKey: .answers)
         case .historyRequest(let requestId, let beforeOrdinal, let limit):
             try container.encode("history_request", forKey: .type)
             try container.encode(requestId, forKey: .requestId)

@@ -117,13 +117,22 @@
     },
     {
       "type": "object",
-      "required": ["type", "operationEpoch", "operationId", "requestId", "choice"],
+      "required": ["type", "operationEpoch", "operationId", "requestId"],
+      "oneOf": [
+        { "required": ["choice"], "not": { "required": ["answers"] } },
+        { "required": ["answers"], "not": { "required": ["choice"] } }
+      ],
       "properties": {
         "type": { "const": "resolve_request" },
         "operationEpoch": { "$ref": "#/$defs/operationEpoch" },
         "operationId": { "$ref": "#/$defs/operationId" },
         "requestId": { "$ref": "#/$defs/requestId" },
-        "choice": { "type": "string", "minLength": 1, "maxLength": 4096 }
+        "choice": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "answers": {
+          "type": "object", "minProperties": 1, "maxProperties": 16,
+          "propertyNames": { "minLength": 1, "maxLength": 4096 },
+          "additionalProperties": { "type": "string", "minLength": 1, "maxLength": 4096 }
+        }
       },
       "additionalProperties": false
     },

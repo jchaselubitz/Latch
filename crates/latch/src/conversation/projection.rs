@@ -369,6 +369,7 @@ mod tests {
                 request_type: RequestType::Question,
                 prompt: "continue?".into(),
                 choices: vec!["yes".into()],
+                questions: Vec::new(),
                 status,
             },
         })

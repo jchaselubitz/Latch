@@ -86,9 +86,22 @@ public enum ConversationViewState: String, CaseIterable, Equatable, Sendable {
     /// still the source of truth; a running tool simply makes "Working" more
     /// useful by naming the newest observed activity. Silence never becomes
     /// a claim that the agent is thinking or that the turn completed.
-    public func statusLine(in transcript: ConversationTranscriptPresentation) -> String? {
+    public func statusLine(in transcript: ConversationTranscriptPresentation, turnOutcome: String? = nil) -> String? {
+        if self == .ready || self == .empty, let outcome = Self.turnOutcomeLabel(turnOutcome) { return outcome }
         guard self == .working else { return label }
         guard let tool = transcript.newestRunningTool else { return label }
         return "Working · Running \(tool.name)"
+    }
+
+    /// What the agent itself said about how its newest turn ended, as the Hub
+    /// relays it in `turnOutcome`. An ordinary answer needs no label, and a
+    /// value this app does not know is not guessed at.
+    public static func turnOutcomeLabel(_ outcome: String?) -> String? {
+        switch outcome {
+        case "aborted": "Stopped"
+        case "refusal": "Agent declined the last request"
+        case "error": "Last turn failed"
+        default: nil
+        }
     }
 }

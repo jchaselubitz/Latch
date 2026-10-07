@@ -44,6 +44,7 @@ struct ConversationScreenActions {
     var edit: (String) -> Void = { _ in }
     var dismiss: (String) -> Void = { _ in }
     var resolve: (_ requestID: String, _ choice: String) -> Void = { _, _ in }
+    var resolveQuestions: (_ requestID: String, _ answers: [String: String]) -> Void = { _, _ in }
 }
 
 extension ConversationScreenContent {
@@ -91,7 +92,7 @@ extension ConversationScreenContent {
             case .notSent: cancelStatus = "Stop was not sent. Reconnect to try again."
             }
         }
-        statusLine = viewState.statusLine(in: transcript)
+        statusLine = viewState.statusLine(in: transcript, turnOutcome: store.turnOutcome)
     }
 }
 
@@ -118,7 +119,8 @@ extension ConversationScreenActions {
             retry: { store.retry($0) },
             edit: { store.editOperation($0) },
             dismiss: { store.dismissOperation($0) },
-            resolve: { store.resolve(requestID: $0, choice: $1) }
+            resolve: { store.resolve(requestID: $0, choice: $1) },
+            resolveQuestions: { store.resolve(requestID: $0, answers: $1) }
         )
     }
 }
@@ -188,8 +190,10 @@ struct ConversationScreen: View {
                     request: request,
                     canResolve: content.canResolve,
                     reason: content.resolveReason,
-                    resolve: actions.resolve
+                    resolve: actions.resolve,
+                    resolveQuestions: actions.resolveQuestions
                 )
+                .id(request.requestId)
             } else {
                 ConversationComposer(
                     draft: $draft,

@@ -50,6 +50,56 @@
               "maxItems": 128,
               "items": { "type": "string", "maxLength": 4096 }
             },
+            "questions": {
+              "type": "array",
+              "maxItems": 16,
+              "description": "Bridge-answerable questions. Omitted for terminal-only requests. Question text is the exact answer-map key.",
+              "items": {
+                "type": "object",
+                "required": [
+                  "question",
+                  "options",
+                  "multiSelect"
+                ],
+                "properties": {
+                  "question": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096
+                  },
+                  "header": {
+                    "type": "string",
+                    "maxLength": 4096
+                  },
+                  "multiSelect": {
+                    "type": "boolean"
+                  },
+                  "options": {
+                    "type": "array",
+                    "maxItems": 128,
+                    "items": {
+                      "type": "object",
+                      "required": [
+                        "label",
+                        "description"
+                      ],
+                      "properties": {
+                        "label": {
+                          "type": "string",
+                          "maxLength": 4096
+                        },
+                        "description": {
+                          "type": "string",
+                          "maxLength": 4096
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
             "status": { "enum": ["pending", "resolved", "dismissed"] }
           },
           "additionalProperties": false

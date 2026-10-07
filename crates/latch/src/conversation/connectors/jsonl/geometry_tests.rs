@@ -150,6 +150,7 @@ fn send_and_resolve_at_desktop_phone_and_never_attached_geometry() {
                 connector.pending_request = Some(PendingRequest {
                     id: "request".into(), request_type: RequestType::Permission,
                     prompt: "Permission required".into(), choices: vec![choice.into()],
+                    questions: Vec::new(),
                     screen_seen: true,
                     announced_at: None,
                 });
@@ -186,6 +187,7 @@ fn permission_resolution_rejects_unoffered_and_stale_choices() {
         request_type: RequestType::Permission,
         prompt: "Permission required".into(),
         choices: vec!["Yes".into(), "No".into()],
+        questions: Vec::new(),
         screen_seen: true,
         announced_at: None,
     });

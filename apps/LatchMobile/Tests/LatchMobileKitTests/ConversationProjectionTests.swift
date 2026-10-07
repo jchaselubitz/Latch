@@ -316,7 +316,7 @@ final class ConversationProjectionTests: XCTestCase {
 
     private static func firstRequestID(_ items: [ConversationItem]) -> String? {
         for item in items {
-            if case .request(let requestId, _, _, _, _) = item.kind { return requestId }
+            if case .request(let requestId, _, _, _, _, _) = item.kind { return requestId }
         }
         return nil
     }
