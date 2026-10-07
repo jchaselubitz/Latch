@@ -24,7 +24,7 @@ use super::auth::{
     load_token, origin_allowed, presented_token, selected_subprotocol, token_matches,
 };
 use super::contract::{
-    CreateSessionRequest, GatewayFeatures, GatewayReadiness, SessionAgent,
+    AgentModelCatalog, CreateSessionRequest, GatewayFeatures, GatewayReadiness, SessionAgent,
     OPERATION_RETENTION_SECONDS, REMOTE_ACCESS_SCHEMA_VERSION,
 };
 use super::conversation::{self, ConversationConnect, ConversationQuery};
@@ -35,6 +35,7 @@ use super::routes::{
 };
 use super::terminal::{self, ResumeRegistry, TerminalConnect, TerminalQuery};
 use super::ServeOptions;
+use crate::cli::agent_models;
 use crate::cli::attach::SessionLookupError;
 use crate::cli::create::{self, RemoteSessionError, RemoteSessionRequest};
 use crate::cli::json::{CapabilitiesReport, CreateReport, CreatedSession};
@@ -201,6 +202,7 @@ fn register(router: Router<AppState>, spec: RouteSpec) -> Router<AppState> {
         RouteId::Terminal => router.route(spec.pattern, get(terminal_ws)),
         RouteId::Conversation => router.route(spec.pattern, get(conversation_ws)),
         RouteId::Attachments => router.route(spec.pattern, post(upload_attachment)),
+        RouteId::AgentModels => router.route(spec.pattern, get(agent_models_catalog)),
     }
 }
 
@@ -383,6 +385,7 @@ struct GatewayEndpoints {
     create_session: bool,
     stop_session: bool,
     attachments: bool,
+    agent_models: bool,
 }
 
 async fn gateway_capabilities(State(state): State<AppState>) -> Response {
@@ -397,6 +400,7 @@ async fn gateway_capabilities(State(state): State<AppState>) -> Response {
             create_session: true,
             stop_session: true,
             attachments: true,
+            agent_models: true,
         },
         features: GatewayFeatures {
             exclusive_terminal: true,
@@ -432,6 +436,28 @@ async fn browse_directories(Query(query): Query<DirectoryQuery>) -> Result<Respo
     .map_err(|_| internal("browse directories"))?
     .map_err(map_browse_error)?;
     Ok(Json(page).into_response())
+}
+
+/// The models `agent` can start with, read fresh from its own cache on this
+/// Mac each time, so a phone that opens the picker sees what the agent itself
+/// would offer today.
+async fn agent_models_catalog(Path(agent): Path<String>) -> Result<Response, ApiError> {
+    let agent = SESSION_AGENTS
+        .iter()
+        .copied()
+        .find(|known| known.harness() == agent)
+        .ok_or_else(|| {
+            ApiError::coded(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "this gateway does not launch that agent",
+            )
+        })?;
+    let catalog: AgentModelCatalog =
+        tokio::task::spawn_blocking(move || agent_models::catalog(agent))
+            .await
+            .map_err(|_| internal("list agent models"))?;
+    Ok(Json(catalog).into_response())
 }
 
 /// Upper bound on a creation body. The request carries three short strings;
@@ -485,15 +511,36 @@ async fn create_session(
             ));
         }
     }
+    if let Some(model) = &request.model {
+        if request.agent.is_none() || !agent_models::is_model_id(model) {
+            return Err(ApiError::coded(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "model must name one of the agent's listed models",
+            ));
+        }
+    }
     let cwd = directory::canonical_directory_from_str(&request.cwd).map_err(map_browse_error)?;
 
     let home = state.home.clone();
     let outcome = tokio::task::spawn_blocking(move || {
+        // Only a model the agent lists today is launched: the phone chose
+        // from this same catalog, and anything else is a stale or forged id.
+        if let (Some(agent), Some(model)) = (request.agent, request.model.as_deref()) {
+            if !agent_models::catalog(agent)
+                .models
+                .iter()
+                .any(|listed| listed.id == model)
+            {
+                return Err(RemoteSessionError::ModelUnavailable(agent));
+            }
+        }
         create::create_remote_session(RemoteSessionRequest {
             home,
             request_id: request.request_id,
             cwd,
             agent: request.agent,
+            model: request.model,
             device: device.0,
         })
     })
@@ -550,6 +597,16 @@ fn map_remote_session_error(error: RemoteSessionError) -> ApiError {
             "agent_unavailable",
             format!(
                 "{} is not installed on this Mac, or its login shell cannot find it",
+                agent_display_name(agent)
+            ),
+        ),
+        // The phone's list was stale: it can reopen the picker and choose
+        // again, so the sentence says that rather than naming the id.
+        RemoteSessionError::ModelUnavailable(agent) => ApiError::coded(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "model_unavailable",
+            format!(
+                "{} on this Mac no longer offers that model; choose another",
                 agent_display_name(agent)
             ),
         ),
@@ -1034,7 +1091,7 @@ mod tests {
 
     #[test]
     fn every_registered_handler_comes_from_the_shared_route_table() {
-        assert_eq!(ROUTES.len(), 10);
+        assert_eq!(ROUTES.len(), 11);
         let mut ids = ROUTES.iter().map(|route| route.id).collect::<Vec<_>>();
         ids.sort_by_key(|id| *id as u8);
         ids.dedup();
@@ -1066,11 +1123,13 @@ mod tests {
             create_session: true,
             stop_session: true,
             attachments: true,
+            agent_models: true,
         })
         .unwrap();
         assert_eq!(value["browseDirectories"], true);
         assert_eq!(value["createSession"], true);
         assert_eq!(value["stopSession"], true);
+        assert_eq!(value["agentModels"], true);
     }
 
     /// The create route names the agents it launches so a phone shows only
@@ -1249,6 +1308,42 @@ mod tests {
                 400,
                 "invalid_request",
             ),
+            // A model belongs to an agent, and is only ever an id: never a
+            // shell's model, and never something an agent could read as a flag.
+            (
+                &serde_json::json!({
+                    "requestId": "8cba5d78-79a0-4a55-9047-f77e57e463c7",
+                    "cwd": work,
+                    "model": "claude-opus-5-5",
+                })
+                .to_string(),
+                400,
+                "invalid_request",
+            ),
+            (
+                &serde_json::json!({
+                    "requestId": "8cba5d78-79a0-4a55-9047-f77e57e463c7",
+                    "cwd": work,
+                    "agent": "claude",
+                    "model": "--dangerously-skip-permissions",
+                })
+                .to_string(),
+                400,
+                "invalid_request",
+            ),
+            // A well-formed id the agent does not list is a stale choice: the
+            // phone is told to choose again, and no agent is looked up.
+            (
+                &serde_json::json!({
+                    "requestId": "8cba5d78-79a0-4a55-9047-f77e57e463c7",
+                    "cwd": work,
+                    "agent": "codex",
+                    "model": "no-such-model-anywhere",
+                })
+                .to_string(),
+                422,
+                "model_unavailable",
+            ),
             (
                 &create_body(harness._dir.path().join("missing").to_str().unwrap()),
                 404,
@@ -1267,6 +1362,38 @@ mod tests {
         }
         // A refused request is a refused request: nothing was created.
         assert!(harness.home.session_ids().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn agent_models_are_listed_at_control_for_known_agents_only() {
+        let harness = harness().await;
+        for agent in ["claude", "codex"] {
+            let target = format!("/v2/agents/{agent}/models");
+            let (status, payload) = send(&harness, "GET", &target, Some("control"), "").await;
+            assert_eq!(status, 200, "{agent}");
+            assert_eq!(payload["agent"], agent);
+            let models = payload["models"].as_array().expect("models");
+            assert!(!models.is_empty(), "{agent} always has a list");
+            for model in models {
+                assert!(agent_models::is_model_id(model["id"].as_str().unwrap()));
+                assert!(!model["name"].as_str().unwrap().is_empty());
+            }
+            assert!(payload.get("defaultModel").is_some());
+            for grant in ["observe", "interact"] {
+                let (status, _) = send(&harness, "GET", &target, Some(grant), "").await;
+                assert_eq!(status, 403, "{grant} must not list {agent} models");
+            }
+        }
+        let (status, payload) = send(
+            &harness,
+            "GET",
+            "/v2/agents/cursor/models",
+            Some("control"),
+            "",
+        )
+        .await;
+        assert_eq!(status, 404);
+        assert_eq!(payload["error"], "not_found");
     }
 
     #[tokio::test]

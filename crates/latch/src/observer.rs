@@ -25,7 +25,7 @@ const CLAUDE_BRIDGE_PLUGIN_NAME: &str = "latch-conversation-bridge";
 /// Version of the bridge module and of the records and commands it exchanges
 /// with the connector. The plugin directory is stamped with it, for the same
 /// reason the observer's is: a running Claude keeps the module it loaded.
-pub const CLAUDE_BRIDGE_VERSION: u32 = 1;
+pub const CLAUDE_BRIDGE_VERSION: u32 = 2;
 /// Set to `0` to launch Claude with the observer alone.
 const CLAUDE_BRIDGE_ENV: &str = "LATCH_CLAUDE_BRIDGE";
 /// `hook_event_name` of every record the bridge module writes.

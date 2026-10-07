@@ -17,6 +17,7 @@ DEFAULT_UPSTREAM = APP.parent.parent
 NAMES = (
     "create-session-request.schema.json",
     "create-session-response.schema.json",
+    "agent-model-catalog.schema.json",
     "conversation-item.schema.json",
     "conversation-state.schema.json",
     "conversation-protocol.schema.json",
@@ -124,6 +125,10 @@ public struct GatewayEndpoints: Codable, Equatable, Sendable {
     /// Upload one file into the session's working directory at the interact
     /// grant. Absent on a Mac that predates the route.
     public var attachments: Bool
+    /// List the models an agent can start with, and accept `model` at
+    /// creation. Absent on a Mac that predates model choice, which then
+    /// starts every agent on the Mac's own default.
+    public var agentModels: Bool
 
     public init(
         sessions: Bool = false,
@@ -133,7 +138,8 @@ public struct GatewayEndpoints: Codable, Equatable, Sendable {
         browseDirectories: Bool = false,
         createSession: Bool = false,
         stopSession: Bool = false,
-        attachments: Bool = false
+        attachments: Bool = false,
+        agentModels: Bool = false
     ) {
         self.sessions = sessions
         self.preview = preview
@@ -143,6 +149,7 @@ public struct GatewayEndpoints: Codable, Equatable, Sendable {
         self.createSession = createSession
         self.stopSession = stopSession
         self.attachments = attachments
+        self.agentModels = agentModels
     }
 
     // Hand-written so an older Mac, whose document has no `preview` key at
@@ -159,6 +166,7 @@ public struct GatewayEndpoints: Codable, Equatable, Sendable {
         createSession = try container.decodeIfPresent(Bool.self, forKey: .createSession) ?? false
         stopSession = try container.decodeIfPresent(Bool.self, forKey: .stopSession) ?? false
         attachments = try container.decodeIfPresent(Bool.self, forKey: .attachments) ?? false
+        agentModels = try container.decodeIfPresent(Bool.self, forKey: .agentModels) ?? false
     }
 }
 
@@ -171,6 +179,7 @@ public enum GatewayEndpointsName: String, CaseIterable, Sendable {
     case createSession
     case stopSession
     case attachments
+    case agentModels
 }
 
 public extension GatewayEndpoints {
@@ -184,6 +193,7 @@ public extension GatewayEndpoints {
         case .createSession: return createSession
         case .stopSession: return stopSession
         case .attachments: return attachments
+        case .agentModels: return agentModels
         }
     }
 }
@@ -214,15 +224,20 @@ public struct CreateSessionRequest: Codable, Equatable, Sendable {
     /// Absent means a standard login shell; the key is omitted on the wire so
     /// an older Mac, whose contract closes the object, still accepts a shell.
     public var agent: SessionAgent?
+    /// Model the agent starts with. Only with `agent`, only an id the Mac
+    /// listed for it, and omitted on the wire when absent for the same reason
+    /// `agent` is.
+    public var model: String?
 
-    public init(requestId: UUID, cwd: String, agent: SessionAgent? = nil) {
+    public init(requestId: UUID, cwd: String, agent: SessionAgent? = nil, model: String? = nil) {
         self.requestId = requestId
         self.cwd = cwd
         self.agent = agent
+        self.model = model
     }
 
     private enum CodingKeys: String, CodingKey {
-        case requestId, cwd, agent
+        case requestId, cwd, agent, model
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -230,6 +245,36 @@ public struct CreateSessionRequest: Codable, Equatable, Sendable {
         try container.encode(requestId, forKey: .requestId)
         try container.encode(cwd, forKey: .cwd)
         try container.encodeIfPresent(agent, forKey: .agent)
+        try container.encodeIfPresent(model, forKey: .model)
+    }
+}
+
+/// One model a hosted agent can start with.
+public struct AgentModel: Codable, Equatable, Hashable, Sendable {
+    public var id: String
+    public var name: String
+    public var description: String?
+
+    public init(id: String, name: String, description: String? = nil) {
+        self.id = id
+        self.name = name
+        self.description = description
+    }
+}
+
+/// Models one hosted agent can start with, read fresh from the agent's own
+/// model cache on the Mac each time it is asked for.
+public struct AgentModelCatalog: Codable, Equatable, Sendable {
+    public var agent: SessionAgent
+    public var models: [AgentModel]
+    /// What the agent starts with when creation names no model: the owner's
+    /// configured choice on the Mac, which may be an alias outside `models`.
+    public var defaultModel: String?
+
+    public init(agent: SessionAgent, models: [AgentModel], defaultModel: String? = nil) {
+        self.agent = agent
+        self.models = models
+        self.defaultModel = defaultModel
     }
 }
 

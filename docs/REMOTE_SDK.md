@@ -113,12 +113,13 @@ path failure — missing, unreadable, not a directory, outside what the gateway
 will serve — is one stable error, so the route cannot be used to probe the
 filesystem.
 
-Creation takes two fields, and an optional third:
+Creation takes two fields, and optionally an agent and its model:
 
 ```json
 { "requestId": "8cba5d78-79a0-4a55-9047-f77e57e463c7", "cwd": "/Users/jake/src" }
 { "requestId": "8cba5d78-79a0-4a55-9047-f77e57e463c7", "cwd": "/Users/jake/src", "agent": "claude" }
 { "requestId": "8cba5d78-79a0-4a55-9047-f77e57e463c7", "cwd": "/Users/jake/src", "agent": "codex" }
+{ "requestId": "8cba5d78-79a0-4a55-9047-f77e57e463c7", "cwd": "/Users/jake/src", "agent": "claude", "model": "claude-opus-5-5" }
 ```
 
 `requestId` is a canonical hyphenated UUID and is the idempotency key. The Mac
@@ -142,6 +143,18 @@ refused as `agent_unavailable` (422) before anything is accepted, with a
 reason fit to show. Either way creation does not attach — the new session
 appears in `GET /v2/sessions` with no surface taken from anyone. The response
 is the existing `CreateReport`.
+
+`model` is optional and only valid with `agent`. It must be an `id` the
+gateway lists at `GET /v2/agents/{agent}/models` (control grant, advertised as
+`endpoints.agentModels`), which answers an `AgentModelCatalog`:
+`{ agent, models: [{ id, name, description? }], defaultModel }`. The list is
+read from the agent's own model cache on the Mac on every request, falling
+back to a list bundled with Latch. The agent is started with `--model <id>`;
+omitting `model` leaves it on the owner's configured default (`defaultModel`,
+which may be an alias outside the list). A well-formed id the agent does not
+list is `model_unavailable` (422); a `model` without `agent`, or one shaped
+like anything but a model id, is `invalid_request`. The request id is bound to
+the model as it is to the folder and agent.
 
 Codex currently has a connector identity but no automatic transcript-source
 binding for a newly launched session. Its conversation remains in `starting`

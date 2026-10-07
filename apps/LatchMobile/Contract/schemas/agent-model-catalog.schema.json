@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://latch.cooperativ.dev/schemas/remote-access/v2/agent-model-catalog.schema.json",
+  "title": "LatchAgentModelCatalogV2",
+  "description": "Models one hosted agent can start with on the gateway host, read fresh from that agent's own model cache on each request and falling back to a list bundled with Latch when the cache is missing or unreadable.",
+  "type": "object",
+  "required": ["agent", "models", "defaultModel"],
+  "properties": {
+    "agent": { "type": "string", "enum": ["claude", "codex"] },
+    "models": {
+      "type": "array",
+      "maxItems": 32,
+      "description": "Newest and most recommended first, in the order the agent itself lists them.",
+      "items": {
+        "type": "object",
+        "required": ["id", "name"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@\\[\\]-]*$" },
+          "name": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "description": { "type": "string", "maxLength": 160 }
+        },
+        "additionalProperties": false
+      }
+    },
+    "defaultModel": {
+      "type": ["string", "null"],
+      "maxLength": 128,
+      "description": "The model the agent starts with when creation names none: the owner's own configured choice on the Mac, which may be an alias outside `models`. Null when the Mac names none."
+    }
+  },
+  "additionalProperties": false
+}

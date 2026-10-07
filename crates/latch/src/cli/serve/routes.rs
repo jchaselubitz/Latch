@@ -65,6 +65,7 @@ pub(crate) enum RouteId {
     Terminal,
     Conversation,
     Attachments,
+    AgentModels,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -168,6 +169,15 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
         required_grant: Grant::Interact,
         streamed_body_limit: Some(ATTACHMENT_MAX_BYTES),
     },
+    // The models an agent can start with matter only to a device that may
+    // start one, so the list sits at the create route's grant.
+    RouteSpec {
+        id: RouteId::AgentModels,
+        pattern: "/v2/agents/{agent}/models",
+        method: "GET",
+        required_grant: Grant::Control,
+        streamed_body_limit: None,
+    },
 ];
 
 /// Resolve one concrete HTTP target against the shared route table.
@@ -224,6 +234,7 @@ mod tests {
                 Grant::Control,
             ),
             ("/v2/sessions/ses_1/conversation", Grant::Observe),
+            ("/v2/agents/claude/models", Grant::Control),
         ];
         for (target, expected) in cases {
             assert_eq!(
@@ -247,6 +258,8 @@ mod tests {
             Some(Grant::Interact)
         );
         assert!(route_for("GET", "/v2/sessions/ses_1/attachments").is_none());
+        assert!(route_for("POST", "/v2/agents/claude/models").is_none());
+        assert!(route_for("GET", "/v2/agents/claude").is_none());
     }
 
     /// Only the attachments route streams its body. Every other request stays

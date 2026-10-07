@@ -28,6 +28,8 @@ struct ConversationComposer: View {
     var placeholder = "Message"
     var sessionActions = ConversationSessionActions()
     var attachments = ConversationAttachmentControls()
+    var commands: [AdvertisedCommand] = []
+    var canUseSlashCommands = false
     let send: (String) -> Void
 
     /// The picker the "+" menu asked for, presented by the modifier below.
@@ -43,6 +45,16 @@ struct ConversationComposer: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
+            if !commandPicker.commands.isEmpty {
+                commandSuggestions
+            }
+            if draft.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("/"),
+               !canUseSlashCommands, presentation.canSend {
+                ConversationSendNoticeView(notice: .init(
+                    kind: .agentState, title: "Slash commands need an idle turn", detail: nil
+                ))
+                .padding(.horizontal, fieldHeight + 8)
+            }
             if let notice = presentation.notice {
                 ConversationSendNoticeView(notice: notice)
                     .padding(.horizontal, fieldHeight + 8)
@@ -61,6 +73,50 @@ struct ConversationComposer: View {
         .padding(.top, 8)
         .padding(.bottom, 8)
         .conversationAttachmentPickers(source: $attachmentSource, add: attachments.add)
+    }
+
+    private var commandPicker: ConversationCommandPickerPresentation {
+        .init(draft: draft, catalog: commands, canSelect: canUseSlashCommands)
+    }
+
+    /// A bounded list in the input inset keeps suggestions above the keyboard
+    /// and reserves transcript space for them. The field remains mounted.
+    private var commandSuggestions: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                ForEach(Array(commandPicker.commands.enumerated()), id: \.offset) { _, command in
+                    Button {
+                        guard let text = commandPicker.inserting(command) else { return }
+                        draft = text
+                        focused = true
+                    } label: {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("/" + command.name).font(.body.weight(.medium))
+                            if !command.description.isEmpty {
+                                Text(command.description).font(.caption).foregroundStyle(.secondary)
+                            }
+                            if let source = command.source, !source.isEmpty {
+                                Text(source).font(.caption2).foregroundStyle(.secondary)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 6)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!commandPicker.canSelect)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityHint(commandPicker.canSelect
+                        ? "Inserts this command into your draft."
+                        : "Slash commands need an idle turn.")
+                    .accessibilityIdentifier("conversation.composer.command." + command.name)
+                }
+            }
+        }
+        .frame(maxHeight: 220)
+        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 16))
+        .accessibilityIdentifier("conversation.composer.commands")
     }
 
     private var field: some View {
@@ -166,6 +222,7 @@ struct ConversationComposer: View {
     /// A file alone is a message; text is not required alongside it.
     private var canSubmit: Bool {
         presentation.canSend
+            && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("/") || canUseSlashCommands)
             && !attachments.isUploading
             && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.items.isEmpty)
     }

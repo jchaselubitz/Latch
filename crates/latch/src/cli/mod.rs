@@ -6,6 +6,7 @@
 //! a terminal — nesting policy, raw-mode restoration, JSON schemas, list sort
 //! order.
 
+pub mod agent_models;
 pub mod attach;
 pub mod create;
 pub mod json;

@@ -6,6 +6,8 @@ import SwiftUI
 /// Components below take these values and plain closures rather than the
 /// store, so each one can be previewed in any state without a connection.
 struct ConversationScreenContent {
+    var commands: [AdvertisedCommand] = []
+    var canUseSlashCommands = false
     var canCancelTurn = false
     var cancelStatus: String? = nil
     var viewState: ConversationViewState
@@ -84,6 +86,10 @@ extension ConversationScreenContent {
             skippedUpdates: diagnostics.droppedItems + diagnostics.undecodableFrames
         )
         canCancelTurn = store.canCancelTurn
+        commands = store.commands
+        canUseSlashCommands = ConversationComposerChrome.canUseSlashCommands(
+            viewState: viewState, state: store.state, canSend: store.canSend && store.socketState == .open
+        )
         if let attempt = store.cancelAttempt {
             switch attempt.status {
             case .sending, .accepted: cancelStatus = "Stopping…"
@@ -202,6 +208,8 @@ struct ConversationScreen: View {
                     placeholder: placeholder,
                     sessionActions: sessionActions,
                     attachments: attachments,
+                    commands: content.commands,
+                    canUseSlashCommands: content.canUseSlashCommands,
                     send: actions.send
                 )
                 // A soft fade rather than a bar: the field floats, and the

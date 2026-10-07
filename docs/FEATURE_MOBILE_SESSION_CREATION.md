@@ -37,7 +37,27 @@ terminal, then presents a folder picker for the Mac. The picker:
 - shows the current absolute path so similarly named folders are
   distinguishable; and
 - has one primary action: **Start session here**, or **Start Claude Code
-  here** when an agent was chosen, with the picker titled for it.
+  here** when an agent was chosen, with the picker titled for it; and
+- for an agent, shows a **Model** row above that action when the Mac serves
+  model choice (`endpoints.agentModels`). Its first entry is **Mac default**,
+  naming the model the agent is configured with on the Mac when it says, then
+  each model the agent itself lists. The phone remembers the last choice per
+  agent and restores it while the Mac still lists it.
+
+The model list is read from the Mac each time the picker opens, through
+`GET /v2/agents/{agent}/models`, and the Mac reads it from the agent's own
+model cache — Claude Code's catalog under `~/.claude/cache/model-catalog/`
+(the models its own picker leads with) and Codex's `models_cache.json` (the
+models it lists, in its order). Both CLIs refresh those caches as they run,
+so the phone offers what the installed CLI offers today. A Mac whose cache is
+missing or unreadable answers with the list bundled in that Latch build.
+**Mac default** sends no model; any other choice starts the agent with
+`--model <id>`, the same argument Overlord passes when it launches an agent.
+
+The sheet is presented by its mode value. An earlier build kept the mode and
+the presentation flag as two separate pieces of state, and the sheet could be
+built with the mode from before the tap — so choosing **Claude Code** could
+start a shell.
 
 The picker is a remote browser. It does not use the iOS document picker, which
 can see the phone's files and cloud providers but cannot browse the Mac that
@@ -122,6 +142,10 @@ closes the request object, so a shell request stays exactly the two fields
 it always was. A kind the phone does not know is dropped from the list rather
 than failing discovery.
 
+Model choice is advertised as `endpoints.agentModels`. A Mac that predates it
+is never asked for a list and never sent `model`; the picker shows no model
+row and the agent starts on the Mac's default, as before.
+
 An older phone ignores the additive flags and continues to list and open
 sessions normally.
 
@@ -139,6 +163,11 @@ sessions normally.
 - If Claude Code is not installed where the Mac's login shell can find it,
   the request is refused before anything is accepted, and the same id may be
   retried once it is installed.
+- If the chosen model is no longer in the agent's list on the Mac, creation is
+  refused as `model_unavailable` before anything is accepted. The picker
+  re-reads the list, falls back to **Mac default** when the model is gone,
+  and the next start is a new request. The request id is bound to the model
+  too: the same id with another model is `request_id_conflict`.
 - Creation failure never attaches to, resizes, or steals another session's
   terminal surface.
 
@@ -159,6 +188,27 @@ sessions normally.
 9. A Mac that lists `claude` or `codex` starts that agent in the chosen folder,
    and the new row opens as a conversation.
 10. A Mac that lists no agents is never sent an `agent` field.
+11. Choosing **Claude Code** or **Codex** starts that agent, never a shell.
+12. An agent started with a chosen model runs with `--model <id>`; **Mac
+    default** starts it with no model argument.
+13. The model list matches what the agent's own CLI lists on the Mac.
+
+## Validation record (2026-10-07)
+
+Diagnosis: a reproduction against the installed `latch serve` (0.2610031136.0)
+showed `POST /v2/sessions` with `agent: "claude"` starts Claude Code with its
+observer and bridge plugins, so the reported "starts a session but not
+Claude" came from the phone. The phone's receipts showed a shell request in
+the window the person tried Claude; the sheet's split mode/flag state above is
+the cause. A debug gateway in an isolated `LATCH_HOME` then confirmed:
+
+- `GET /v2/agents/claude/models` lists Opus 5.5, Fable 5.1, Sonnet 5.5 and
+  Haiku 4.5 with default `claude-fable-5-1`, and `GET /v2/agents/codex/models`
+  lists GPT-6.1-Sol through GPT-5.6-Luna with default `gpt-6.1-sol`, both read
+  live from the CLIs' caches;
+- creating Claude with `claude-sonnet-5-5` and Codex with `gpt-6-luna` runs
+  each agent with that `--model`; a Codex model requested for Claude is
+  `model_unavailable`.
 
 ## Validation record (2026-09-22)
 

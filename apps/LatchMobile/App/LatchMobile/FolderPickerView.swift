@@ -200,6 +200,9 @@ struct FolderPickerView: View {
     @ViewBuilder
     private func actionBar(_ browser: FolderBrowserModel) -> some View {
         VStack(spacing: 8) {
+            if browser.offersModelChoice {
+                modelRow(browser)
+            }
             Button {
                 switch mode {
                 case .create, .createAgent:
@@ -233,6 +236,72 @@ struct FolderPickerView: View {
         }
         .padding(16)
         .background(.bar)
+    }
+
+    /// Which model the agent starts with. The list is the Mac's own, read
+    /// when this sheet opened; the first choice is always the Mac's default,
+    /// which sends no model at all.
+    @ViewBuilder
+    private func modelRow(_ browser: FolderBrowserModel) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Menu {
+                Picker(
+                    "Model",
+                    selection: Binding(
+                        get: { browser.selectedModelID },
+                        set: { browser.selectModel($0) }
+                    )
+                ) {
+                    Text(Self.defaultModelTitle(browser)).tag(String?.none)
+                    ForEach(browser.modelCatalog?.models ?? [], id: \.id) { model in
+                        Text(model.name).tag(Optional(model.id))
+                    }
+                }
+            } label: {
+                HStack(spacing: 8) {
+                    Label("Model", systemImage: "cpu")
+                        .foregroundStyle(.secondary)
+                    Spacer(minLength: 8)
+                    if browser.isLoadingModels, browser.modelCatalog == nil {
+                        ProgressView()
+                    } else {
+                        Text(browser.selectedModelName ?? Self.defaultModelTitle(browser))
+                            .lineLimit(1)
+                    }
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
+            }
+            .disabled(browser.isLoading || browser.modelCatalog == nil)
+            .accessibilityLabel("Model")
+            .accessibilityValue(browser.selectedModelName ?? Self.defaultModelTitle(browser))
+            .accessibilityHint("Chooses the model \(mode.agent?.displayName ?? "the agent") starts with")
+
+            if let note = Self.modelNote(browser) {
+                Text(note)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    /// "Mac default", naming the model it resolves to when the Mac says.
+    static func defaultModelTitle(_ browser: FolderBrowserModel) -> String {
+        browser.defaultModelName.map { "Mac default (\($0))" } ?? "Mac default"
+    }
+
+    /// The chosen model's own description, or why there is no list.
+    static func modelNote(_ browser: FolderBrowserModel) -> String? {
+        if let error = browser.modelListError {
+            return "Could not read the model list: \(error) Starting uses the Mac's default."
+        }
+        guard let id = browser.selectedModelID else { return nil }
+        return browser.modelCatalog?.models.first { $0.id == id }?.description
     }
 
     private var isPermitted: Bool {

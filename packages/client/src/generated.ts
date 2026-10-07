@@ -1,5 +1,5 @@
 // Generated from schemas/remote-access/v2/*.schema.json; do not edit by hand.
-// Canonical schema set SHA-256: 9ed43d89589f8b43f9f28633b8edd7fe9aef38757b24711c68bf6e26ded71944
+// Canonical schema set SHA-256: 83bb60480f37a6df7de48053e00ba606c23bc059bf48713df5e4555e4bdf3167
 
 
 export type TerminalCloseReason =
@@ -18,7 +18,20 @@ export const TERMINAL_CLOSE_CODES = {
   resume_refused: 4411
 } as const satisfies Record<TerminalCloseReason, number>;
 export type SessionAgent = 'claude' | 'codex';
-export type CreateSessionRequest = { requestId: string; cwd: string; agent?: SessionAgent };
+export type CreateSessionRequest = {
+  requestId: string;
+  cwd: string;
+  agent?: SessionAgent;
+  /** Only with `agent`, and only an id the gateway lists for it. */
+  model?: string;
+};
+export type AgentModel = { id: string; name: string; description?: string };
+/** `GET /v2/agents/{agent}/models`, served when `endpoints.agentModels` is true. */
+export type AgentModelCatalog = {
+  agent: SessionAgent;
+  models: AgentModel[];
+  defaultModel: string | null;
+};
 /** `sessionAgents` is absent on a gateway that predates agent creation; read
  * that as shells only. `attachmentMaxBytes` is present exactly when the
  * gateway serves the attachments route. */
@@ -45,8 +58,9 @@ export type GatewayEndpoints = {
   createSession?: boolean;
   stopSession?: boolean;
   attachments?: boolean;
+  agentModels?: boolean;
 };
-export type GatewayEndpointName = 'sessions' | 'preview' | 'terminal' | 'conversation' | 'browseDirectories' | 'createSession' | 'stopSession' | 'attachments';
+export type GatewayEndpointName = 'sessions' | 'preview' | 'terminal' | 'conversation' | 'browseDirectories' | 'createSession' | 'stopSession' | 'attachments' | 'agentModels';
 
 export type ConversationItem = { id: string; ordinal: number; createdAt: string; kind: { type: "message"; role: "user" | "assistant"; text: string; status: "submitted" | "queued" | "observed" | "partial" | "complete" | "failed"; } | { type: "tool"; name: string; summary: string; status: "running" | "succeeded" | "failed"; parentMessageId?: string | null; } | { type: "request"; requestId: string; requestType: "permission" | "question"; prompt: string; choices: Array<string>; questions?: Array<{ question: string; header?: string; multiSelect: boolean; options: Array<{ label: string; description: string; }>; }>; status: "pending" | "resolved" | "dismissed"; }; };
 export type ConversationState = { phase: "starting" | "idle" | "working" | "awaiting_input" | "exited" | "unavailable"; sendMessage: { enabled: boolean; reason?: string | null; }; resolveRequest: { enabled: boolean; reason?: string | null; }; cancelTurn?: { enabled: boolean; reason?: string | null; }; turnOutcome?: "answer" | "aborted" | "refusal" | "error" | null; commands?: Array<{ name: string; description: string; source?: string; }>; pendingRequest: string | null; connector: null | { id: string; version: string; }; };

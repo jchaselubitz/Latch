@@ -1,5 +1,5 @@
 //! Generated from `schemas/remote-access/v2/*.schema.json`; do not edit by hand.
-//! Canonical schema set SHA-256: 9ed43d89589f8b43f9f28633b8edd7fe9aef38757b24711c68bf6e26ded71944
+//! Canonical schema set SHA-256: 83bb60480f37a6df7de48053e00ba606c23bc059bf48713df5e4555e4bdf3167
 
 use serde::{Deserialize, Serialize};
 
@@ -31,6 +31,10 @@ pub struct CreateSessionRequest {
     /// advertises in `features.session_agents`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<SessionAgent>,
+    /// Model the agent starts with, passed to it as `--model`. Valid only
+    /// with `agent`, and only an id the gateway lists for that agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 /// Hosted agent kinds a caller may name at creation. The Mac resolves the
@@ -53,6 +57,31 @@ impl SessionAgent {
             Self::Codex => "codex",
         }
     }
+}
+
+/// One model a hosted agent can start with.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentModel {
+    /// What the agent accepts as `--model`.
+    pub id: String,
+    /// The agent's own display name for it.
+    pub name: String,
+    /// The agent's one-line description, when it gives one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// Models one hosted agent can start with, read fresh from the agent's own
+/// model cache on the Mac, with a list bundled with Latch as the fallback.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentModelCatalog {
+    /// The agent these models start.
+    pub agent: SessionAgent,
+    /// Newest and most recommended first, in the agent's own order.
+    pub models: Vec<AgentModel>,
+    /// The owner's configured default, which may be an alias outside `models`.
+    pub default_model: Option<String>,
 }
 
 /// Reason carried in a terminal WebSocket close frame. `Detached` is a clean

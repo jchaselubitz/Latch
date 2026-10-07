@@ -131,6 +131,10 @@ pub struct RemoteSessionRequest {
     pub cwd: PathBuf,
     /// Hosted agent to launch directly, or `None` for a standard login shell.
     pub agent: Option<SessionAgent>,
+    /// Model the agent starts with, passed as `--model`; `None` leaves the
+    /// agent on its own configured default. The caller has already checked it
+    /// against the agent's catalog; it is never set without `agent`.
+    pub model: Option<String>,
     /// Opaque device that submitted the request, when it came through the
     /// paired proxy. A request id is owned by the device that first used it.
     pub device: Option<String>,
@@ -146,6 +150,8 @@ pub enum RemoteSessionError {
     DeviceConflict,
     /// The requested agent is not installed where this Mac can find it.
     AgentUnavailable(SessionAgent),
+    /// The requested model is not one the agent lists on this Mac.
+    ModelUnavailable(SessionAgent),
     /// Creation itself failed.
     Failed(anyhow::Error),
 }
@@ -168,6 +174,10 @@ pub struct CreationReceipt {
     /// were all shells.
     #[serde(default)]
     pub agent: Option<String>,
+    /// Model the request named; `None` for the agent's default. Absent on
+    /// receipts written before a model could be chosen, which named none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     /// Where the launch got to.
     pub status: CreationReceiptStatus,
     /// The session it produced, once it did.
@@ -312,7 +322,7 @@ fn create_remote_session_with(
         if receipt.device != request.device {
             return Err(RemoteSessionError::DeviceConflict);
         }
-        if receipt.cwd != cwd || receipt.agent != harness {
+        if receipt.cwd != cwd || receipt.agent != harness || receipt.model != request.model {
             return Err(RemoteSessionError::RequestIdConflict);
         }
     }
@@ -348,6 +358,7 @@ fn create_remote_session_with(
         device: request.device.clone(),
         cwd: cwd.clone(),
         agent: harness,
+        model: request.model.clone(),
         status: CreationReceiptStatus::Accepted,
         session_id: None,
         accepted_at: crate::engine::format_rfc3339(std::time::SystemTime::now()),
@@ -366,11 +377,17 @@ fn create_remote_session_with(
         },
     };
     // Declare the real agent argv before the engine prepares its observer and
-    // wraps it in a login shell. This is the same path Desktop uses, preserving
-    // agent identity while loading the owner's terminal environment.
+    // wraps it in a login shell. This is the same path Desktop and Overlord
+    // use, preserving agent identity while loading the owner's terminal
+    // environment. The model travels as its own argument, the way Overlord
+    // passes it, so it is never re-parsed by the shell.
     let manifest = match program {
         Some(program) => {
-            let mut manifest = run_manifest(vec![program.display().to_string()], options);
+            let mut argv = vec![program.display().to_string()];
+            if let Some(model) = request.model {
+                argv.extend(["--model".to_owned(), model]);
+            }
+            let mut manifest = run_manifest(argv, options);
             manifest.launch.agent = request.agent.map(|agent| match agent {
                 SessionAgent::Claude => AgentKind::Claude,
                 SessionAgent::Codex => AgentKind::Codex,
@@ -721,6 +738,7 @@ mod tests {
             request_id: REQUEST_ID.to_owned(),
             cwd: cwd.to_owned(),
             agent: None,
+            model: None,
             device: Some("phone-a".to_owned()),
         }
     }
@@ -1047,6 +1065,70 @@ mod tests {
             conflict,
             Err(RemoteSessionError::RequestIdConflict)
         ));
+    }
+
+    #[test]
+    fn a_chosen_model_is_passed_to_the_agent_and_binds_the_request_id() {
+        let (_temp, home, cwd) = home();
+        let with_model = || RemoteSessionRequest {
+            model: Some("claude-opus-5-5".to_owned()),
+            ..claude_request(&home, &cwd)
+        };
+        let outcome = create_remote_session_with(with_model(), fake_claude, |options| {
+            // The model follows the program as separate arguments, so the
+            // agent identity and observer setup still see `claude` first.
+            assert_eq!(
+                options.manifest.launch.argv,
+                ["/opt/fake/bin/claude", "--model", "claude-opus-5-5"]
+            );
+            assert_eq!(options.manifest.launch.agent, Some(AgentKind::Claude));
+            stub_launch(options)
+        })
+        .unwrap();
+        assert_eq!(
+            read_receipt(&home, REQUEST_ID)
+                .unwrap()
+                .unwrap()
+                .model
+                .as_deref(),
+            Some("claude-opus-5-5")
+        );
+        let meta = meta::read(&home.session(&SessionId::parse(&outcome.id).unwrap())).unwrap();
+        assert_eq!(meta.command_label, "claude");
+
+        let retry = create_remote_session_with(with_model(), fake_claude, |_| {
+            panic!("a retry must not launch a second agent")
+        })
+        .unwrap();
+        assert!(retry.reused);
+        // The same id with another model is a different request, never a
+        // second launch and never a silent reuse of the first model.
+        let other = RemoteSessionRequest {
+            model: Some("claude-sonnet-5-5".to_owned()),
+            ..claude_request(&home, &cwd)
+        };
+        let conflict = create_remote_session_with(other, fake_claude, |_| {
+            panic!("a different model must conflict")
+        });
+        assert!(matches!(
+            conflict,
+            Err(RemoteSessionError::RequestIdConflict)
+        ));
+    }
+
+    #[test]
+    fn an_agent_without_a_model_starts_on_its_own_default() {
+        let (_temp, home, cwd) = home();
+        create_remote_session_with(codex_request(&home, &cwd), fake_codex, |options| {
+            assert_eq!(options.manifest.launch.argv, ["/opt/fake/bin/codex"]);
+            stub_launch(options)
+        })
+        .unwrap();
+        let receipt = read_receipt(&home, REQUEST_ID).unwrap().unwrap();
+        assert_eq!(receipt.model, None);
+        // Receipts keep their pre-model shape when no model was chosen.
+        let text = std::fs::read_to_string(receipt_path(&home, REQUEST_ID)).unwrap();
+        assert!(!text.contains("\"model\""));
     }
 
     #[test]

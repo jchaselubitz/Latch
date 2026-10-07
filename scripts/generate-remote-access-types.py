@@ -21,6 +21,7 @@ TYPESCRIPT = ROOT / "packages/client/src/generated.ts"
 SCHEMA_NAMES = (
     "create-session-request.schema.json",
     "create-session-response.schema.json",
+    "agent-model-catalog.schema.json",
     "conversation-item.schema.json",
     "conversation-state.schema.json",
     "conversation-protocol.schema.json",
@@ -79,6 +80,10 @@ pub struct CreateSessionRequest {
     /// advertises in `features.session_agents`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<SessionAgent>,
+    /// Model the agent starts with, passed to it as `--model`. Valid only
+    /// with `agent`, and only an id the gateway lists for that agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 /// Hosted agent kinds a caller may name at creation. The Mac resolves the
@@ -101,6 +106,31 @@ impl SessionAgent {
             Self::Codex => "codex",
         }
     }
+}
+
+/// One model a hosted agent can start with.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentModel {
+    /// What the agent accepts as `--model`.
+    pub id: String,
+    /// The agent's own display name for it.
+    pub name: String,
+    /// The agent's one-line description, when it gives one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// Models one hosted agent can start with, read fresh from the agent's own
+/// model cache on the Mac, with a list bundled with Latch as the fallback.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentModelCatalog {
+    /// The agent these models start.
+    pub agent: SessionAgent,
+    /// Newest and most recommended first, in the agent's own order.
+    pub models: Vec<AgentModel>,
+    /// The owner's configured default, which may be an alias outside `models`.
+    pub default_model: Option<String>,
 }
 
 /// Reason carried in a terminal WebSocket close frame. `Detached` is a clean
@@ -440,7 +470,20 @@ export const TERMINAL_CLOSE_CODES = {
   resume_refused: 4411
 } as const satisfies Record<TerminalCloseReason, number>;
 export type SessionAgent = 'claude' | 'codex';
-export type CreateSessionRequest = { requestId: string; cwd: string; agent?: SessionAgent };
+export type CreateSessionRequest = {
+  requestId: string;
+  cwd: string;
+  agent?: SessionAgent;
+  /** Only with `agent`, and only an id the gateway lists for it. */
+  model?: string;
+};
+export type AgentModel = { id: string; name: string; description?: string };
+/** `GET /v2/agents/{agent}/models`, served when `endpoints.agentModels` is true. */
+export type AgentModelCatalog = {
+  agent: SessionAgent;
+  models: AgentModel[];
+  defaultModel: string | null;
+};
 /** `sessionAgents` is absent on a gateway that predates agent creation; read
  * that as shells only. `attachmentMaxBytes` is present exactly when the
  * gateway serves the attachments route. */

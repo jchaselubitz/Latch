@@ -238,6 +238,82 @@ final class GatewayV2Tests: XCTestCase {
         XCTAssertEqual(discovered.features.sessionAgents, [.claude, .codex])
     }
 
+    /// A model rides along only with an agent, only to a Mac that serves
+    /// model choice, and the list it came from is the Mac's own, read fresh.
+    func testModelChoiceIsListedFreshAndSentOnlyWithAnAgent() async throws {
+        StubProtocol.stub(
+            path: "/v2/capabilities",
+            body: capabilities(agents: ["claude", "codex"], agentModels: true)
+        )
+        StubProtocol.stub(path: "/v2/agents/claude/models", body: """
+        {"agent":"claude","models":[{"id":"claude-opus-5-5","name":"Opus 5.5",
+        "description":"For complex work"},{"id":"claude-fable-5-1","name":"Fable 5.1"}],
+        "defaultModel":"claude-fable-5-1"}
+        """)
+        StubProtocol.stub(path: "/v2/sessions", body: """
+        {"protocolVersion":2,"session":{"id":"ses_new","name":"claude",
+        "state":"running","createdAt":"2026-09-06T00:00:00Z"}}
+        """)
+        let gateway = makeGateway()
+
+        let catalog = try await gateway.agentModels(for: .claude)
+        XCTAssertEqual(catalog.agent, .claude)
+        XCTAssertEqual(catalog.models.map(\.id), ["claude-opus-5-5", "claude-fable-5-1"])
+        XCTAssertEqual(catalog.models.first?.description, "For complex work")
+        XCTAssertEqual(catalog.defaultModel, "claude-fable-5-1")
+        XCTAssertEqual(StubProtocol.requests.last?.method, "GET")
+
+        let requestID = UUID()
+        _ = try await gateway.createSession(
+            requestID: requestID, cwd: "/tmp/a", agent: .claude, model: "claude-opus-5-5"
+        )
+        let chosen = try XCTUnwrap(StubProtocol.requests.last)
+        let decoded = try JSONDecoder().decode(CreateSessionRequest.self, from: Data(chosen.body.utf8))
+        XCTAssertEqual(
+            decoded,
+            CreateSessionRequest(requestId: requestID, cwd: "/tmp/a", agent: .claude, model: "claude-opus-5-5")
+        )
+
+        // A shell has no model: it is dropped rather than sent.
+        _ = try await gateway.createSession(requestID: requestID, cwd: "/tmp/a", model: "claude-opus-5-5")
+        let shell = try XCTUnwrap(StubProtocol.requests.last)
+        let shellBody = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(shell.body.utf8)) as? [String: Any]
+        )
+        XCTAssertEqual(Set(shellBody.keys), ["requestId", "cwd"])
+    }
+
+    /// A Mac that predates model choice is never asked for a list or sent a
+    /// model; the agent still starts, on the Mac's own default.
+    func testAMacWithoutModelChoiceIsNeverAskedForOne() async throws {
+        StubProtocol.stub(path: "/v2/capabilities", body: capabilities(agents: ["claude"]))
+        let gateway = makeGateway()
+        do {
+            _ = try await gateway.agentModels(for: .claude)
+            XCTFail("the model list must be gated by discovery")
+        } catch {
+            XCTAssertEqual(error as? LatchError, .endpointUnavailable(.agentModels))
+        }
+        do {
+            _ = try await gateway.createSession(
+                requestID: UUID(), cwd: "/tmp", agent: .claude, model: "claude-opus-5-5"
+            )
+            XCTFail("a model must not be sent to a Mac that cannot honour it")
+        } catch {
+            XCTAssertEqual(error as? LatchError, .endpointUnavailable(.agentModels))
+        }
+        XCTAssertEqual(StubProtocol.requests.map(\.path), ["/v2/capabilities"])
+    }
+
+    func testAStaleModelIsAPlainRefusal() {
+        let error = LatchGateway.error(
+            status: 422,
+            path: "/v2/sessions",
+            data: Data(#"{"error":"model_unavailable","reason":"Claude Code on this Mac no longer offers that model; choose another"}"#.utf8)
+        )
+        XCTAssertEqual(error, .refused("Claude Code on this Mac no longer offers that model; choose another"))
+    }
+
     /// The Mac serves agents but could not find this one. That is the person's
     /// sentence to read, not a status line, and retrying changes nothing.
     func testAMissingAgentOnTheMacIsAPlainRefusal() {
@@ -298,7 +374,8 @@ final class GatewayV2Tests: XCTestCase {
     private func capabilities(
         browse: Bool = true,
         create: Bool = true,
-        agents: [String]? = nil
+        agents: [String]? = nil,
+        agentModels: Bool = false
     ) -> String {
         let features = agents.map { names in
             let list = names.map { "\"\($0)\"" }.joined(separator: ",")
@@ -309,7 +386,7 @@ final class GatewayV2Tests: XCTestCase {
          "capabilities":{"create":true,"openViewer":true,"localAttach":true,
           "cloudAttach":false,"selfUpdate":true,"extensions":[]},
          "endpoints":{"sessions":true,"terminal":true,"conversation":false,
-          "browseDirectories":\(browse),"createSession":\(create)},
+          "browseDirectories":\(browse),"createSession":\(create),"agentModels":\(agentModels)},
          "features":\(features),"gatewayInstanceId":"gw-a-b",
          "operationRetentionSeconds":600}
         """

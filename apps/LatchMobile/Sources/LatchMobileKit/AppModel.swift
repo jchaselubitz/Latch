@@ -139,6 +139,7 @@ public final class AppModel {
     private let presentationStore: any SessionPresentationStoring
     private let terminalSizeStore: any TerminalSizeStoring
     private let newSessionFolderStore: any NewSessionFolderStoring
+    private let agentModelStore: any AgentModelPreferenceStoring
     /// Where the transport writes the path it selected, so Settings can say
     /// whether this session is on the local network, direct, or relayed.
     private let pathReporter: RemotePathReporter
@@ -183,6 +184,7 @@ public final class AppModel {
         presentationStore: any SessionPresentationStoring = UserDefaultsSessionPresentationStore(),
         terminalSizeStore: any TerminalSizeStoring = UserDefaultsTerminalSizeStore(),
         newSessionFolderStore: any NewSessionFolderStoring = UserDefaultsNewSessionFolderStore(),
+        agentModelStore: any AgentModelPreferenceStoring = UserDefaultsAgentModelPreferenceStore(),
         terminalConnector: TerminalConnecting? = nil,
         terminalUnlock: TerminalUnlock? = nil,
         coldOpen: ColdOpenRecorder? = nil
@@ -194,6 +196,7 @@ public final class AppModel {
         self.presentationStore = presentationStore
         self.terminalSizeStore = terminalSizeStore
         self.newSessionFolderStore = newSessionFolderStore
+        self.agentModelStore = agentModelStore
         self.defaultNewSessionFolder = newSessionFolderStore.load()
         self.sessionPresentation = presentationStore.load()
         self.terminalSize = terminalSizeStore.load()
@@ -281,6 +284,14 @@ public final class AppModel {
         guard canCreateNewSession else { return false }
         guard let agent else { return true }
         return availableSessionAgents.contains(agent)
+    }
+
+    /// Whether the linked Mac lists models for its agents and accepts one at
+    /// creation. A Mac that predates model choice starts every agent on its
+    /// own default, and the picker shows no model row.
+    public var offersAgentModelChoice: Bool {
+        guard case .linked(let capabilities) = linkState else { return false }
+        return GatewayCompatibility.supports(endpoint: .agentModels, capabilities: capabilities)
     }
 
     /// Whether the linked Mac serves both new-session routes, independent of
@@ -436,6 +447,17 @@ public final class AppModel {
         }
         guard await unlockRemoteAccess(reason: reason) else { return nil }
 
+        // Read when the picker opens rather than at discovery, so the list is
+        // the one the agent holds now; a Mac without the route gets no row.
+        var listModels: FolderBrowserModel.ListingModels?
+        if let agent = mode.agent, offersAgentModelChoice {
+            listModels = {
+                guard self.canCreateNewSession(agent: agent) else {
+                    throw NewSessionAccessError.unavailable
+                }
+                return try await gateway.agentModels(for: agent)
+            }
+        }
         let browser = FolderBrowserModel(
             mode: mode,
             initialPath: newSessionFolderStore.load(),
@@ -446,14 +468,15 @@ public final class AppModel {
                 }
                 return try await gateway.browseDirectories(path: path, cursor: cursor)
             },
-            create: { requestID, cwd in
+            create: { requestID, cwd, model in
                 guard self.canCreateNewSession(agent: mode.agent) else {
                     throw NewSessionAccessError.unavailable
                 }
                 return try await gateway.createSession(
                     requestID: requestID,
                     cwd: cwd,
-                    agent: mode.agent
+                    agent: mode.agent,
+                    model: model
                 )
             },
             hasAccess: {
@@ -464,7 +487,9 @@ public final class AppModel {
             didCreate: { sessionID in
                 await self.refreshSessions()
                 self.highlightedSessionID = sessionID
-            }
+            },
+            listModels: listModels,
+            modelStore: agentModelStore
         )
         await browser.load()
         return browser

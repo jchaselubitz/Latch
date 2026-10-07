@@ -390,6 +390,7 @@ struct SettingsView: View {
         case .createSession: return "Session creation"
         case .stopSession: return "Session stop"
         case .attachments: return "Attachments"
+        case .agentModels: return "Model choice"
         }
     }
 

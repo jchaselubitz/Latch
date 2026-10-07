@@ -120,11 +120,26 @@ struct PendingRequest {
     /// us ignore transcript records that existed before a newly-read hook.
     #[serde(default)]
     announced_at: Option<String>,
+    /// Announced by the bridge module under the call's real id. The bridge,
+    /// not the transcript, says when such a request closes, and the Hub can
+    /// answer it through the bridge by that id.
+    #[serde(default)]
+    bridge_call: bool,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 struct RuntimeCheckpoint {
     pending_request: Option<PendingRequest>,
+    /// Requests the bridge announced while another was shown, oldest first.
+    /// Clients have not been shown any of them yet. Absent in older
+    /// checkpoints.
+    #[serde(default)]
+    queued_requests: Vec<PendingRequest>,
+    /// Requests clients were shown until the dialog on the screen proved
+    /// another was the open one, most recent last. Each is still pending at
+    /// the Hub. Absent in older checkpoints.
+    #[serde(default)]
+    displaced_requests: Vec<PendingRequest>,
     tools: HashMap<String, (String, String)>,
     /// Sanitized input summary per open call, so the result can say what the
     /// call was as well as how it ended. Absent in older checkpoints.
@@ -177,7 +192,13 @@ pub struct JsonlConnector {
     /// A rewind truncates after an item, and most source records own none.
     chain_items: HashMap<String, String>,
     malformed_records: u64,
+    /// The request clients are shown. The Hub presents the newest pending
+    /// request item, so this is always the one surfaced last of those still
+    /// open.
     pending_request: Option<PendingRequest>,
+    /// Bridge requests waiting behind the shown one; see `RuntimeCheckpoint`.
+    queued_requests: Vec<PendingRequest>,
+    displaced_requests: Vec<PendingRequest>,
     tools: HashMap<String, (String, String)>,
     tool_summaries: HashMap<String, String>,
     tool_running: bool,
@@ -225,6 +246,8 @@ impl JsonlConnector {
             chain_items: HashMap::new(),
             malformed_records: 0,
             pending_request: None,
+            queued_requests: Vec::new(),
+            displaced_requests: Vec::new(),
             tools: HashMap::new(),
             tool_summaries: HashMap::new(),
             tool_running: false,
@@ -262,6 +285,8 @@ impl JsonlConnector {
             chain_items: HashMap::new(),
             malformed_records: 0,
             pending_request: None,
+            queued_requests: Vec::new(),
+            displaced_requests: Vec::new(),
             tools: HashMap::new(),
             tool_summaries: HashMap::new(),
             tool_running: false,
@@ -292,6 +317,8 @@ impl JsonlConnector {
     fn runtime_checkpoint(&self) -> RuntimeCheckpoint {
         RuntimeCheckpoint {
             pending_request: self.pending_request.clone(),
+            queued_requests: self.queued_requests.clone(),
+            displaced_requests: self.displaced_requests.clone(),
             tools: self.tools.clone(),
             tool_summaries: self.tool_summaries.clone(),
             tool_running: self.tool_running,
@@ -308,6 +335,8 @@ impl JsonlConnector {
 
     fn restore_runtime(&mut self, runtime: RuntimeCheckpoint) {
         self.pending_request = runtime.pending_request;
+        self.queued_requests = runtime.queued_requests;
+        self.displaced_requests = runtime.displaced_requests;
         self.tools = runtime.tools;
         self.tool_summaries = runtime.tool_summaries;
         self.tool_running = runtime.tool_running;
@@ -407,6 +436,8 @@ impl JsonlConnector {
         self.offset = 0;
         self.forget_chain();
         self.pending_request = None;
+        self.queued_requests.clear();
+        self.displaced_requests.clear();
         self.tools.clear();
         self.tool_summaries.clear();
         self.tool_running = false;
@@ -524,18 +555,27 @@ impl JsonlConnector {
     }
 
     fn observe_screen(&mut self, screen: &str) -> Vec<ConnectorMutation> {
-        let mut mutations = Vec::new();
+        let mut mutations = self.follow_painted_request(screen);
+        // With other dialogs waiting, the numbered decisions on the screen
+        // may be another dialog's: only the painted request reads them.
+        let is_painted = !self.has_waiting_requests()
+            || self.pending_request.as_ref().is_some_and(|shown| {
+                painted_request(screen, self.waiting_requests(shown))
+                    .is_some_and(|painted| painted.id == shown.id)
+            });
         if let Some(request) = self.pending_request.as_mut() {
             if screen_contains_request(screen, request) {
-                request.screen_seen = true;
-                let choices = visible_choices(screen, &request.prompt);
-                if !choices.is_empty() && request.choices != choices {
-                    request.choices = choices;
-                    mutations.push(request_mutation(request, RequestStatus::Pending));
+                if is_painted {
+                    request.screen_seen = true;
+                    let choices = visible_choices(screen, &request.prompt);
+                    if !choices.is_empty() && request.choices != choices {
+                        request.choices = choices;
+                        mutations.push(request_mutation(request, RequestStatus::Pending));
+                    }
                 }
             } else if request.screen_seen {
-                let request = self.pending_request.take().expect("request was present");
-                mutations.push(request_mutation(&request, RequestStatus::Dismissed));
+                let id = request.id.clone();
+                mutations.extend(self.close_request(&id));
             }
         }
         self.screen_can_send = Some(
@@ -544,6 +584,203 @@ impl JsonlConnector {
                 && screen.lines().any(|line| is_empty_composer(self.id, line)),
         );
         mutations
+    }
+
+    fn has_waiting_requests(&self) -> bool {
+        !self.queued_requests.is_empty() || !self.displaced_requests.is_empty()
+    }
+
+    /// The shown request, then every request waiting behind it.
+    fn waiting_requests<'a>(
+        &'a self,
+        shown: &'a PendingRequest,
+    ) -> impl Iterator<Item = &'a PendingRequest> {
+        std::iter::once(shown)
+            .chain(&self.queued_requests)
+            .chain(&self.displaced_requests)
+    }
+
+    /// Shows a request the bridge announced under its call id. One request
+    /// is shown at a time: while another bridge request is shown, this one
+    /// waits behind it in the order the engine raised them, because a
+    /// parallel batch raises every dialog at once and Claude paints the
+    /// oldest.
+    fn announce_bridge_request(&mut self, request: PendingRequest) -> Vec<ConnectorMutation> {
+        if let Some(waiting) = self
+            .queued_requests
+            .iter_mut()
+            .find(|waiting| waiting.id == request.id)
+        {
+            *waiting = request;
+            return Vec::new();
+        }
+        if self
+            .displaced_requests
+            .iter()
+            .any(|waiting| waiting.id == request.id)
+        {
+            return Vec::new();
+        }
+        match self.pending_request.take() {
+            Some(shown) if shown.bridge_call && shown.id != request.id => {
+                self.pending_request = Some(shown);
+                let at = self
+                    .queued_requests
+                    .iter()
+                    .position(|waiting| announced_before(&request, waiting))
+                    .unwrap_or(self.queued_requests.len());
+                self.queued_requests.insert(at, request);
+                Vec::new()
+            }
+            previous => {
+                let mut mutations = Vec::new();
+                // The hook may have announced the same dialog first, under a
+                // synthetic id; the real one replaces it.
+                if let Some(previous) = previous.filter(|previous| previous.id != request.id) {
+                    mutations.push(request_mutation(&previous, RequestStatus::Dismissed));
+                }
+                self.pending_request = Some(request.clone());
+                mutations.push(request_mutation(&request, RequestStatus::Pending));
+                mutations
+            }
+        }
+    }
+
+    /// Closes the request with this id wherever it waits. Closing the shown
+    /// request surfaces the next one.
+    fn close_request(&mut self, id: &str) -> Vec<ConnectorMutation> {
+        if self
+            .pending_request
+            .as_ref()
+            .is_some_and(|shown| shown.id == id)
+        {
+            let closed = self.pending_request.take().expect("request was present");
+            let mut mutations = vec![request_mutation(&closed, RequestStatus::Dismissed)];
+            mutations.extend(self.surface_next_request());
+            return mutations;
+        }
+        if let Some(index) = self
+            .displaced_requests
+            .iter()
+            .position(|waiting| waiting.id == id)
+        {
+            let closed = self.displaced_requests.remove(index);
+            return vec![request_mutation(&closed, RequestStatus::Dismissed)];
+        }
+        // Never shown, so clients hold nothing to dismiss.
+        self.queued_requests.retain(|waiting| waiting.id != id);
+        Vec::new()
+    }
+
+    /// Shows the request next in line once the shown one has closed: the
+    /// last one the screen displaced, which clients still hold as their
+    /// newest pending request, else the oldest the bridge announced.
+    fn surface_next_request(&mut self) -> Vec<ConnectorMutation> {
+        if self.bridge_version.is_none() {
+            // Only the bridge says when a waiting request closes.
+            return self.drop_waiting_requests();
+        }
+        if let Some(request) = self.displaced_requests.pop() {
+            self.pending_request = Some(request);
+            return Vec::new();
+        }
+        if self.queued_requests.is_empty() {
+            return Vec::new();
+        }
+        let request = self.queued_requests.remove(0);
+        self.pending_request = Some(request.clone());
+        vec![request_mutation(&request, RequestStatus::Pending)]
+    }
+
+    /// Forgets the requests waiting behind the shown one; they remain the
+    /// terminal's to answer.
+    fn drop_waiting_requests(&mut self) -> Vec<ConnectorMutation> {
+        self.queued_requests.clear();
+        self.displaced_requests
+            .drain(..)
+            .map(|request| request_mutation(&request, RequestStatus::Dismissed))
+            .collect()
+    }
+
+    /// Shows the waiting request whose dialog Claude is painting when that
+    /// is not the shown one. Only a request clients have not seen yet can
+    /// take its place: the Hub presents the newest pending item, so one they
+    /// already hold could not be brought back in front.
+    fn follow_painted_request(&mut self, screen: &str) -> Vec<ConnectorMutation> {
+        if self.queued_requests.is_empty() {
+            return Vec::new();
+        }
+        let Some(shown) = self
+            .pending_request
+            .as_ref()
+            .filter(|shown| shown.bridge_call)
+        else {
+            return Vec::new();
+        };
+        let Some(painted) =
+            painted_request(screen, self.waiting_requests(shown)).map(|painted| painted.id.clone())
+        else {
+            return Vec::new();
+        };
+        let Some(index) = self
+            .queued_requests
+            .iter()
+            .position(|waiting| waiting.id == painted)
+        else {
+            return Vec::new();
+        };
+        let mut request = self.queued_requests.remove(index);
+        request.screen_seen = true;
+        let choices = visible_choices(screen, &request.prompt);
+        if !choices.is_empty() {
+            request.choices = choices;
+        }
+        let displaced = self
+            .pending_request
+            .replace(request.clone())
+            .expect("a request was shown");
+        self.displaced_requests.push(displaced);
+        vec![request_mutation(&request, RequestStatus::Pending)]
+    }
+
+    /// The key that picks `choice` in the shown request's dialog. The screen
+    /// must prove that dialog is the one painted: with other dialogs waiting,
+    /// a key pressed into the wrong one answers another call.
+    fn terminal_choice_key(
+        &self,
+        screen: &str,
+        choice: &str,
+    ) -> std::result::Result<String, String> {
+        let request = self
+            .pending_request
+            .as_ref()
+            .ok_or_else(|| "no pending request".to_owned())?;
+        if !request
+            .choices
+            .iter()
+            .any(|offered| offered.eq_ignore_ascii_case(choice))
+        {
+            return Err(
+                "the selected decision is not among the choices currently offered by Claude"
+                    .to_owned(),
+            );
+        }
+        if !screen_contains_request(screen, request) {
+            return Err("the requested Claude prompt is no longer visible".to_owned());
+        }
+        if self.has_waiting_requests()
+            && painted_request(screen, self.waiting_requests(request))
+                .is_none_or(|painted| painted.id != request.id)
+        {
+            return Err(
+                "another waiting permission dialog may be the one on the screen; answer at the terminal"
+                    .to_owned(),
+            );
+        }
+        visible_choice_key(screen, &request.prompt, choice).ok_or_else(|| {
+            "the selected decision is no longer identifiable on the current Claude prompt"
+                .to_owned()
+        })
     }
 
     fn record(&mut self, value: Value, ordinal: u64) -> Vec<ConnectorMutation> {
@@ -674,6 +911,7 @@ impl JsonlConnector {
                     questions: Vec::new(),
                     screen_seen: false,
                     announced_at: None,
+                    bridge_call: false,
                 });
                 Some(ConversationItemKind::Request {
                     request_id,
@@ -798,6 +1036,17 @@ impl JsonlConnector {
             {
                 return Vec::new();
             }
+            // Likewise while a request the bridge announced is shown: the
+            // hook's generic prompt must not replace it, the bridge says when
+            // it closes, and a further dialog of the same batch is announced
+            // by the bridge, which queues it behind the shown one.
+            if self
+                .pending_request
+                .as_ref()
+                .is_some_and(|request| request.bridge_call)
+            {
+                return Vec::new();
+            }
             return self.claude_permission(object, ordinal);
         }
         if hook_event_name.as_deref() == Some(crate::observer::CLAUDE_BRIDGE_EVENT) {
@@ -876,10 +1125,9 @@ impl JsonlConnector {
         // A question the bridge announced is closed by the bridge: other
         // calls of the same response may finish while it is still open.
         let bridge_owns_request = self.bridge_version.is_some()
-            && self
-                .pending_request
-                .as_ref()
-                .is_some_and(|request| request.request_type == RequestType::Question);
+            && self.pending_request.as_ref().is_some_and(|request| {
+                request.request_type == RequestType::Question || request.bridge_call
+            });
         if !bridge_owns_request
             && self.pending_request.as_ref().is_some_and(|request| {
                 request
@@ -1021,6 +1269,7 @@ impl JsonlConnector {
                                     questions: Vec::new(),
                                     screen_seen: false,
                                     announced_at: None,
+                                    bridge_call: false,
                                 };
                                 self.pending_request = Some(request.clone());
                                 mutations.push(request_mutation(&request, RequestStatus::Pending));
@@ -1050,7 +1299,7 @@ impl JsonlConnector {
                     return Vec::new();
                 };
                 let input = Value::Object(object.clone());
-                let request = PendingRequest {
+                return self.announce_bridge_request(PendingRequest {
                     id,
                     request_type: RequestType::Question,
                     prompt: claude_question_prompt(Some(&input)),
@@ -1058,15 +1307,43 @@ impl JsonlConnector {
                     questions: bridge_questions(&input),
                     screen_seen: false,
                     announced_at: string(object, "timestamp"),
-                };
-                self.pending_request = Some(request.clone());
-                return vec![request_mutation(&request, RequestStatus::Pending)];
+                    bridge_call: true,
+                });
             }
-            Some("question.closed") => {
-                let closed = string(object, "tool_use_id");
-                if self.pending_request.as_ref().map(|request| &request.id) == closed.as_ref() {
-                    let request = self.pending_request.take().expect("request was present");
-                    return vec![request_mutation(&request, RequestStatus::Dismissed)];
+            // The engine's permission hook carries no call id. The bridge
+            // matches the dialog to the running call and announces it under
+            // that call's id, which is what the Hub answers by.
+            Some("permission.open") => {
+                let Some(id) = string(object, "tool_use_id") else {
+                    return Vec::new();
+                };
+                let tool = string(object, "tool").unwrap_or_else(|| "this tool".to_owned());
+                return self.announce_bridge_request(PendingRequest {
+                    id,
+                    request_type: RequestType::Permission,
+                    // The same words the permission hook would give it, so
+                    // the dialog on the screen is found by either.
+                    prompt: object
+                        .get("input")
+                        .and_then(|input| input.get("description"))
+                        .and_then(Value::as_str)
+                        .filter(|text| !text.is_empty())
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| format!("Allow {tool}?")),
+                    // What the bridge can carry out. The labels Claude paints
+                    // replace these once the dialog is on the screen.
+                    choices: vec!["Yes".to_owned(), "No".to_owned()],
+                    questions: Vec::new(),
+                    screen_seen: false,
+                    announced_at: string(object, "timestamp"),
+                    bridge_call: true,
+                });
+            }
+            // Answered at the terminal, from Latch, or by nobody: the next
+            // dialog of a parallel batch is shown once the shown one closes.
+            Some("question.closed") | Some("permission.closed") => {
+                if let Some(closed) = string(object, "tool_use_id") {
+                    return self.close_request(&closed);
                 }
             }
             Some("hello") => {
@@ -1099,6 +1376,7 @@ impl JsonlConnector {
                 self.bridge_version = None;
                 self.turn_open = false;
                 self.commands = None;
+                return self.drop_waiting_requests();
             }
             _ => {}
         }
@@ -1195,9 +1473,20 @@ impl JsonlConnector {
             questions: Vec::new(),
             screen_seen: false,
             announced_at: string(object, "timestamp"),
+            bridge_call: false,
         };
-        self.pending_request = Some(request.clone());
-        vec![request_mutation(&request, RequestStatus::Pending)]
+        let mut mutations = Vec::new();
+        // The hook names no call, so a later dialog cannot wait behind this
+        // one; it replaces it, and the earlier item must not linger pending.
+        if let Some(previous) = self
+            .pending_request
+            .replace(request.clone())
+            .filter(|previous| previous.id != request.id)
+        {
+            mutations.push(request_mutation(&previous, RequestStatus::Dismissed));
+        }
+        mutations.push(request_mutation(&request, RequestStatus::Pending));
+        mutations
     }
 }
 
@@ -1595,6 +1884,56 @@ fn is_empty_composer(connector: &str, line: &str) -> bool {
         })
     })
 }
+/// Whether the bridge announced `request` before `other`. Bridge records
+/// carry millisecond timestamps taken as each dialog was raised; they may
+/// reach the sidecar out of order, since each is its own run of `latch`.
+fn announced_before(request: &PendingRequest, other: &PendingRequest) -> bool {
+    match (
+        request.announced_at.as_deref(),
+        other.announced_at.as_deref(),
+    ) {
+        (Some(request), Some(other)) if request.len() > 20 && other.len() > 20 => request < other,
+        _ => false,
+    }
+}
+
+/// Of several waiting requests, the one whose dialog Claude is painting: the
+/// one whose prompt is the last on the screen with numbered decisions
+/// beneath it. None when no prompt is on the screen, or when the request
+/// found shares its prompt with another, so the screen cannot tell them apart.
+fn painted_request<'a>(
+    screen: &str,
+    requests: impl Iterator<Item = &'a PendingRequest>,
+) -> Option<&'a PendingRequest> {
+    let lines: Vec<String> = screen.lines().map(str::to_lowercase).collect();
+    let requests: Vec<&PendingRequest> = requests.collect();
+    let mut painted: Option<(usize, &PendingRequest)> = None;
+    let mut is_ambiguous = false;
+    for request in &requests {
+        let prompt = request.prompt.to_lowercase();
+        if prompt.len() < 4 || visible_choices_with_keys(screen, &request.prompt).is_empty() {
+            continue;
+        }
+        let Some(line) = lines.iter().rposition(|line| line.contains(&prompt)) else {
+            continue;
+        };
+        match painted {
+            Some((last, _)) if line < last => {}
+            Some((last, _)) if line == last => is_ambiguous = true,
+            _ => {
+                painted = Some((line, request));
+                is_ambiguous = false;
+            }
+        }
+    }
+    let (_, request) = painted.filter(|_| !is_ambiguous)?;
+    let shared = requests
+        .iter()
+        .filter(|other| other.prompt.eq_ignore_ascii_case(&request.prompt))
+        .count();
+    (shared == 1).then_some(request)
+}
+
 fn screen_contains_request(screen: &str, request: &PendingRequest) -> bool {
     let screen = screen.to_lowercase();
     let prompt = request.prompt.to_lowercase();
@@ -1751,6 +2090,8 @@ impl Connector for JsonlConnector {
                 self.offset = 0;
                 self.forget_chain();
                 self.pending_request = None;
+                self.queued_requests.clear();
+                self.displaced_requests.clear();
                 self.tools.clear();
                 self.tool_summaries.clear();
                 self.tool_running = false;
@@ -1970,7 +2311,9 @@ impl Connector for JsonlConnector {
             return Ok(
                 match self.ask_bridge("answer_question", payload, deadline)? {
                     BridgeAnswer::Accepted => {
-                        self.pending_request = None;
+                        if let Some(answered) = request_id {
+                            self.close_request(answered);
+                        }
                         self.last_screen_refresh = None;
                         ApplyResult::Accepted { correlation: None }
                     }
@@ -2050,33 +2393,51 @@ impl Connector for JsonlConnector {
                     "submit_prompt"
                 })
             } else {
-                // The bridge answers a question by its call id, so the answer
-                // cannot land on another prompt and need not be one of the
-                // offered labels: free text and comma-joined multi-select
-                // answers are the tool's own. Multi-question requests require
-                // the structured answer map handled above.
-                self.pending_request
-                    .as_ref()
-                    .filter(|request| {
-                        request.request_type == RequestType::Question
+                match self.pending_request.as_ref() {
+                    // The bridge answers a question by its call id, so the
+                    // answer cannot land on another prompt and need not be
+                    // one of the offered labels: free text and comma-joined
+                    // multi-select answers are the tool's own. Multi-question
+                    // requests require the structured answer map handled above.
+                    Some(request)
+                        if request.request_type == RequestType::Question
                             && !request.prompt.is_empty()
-                            && (request.questions.len() == 1 || !request.prompt.contains('\n'))
-                    })
-                    .map(|request| {
+                            && (request.questions.len() == 1 || !request.prompt.contains('\n')) =>
+                    {
                         payload.insert("tool_use_id".to_owned(), Value::from(request.id.clone()));
                         payload.insert(
                             "answers".to_owned(),
                             serde_json::json!({ request.prompt.clone(): text }),
                         );
-                        "answer_question"
-                    })
+                        Some("answer_question")
+                    }
+                    // A permission the bridge announced is answered by its
+                    // call id with the two decisions the bridge can carry
+                    // out. A label that also writes a rule ("Yes, and don't
+                    // ask again") is the dialog's own and stays on the key path.
+                    Some(request)
+                        if request.request_type == RequestType::Permission
+                            && request.bridge_call =>
+                    {
+                        bridge_permission_decision(text).map(|decision| {
+                            payload
+                                .insert("tool_use_id".to_owned(), Value::from(request.id.clone()));
+                            payload.insert("decision".to_owned(), Value::from(decision));
+                            "answer_permission"
+                        })
+                    }
+                    _ => None,
+                }
             };
             if let Some(kind) = command {
                 match self.ask_bridge(kind, payload, remaining()?)? {
                     BridgeAnswer::Queued => return Ok(ApplyResult::Queued { correlation: None }),
                     BridgeAnswer::Accepted => {
-                        if action.id == ACTION_RESOLVE_REQUEST {
-                            self.pending_request = None;
+                        if let Some(answered) = (action.id == ACTION_RESOLVE_REQUEST)
+                            .then(|| self.pending_request.as_ref().map(|r| r.id.clone()))
+                            .flatten()
+                        {
+                            self.close_request(&answered);
                         }
                         self.screen_can_send = Some(false);
                         self.last_screen_refresh = None;
@@ -2119,31 +2480,18 @@ impl Connector for JsonlConnector {
                 self.control()?.submit(text, remaining()?)?;
             }
         } else {
-            let request = self.pending_request.as_ref().expect("checked above");
-            if !request
-                .choices
-                .iter()
-                .any(|choice| choice.eq_ignore_ascii_case(text))
-            {
-                return Ok(ApplyResult::Refused {
-                    reason:
-                        "the selected decision is not among the choices currently offered by Claude"
-                            .to_owned(),
-                });
-            }
-            if !screen_contains_request(&screen, request) {
-                return Ok(ApplyResult::Refused {
-                    reason: "the requested Claude prompt is no longer visible".to_owned(),
-                });
-            }
-            let Some(key) = visible_choice_key(&screen, &request.prompt, text) else {
-                return Ok(ApplyResult::Refused {
-                    reason: "the selected decision is no longer identifiable on the current Claude prompt"
-                        .to_owned(),
-                });
+            let key = match self.terminal_choice_key(&screen, text) {
+                Ok(key) => key,
+                Err(reason) => return Ok(ApplyResult::Refused { reason }),
             };
             self.control()?.key(&[key], remaining()?)?;
-            self.pending_request = None;
+            let answered = self
+                .pending_request
+                .as_ref()
+                .expect("checked above")
+                .id
+                .clone();
+            self.close_request(&answered);
         }
         self.screen_can_send = Some(false);
         self.last_screen_refresh = None;
@@ -2309,6 +2657,19 @@ fn bridge_commands(list: &[Value]) -> Vec<crate::conversation::AdvertisedCommand
         })
         .take(MAX_ADVERTISED_COMMANDS)
         .collect()
+}
+
+/// The bridge decision a permission label stands for, or none when the label
+/// is one only the dialog itself can honour.
+fn bridge_permission_decision(label: &str) -> Option<&'static str> {
+    let label = label.trim();
+    if label.eq_ignore_ascii_case("yes") || label.eq_ignore_ascii_case("allow") {
+        Some("allow")
+    } else if label.eq_ignore_ascii_case("no") || label.eq_ignore_ascii_case("deny") {
+        Some("deny")
+    } else {
+        None
+    }
 }
 
 fn bounded_chars(text: String, max_chars: usize) -> String {
@@ -3171,6 +3532,7 @@ mod tests {
             questions: Vec::new(),
             screen_seen: true,
             announced_at: None,
+            bridge_call: false,
         });
 
         let mutations = connector.observe_screen("finished\n› \n");
@@ -3199,6 +3561,7 @@ mod tests {
             questions: Vec::new(),
             screen_seen: false,
             announced_at: None,
+            bridge_call: false,
         });
 
         let mutations = connector.observe_screen(
@@ -3230,6 +3593,7 @@ mod tests {
             questions: Vec::new(),
             screen_seen: false,
             announced_at: Some("2026-09-22T07:03:52Z".to_owned()),
+            bridge_call: false,
         });
         let record = serde_json::json!({
             "type": "user",
@@ -4248,6 +4612,7 @@ mod tests {
             questions: Vec::new(),
             screen_seen: false,
             announced_at: None,
+            bridge_call: false,
         });
         let module = answer_next_bridge_command(&connector, "accepted");
         let result = connector
@@ -4292,6 +4657,7 @@ mod tests {
             questions: Vec::new(),
             screen_seen: true,
             announced_at: None,
+            bridge_call: false,
         });
         assert!(connector
             .apply(
@@ -4304,6 +4670,234 @@ mod tests {
             .is_err());
         assert!(!inbox.exists());
         assert_eq!(connector.bridge_version, Some(1));
+    }
+
+    fn resolve(request_id: &str, choice: &str) -> ConnectorAction {
+        ConnectorAction {
+            id: ACTION_RESOLVE_REQUEST.to_owned(),
+            payload: serde_json::json!({ "requestId": request_id, "choice": choice }),
+        }
+    }
+
+    fn bridge_permission() -> PendingRequest {
+        PendingRequest {
+            id: "toolu_bash".to_owned(),
+            request_type: RequestType::Permission,
+            prompt: "Create the marker file".to_owned(),
+            choices: vec![
+                "Yes".to_owned(),
+                "Yes, and don't ask again".to_owned(),
+                "No".to_owned(),
+            ],
+            questions: Vec::new(),
+            screen_seen: true,
+            announced_at: None,
+            bridge_call: true,
+        }
+    }
+
+    #[test]
+    fn a_bridge_permission_is_answered_by_its_call_id_and_rule_labels_stay_on_the_terminal() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut connector = bridged_connector(temp.path());
+        let inbox = connector
+            .home
+            .session(&connector.session)
+            .conversation_bridge_inbox();
+
+        connector.pending_request = Some(bridge_permission());
+        let module = answer_next_bridge_command(&connector, "accepted");
+        let result = connector
+            .apply(resolve("toolu_bash", "Yes"), Duration::from_secs(5))
+            .unwrap();
+        assert_eq!(result, ApplyResult::Accepted { correlation: None });
+        assert!(connector.pending_request.is_none());
+        let command = module.join().unwrap();
+        assert_eq!(command["kind"], "answer_permission");
+        assert_eq!(command["tool_use_id"], "toolu_bash");
+        assert_eq!(command["decision"], "allow");
+
+        connector.pending_request = Some(bridge_permission());
+        let module = answer_next_bridge_command(&connector, "refused");
+        let result = connector
+            .apply(resolve("toolu_bash", "no"), Duration::from_secs(5))
+            .unwrap();
+        assert!(matches!(result, ApplyResult::Refused { .. }));
+        assert_eq!(module.join().unwrap()["decision"], "deny");
+        // A refusal leaves the dialog where it was.
+        assert!(connector.pending_request.is_some());
+
+        // A label that also writes a rule is the dialog's own: it is never
+        // handed to the bridge. The key path then fails here for want of a
+        // kernel, which is the proof it was the path taken.
+        assert!(connector
+            .apply(
+                resolve("toolu_bash", "Yes, and don't ask again"),
+                Duration::from_secs(2)
+            )
+            .is_err());
+        assert_eq!(fs::read_dir(&inbox).unwrap().count(), 0);
+        assert_eq!(connector.bridge_version, Some(1));
+
+        // A permission the hook announced has no call id the bridge knows.
+        connector.pending_request = Some(PendingRequest {
+            bridge_call: false,
+            id: "permission-1".to_owned(),
+            ..bridge_permission()
+        });
+        assert!(connector
+            .apply(resolve("permission-1", "Yes"), Duration::from_secs(2))
+            .is_err());
+        assert_eq!(fs::read_dir(&inbox).unwrap().count(), 0);
+        assert_eq!(connector.bridge_version, Some(1));
+    }
+
+    #[test]
+    fn an_untaken_permission_answer_is_withdrawn_before_the_key_path_is_tried() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut connector = bridged_connector(temp.path());
+        let inbox = connector
+            .home
+            .session(&connector.session)
+            .conversation_bridge_inbox();
+        connector.pending_request = Some(bridge_permission());
+        // Nobody plays the module. The key path then fails for want of a
+        // kernel, and the request is still there to answer at the terminal.
+        assert!(connector
+            .apply(resolve("toolu_bash", "Yes"), Duration::from_secs(5))
+            .is_err());
+        assert_eq!(connector.bridge_version, None);
+        assert_eq!(fs::read_dir(&inbox).unwrap().count(), 0);
+        assert!(connector.pending_request.is_some());
+    }
+
+    /// The engine's permission hook carries no call id. The bridge announces
+    /// the dialog under the call's id; the hook for the same dialog must not
+    /// replace it, the transcript must not dismiss it, and the bridge closes it.
+    #[test]
+    fn the_bridge_announces_an_open_permission_under_its_call_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut connector = JsonlConnector::fixture("claude", dir.path().join("source.jsonl"));
+        observe_bridge(&mut connector, "hello", "2026-09-22T09:00:00.000Z");
+
+        let mut open = bridge_record("permission.open", "2026-09-22T09:00:01.000Z");
+        open["tool_use_id"] = Value::from("toolu_bash");
+        open["tool"] = Value::from("Bash");
+        open["input"] = serde_json::json!({
+            "command": "touch marker",
+            "description": "Create the marker file",
+        });
+        let mutations = connector.claude_record(open.as_object().unwrap(), "hook", 2);
+        assert!(matches!(
+            mutations.as_slice(),
+            [ConnectorMutation::Upsert(ObservedItem {
+                kind: ConversationItemKind::Request {
+                    request_id,
+                    request_type: RequestType::Permission,
+                    prompt,
+                    choices,
+                    status: RequestStatus::Pending,
+                    ..
+                },
+                ..
+            })] if request_id == "toolu_bash" && prompt == "Create the marker file" && choices == &["Yes", "No"]
+        ));
+        assert_eq!(connector.state().phase, ConversationPhase::AwaitingInput);
+        assert!(connector.state().resolve_request.enabled);
+
+        let hook = serde_json::json!({
+            "hook_event_name": "PermissionRequest",
+            "latch_observer_version": 2,
+            "tool_name": "Bash",
+            "tool_input": { "command": "touch marker", "description": "Create the marker file" },
+            "prompt_id": "prompt-1",
+            "timestamp": "2026-09-22T09:00:01.100Z",
+        });
+        assert!(connector
+            .claude_record(hook.as_object().unwrap(), "hook", 3)
+            .is_empty());
+        assert_eq!(connector.pending_request.as_ref().unwrap().id, "toolu_bash");
+
+        let later = serde_json::json!({
+            "type": "user",
+            "uuid": "later-user-message",
+            "timestamp": "2026-09-22T09:00:02.000Z",
+            "message": { "content": "Carry on." }
+        });
+        let mutations = connector.claude_record(later.as_object().unwrap(), "user", 4);
+        assert!(!mutations.iter().any(|mutation| matches!(
+            mutation,
+            ConnectorMutation::Upsert(ObservedItem {
+                kind: ConversationItemKind::Request {
+                    status: RequestStatus::Dismissed,
+                    ..
+                },
+                ..
+            })
+        )));
+        assert_eq!(connector.pending_request.as_ref().unwrap().id, "toolu_bash");
+
+        let mut closed = bridge_record("permission.closed", "2026-09-22T09:00:09.000Z");
+        closed["tool_use_id"] = Value::from("toolu_bash");
+        let mutations = connector.claude_record(closed.as_object().unwrap(), "hook", 5);
+        assert!(matches!(
+            mutations.as_slice(),
+            [ConnectorMutation::Upsert(ObservedItem {
+                kind: ConversationItemKind::Request {
+                    status: RequestStatus::Dismissed,
+                    ..
+                },
+                ..
+            })]
+        ));
+        assert!(connector.pending_request.is_none());
+    }
+
+    #[test]
+    fn a_permission_the_hook_announced_first_is_replaced_by_its_call_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut connector = JsonlConnector::fixture("claude", dir.path().join("source.jsonl"));
+        observe_bridge(&mut connector, "hello", "2026-09-22T09:00:00.000Z");
+
+        let hook = serde_json::json!({
+            "hook_event_name": "PermissionRequest",
+            "latch_observer_version": 2,
+            "tool_name": "Edit",
+            "tool_input": { "file_path": "src/main.rs" },
+            "prompt_id": "prompt-1",
+            "timestamp": "2026-09-22T09:00:01.000Z",
+        });
+        connector.claude_record(hook.as_object().unwrap(), "hook", 2);
+        assert_eq!(connector.pending_request.as_ref().unwrap().id, "prompt-1");
+
+        let mut open = bridge_record("permission.open", "2026-09-22T09:00:01.050Z");
+        open["tool_use_id"] = Value::from("toolu_edit");
+        open["tool"] = Value::from("Edit");
+        open["input"] = serde_json::json!({ "file_path": "src/main.rs" });
+        let mutations = connector.claude_record(open.as_object().unwrap(), "hook", 3);
+        assert!(matches!(
+            mutations.as_slice(),
+            [
+                ConnectorMutation::Upsert(ObservedItem {
+                    kind: ConversationItemKind::Request {
+                        request_id: dismissed,
+                        status: RequestStatus::Dismissed,
+                        ..
+                    },
+                    ..
+                }),
+                ConnectorMutation::Upsert(ObservedItem {
+                    kind: ConversationItemKind::Request {
+                        request_id: pending,
+                        prompt,
+                        status: RequestStatus::Pending,
+                        ..
+                    },
+                    ..
+                })
+            ] if dismissed == "prompt-1" && pending == "toolu_edit" && prompt == "Allow Edit?"
+        ));
+        assert!(connector.pending_request.as_ref().unwrap().bridge_call);
     }
 
     /// While a question is open the transcript does not hold its call yet.
@@ -4452,5 +5046,453 @@ mod tests {
         assert!(connector.bridge_version.is_none());
         assert!(connector.pending_request.is_some());
         assert!(!connector.state().resolve_request.enabled);
+    }
+
+    fn permission_open(id: &str, marker: &str, at: &str) -> Value {
+        let mut open = bridge_record("permission.open", at);
+        open["tool_use_id"] = Value::from(id);
+        open["tool"] = Value::from("Bash");
+        open["input"] = serde_json::json!({
+            "command": format!("touch {marker}"),
+            "description": format!("Create marker {marker}"),
+        });
+        open
+    }
+
+    fn permission_closed(id: &str, answered_by: &str, at: &str) -> Value {
+        let mut closed = bridge_record("permission.closed", at);
+        closed["tool_use_id"] = Value::from(id);
+        closed["answered_by"] = Value::from(answered_by);
+        closed
+    }
+
+    /// Claude's permission dialog for one call of the batch, as painted, with
+    /// whatever the screen still holds above it.
+    fn permission_dialog(above: &str, marker: &str) -> String {
+        format!(
+            "{above}\nBash command\n  touch {marker}\n  Create marker {marker}\nDo you want to proceed?\n❯ 1. Yes\n  2. Yes, and don't ask again for touch commands in this project\n  3. No, and tell Claude what to do differently (esc)"
+        )
+    }
+
+    /// Plays the Hub: the observation connector's mutations go into the
+    /// projection clients read, and every action runs on a separate action
+    /// connector restored from the latest checkpoint first.
+    struct Batch {
+        observer: JsonlConnector,
+        actor: JsonlConnector,
+        projection: super::super::super::Projection,
+        ordinal: u64,
+    }
+
+    impl Batch {
+        fn new(home: &std::path::Path) -> Self {
+            let observer = bridged_connector(home);
+            let mut actor = JsonlConnector::fixture("claude", observer.source.clone().unwrap());
+            actor.home = observer.home.clone();
+            actor.session = observer.session.clone();
+            let projection = super::super::super::Projection::new(
+                super::super::super::OperationEpoch::new("fixture"),
+                ConversationState::starting(Some(observer.identity())),
+            );
+            Self {
+                observer,
+                actor,
+                projection,
+                ordinal: 0,
+            }
+        }
+
+        fn publish(&mut self, mutations: Vec<ConnectorMutation>) -> Vec<ConnectorMutation> {
+            for mutation in mutations.iter().cloned() {
+                self.projection.apply_connector(mutation).unwrap();
+            }
+            mutations
+        }
+
+        fn hook(&mut self, record: Value) -> Vec<ConnectorMutation> {
+            self.ordinal += 1;
+            let mutations =
+                self.observer
+                    .claude_record(record.as_object().unwrap(), "hook", self.ordinal);
+            self.publish(mutations)
+        }
+
+        fn screen(&mut self, screen: &str) -> Vec<ConnectorMutation> {
+            let mutations = self.observer.observe_screen(screen);
+            self.publish(mutations)
+        }
+
+        fn act(&mut self, action: ConnectorAction) -> ApplyResult {
+            let checkpoint = self.observer.checkpoint_snapshot().unwrap();
+            self.actor.restore_checkpoint(&checkpoint).unwrap();
+            self.actor.apply(action, Duration::from_secs(5)).unwrap()
+        }
+
+        fn key_for(&mut self, screen: &str, choice: &str) -> std::result::Result<String, String> {
+            let checkpoint = self.observer.checkpoint_snapshot().unwrap();
+            self.actor.restore_checkpoint(&checkpoint).unwrap();
+            self.actor.terminal_choice_key(screen, choice)
+        }
+
+        /// The request clients are shown, which must be the one the
+        /// connector would answer.
+        fn shown(&self) -> Option<String> {
+            let shown = self.projection.state().pending_request;
+            assert_eq!(
+                shown,
+                self.observer.pending_request.as_ref().map(|r| r.id.clone()),
+                "the Hub presents the request the connector answers"
+            );
+            shown
+        }
+    }
+
+    fn surfaced(mutations: &[ConnectorMutation]) -> Vec<(String, RequestStatus)> {
+        mutations
+            .iter()
+            .filter_map(|mutation| match mutation {
+                ConnectorMutation::Upsert(ObservedItem {
+                    kind:
+                        ConversationItemKind::Request {
+                            request_id, status, ..
+                        },
+                    ..
+                }) => Some((request_id.clone(), status.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A parallel batch raises every dialog at once. The Hub shows one at a
+    /// time, oldest first or whichever Claude paints, surfaces the next when
+    /// one closes, and answers each by its own call id from Latch or leaves
+    /// it to the terminal, in any order.
+    #[test]
+    fn a_batch_of_three_permission_dialogs_is_answered_in_mixed_order() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut batch = Batch::new(temp.path());
+
+        // The bridge's records arrive out of order: each is its own run of
+        // `latch`. The classic hook's own records for the same dialogs
+        // arrive among them and are ignored.
+        assert_eq!(
+            surfaced(&batch.hook(permission_open("toolu_a", "a", "2026-09-22T09:00:01.001Z"))),
+            [("toolu_a".to_owned(), RequestStatus::Pending)]
+        );
+        for (record, marker) in [
+            (
+                permission_open("toolu_c", "c", "2026-09-22T09:00:01.003Z"),
+                None,
+            ),
+            (serde_json::Value::Null, Some("b")),
+            (
+                permission_open("toolu_b", "b", "2026-09-22T09:00:01.002Z"),
+                None,
+            ),
+            (serde_json::Value::Null, Some("c")),
+        ] {
+            let record = match marker {
+                Some(marker) => serde_json::json!({
+                    "hook_event_name": "PermissionRequest",
+                    "latch_observer_version": 2,
+                    "tool_name": "Bash",
+                    "tool_input": {
+                        "command": format!("touch {marker}"),
+                        "description": format!("Create marker {marker}"),
+                    },
+                    "prompt_id": format!("prompt-{marker}"),
+                    "timestamp": "2026-09-22T09:00:01Z",
+                }),
+                None => record,
+            };
+            assert!(
+                batch.hook(record).is_empty(),
+                "only the shown dialog reaches clients"
+            );
+        }
+        assert_eq!(batch.shown().as_deref(), Some("toolu_a"));
+        let queued: Vec<_> = batch
+            .observer
+            .queued_requests
+            .iter()
+            .map(|request| request.id.as_str())
+            .collect();
+        assert_eq!(
+            queued,
+            ["toolu_b", "toolu_c"],
+            "waiting in the order raised"
+        );
+        assert_eq!(
+            batch.observer.state().phase,
+            ConversationPhase::AwaitingInput
+        );
+
+        // Claude paints the oldest. Its labels replace the seeded ones, and a
+        // rule-writing label takes the screen-verified key path.
+        let screen_a = permission_dialog("Earlier output", "a");
+        batch.screen(&screen_a);
+        assert_eq!(batch.shown().as_deref(), Some("toolu_a"));
+        assert_eq!(
+            batch.key_for(
+                &screen_a,
+                "Yes, and don't ask again for touch commands in this project"
+            ),
+            Ok("2".to_owned())
+        );
+
+        // 1. The terminal answers A. The bridge reports it and B surfaces.
+        let mutations = batch.hook(permission_closed(
+            "toolu_a",
+            "terminal",
+            "2026-09-22T09:00:04.000Z",
+        ));
+        assert_eq!(
+            surfaced(&mutations),
+            [
+                ("toolu_a".to_owned(), RequestStatus::Dismissed),
+                ("toolu_b".to_owned(), RequestStatus::Pending),
+            ]
+        );
+        assert_eq!(batch.shown().as_deref(), Some("toolu_b"));
+
+        // Claude paints C next, B's text still in the scrollback above it.
+        // The key path for B refuses: a key would land in C's dialog.
+        let screen_c = permission_dialog(
+            "Bash command\n  touch b\n  Create marker b\nEarlier output",
+            "c",
+        );
+        assert!(batch.key_for(&screen_c, "Yes").is_err());
+        // The screen then shows clients the dialog that is really open.
+        assert_eq!(
+            surfaced(&batch.screen(&screen_c)),
+            [("toolu_c".to_owned(), RequestStatus::Pending)]
+        );
+        assert_eq!(batch.shown().as_deref(), Some("toolu_c"));
+        assert_eq!(batch.key_for(&screen_c, "Yes"), Ok("1".to_owned()));
+
+        // 2. Latch denies C by its call id; the module closes it.
+        let module = answer_next_bridge_command(&batch.actor, "accepted");
+        assert_eq!(
+            batch.act(resolve("toolu_c", "No")),
+            ApplyResult::Accepted { correlation: None }
+        );
+        let command = module.join().unwrap();
+        assert_eq!(command["kind"], "answer_permission");
+        assert_eq!(command["tool_use_id"], "toolu_c");
+        assert_eq!(command["decision"], "deny");
+        let mutations = batch.hook(permission_closed(
+            "toolu_c",
+            "latch",
+            "2026-09-22T09:00:06.000Z",
+        ));
+        assert_eq!(
+            surfaced(&mutations),
+            [("toolu_c".to_owned(), RequestStatus::Dismissed)],
+            "B is pending at the Hub already"
+        );
+        assert_eq!(batch.shown().as_deref(), Some("toolu_b"));
+
+        // A stale answer aimed at C is refused without reaching the agent.
+        assert!(matches!(
+            batch.act(resolve("toolu_c", "Yes")),
+            ApplyResult::Refused { .. }
+        ));
+
+        // 3. Latch allows B by its call id; the module closes it and nothing
+        // is left waiting.
+        let screen_b = permission_dialog("Earlier output", "b");
+        batch.screen(&screen_b);
+        let module = answer_next_bridge_command(&batch.actor, "accepted");
+        assert_eq!(
+            batch.act(resolve("toolu_b", "Yes")),
+            ApplyResult::Accepted { correlation: None }
+        );
+        assert_eq!(module.join().unwrap()["decision"], "allow");
+        let mutations = batch.hook(permission_closed(
+            "toolu_b",
+            "latch",
+            "2026-09-22T09:00:08.000Z",
+        ));
+        assert_eq!(
+            surfaced(&mutations),
+            [("toolu_b".to_owned(), RequestStatus::Dismissed)]
+        );
+        assert_eq!(batch.shown(), None);
+        assert!(!batch.observer.has_waiting_requests());
+        assert_ne!(
+            batch.observer.state().phase,
+            ConversationPhase::AwaitingInput
+        );
+    }
+
+    /// The other mix: Latch answers the shown dialog first, the terminal then
+    /// answers one that was never shown, and a rule label from Latch for the
+    /// last takes the key path on the dialog Claude paints.
+    #[test]
+    fn a_waiting_dialog_answered_at_the_terminal_never_reaches_clients() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut batch = Batch::new(temp.path());
+        for (id, marker, at) in [
+            ("toolu_a", "a", "2026-09-22T09:00:01.001Z"),
+            ("toolu_b", "b", "2026-09-22T09:00:01.002Z"),
+            ("toolu_c", "c", "2026-09-22T09:00:01.003Z"),
+        ] {
+            batch.hook(permission_open(id, marker, at));
+        }
+
+        // 1. Latch allows A by its call id.
+        let module = answer_next_bridge_command(&batch.actor, "accepted");
+        assert_eq!(
+            batch.act(resolve("toolu_a", "Yes")),
+            ApplyResult::Accepted { correlation: None }
+        );
+        assert_eq!(module.join().unwrap()["tool_use_id"], "toolu_a");
+        // The action connector already looks past A; clients follow the
+        // bridge's own close.
+        assert_eq!(
+            batch.actor.pending_request.as_ref().map(|r| r.id.as_str()),
+            Some("toolu_b")
+        );
+        let mutations = batch.hook(permission_closed(
+            "toolu_a",
+            "latch",
+            "2026-09-22T09:00:03.000Z",
+        ));
+        assert_eq!(
+            surfaced(&mutations),
+            [
+                ("toolu_a".to_owned(), RequestStatus::Dismissed),
+                ("toolu_b".to_owned(), RequestStatus::Pending),
+            ]
+        );
+
+        // 2. The terminal answers C while B is shown: C was never shown, so
+        // clients have nothing to dismiss, and B stays.
+        assert!(batch
+            .hook(permission_closed(
+                "toolu_c",
+                "terminal",
+                "2026-09-22T09:00:04.000Z"
+            ))
+            .is_empty());
+        assert_eq!(batch.shown().as_deref(), Some("toolu_b"));
+        assert!(!batch.observer.has_waiting_requests());
+
+        // 3. With B the only dialog, a rule label takes the key path.
+        let screen_b = permission_dialog("Earlier output", "b");
+        batch.screen(&screen_b);
+        assert_eq!(
+            batch.key_for(
+                &screen_b,
+                "Yes, and don't ask again for touch commands in this project"
+            ),
+            Ok("2".to_owned())
+        );
+        let mutations = batch.hook(permission_closed(
+            "toolu_b",
+            "terminal",
+            "2026-09-22T09:00:06.000Z",
+        ));
+        assert_eq!(
+            surfaced(&mutations),
+            [("toolu_b".to_owned(), RequestStatus::Dismissed)]
+        );
+        assert_eq!(batch.shown(), None);
+    }
+
+    /// Dialogs whose prompts the screen cannot tell apart: the oldest stays
+    /// shown and is still answered by call id, but no key is pressed.
+    #[test]
+    fn dialogs_the_screen_cannot_tell_apart_are_answered_only_by_call_id() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut batch = Batch::new(temp.path());
+        for (id, at) in [
+            ("toolu_a", "2026-09-22T09:00:01.001Z"),
+            ("toolu_b", "2026-09-22T09:00:01.002Z"),
+        ] {
+            batch.hook(permission_open(id, "same", at));
+        }
+        let screen = permission_dialog("Earlier output", "same");
+        assert!(batch.screen(&screen).is_empty());
+        assert_eq!(batch.shown().as_deref(), Some("toolu_a"));
+        assert!(batch.key_for(&screen, "Yes").is_err());
+
+        let module = answer_next_bridge_command(&batch.actor, "accepted");
+        assert_eq!(
+            batch.act(resolve("toolu_a", "Yes")),
+            ApplyResult::Accepted { correlation: None }
+        );
+        assert_eq!(module.join().unwrap()["tool_use_id"], "toolu_a");
+    }
+
+    /// The queue survives a Hub checkpoint, and leaves with the bridge: only
+    /// the bridge says when a waiting dialog closes.
+    #[test]
+    fn waiting_dialogs_survive_a_checkpoint_and_leave_with_the_bridge() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut batch = Batch::new(temp.path());
+        for (id, marker, at) in [
+            ("toolu_a", "a", "2026-09-22T09:00:01.001Z"),
+            ("toolu_b", "b", "2026-09-22T09:00:01.002Z"),
+            ("toolu_c", "c", "2026-09-22T09:00:01.003Z"),
+        ] {
+            batch.hook(permission_open(id, marker, at));
+        }
+        // C is painted, so A waits displaced and still pending at the Hub.
+        batch.screen(&permission_dialog("Earlier output", "c"));
+        assert_eq!(batch.shown().as_deref(), Some("toolu_c"));
+
+        let checkpoint = batch.observer.checkpoint_snapshot().unwrap();
+        let mut restored =
+            JsonlConnector::fixture("claude", batch.observer.source.clone().unwrap());
+        restored.restore_checkpoint(&checkpoint).unwrap();
+        assert_eq!(restored.pending_request, batch.observer.pending_request);
+        assert_eq!(restored.queued_requests, batch.observer.queued_requests);
+        assert_eq!(
+            restored.displaced_requests,
+            batch.observer.displaced_requests
+        );
+        // A checkpoint from before the queue existed still restores.
+        let old: RuntimeCheckpoint = serde_json::from_str(
+            r#"{"pending_request":null,"tools":{},"tool_running":false,"last_state":null,"screen_can_send":null}"#,
+        )
+        .unwrap();
+        assert!(old.queued_requests.is_empty() && old.displaced_requests.is_empty());
+
+        let mut end = bridge_record("session.end", "2026-09-22T09:00:09.000Z");
+        end["reason"] = Value::from("prompt_input_exit");
+        assert_eq!(
+            surfaced(&batch.hook(end)),
+            [("toolu_a".to_owned(), RequestStatus::Dismissed)]
+        );
+        assert!(!batch.observer.has_waiting_requests());
+        assert_eq!(batch.shown().as_deref(), Some("toolu_c"));
+    }
+
+    /// Without a bridge the hook names no call, so a second dialog replaces
+    /// the first rather than leaving it pending at the Hub for good.
+    #[test]
+    fn a_hook_permission_replaced_by_another_is_dismissed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut connector = JsonlConnector::fixture("claude", dir.path().join("source.jsonl"));
+        let hook = |prompt: &str| {
+            serde_json::json!({
+                "hook_event_name": "PermissionRequest",
+                "latch_observer_version": 2,
+                "tool_name": "Bash",
+                "tool_input": { "command": "true", "description": prompt },
+                "prompt_id": prompt,
+                "timestamp": "2026-09-22T09:00:01Z",
+            })
+        };
+        connector.claude_record(hook("first").as_object().unwrap(), "hook", 1);
+        let mutations = connector.claude_record(hook("second").as_object().unwrap(), "hook", 2);
+        assert_eq!(
+            surfaced(&mutations),
+            [
+                ("first".to_owned(), RequestStatus::Dismissed),
+                ("second".to_owned(), RequestStatus::Pending),
+            ]
+        );
     }
 }

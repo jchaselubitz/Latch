@@ -34,7 +34,7 @@ and passes each to Claude with `--plugin-dir`:
 | Plugin | Kind | Role |
 | --- | --- | --- |
 | `latch-conversation-observer-v2` | command hooks | Source binding, permission requests, `Stop`. Unchanged. |
-| `latch-conversation-bridge-v1` | function hooks | Everything below. |
+| `latch-conversation-bridge-v2` | function hooks | Everything below. |
 
 They are separate on purpose. A Claude build that cannot load a hooks module
 skips the bridge and still runs the observer. Set `LATCH_CLAUDE_BRIDGE=0` in
@@ -78,6 +78,8 @@ is not retried.
 | `turn.complete` | `turn_id`, `reason` (`answer`, `aborted`, `refusal`, `error`), `duration_ms` | Closes the turn, including an interrupted one. Main loop only. |
 | `question.open` | `tool_use_id`, `questions[]` with options, descriptions, `multi_select` | Announces a question under its real call id. |
 | `question.closed` | `tool_use_id`, `answered_by` (`latch`, `terminal`, `nobody`) | Dismisses it. |
+| `permission.open` | `tool_use_id`, `tool`, `input` (the call's named scalar arguments, each bounded to 1000 characters) | Announces an open permission dialog under the call's real id. |
+| `permission.closed` | `tool_use_id`, `answered_by` (`latch`, `terminal`, `nobody`) | Dismisses it. |
 | `command.result` | `command_id`, `outcome` (`accepted`, `queued`, `refused`), `detail` | Answers one command. |
 | `session.end` | `reason` | Retires the bridge, except on `/clear`, which keeps the process. |
 
@@ -93,10 +95,25 @@ reopening a closed turn.
 | `submit_prompt` | `text` | `$.prompt.submit({ text, asUser: true })`. The model reads it as the person's own words. Entered while a turn runs, it is reported `queued`. |
 | `abort_turn` | none | `$.turn.abort` on the running turn. |
 | `answer_question` | `tool_use_id`, `answers` (question text to answer) | Settles the open `AskUserQuestion` call with that id. |
+| `answer_permission` | `tool_use_id`, `decision` (`allow` or `deny`) | Settles the open permission dialog for the call with that id. |
 
-The question hook races the two places an answer can come from. The engine's
-dialog still opens at the terminal. Whichever answers first settles the call,
-and an answer from Latch abandons the dialog beneath, so both can never answer.
+The question and permission hooks race the two places an answer can come from.
+The engine's dialog still opens at the terminal. Whichever answers first
+settles the call, and an answer from Latch abandons the dialog beneath, so
+both can never answer.
+
+A permission is the engine's to grant, and a hook cannot settle an open
+dialog as allowed. The module hooks every `tool.call` of the model's. When
+the engine raises its `PermissionRequest` hook for the call (which it does
+only as a dialog opens, so a call a rule or the mode settles is never
+announced), the module matches the dialog to the running call by tool and
+arguments and reports `permission.open` under the call's id. A `deny` from
+Latch is returned with the dialog open. An `allow` abandons the engine's path
+for the call and runs the same call again through `$.tool.call` with a
+`consent` line; the module's own `tool.check` hook approves that one re-run
+and nothing else, because the engine's `next.origin` names this plugin for
+it and the engine for the model's own calls. The re-run's result is returned
+as the original call's, so the transcript shows one call with one result.
 
 ## What the Hub does with it today
 
@@ -116,7 +133,12 @@ and an answer from Latch abandons the dialog beneath, so both can never answer.
   without a catalog, a session without a bridge, or a bridge that has ended
   leaves the key absent, which clients read as unknown, never as none. `/clear`
   keeps the loaded module and so keeps the catalog. The mobile store exposes
-  it as `commands`; no composer surface uses it yet.
+  it as `commands`. In LatchMobile, a draft beginning with `/` offers matching
+  command names with their descriptions and sources. Picking one inserts
+  `/name ` into the draft without sending it; typing arguments hides the list.
+  An absent or empty catalog offers nothing. The list is disabled while the
+  agent works, and both selection and sending a slash draft require a connected,
+  send-enabled idle turn. Ordinary bridge messages can still be queued mid-turn.
 - **Sending.** With a live bridge, `send_message` goes through `submit_prompt`
   and no longer needs an empty composer. A text beginning with `/` still goes
   to the terminal, because the engine runs a slash command only from its own
@@ -139,15 +161,55 @@ and an answer from Latch abandons the dialog beneath, so both can never answer.
   answers are refused. Structured answers require a live bridge and never
   fall back to terminal keys. An untaken answer disables bridge answering;
   a taken command with no result remains ambiguous and is never resent.
-- **Permissions** are unchanged. They are still announced by the permission
-  hook and answered by the visible numbered key.
+- **Permissions.** With a live bridge the pending request is the call itself:
+  `permission.open` announces it under its real call id, with the same prompt
+  the permission hook would give it (the input's `description`, else
+  "Allow <tool>?") and the choices `Yes` and `No`. The engine's permission
+  hook for the same dialog is ignored while that request is pending, and a
+  hook announced first is replaced by the call id. Transcript records do not
+  dismiss it; `permission.closed` does, as does the dialog leaving the
+  screen. Once the dialog is painted the labels Claude shows replace the
+  seeded choices. `resolve_request` with `Yes` or `No` (`Allow` and `Deny`
+  are read the same way) goes through `answer_permission` by call id, under
+  the interact grant and the same deduplicated operation receipts as every
+  other action. Any other label, such as "Yes, and don't ask again", writes a
+  rule only the dialog can write, so it is never handed to the bridge and
+  takes the screen-verified key path as before. A permission the hook
+  announced without a bridge call id also stays on the key path.
+- **Several dialogs at once.** A parallel batch can raise several dialogs
+  together (see [When the engine raises the permission hook](#when-the-engine-raises-the-permission-hook)).
+  The Hub keeps every request the bridge announces, by call id, and shows one
+  at a time. The others wait behind it in the order the engine raised them,
+  by the bridge's millisecond timestamps rather than by arrival, because each
+  record is its own run of `latch` and they can reach the sidecar out of
+  order. Clients see nothing of a waiting request until it is shown. The
+  shown request is the oldest, unless the screen proves Claude is painting a
+  waiting one: then that one is shown, and the one it displaced stays
+  pending at the Hub until it is shown again or closes. When the shown
+  request closes, by `permission.closed`, by `question.closed`, or by an
+  answer from Latch, the request displaced most recently is shown again,
+  else the oldest still waiting. A waiting request that closes first, for
+  instance one answered at the terminal, is dropped by its id; one clients
+  never saw leaves no trace. The classic hook's own records for the batch
+  are ignored while a bridge request is shown. Only the bridge says when a
+  waiting request closes, so when the bridge ends they are forgotten and
+  left to the terminal. The queue survives a Hub checkpoint.
+- **Keys with several dialogs.** The key path presses a number into whatever
+  dialog is on the screen, so with other requests waiting it requires the
+  screen to prove the shown request's dialog is the one painted: its prompt
+  is the last on the screen with numbered decisions beneath it, and no other
+  waiting request shares that prompt. Otherwise the label is refused with a
+  reason, and `Yes` and `No` still go through the bridge by call id. Only the
+  painted request's labels replace the seeded `Yes` and `No`.
 
-Sending and legacy single-choice answers fall back to the terminal path when the module does
-not take the command, and the connector then treats the bridge as gone. Sending
-through the terminal still requires an idle turn and an empty composer.
-`cancel_turn` never falls back to the terminal: an untaken command disables the
-bridge and is refused. Commands taken without a result remain ambiguous and
-are never retried automatically.
+Sending, legacy single-choice answers, and permission answers fall back to
+the terminal path when the module does not take the command, and the
+connector then treats the bridge as gone. Sending through the terminal still
+requires an idle turn and an empty composer; a permission answer still
+requires the dialog on the screen and the chosen label among its visible
+numbered decisions. `cancel_turn` never falls back to the terminal: an
+untaken command disables the bridge and is refused. Commands taken without a
+result remain ambiguous and are never retried automatically.
 
 ## Planned features and the hook that serves each
 
@@ -159,22 +221,31 @@ are never retried automatically.
 | Multi-select answers | `answer_question` | Implemented: `multiSelect` reaches clients, and mobile submits comma-joined selected labels plus optional free text. |
 | Several questions in one call | `answer_question` takes a map | Implemented: structured questions reach clients and `resolve_request.answers` supplies one answer per question. |
 | Option descriptions on question cards | `question.open` | Implemented in the contract and mobile form. |
-| Advertised agent commands | `hello.commands` | In the contract as `state.commands` while the bridge is live. A composer surface that offers them is not built. |
+| Advertised agent commands | `hello.commands` | In the contract as `state.commands` while the bridge is live. LatchMobile offers filtered slash completions with descriptions and sources; selection inserts the name into the draft and requires an idle turn. |
 | Send while the agent works | `submit_prompt` reports `queued` | Implemented for a live bridge. Queued sends carry `queued` in their operation receipt and message status until transcript observation reconciles them. Slash commands still require an idle terminal. |
-| Permission answers by request id | `tool.check` and `tool.call` | Mechanics proven in the engine's test kit by the probe under `docs/experiments/claude-permission-probe`; the live dialog is still to be watched. See below. |
+| Permission answers by request id | `classic.PermissionRequest`, `tool.call`, `tool.check` | Implemented: `permission.open` carries the call id, and `answer_permission` settles the dialog. Rule-writing labels stay on the key path. The live run that cleared it is recorded under [the permission probe](#the-permission-probe). |
+| Several permission dialogs from one batch | `permission.open`, `permission.closed` per call id | Implemented in the Hub: an ordered queue by call id, one shown at a time, the next shown as each closes. No contract change: clients see one pending request, as before. |
 | Streaming assistant text | `turn.step` | Not built. See below. |
 
 ## Known limits
 
-- **Permissions.** `tool.check` resolves to the engine's verdict before the
-  dialog opens, and a hook has no way to settle an open permission dialog as
-  allowed. A `tool.call` hook can end the dialog with a denial. Allowing means
-  abandoning the engine's path for the call and running the call again through
-  `$.tool.call` under a one-shot approving `tool.check`. The probe described
-  under [the permission probe](#the-permission-probe) shows the engine's own
-  test kit carrying that out; what it cannot show is the dialog itself closing
-  when the hook answers around it. Until a person watches that once,
-  permissions stay on the screen-verified path.
+- **Permissions.** An allow from Latch is a second run of the call under a
+  new id, not the dialog's own "Yes": the engine records the re-run as the
+  original call's result, and the person reads one call in the transcript,
+  but the engine's own log of the abandoned path says the call was
+  rejected. Only `allow` and `deny` are carried; a label that also writes a
+  permission rule is the dialog's and stays on the key path. Several dialogs
+  from one batch are shown one at a time; clients are not told how many
+  wait behind the shown one, and a rule-writing label is refused while the
+  screen cannot tell the waiting dialogs apart. A waiting request the screen
+  painted after clients were already shown it cannot be brought back in
+  front of a newer one, because the Hub presents the newest pending request;
+  its key path is refused until it is the shown one again. A
+  dialog raised in a subagent's loop is announced like the main loop's. In
+  auto mode the classifier settles an `ask` before any dialog, so nothing is
+  announced unless it escalates. The engine's `PermissionRequest` hook
+  carries no call id, so the dialog is matched to the running call by tool
+  and arguments, with the only waiting call of that tool as the fallback.
 - **Streaming.** A `turn.step` hook sits on every model request of the session.
   A fault there costs more than the feature is worth until the rich contract
   has somewhere to put a streaming row.
@@ -190,6 +261,35 @@ are never retried automatically.
 
 - **Existing sessions** keep the plugins they were launched with. Only sessions
   created by a `latch` that has the bridge gain it.
+
+## When the engine raises the permission hook
+
+Read from the installed engine, Claude Code 2.1.292, on 7 October 2026.
+The engine's type kit draws no dialog, so it cannot show this, and no
+Latch session had yet recorded a permission.
+
+- The tool executor runs consecutive calls whose tool is concurrency-safe
+  for that input together, and every other call alone, once the calls
+  running before it have finished. A call's permission check is part of
+  running it.
+- A call whose check reaches the ask path builds its dialog request and, in
+  the same step, starts the `PermissionRequest` hooks, before the dialog is
+  queued for the screen. The hook does not wait for the dialog to be
+  painted.
+
+So a batch of concurrency-safe calls that each need the person (reads
+outside the workspace, `WebFetch`, read-only `Bash`, read-only MCP tools)
+raises the hook for every call at once, and the bridge announces each, while
+only the first dialog is on the screen. A batch of calls that are not
+concurrency-safe (`Bash` that writes, `Edit`, `Write`) raises one dialog at a
+time: the next call's check runs only after the previous call settled, which
+for a call waiting on its dialog means after that dialog was answered. Both
+are covered by the queue above. The bridge's own test,
+`a parallel batch announces every dialog under its own call id`, raises
+three dialogs together and answers them from Latch and the terminal in mixed
+order. Watching it live needs a batch of concurrency-safe calls that each
+need the person, for instance three `WebFetch` calls to different hosts that
+no rule allows.
 
 ## The permission probe
 
@@ -221,12 +321,25 @@ the allow path runs the tool once more under a new call id and returns its
 result as the original call's; the one-shot approval is read by `tool.check`
 exactly once; the deny path ends the call while the engine's path is still
 open. The kit reaches the test's own `tool.call` without raising `tool.check`
-and draws no dialog, so two things are still unverified in a live session:
-that the engine's re-run reads the module's approving verdict rather than
-asking again, and that the abandoned dialog leaves the screen. The question
-hook's dialog does leave the screen when the hook answers around it, which is
-the same mechanism, so the expectation is that it works. It has not been
-watched for a permission dialog.
+and draws no dialog, so two things needed a live session: that the engine's
+re-run reads the module's approving verdict rather than asking again, and
+that the abandoned dialog leaves the screen.
+
+**The live run (Claude Code 2.1.292, 7 October 2026).** A person ran the
+sequence below in an interactive session and left the first two prompts
+unanswered. The log recorded, for the allow path, the engine's `ask` verdict
+for the model's call, the simulated allow six seconds later, the re-run's
+`tool.check` arriving with `origin` naming the probe plugin and answered
+`allow` without a dialog, the re-run settling with the tool's result, and
+the abandoned engine path settling three milliseconds later with the
+engine's own rejection ("The user doesn't want to proceed"). The file was
+created and the transcript shows one Bash call with one result. For the deny
+path the call ended with the probe's denial, the engine path settled the
+same way three milliseconds later, and no file was created. On the third
+prompt the person pressed `1` within six seconds and the terminal won the
+race. The person went on typing prompts after each unanswered dialog, so the
+dialog had left the screen. That is what cleared the production bridge to
+carry both halves.
 
 To watch it, in an interactive session with nothing of Latch's inherited:
 
@@ -244,11 +357,15 @@ close with a denial and no file. Answer a third prompt at the terminal within
 six seconds to see the terminal win the race. Whichever way it goes, the log at
 `LATCH_PROBE_LOG` holds the sequence.
 
-If the dialog does close on the allow path, the production bridge gains a
-`permission.open` record with the call id, tool, and input from `tool.check`'s
-`ask` verdict, and an `answer_permission` command that resolves the race the
-probe simulates. If it does not, permissions stay on the screen-verified path
-and the deny half alone is worth carrying.
+The production bridge differs from the probe in two ways. It announces the
+dialog from the engine's `classic.PermissionRequest` hook rather than from
+`tool.check`'s `ask` verdict, because that hook fires only as a dialog
+opens, while an `ask` verdict in auto mode goes to the classifier first. And
+its `tool.check` approves a re-run only when `next.origin` names the bridge
+plugin, so the model's own next identical call is never approved by it. The
+engine's test kit raises every check with the engine as origin, so the
+module's tests prove the negative (an engine-origin check for the same
+command is not approved) and the live run above proves the positive.
 
 ## Trust
 

@@ -153,6 +153,7 @@ fn send_and_resolve_at_desktop_phone_and_never_attached_geometry() {
                     questions: Vec::new(),
                     screen_seen: true,
                     announced_at: None,
+                    bridge_call: false,
                 });
                 ConnectorAction { id: ACTION_RESOLVE_REQUEST.into(), payload: serde_json::json!({"requestId":"request", "choice":choice}) }
             } else {
@@ -190,6 +191,7 @@ fn permission_resolution_rejects_unoffered_and_stale_choices() {
         questions: Vec::new(),
         screen_seen: true,
         announced_at: None,
+        bridge_call: false,
     });
 
     let unoffered = connector

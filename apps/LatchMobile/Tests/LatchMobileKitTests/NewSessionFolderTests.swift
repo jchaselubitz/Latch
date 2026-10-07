@@ -78,7 +78,7 @@ final class NewSessionFolderTests: XCTestCase {
             initialPath: nil,
             folderStore: MemoryNewSessionFolderStore(),
             browse: { _, _ in self.page("/work") },
-            create: { requestID, _ in
+            create: { requestID, _, _ in
                 requestIDs.append(requestID)
                 calls += 1
                 if calls == 1 { throw LostResponse.once }
@@ -97,7 +97,7 @@ final class NewSessionFolderTests: XCTestCase {
         XCTAssertEqual(model.createdSessionID, "ses_new")
         XCTAssertNil(model.pendingCreationRequestID)
 
-        let cancelled = browser(mode: .create, create: { requestID, _ in
+        let cancelled = browser(mode: .create, create: { requestID, _, _ in
             requestIDs.append(requestID)
             throw LostResponse.once
         }) { _, _ in self.page("/work") }
@@ -121,7 +121,7 @@ final class NewSessionFolderTests: XCTestCase {
                 browseCalls += 1
                 return self.page("/home")
             },
-            create: { _, _ in
+            create: { _, _, _ in
                 createCalls += 1
                 return self.report("ses_forbidden")
             },
@@ -146,7 +146,7 @@ final class NewSessionFolderTests: XCTestCase {
             initialPath: nil,
             folderStore: store,
             browse: { _, _ in self.page("/chosen") },
-            create: { _, _ in self.report("unused") }
+            create: { _, _, _ in self.report("unused") }
         )
         await model.load()
 
@@ -154,10 +154,140 @@ final class NewSessionFolderTests: XCTestCase {
         XCTAssertEqual(store.load(), "/chosen")
     }
 
+    func testAnAgentPickerListsModelsRestoresTheLastChoiceAndSendsIt() async {
+        let store = MemoryAgentModelPreferenceStore([.claude: "claude-fable-5-1"])
+        var sent: [String?] = []
+        var listCalls = 0
+        let model = FolderBrowserModel(
+            mode: .createAgent(.claude),
+            initialPath: nil,
+            folderStore: MemoryNewSessionFolderStore(),
+            browse: { _, _ in self.page("/work") },
+            create: { _, _, model in
+                sent.append(model)
+                return self.report("ses_new")
+            },
+            listModels: {
+                listCalls += 1
+                return self.catalog(["claude-opus-5-5", "claude-fable-5-1"], default: "claude-opus-5-5")
+            },
+            modelStore: store
+        )
+        XCTAssertTrue(model.offersModelChoice)
+        await model.load()
+
+        XCTAssertEqual(listCalls, 1)
+        XCTAssertEqual(model.modelCatalog?.models.map(\.id), ["claude-opus-5-5", "claude-fable-5-1"])
+        XCTAssertEqual(model.selectedModelID, "claude-fable-5-1")
+        XCTAssertEqual(model.selectedModelName, "Name claude-fable-5-1")
+        XCTAssertEqual(model.defaultModelName, "Name claude-opus-5-5")
+
+        model.selectModel("not-listed")
+        XCTAssertEqual(model.selectedModelID, "claude-fable-5-1", "only a listed model can be chosen")
+        model.selectModel("claude-opus-5-5")
+        XCTAssertEqual(store.load(agent: .claude), "claude-opus-5-5")
+
+        await model.startSession()
+        XCTAssertEqual(sent, ["claude-opus-5-5"])
+
+        model.selectModel(nil)
+        XCTAssertNil(store.load(agent: .claude), "the Mac's default is remembered too")
+    }
+
+    func testARememberedModelTheMacDroppedFallsBackToTheMacDefault() async {
+        let model = FolderBrowserModel(
+            mode: .createAgent(.codex),
+            initialPath: nil,
+            folderStore: MemoryNewSessionFolderStore(),
+            browse: { _, _ in self.page("/work") },
+            create: { _, _, _ in self.report("unused") },
+            listModels: { self.catalog(["gpt-6.1-sol"], agent: .codex) },
+            modelStore: MemoryAgentModelPreferenceStore([.codex: "gpt-5.5"])
+        )
+        await model.load()
+        XCTAssertNil(model.selectedModelID)
+    }
+
+    func testChangingTheModelIsANewIntentAndARefusedModelRereadsTheList() async {
+        var requestIDs: [UUID] = []
+        var listed = ["claude-opus-5-5", "claude-fable-5-1"]
+        let model = FolderBrowserModel(
+            mode: .createAgent(.claude),
+            initialPath: nil,
+            folderStore: MemoryNewSessionFolderStore(),
+            browse: { _, _ in self.page("/work") },
+            create: { requestID, _, _ in
+                requestIDs.append(requestID)
+                throw LatchError.refused("no longer offered")
+            },
+            listModels: { self.catalog(listed) },
+            modelStore: MemoryAgentModelPreferenceStore()
+        )
+        await model.load()
+        model.selectModel("claude-fable-5-1")
+        listed = ["claude-opus-5-5"]
+
+        await model.startSession()
+        // The fresh list no longer has the model, so the choice falls back to
+        // the Mac's default, and the next start is a new request.
+        XCTAssertEqual(model.error, "no longer offered")
+        XCTAssertNil(model.selectedModelID)
+        XCTAssertNil(model.pendingCreationRequestID)
+
+        await model.startSession()
+        XCTAssertEqual(requestIDs.count, 2)
+        XCTAssertNotEqual(requestIDs[0], requestIDs[1])
+    }
+
+    func testAShellPickerNeverOffersOrSendsAModel() async {
+        var sent: [String?] = []
+        var listCalls = 0
+        let model = FolderBrowserModel(
+            mode: .create,
+            initialPath: nil,
+            folderStore: MemoryNewSessionFolderStore(),
+            browse: { _, _ in self.page("/work") },
+            create: { _, _, model in
+                sent.append(model)
+                return self.report("ses_shell")
+            },
+            listModels: {
+                listCalls += 1
+                return self.catalog(["claude-opus-5-5"])
+            },
+            modelStore: MemoryAgentModelPreferenceStore([.claude: "claude-opus-5-5"])
+        )
+        XCTAssertFalse(model.offersModelChoice)
+        await model.load()
+        await model.startSession()
+        XCTAssertEqual(listCalls, 0)
+        XCTAssertEqual(sent, [nil])
+    }
+
+    /// The picker sheet is presented by mode, so each mode needs its own
+    /// identity: a shell and each agent must never share one.
+    func testEachCreationModeHasItsOwnIdentity() {
+        let ids = [FolderBrowserMode.create, .createAgent(.claude), .createAgent(.codex), .chooseDefault]
+            .map(\.id)
+        XCTAssertEqual(Set(ids).count, ids.count)
+    }
+
+    private func catalog(
+        _ ids: [String],
+        agent: SessionAgent = .claude,
+        default defaultModel: String? = nil
+    ) -> AgentModelCatalog {
+        AgentModelCatalog(
+            agent: agent,
+            models: ids.map { AgentModel(id: $0, name: "Name \($0)") },
+            defaultModel: defaultModel
+        )
+    }
+
     private func browser(
         mode: FolderBrowserMode,
         initialPath: String? = nil,
-        create: @escaping FolderBrowserModel.Creating = { _, _ in
+        create: @escaping FolderBrowserModel.Creating = { _, _, _ in
             throw LostResponse.once
         },
         browse: @escaping FolderBrowserModel.Browsing

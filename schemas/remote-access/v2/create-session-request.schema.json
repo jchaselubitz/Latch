@@ -12,6 +12,13 @@
       "type": "string",
       "enum": ["claude", "codex"],
       "description": "Hosted agent to launch directly in the session. Absent means a standard login shell. The Mac resolves the agent's own executable and launch arguments; the caller names only the kind, and only a kind the gateway advertises in features.sessionAgents."
+    },
+    "model": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@\\[\\]-]*$",
+      "description": "Model the agent starts with, passed to it as `--model`. Only valid with `agent`, and only an id the gateway lists for that agent at GET /v2/agents/{agent}/models. Absent means the agent's own configured default on the Mac."
     }
   },
   "additionalProperties": false

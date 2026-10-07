@@ -41,7 +41,51 @@ public final class MemoryNewSessionFolderStore: NewSessionFolderStoring, @unchec
     public func save(_ path: String?) { lock.withLock { self.path = path } }
 }
 
-public enum FolderBrowserMode: Equatable, Sendable {
+/// The model last chosen for each agent, so the next new session offers it
+/// first. `nil` means the agent's own default on the Mac.
+public protocol AgentModelPreferenceStoring: Sendable {
+    func load(agent: SessionAgent) -> String?
+    func save(_ model: String?, agent: SessionAgent)
+}
+
+public struct UserDefaultsAgentModelPreferenceStore: AgentModelPreferenceStoring {
+    private nonisolated(unsafe) let defaults: UserDefaults
+    private let prefix: String
+
+    public init(defaults: UserDefaults = .standard, prefix: String = "newSessionModel.") {
+        self.defaults = defaults
+        self.prefix = prefix
+    }
+
+    public func load(agent: SessionAgent) -> String? {
+        guard let model = defaults.string(forKey: prefix + agent.rawValue), !model.isEmpty else {
+            return nil
+        }
+        return model
+    }
+
+    public func save(_ model: String?, agent: SessionAgent) {
+        if let model, !model.isEmpty {
+            defaults.set(model, forKey: prefix + agent.rawValue)
+        } else {
+            defaults.removeObject(forKey: prefix + agent.rawValue)
+        }
+    }
+}
+
+public final class MemoryAgentModelPreferenceStore: AgentModelPreferenceStoring, @unchecked Sendable {
+    private let lock = NSLock()
+    private var models: [SessionAgent: String] = [:]
+
+    public init(_ models: [SessionAgent: String] = [:]) { self.models = models }
+
+    public func load(agent: SessionAgent) -> String? { lock.withLock { models[agent] } }
+    public func save(_ model: String?, agent: SessionAgent) {
+        lock.withLock { models[agent] = model }
+    }
+}
+
+public enum FolderBrowserMode: Equatable, Hashable, Sendable, Identifiable {
     /// Start a standard shell in the chosen folder.
     case create
     /// Start the named agent directly in the chosen folder.
@@ -60,6 +104,16 @@ public enum FolderBrowserMode: Equatable, Sendable {
     public var agent: SessionAgent? {
         if case .createAgent(let agent) = self { return agent }
         return nil
+    }
+
+    /// Lets the picker be presented by value: a sheet bound to the mode
+    /// itself always shows the mode that was tapped, never the one before.
+    public var id: String {
+        switch self {
+        case .create: return "create"
+        case .createAgent(let agent): return "create." + agent.rawValue
+        case .chooseDefault: return "chooseDefault"
+        }
     }
 }
 
@@ -88,7 +142,10 @@ public enum NewSessionAccessError: Error, Equatable, Sendable {
 @Observable
 public final class FolderBrowserModel {
     public typealias Browsing = (String?, String?) async throws -> DirectoryPage
-    public typealias Creating = (UUID, String) async throws -> CreateReport
+    /// Starts a session: request id, folder, and the chosen model (`nil` for
+    /// the agent's default, and always `nil` for a shell).
+    public typealias Creating = (UUID, String, String?) async throws -> CreateReport
+    public typealias ListingModels = () async throws -> AgentModelCatalog
     public typealias AccessChecking = () -> Bool
     public typealias Created = (String) async -> Void
 
@@ -102,6 +159,15 @@ public final class FolderBrowserModel {
     public private(set) var notice: String?
     public private(set) var pendingCreationRequestID: UUID?
     public private(set) var createdSessionID: String?
+    /// What the agent lists on the Mac. `nil` for a shell, a Mac that
+    /// predates model choice, or until the list arrives.
+    public private(set) var modelCatalog: AgentModelCatalog?
+    public private(set) var isLoadingModels = false
+    /// Why the list could not be read. Starting still works, on the Mac's
+    /// default, so this is said rather than blocking the start.
+    public private(set) var modelListError: String?
+    /// The model the next start names; `nil` is the agent's default on the Mac.
+    public private(set) var selectedModelID: String?
 
     private let initialPath: String?
     private let folderStore: any NewSessionFolderStoring
@@ -109,6 +175,8 @@ public final class FolderBrowserModel {
     private let create: Creating
     private let hasAccess: AccessChecking
     private let didCreate: Created
+    private let listModels: ListingModels?
+    private let modelStore: (any AgentModelPreferenceStoring)?
 
     public init(
         mode: FolderBrowserMode,
@@ -117,7 +185,9 @@ public final class FolderBrowserModel {
         browse: @escaping Browsing,
         create: @escaping Creating,
         hasAccess: @escaping AccessChecking = { true },
-        didCreate: @escaping Created = { _ in }
+        didCreate: @escaping Created = { _ in },
+        listModels: ListingModels? = nil,
+        modelStore: (any AgentModelPreferenceStoring)? = nil
     ) {
         self.mode = mode
         self.initialPath = initialPath
@@ -126,9 +196,66 @@ public final class FolderBrowserModel {
         self.create = create
         self.hasAccess = hasAccess
         self.didCreate = didCreate
+        self.listModels = listModels
+        self.modelStore = modelStore
+    }
+
+    /// Whether this picker offers a model choice at all.
+    public var offersModelChoice: Bool { mode.agent != nil && listModels != nil }
+
+    /// The chosen model's display name, or nil while it is the Mac's default.
+    public var selectedModelName: String? {
+        guard let selectedModelID else { return nil }
+        return modelCatalog?.models.first { $0.id == selectedModelID }?.name ?? selectedModelID
+    }
+
+    /// The Mac's own default, named from the list when the list has it.
+    public var defaultModelName: String? {
+        guard let id = modelCatalog?.defaultModel else { return nil }
+        return modelCatalog?.models.first { $0.id == id }?.name ?? id
     }
 
     public func load() async {
+        await loadFolders()
+        await loadModels()
+    }
+
+    /// Reads the agent's models from the Mac and restores the last choice
+    /// for this agent when the Mac still lists it.
+    public func loadModels() async {
+        guard let agent = mode.agent, let listModels, !isLoadingModels else { return }
+        guard hasAccess() else { return }
+        isLoadingModels = true
+        defer { isLoadingModels = false }
+        do {
+            let catalog = try await listModels()
+            modelCatalog = catalog
+            modelListError = nil
+            let wanted = selectedModelID ?? modelStore?.load(agent: agent)
+            let restored = catalog.models.contains { $0.id == wanted } ? wanted : nil
+            if restored != selectedModelID {
+                selectedModelID = restored
+                pendingCreationRequestID = nil
+            }
+        } catch {
+            modelListError = Self.message(for: error)
+        }
+    }
+
+    /// Chooses the model the next start names, or `nil` for the Mac's
+    /// default, and remembers it for this agent's next session.
+    public func selectModel(_ id: String?) {
+        guard let agent = mode.agent else { return }
+        if let id, modelCatalog?.models.contains(where: { $0.id == id }) != true { return }
+        guard id != selectedModelID else { return }
+        selectedModelID = id
+        modelStore?.save(id, agent: agent)
+        // A request ID is bound to one model, as it is to one folder: another
+        // model is a new intent, not a retry of a possibly-created session.
+        pendingCreationRequestID = nil
+    }
+
+    private func loadFolders() async {
         guard currentPage == nil else { return }
         if let initialPath {
             do {
@@ -213,14 +340,21 @@ public final class FolderBrowserModel {
         pendingCreationRequestID = requestID
         isLoading = true
         defer { isLoading = false }
+        let model = mode.agent == nil ? nil : selectedModelID
         do {
-            let report = try await create(requestID, cwd)
+            let report = try await create(requestID, cwd, model)
             createdSessionID = report.session.id
             pendingCreationRequestID = nil
             error = nil
             await didCreate(report.session.id)
         } catch {
             self.error = Self.message(for: error)
+            // The Mac may have moved on from the model this list showed. A
+            // fresh list drops a model it no longer offers, so the next tap
+            // is not refused the same way.
+            if model != nil {
+                await loadModels()
+            }
         }
     }
 

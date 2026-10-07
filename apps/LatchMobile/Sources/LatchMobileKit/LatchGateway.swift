@@ -108,10 +108,15 @@ public actor LatchGateway {
     /// names only the kind, and only one discovery listed under
     /// `features.sessionAgents`, so an older gateway is never asked for a
     /// field its contract closes against.
+    ///
+    /// `model` is one id from ``agentModels(for:)`` and travels only with an
+    /// agent, and only to a Mac that serves model choice; `nil` starts the
+    /// agent on whatever the Mac's owner configured.
     public func createSession(
         requestID: UUID,
         cwd: String,
-        agent: SessionAgent? = nil
+        agent: SessionAgent? = nil,
+        model: String? = nil
     ) async throws -> CreateReport {
         try await require(.createSession)
         if let agent {
@@ -120,15 +125,27 @@ public actor LatchGateway {
                 throw LatchError.agentUnavailable(agent)
             }
         }
+        let model = agent == nil ? nil : model
+        if model != nil {
+            try await require(.agentModels)
+        }
         let body: Data
         do {
             body = try JSONEncoder().encode(
-                CreateSessionRequest(requestId: requestID, cwd: cwd, agent: agent)
+                CreateSessionRequest(requestId: requestID, cwd: cwd, agent: agent, model: model)
             )
         } catch {
             throw LatchError.malformedResponse(String(describing: error))
         }
         return try await request(method: "POST", path: "/v2/sessions", body: body)
+    }
+
+    /// The models `agent` can start with on the Mac, read from the agent's
+    /// own model cache when asked, so the list is as current as the CLI that
+    /// will run it rather than as old as this app's build.
+    public func agentModels(for agent: SessionAgent) async throws -> AgentModelCatalog {
+        try await require(.agentModels)
+        return try await get(path: "/v2/agents/\(agent.rawValue)/models")
     }
 
     /// Stops one session on the Mac, leaving its record and dead pane behind.
@@ -333,6 +350,13 @@ public actor LatchGateway {
         if code == "agent_unavailable" {
             return .refused(
                 reason.isEmpty ? "That agent is not installed on your Mac." : reason
+            )
+        }
+        // The model list the phone chose from has moved on. The sentence says
+        // to choose again; the picker re-reads the list on its own.
+        if code == "model_unavailable" {
+            return .refused(
+                reason.isEmpty ? "Your Mac no longer offers that model. Choose another." : reason
             )
         }
         // An attachment the Mac would not place: too large, or the session's

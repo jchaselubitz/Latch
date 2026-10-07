@@ -11,9 +11,11 @@ struct SessionsView: View {
     @Environment(PairingModel.self) private var pairing
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
-    @State private var creatingSession = false
-    /// What the open picker starts: a shell, or an agent the Mac listed.
-    @State private var creatingMode: FolderBrowserMode = .create
+    /// What the open picker starts — a shell, or an agent the Mac listed —
+    /// and whether it is open at all. One value, presented by item: a
+    /// separate flag and mode let the sheet build with the mode from before
+    /// the tap, which started a shell when Claude Code was chosen.
+    @State private var creating: FolderBrowserMode?
     @State private var explainingGrant = false
     /// The session a Stop tap is asking about. Ending someone's work is not
     /// undoable, so it is always confirmed by name first.
@@ -57,8 +59,8 @@ struct SessionsView: View {
         } message: {
             Text(model.requestedSessionError ?? "")
         }
-        .sheet(isPresented: $creatingSession) {
-            FolderPickerView(mode: creatingMode)
+        .sheet(item: $creating) { mode in
+            FolderPickerView(mode: mode)
         }
         .sheet(isPresented: $showingSettings) {
             SettingsView()
@@ -110,7 +112,7 @@ struct SessionsView: View {
             // not under a sheet or on top of another session.
             guard let sessionID = SessionDeepLink.sessionID(from: url) else { return }
             showingSettings = false
-            creatingSession = false
+            creating = nil
             stopping = nil
             selectedSessionID = nil
             Task { await model.requestSession(id: sessionID) }
@@ -400,8 +402,7 @@ struct SessionsView: View {
 
     private func startCreating(_ mode: FolderBrowserMode) {
         if model.canCreateNewSession(agent: mode.agent) {
-            creatingMode = mode
-            creatingSession = true
+            creating = mode
         } else {
             explainingGrant = true
         }
