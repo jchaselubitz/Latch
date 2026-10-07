@@ -7,7 +7,6 @@ struct SessionsView: View {
     @ObservedObject var updates: UpdateController
     @State private var showingCreate = false
     @State private var showingPrune = false
-    @State private var showingStopAll = false
     @State private var pendingStop: PendingStopRequest?
 
     var body: some View {
@@ -77,8 +76,12 @@ struct SessionsView: View {
             // reachable regardless of list length or sidebar width.
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 SidebarFooter(
-                    canStopAll: store.sessions.contains(where: { $0.state.isLive }),
-                    stopAll: { showingStopAll = true },
+                    canStopSelected: store.hasSelectedLiveSessions,
+                    stopSelected: {
+                        let ids = store.selectedLiveSessionIDs
+                        guard !ids.isEmpty else { return }
+                        pendingStop = PendingStopRequest(sessionIDs: ids)
+                    },
                     prune: {
                         Task {
                             await store.previewPrune()
@@ -132,16 +135,6 @@ struct SessionsView: View {
         }
         .sheet(isPresented: $showingPrune) {
             PruneView(store: store, isPresented: $showingPrune)
-        }
-        .confirmationDialog(
-            "Stop all running sessions?",
-            isPresented: $showingStopAll,
-            titleVisibility: .visible
-        ) {
-            Button("Stop All", role: .destructive) { Task { await store.stopAll() } }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("Stopping ends every live child process but retains each final screen for later inspection.")
         }
         .confirmationDialog(
             pendingStopTitle,
@@ -246,16 +239,16 @@ struct SessionsView: View {
 }
 
 private struct SidebarFooter: View {
-    let canStopAll: Bool
-    let stopAll: () -> Void
+    let canStopSelected: Bool
+    let stopSelected: () -> Void
     let prune: () -> Void
 
     var body: some View {
         VStack(spacing: 0) {
             Divider()
             HStack(spacing: 8) {
-                Button("Stop All…", role: .destructive, action: stopAll)
-                    .disabled(!canStopAll)
+                Button("Stop Selected…", role: .destructive, action: stopSelected)
+                    .disabled(!canStopSelected)
                 Button("Prune…", action: prune)
                 Spacer(minLength: 0)
             }
