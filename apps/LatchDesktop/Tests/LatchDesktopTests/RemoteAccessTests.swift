@@ -225,10 +225,10 @@ private extension String {
 @MainActor
 final class HelperRestartScheduleTests: XCTestCase {
     func testAHealthyHelperResetsTheRestartScheduleAndACrashLoopClimbsIt() {
-        XCTAssertEqual(RemoteAccessController.nextRestartAttempt(after: 0.5, previous: 0), 1)
-        XCTAssertEqual(RemoteAccessController.nextRestartAttempt(after: 3, previous: 3), 4)
-        XCTAssertEqual(RemoteAccessController.nextRestartAttempt(after: 3, previous: 4), 4, "the schedule caps at its last delay")
-        XCTAssertEqual(RemoteAccessController.nextRestartAttempt(after: RemoteAccessController.healthyHelperUptime, previous: 4), 0)
-        XCTAssertEqual(RemoteAccessController.nextRestartAttempt(after: 600, previous: 2), 0)
+        XCTAssertEqual(CrashLoopBackoff.nextAttempt(after: 0.5, previous: 0), 1)
+        XCTAssertEqual(CrashLoopBackoff.nextAttempt(after: 3, previous: 3), 4)
+        XCTAssertEqual(CrashLoopBackoff.nextAttempt(after: 3, previous: 4), 4, "the schedule caps at its last delay")
+        XCTAssertEqual(CrashLoopBackoff.nextAttempt(after: CrashLoopBackoff.healthyUptime, previous: 4), 0)
+        XCTAssertEqual(CrashLoopBackoff.nextAttempt(after: 600, previous: 2), 0)
     }
 }

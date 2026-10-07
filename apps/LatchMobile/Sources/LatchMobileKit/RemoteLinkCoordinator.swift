@@ -115,8 +115,6 @@ public enum RemoteLinkState: Equatable, Sendable {
     /// Authentication against the pinned Mac failed. Re-pair.
     case pairingRequired(String)
 
-    public var isReady: Bool { self == .ready }
-
     public var isTerminal: Bool {
         switch self {
         case .revoked, .pairingRequired: return true

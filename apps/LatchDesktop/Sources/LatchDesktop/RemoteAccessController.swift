@@ -32,16 +32,6 @@ final class RemoteAccessController: ObservableObject {
     @Published private(set) var isPreventingSleep = false
 
     static let keepAwakeKey = "remoteAccessKeepAwakeWhilePluggedIn"
-    private static let restartDelays: [UInt64] = [1, 2, 5, 10, 30]
-    /// A helper that stayed up this long before exiting was not crash-looping;
-    /// its next restart starts the schedule over. Without this, every helper
-    /// exit over the app's lifetime climbed the schedule and a tenth restart
-    /// waited the full 30 s (seen in the field on 8 September 2026).
-    static let healthyHelperUptime: TimeInterval = 60
-
-    static func nextRestartAttempt(after uptime: TimeInterval, previous: Int) -> Int {
-        uptime >= healthyHelperUptime ? 0 : min(previous + 1, restartDelays.count - 1)
-    }
     private static let powerPollInterval: Duration = .seconds(30)
     /// Directory re-check while no phone is linked.
     static let idleLinkPollInterval: Duration = .seconds(20)
@@ -148,10 +138,10 @@ final class RemoteAccessController: ObservableObject {
         guard gatewaySupervision == nil else { return }
         let executableURL = client.executableURL
         gatewaySupervision = Task { [weak self] in
-            var attempt = 0
+            var backoff = CrashLoopBackoff()
             while !Task.isCancelled {
                 guard let self else { return }
-                let startedAt = Date()
+                backoff.runStarted()
                 let supervisor = RemoteGatewaySupervisor(executableURL: executableURL)
                 self.gatewaySupervisor = supervisor
                 Self.supervisorRegistry.register(supervisor)
@@ -171,10 +161,7 @@ final class RemoteAccessController: ObservableObject {
                 if self.gatewaySupervisor === supervisor { self.gatewaySupervisor = nil }
                 guard !Task.isCancelled else { return }
                 self.gatewayReady = false
-                attempt = Self.nextRestartAttempt(
-                    after: Date().timeIntervalSince(startedAt), previous: attempt
-                )
-                try? await Task.sleep(for: .seconds(Self.restartDelays[attempt]))
+                await backoff.next()
             }
         }
     }
@@ -191,7 +178,7 @@ final class RemoteAccessController: ObservableObject {
     private func startAssignmentSupervision() {
         guard supervision == nil else { return }
         supervision = Task { [weak self] in
-            var attempt = 0
+            var backoff = CrashLoopBackoff()
             while !Task.isCancelled {
                 guard let self else { return }
                 var discovered = false
@@ -199,13 +186,13 @@ final class RemoteAccessController: ObservableObject {
                     let assignments = try await self.remoteLinkAssignments()
                     guard !Task.isCancelled else { return }
                     self.reconcile(assignments)
-                    attempt = 0
+                    backoff.reset()
                     discovered = true
                     if self.gatewayReady { self.phase = .onlineRelay(peers: self.connectedPeers) }
                 } catch {
                     guard !Task.isCancelled else { return }
                     self.errorMessage = error.localizedDescription
-                    attempt = min(attempt + 1, Self.restartDelays.count - 1)
+                    backoff.recordFailure()
                 }
                 let delay: Duration
                 if discovered, !activeAssignments.isEmpty {
@@ -216,7 +203,7 @@ final class RemoteAccessController: ObservableObject {
                 } else if discovered {
                     delay = Self.idleLinkPollInterval
                 } else {
-                    delay = .seconds(Self.restartDelays[attempt])
+                    delay = backoff.delay
                 }
                 try? await Task.sleep(for: delay)
             }
@@ -255,13 +242,13 @@ final class RemoteAccessController: ObservableObject {
     private func superviseLink(_ assignment: RemoteLinkAssignment) async {
         let peerID = assignment.peerDeviceID
         var configuration = assignment.configuration
-        var attempt = 0
+        var backoff = CrashLoopBackoff()
         while !Task.isCancelled, activeAssignments[peerID]?.hasSameAuthority(as: assignment) == true {
             while !gatewayReady, !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(100))
             }
             guard !Task.isCancelled else { return }
-            let startedAt = Date()
+            backoff.runStarted()
             let generation = UUID()
             linkGenerations[peerID] = generation
             let supervisor = RemoteAccessSupervisor(
@@ -296,10 +283,7 @@ final class RemoteAccessController: ObservableObject {
             Self.supervisorRegistry.remove(supervisor)
             if linkSupervisors[peerID] === supervisor { linkSupervisors[peerID] = nil }
             guard !Task.isCancelled else { return }
-            attempt = Self.nextRestartAttempt(
-                after: Date().timeIntervalSince(startedAt), previous: attempt
-            )
-            try? await Task.sleep(for: .seconds(Self.restartDelays[attempt]))
+            await backoff.next()
             guard !Task.isCancelled else { return }
             while !Task.isCancelled {
                 if let admission = try? await controlPlane.freshRelayAdmission(peerDeviceID: peerID) {
@@ -307,7 +291,7 @@ final class RemoteAccessController: ObservableObject {
                     break
                 }
                 linkStatuses[peerID] = .offline
-                try? await Task.sleep(for: .seconds(Self.restartDelays[attempt]))
+                await backoff.wait()
             }
         }
     }

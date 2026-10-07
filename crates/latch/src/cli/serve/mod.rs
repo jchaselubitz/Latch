@@ -13,7 +13,6 @@
 mod attachments;
 pub mod attention;
 mod auth;
-#[allow(dead_code)] // Phase 0 generates the full v2 wire surface before the Hub consumes it.
 mod contract;
 mod conversation;
 mod directory;

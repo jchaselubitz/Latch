@@ -9,6 +9,14 @@
 /* Begin PBXBuildFile section */
 		ABCDEF0123456789ABCD0015 /* LatchMobileApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD0010 /* LatchMobileApp.swift */; };
 		ABCDEF0123456789ABCD0016 /* SessionsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD0011 /* SessionsView.swift */; };
+		ABCDEF0123456789ABCD0111 /* ChatUnavailableView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD0110 /* ChatUnavailableView.swift */; };
+		ABCDEF0123456789ABCD0113 /* SessionUnavailableView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD0112 /* SessionUnavailableView.swift */; };
+		ABCDEF0123456789ABCD0115 /* SessionRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD0114 /* SessionRow.swift */; };
+		ABCDEF0123456789ABCD0117 /* SessionListHeader.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD0116 /* SessionListHeader.swift */; };
+		ABCDEF0123456789ABCD0119 /* LinkStatusPill.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD0118 /* LinkStatusPill.swift */; };
+		ABCDEF0123456789ABCD011B /* UnlinkedView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD011A /* UnlinkedView.swift */; };
+		ABCDEF0123456789ABCD011D /* MessageView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD011C /* MessageView.swift */; };
+		ABCDEF0123456789ABCD011F /* BannerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD011E /* BannerView.swift */; };
 		ABCDEF0123456789ABCD0017 /* ChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD0012 /* ChatView.swift */; };
 		ABCDEF0123456789ABCD0018 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD0013 /* SettingsView.swift */; };
 		ABCDEF0123456789ABCD0021 /* PairingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD001E /* PairingView.swift */; };
@@ -40,6 +48,14 @@
 		ABCDEF0123456789ABCD0003 /* Latch.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Latch.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		ABCDEF0123456789ABCD0010 /* LatchMobileApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LatchMobileApp.swift; sourceTree = "<group>"; };
 		ABCDEF0123456789ABCD0011 /* SessionsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionsView.swift; sourceTree = "<group>"; };
+		ABCDEF0123456789ABCD0110 /* ChatUnavailableView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatUnavailableView.swift; sourceTree = "<group>"; };
+		ABCDEF0123456789ABCD0112 /* SessionUnavailableView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionUnavailableView.swift; sourceTree = "<group>"; };
+		ABCDEF0123456789ABCD0114 /* SessionRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionRow.swift; sourceTree = "<group>"; };
+		ABCDEF0123456789ABCD0116 /* SessionListHeader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListHeader.swift; sourceTree = "<group>"; };
+		ABCDEF0123456789ABCD0118 /* LinkStatusPill.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinkStatusPill.swift; sourceTree = "<group>"; };
+		ABCDEF0123456789ABCD011A /* UnlinkedView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UnlinkedView.swift; sourceTree = "<group>"; };
+		ABCDEF0123456789ABCD011C /* MessageView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageView.swift; sourceTree = "<group>"; };
+		ABCDEF0123456789ABCD011E /* BannerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BannerView.swift; sourceTree = "<group>"; };
 		ABCDEF0123456789ABCD0012 /* ChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatView.swift; sourceTree = "<group>"; };
 		ABCDEF0123456789ABCD0013 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		ABCDEF0123456789ABCD001E /* PairingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingView.swift; sourceTree = "<group>"; };
@@ -93,6 +109,14 @@
 			children = (
 				ABCDEF0123456789ABCD0010 /* LatchMobileApp.swift */,
 				ABCDEF0123456789ABCD0011 /* SessionsView.swift */,
+				ABCDEF0123456789ABCD0110 /* ChatUnavailableView.swift */,
+				ABCDEF0123456789ABCD0112 /* SessionUnavailableView.swift */,
+				ABCDEF0123456789ABCD0114 /* SessionRow.swift */,
+				ABCDEF0123456789ABCD0116 /* SessionListHeader.swift */,
+				ABCDEF0123456789ABCD0118 /* LinkStatusPill.swift */,
+				ABCDEF0123456789ABCD011A /* UnlinkedView.swift */,
+				ABCDEF0123456789ABCD011C /* MessageView.swift */,
+				ABCDEF0123456789ABCD011E /* BannerView.swift */,
 				ABCDEF0123456789ABCD0012 /* ChatView.swift */,
 				ABCDEF0123456789ABCD0070 /* Conversation */,
 				ABCDEF0123456789ABCD0013 /* SettingsView.swift */,
@@ -230,6 +254,14 @@
 			files = (
 				ABCDEF0123456789ABCD0015 /* LatchMobileApp.swift in Sources */,
 				ABCDEF0123456789ABCD0016 /* SessionsView.swift in Sources */,
+				ABCDEF0123456789ABCD0111 /* ChatUnavailableView.swift in Sources */,
+				ABCDEF0123456789ABCD0113 /* SessionUnavailableView.swift in Sources */,
+				ABCDEF0123456789ABCD0115 /* SessionRow.swift in Sources */,
+				ABCDEF0123456789ABCD0117 /* SessionListHeader.swift in Sources */,
+				ABCDEF0123456789ABCD0119 /* LinkStatusPill.swift in Sources */,
+				ABCDEF0123456789ABCD011B /* UnlinkedView.swift in Sources */,
+				ABCDEF0123456789ABCD011D /* MessageView.swift in Sources */,
+				ABCDEF0123456789ABCD011F /* BannerView.swift in Sources */,
 				ABCDEF0123456789ABCD0017 /* ChatView.swift in Sources */,
 				ABCDEF0123456789ABCD0072 /* ConversationScreen.swift in Sources */,
 				ABCDEF0123456789ABCD0074 /* ConversationTranscript.swift in Sources */,

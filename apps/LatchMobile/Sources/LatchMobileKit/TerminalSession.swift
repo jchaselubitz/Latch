@@ -183,11 +183,6 @@ public final class TerminalSession {
         Task { try? await socket.send(data) }
     }
 
-    /// Clears the undelivered-input notice once the person has seen it.
-    public func acknowledgeUndeliveredInput() {
-        inputMayBeUndelivered = false
-    }
-
     /// The link underneath this surface was lost before the socket noticed.
     /// The socket is dropped now rather than left to time out, the surface
     /// becomes interrupted (resumable only with a live capability), and any

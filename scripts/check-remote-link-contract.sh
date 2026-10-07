@@ -34,7 +34,7 @@ def expect(path, pattern, value, what):
         found = match.group(1) if match else "nothing"
         sys.exit(f"device-name policy drift: {path} {what} is {found!r}, fixture says {value!r}")
 
-host = "crates/latch/src/cli/remote_access.rs"
+host = "crates/latch/src/cli/remote_access/devices.rs"
 phone = "apps/LatchMobile/Sources/LatchMobileKit/PairingModel.swift"
 service = "services/control-plane/src/validation.ts"
 expect(host, r'DEVICE_NAME_PUNCTUATION: &str = "([^"]*)"', punctuation, "punctuation")

@@ -171,9 +171,7 @@ final class SessionStore: ObservableObject {
                     cliCapabilities = capabilities
                 }
             } catch {
-                if errorMessage != error.localizedDescription {
-                    errorMessage = error.localizedDescription
-                }
+                report(error)
                 shouldPresentCLISetup = true
                 return
             }
@@ -208,9 +206,7 @@ final class SessionStore: ObservableObject {
     func runCLIInstaller() {
         do { try TerminalLauncher.runInTerminal(cliInstallCommand) }
         catch {
-            if errorMessage != error.localizedDescription {
-                errorMessage = error.localizedDescription
-            }
+            report(error)
         }
     }
 
@@ -289,26 +285,20 @@ final class SessionStore: ObservableObject {
     private func reportRefreshFailure(_ error: Error) {
         consecutiveRefreshFailures += 1
         guard consecutiveRefreshFailures >= Self.refreshFailuresBeforeReporting else { return }
-        if errorMessage != error.localizedDescription {
-            errorMessage = error.localizedDescription
-        }
+        report(error)
     }
 
     func create(_ request: NewSessionRequest, openAfterCreation: Bool) async {
-        do {
+        await perform {
             let report = try await client.create(request)
             selection = [report.session.id]
             await refresh()
             if openAfterCreation { await open(report.session.id) }
-        } catch {
-            if errorMessage != error.localizedDescription {
-                errorMessage = error.localizedDescription
-            }
         }
     }
 
     func open(_ id: String, behavior: TerminalOpenBehavior? = nil) async {
-        do {
+        await perform {
             let command = await client.attachmentCommand(for: id)
             try TerminalLauncher.open(
                 command: command,
@@ -318,10 +308,6 @@ final class SessionStore: ObservableObject {
                 customTemplate: customTerminalTemplate,
                 openInBackground: terminalOpenInBackground
             )
-        } catch {
-            if errorMessage != error.localizedDescription {
-                errorMessage = error.localizedDescription
-            }
         }
     }
 
@@ -331,25 +317,16 @@ final class SessionStore: ObservableObject {
 
     func stopSessions(_ ids: [String], force: Bool) async {
         guard !ids.isEmpty else { return }
-        do {
+        await perform {
             for id in ids {
                 _ = try await client.stop(id, force: force)
             }
             await refresh()
-        } catch {
-            if errorMessage != error.localizedDescription {
-                errorMessage = error.localizedDescription
-            }
         }
     }
 
     func stopAll() async {
-        do { _ = try await client.stopAll(); await refresh() }
-        catch {
-            if errorMessage != error.localizedDescription {
-                errorMessage = error.localizedDescription
-            }
-        }
+        await perform { _ = try await client.stopAll(); await refresh() }
     }
 
     /// Live session ids "Stop Other Sessions" would end, leaving `id` as-is.
@@ -362,47 +339,35 @@ final class SessionStore: ObservableObject {
     }
 
     func rename(_ id: String, to name: String) async {
-        do { _ = try await client.rename(id, to: name); await refresh() }
-        catch {
-            if errorMessage != error.localizedDescription {
-                errorMessage = error.localizedDescription
-            }
-        }
+        await perform { _ = try await client.rename(id, to: name); await refresh() }
     }
 
     func resize(_ id: String, request: ResizeSessionRequest) async {
-        do { _ = try await client.resize(id, request: request); await refresh() }
-        catch {
-            if errorMessage != error.localizedDescription {
-                errorMessage = error.localizedDescription
-            }
-        }
+        await perform { _ = try await client.resize(id, request: request); await refresh() }
     }
 
     func remove(_ id: String, force: Bool) async {
-        do { _ = try await client.remove(id, force: force); await refresh() }
-        catch {
-            if errorMessage != error.localizedDescription {
-                errorMessage = error.localizedDescription
-            }
-        }
+        await perform { _ = try await client.remove(id, force: force); await refresh() }
     }
 
     func previewPrune() async {
-        do { prunePreview = try await client.previewPrune() }
-        catch {
-            if errorMessage != error.localizedDescription {
-                errorMessage = error.localizedDescription
-            }
-        }
+        await perform { prunePreview = try await client.previewPrune() }
     }
 
     func pruneAll() async {
-        do { _ = try await client.pruneAll(); prunePreview = nil; await refresh() }
-        catch {
-            if errorMessage != error.localizedDescription {
-                errorMessage = error.localizedDescription
-            }
+        await perform { _ = try await client.pruneAll(); prunePreview = nil; await refresh() }
+    }
+
+    /// Runs a user-initiated session action, surfacing any failure in the
+    /// error banner. Each action refreshes the list itself when it succeeds.
+    private func perform(_ operation: () async throws -> Void) async {
+        do { try await operation() } catch { report(error) }
+    }
+
+    /// Shows `error` in the banner, skipping the publish when it is already shown.
+    private func report(_ error: Error) {
+        if errorMessage != error.localizedDescription {
+            errorMessage = error.localizedDescription
         }
     }
 
@@ -418,9 +383,7 @@ final class SessionStore: ObservableObject {
             }
             syncChrome()
         } catch {
-            if errorMessage != error.localizedDescription {
-                errorMessage = error.localizedDescription
-            }
+            report(error)
         }
     }
 
@@ -434,9 +397,7 @@ final class SessionStore: ObservableObject {
                 errorMessage = nil
             }
         } catch {
-            if errorMessage != error.localizedDescription {
-                errorMessage = error.localizedDescription
-            }
+            report(error)
         }
     }
 
@@ -459,9 +420,7 @@ final class SessionStore: ObservableObject {
             syncChrome()
             await refresh()
         } catch {
-            if errorMessage != error.localizedDescription {
-                errorMessage = error.localizedDescription
-            }
+            report(error)
         }
     }
 

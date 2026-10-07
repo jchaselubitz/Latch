@@ -19,8 +19,6 @@ public enum CameraPermission: Equatable, Sendable {
     /// No camera at all — the simulator, mostly.
     case unavailable
 
-    public var allowsScanning: Bool { self == .authorized }
-
     public var explanation: String? {
         switch self {
         case .authorized, .notDetermined:

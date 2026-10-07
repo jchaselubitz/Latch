@@ -283,11 +283,6 @@ public final class FolderBrowserModel {
         }
     }
 
-    public func navigateToParent() async {
-        guard let parent = currentPage?.parent else { return }
-        await navigate(to: parent)
-    }
-
     public func retry() async {
         let path = currentPage?.path ?? initialPath
         do {

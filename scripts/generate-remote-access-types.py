@@ -133,34 +133,6 @@ pub struct AgentModelCatalog {
     pub default_model: Option<String>,
 }
 
-/// Reason carried in a terminal WebSocket close frame. `Detached` is a clean
-/// end; every other value says why the single exclusive surface was taken away.
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum TerminalCloseReason {
-    Detached,
-    Stolen,
-    SlowClient,
-    SessionExited,
-    KernelError,
-    ResumeRefused,
-}
-
-impl TerminalCloseReason {
-    /// Application close code paired with this reason. `Detached` uses the
-    /// ordinary 1000.
-    pub const fn close_code(self) -> u16 {
-        match self {
-            Self::Detached => 1000,
-            Self::SlowClient => 4408,
-            Self::Stolen => 4409,
-            Self::SessionExited => 4410,
-            Self::KernelError => 4500,
-            Self::ResumeRefused => 4411,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct GatewayFeatures {

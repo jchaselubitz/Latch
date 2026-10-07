@@ -309,7 +309,7 @@ extension View {
     /// The Stop confirmation and the missing-grant explanation, shared by
     /// every screen that offers Stop. Ending the agent's work is never one tap.
     func sessionStopPrompts(
-        session: SessionSummary,
+        session: SessionSummary?,
         confirming: Binding<Bool>,
         explainingGrant: Binding<Bool>
     ) -> some View {
@@ -318,7 +318,7 @@ extension View {
 }
 
 private struct SessionStopPrompts: ViewModifier {
-    let session: SessionSummary
+    let session: SessionSummary?
     @Binding var confirming: Bool
     @Binding var explainingGrant: Bool
 
@@ -332,15 +332,17 @@ private struct SessionStopPrompts: ViewModifier {
                 Text(appModel.sessionStopUnavailableExplanation ?? "")
             }
             .confirmationDialog(
-                "Stop \(session.displayName)?",
+                session.map { "Stop \($0.displayName)?" } ?? "Stop this session?",
                 isPresented: $confirming,
-                titleVisibility: .visible
-            ) {
+                titleVisibility: .visible,
+                presenting: session
+            ) { session in
                 Button("Stop session", role: .destructive) {
+                    confirming = false
                     Task { await appModel.stopSession(session) }
                 }
                 Button("Cancel", role: .cancel) {}
-            } message: {
+            } message: { session in
                 Text(
                     """
                     Whatever is running in \(session.directoryName) on your Mac ends. The session \

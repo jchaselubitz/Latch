@@ -65,9 +65,9 @@ fi
 # The Remote Link proxy must parse the controller request and serialize a fresh
 # one. Copying its raw header slice would reintroduce the header-smuggling
 # boundary this check is intended to make mechanically visible.
-remote_access_source=crates/latch/src/cli/remote_access.rs
+remote_access_source=crates/latch/src/cli/remote_access/framing.rs
 if [ -f "$remote_access_source" ] &&
-    sed -n '/^fn authorize_and_inject(/,/^fn complete_initial_request_len(/p' "$remote_access_source" |
+    sed -n '/^pub(super) fn authorize_and_inject(/,/^}/p' "$remote_access_source" |
         grep -qE 'extend_from_slice\(&request\[\.\.[^]]*\]\)'; then
     report 'authorize_and_inject forwards a raw caller request slice'
 fi

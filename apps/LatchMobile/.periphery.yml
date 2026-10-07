@@ -1,0 +1,11 @@
+project: App/LatchMobile.xcodeproj
+schemes:
+  - LatchMobile
+  - LatchMobileKit
+  - LatchTransportNative
+retain_public: false
+# UniFFI-generated; not hand-editable.
+report_exclude:
+  - "Sources/LatchMobileKit/Generated/**"
+  - "Sources/LatchTransportNative/Generated/**"
+  - "**/Generated/**"

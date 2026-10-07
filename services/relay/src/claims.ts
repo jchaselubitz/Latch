@@ -1,26 +1,9 @@
 import { createPublicKey, verify } from 'node:crypto';
+import { REMOTE_LINK_LIMITS, type AdmissionClaims } from '../../admission-contract.ts';
 
-export type RelayRole = 'host' | 'controller';
-export type RoomPurpose = 'enrollment' | 'session';
-
-export interface AdmissionClaim {
-  readonly iss: string;
-  readonly aud: 'latch-relay';
-  readonly kid: string;
-  readonly roomId: string;
-  readonly role: RelayRole;
-  readonly purpose: RoomPurpose;
-  readonly jti: string;
-  readonly generation: number;
-  readonly nbf: number;
-  readonly exp: number;
-  readonly limits: {
-    readonly maxStreams: 32;
-    readonly streamWindowBytes: 262144;
-    readonly totalBufferBytes: 8388608;
-    readonly recordBytes: 65535;
-  };
-}
+export type { AdmissionRole as RelayRole } from '../../admission-contract.ts';
+export type { AdmissionPurpose as RoomPurpose } from '../../admission-contract.ts';
+export type AdmissionClaim = AdmissionClaims;
 
 export interface LeaseExtensionClaim extends AdmissionClaim {
   readonly leaseId: string;
@@ -73,8 +56,10 @@ function validateCommon(claim: Record<string, unknown>, nowSeconds: number, maxi
   ) throw new Error('invalid admission claim');
   const limits = object(claim.limits);
   if (
-    limits.maxStreams !== 32 || limits.streamWindowBytes !== 262144 ||
-    limits.totalBufferBytes !== 8388608 || limits.recordBytes !== 65535 ||
+    limits.maxStreams !== REMOTE_LINK_LIMITS.maxStreams ||
+    limits.streamWindowBytes !== REMOTE_LINK_LIMITS.streamWindowBytes ||
+    limits.totalBufferBytes !== REMOTE_LINK_LIMITS.totalBufferBytes ||
+    limits.recordBytes !== REMOTE_LINK_LIMITS.recordBytes ||
     Object.keys(limits).sort().join(',') !== 'maxStreams,recordBytes,streamWindowBytes,totalBufferBytes'
   ) throw new Error('unsupported admission limits');
 }

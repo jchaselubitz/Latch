@@ -229,8 +229,9 @@ export function createRouter(dependencies: ApiDependencies): Router {
     }
     const id = newId('inv');
     const credential = issueCredential('owner-invitation', id);
-    await store.createOwnerInvitation({ id, secretDigest: credential.digest, expiresAt: unixSeconds(now) + Number(ttl) });
-    return { status: 201, body: { invitation: credential.token, expiresAt: unixSeconds(now) + Number(ttl) } };
+    const expiresAt = unixSeconds(now) + Number(ttl);
+    await store.createOwnerInvitation({ id, secretDigest: credential.digest, expiresAt });
+    return { status: 201, body: { invitation: credential.token, expiresAt } };
   });
 
   router.post('/v1/accounts/claim', async (context) => {
@@ -530,6 +531,7 @@ export function createRouter(dependencies: ApiDependencies): Router {
     if (subjectOf(admissionCode) !== enrollmentId) throw forbidden('enrollment admission does not match');
     const provisionalDeviceId = newId('dev');
     const provisionalCredential = issueCredential('device', provisionalDeviceId);
+    const nowSeconds = unixSeconds(now);
     const claimed = await store.claimRemoteEnrollment({
       id: enrollmentId,
       admissionDigest: digestOf('enrollment', admissionCode),
@@ -538,10 +540,10 @@ export function createRouter(dependencies: ApiDependencies): Router {
       provisionalPlatform: validate.requiredString(input, 'platform', /^[a-z0-9.-]{2,32}$/),
       provisionalPublicKey: validate.publicKey(input, 'publicKey'),
       provisionalTokenDigest: provisionalCredential.digest,
-      now: unixSeconds(now),
+      now: nowSeconds,
     });
     if (!claimed) throw new HttpError(409, 'enrollment_unavailable', 'enrollment is invalid, expired, or already claimed');
-    const enrollment = await store.getRemoteEnrollment(enrollmentId, unixSeconds(now));
+    const enrollment = await store.getRemoteEnrollment(enrollmentId, nowSeconds);
     if (!enrollment) throw new HttpError(409, 'enrollment_unavailable', 'enrollment is unavailable');
     requireAdmissionBudget(context, enrollment.accountId, provisionalDeviceId);
     const controllerAdmission = await issueRemoteAdmission({
@@ -731,6 +733,7 @@ export function createRouter(dependencies: ApiDependencies): Router {
     const attemptId = validate.requiredString(input, 'attemptId', /^[A-Za-z0-9_-]{16,96}$/);
     const admission = await store.getRemoteAdmission(ticketId);
     if (!admission) throw forbidden('admission is unavailable');
+    const nowSeconds = unixSeconds(now);
     if (admission.linkId) {
       const link = await store.getRemoteLink(admission.linkId);
       if (!link) throw forbidden('link is unavailable');
@@ -744,14 +747,14 @@ export function createRouter(dependencies: ApiDependencies): Router {
         throw forbidden('admission authorization is no longer current');
       }
     } else if (admission.enrollmentId) {
-      const enrollment = await store.getRemoteEnrollment(admission.enrollmentId, unixSeconds(now));
+      const enrollment = await store.getRemoteEnrollment(admission.enrollmentId, nowSeconds);
       if (!enrollment || (admission.role === 'controller' && !enrollment.provisionalDeviceId)) {
         throw forbidden('enrollment authorization is no longer current');
       }
     }
     const leaseId = newId('lease');
     const redeemed = await store.redeemRemoteAdmission(
-      ticketId, attemptId, leaseId, unixSeconds(now) + LEASE_TTL_SECONDS, unixSeconds(now),
+      ticketId, attemptId, leaseId, nowSeconds + LEASE_TTL_SECONDS, nowSeconds,
     );
     if (!redeemed?.leaseId || !redeemed.leaseExpiresAt) throw forbidden('admission was already spent');
     return { status: 200, body: { leaseId: redeemed.leaseId, expiresAt: redeemed.leaseExpiresAt } };
