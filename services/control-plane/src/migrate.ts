@@ -9,6 +9,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { readdir, readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -28,7 +29,12 @@ export interface MigrationClient {
 
 /** Resolves the migrations directory for both `src/` and compiled `dist/`. */
 export function migrationsDirectory(): string {
-  return join(dirname(fileURLToPath(import.meta.url)), '..', 'migrations');
+  const moduleDirectory = dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    join(moduleDirectory, '..', 'migrations'),
+    join(moduleDirectory, '../../../migrations'),
+  ];
+  return candidates.find(existsSync) ?? candidates[0]!;
 }
 
 export function checksumOf(sql: string): string {
