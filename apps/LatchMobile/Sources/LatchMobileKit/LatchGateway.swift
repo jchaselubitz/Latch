@@ -164,6 +164,16 @@ public actor LatchGateway {
         return try await request(method: "POST", path: "/v2/sessions/\(sessionID)/stop")
     }
 
+    /// Tells the Mac which key to seal this device's attention alerts to.
+    ///
+    /// The device is the one the link authenticated, never a field here, so
+    /// a phone can only ever set its own key. Repeating it is harmless.
+    public func registerNotificationKey(publicKeyHex: String) async throws {
+        try await require(.notificationKey)
+        let body = try JSONEncoder().encode(["publicKey": publicKeyHex])
+        let _: NoContent = try await request(method: "PUT", path: "/v2/notifications/key", body: body)
+    }
+
     /// Places one file in the session's working directory on the Mac, under
     /// its attachments folder, so the next message can name it by path.
     ///
@@ -317,6 +327,9 @@ public actor LatchGateway {
         guard (200..<300).contains(http.statusCode) else {
             throw Self.error(status: http.statusCode, path: path, data: data)
         }
+        if data.isEmpty, let empty = NoContent() as? T {
+            return empty
+        }
         guard data.count <= Self.maximumJSONResponseBytes else {
             throw LatchError.malformedResponse("response exceeded the JSON size limit")
         }
@@ -382,4 +395,10 @@ public actor LatchGateway {
             reason: reason.isEmpty ? "request failed" : reason
         )
     }
+}
+
+/// The answer of a route that answers with no body (`204 No Content`).
+struct NoContent: Decodable {
+    init() {}
+    init(from decoder: Decoder) throws {}
 }

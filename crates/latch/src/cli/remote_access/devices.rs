@@ -65,6 +65,12 @@ pub(super) struct DeviceRecord {
     enrollment_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     control_plane_device_id: Option<String>,
+    /// X25519 public key the phone registered for sealing attention
+    /// notifications, as 32-byte lowercase hex. Separate from `public_key`:
+    /// the phone's notification extension must open alerts while the phone
+    /// is locked, which the Noise identity key is deliberately unable to do.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    notification_key: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -242,6 +248,7 @@ pub fn authorize_enrollment(
         revoked: false,
         enrollment_id: Some(enrollment_id.to_owned()),
         control_plane_device_id: Some(control_plane_device_id.to_owned()),
+        notification_key: None,
     };
     let result = summary(&record);
     store.devices.push(record);
@@ -315,6 +322,44 @@ pub fn revoke(home: &LatchHome, device_id: &str) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow!("device grant revision exhausted"))?;
     write_json(&paths.devices(), &store)?;
     audit(&paths, "device_revoked", Some(device_id), "ok")
+}
+
+/// Records the X25519 public key a controller wants its attention
+/// notifications sealed to. Replacing it needs no grant change: the key opens
+/// only notification metadata, never a transport admission.
+pub fn set_notification_key(
+    home: &LatchHome,
+    device_id: &str,
+    public_key: &str,
+) -> anyhow::Result<()> {
+    decode_static_key(public_key)?;
+    let paths = Paths::new(home);
+    let mut store: DeviceStore = read_json_or_default(&paths.devices())?;
+    let device = store
+        .devices
+        .iter_mut()
+        .find(|item| item.device_id == device_id)
+        .ok_or_else(|| anyhow!("device not found"))?;
+    if device.revoked {
+        bail!("device is revoked");
+    }
+    if device.notification_key.as_deref() == Some(public_key) {
+        return Ok(());
+    }
+    device.notification_key = Some(public_key.to_owned());
+    write_json(&paths.devices(), &store)?;
+    audit(&paths, "notification_key_set", Some(device_id), "ok")
+}
+
+/// The notification key a live controller registered, if any.
+pub fn notification_key(home: &LatchHome, device_id: &str) -> Option<[u8; 32]> {
+    let store: DeviceStore = read_json_or_default(&Paths::new(home).devices()).ok()?;
+    let device = store
+        .devices
+        .iter()
+        .find(|item| item.device_id == device_id && !item.revoked)?;
+    let bytes = decode_static_key(device.notification_key.as_deref()?).ok()?;
+    bytes.try_into().ok()
 }
 
 /// Replaces a controller key while invalidating existing admissions.

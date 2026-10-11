@@ -53,6 +53,12 @@ const LEASE_TTL_SECONDS = 10 * 60;
 const ATTENTION_TTL_SECONDS = 10 * 60;
 const PUSH_TOKEN = /^[0-9a-f]{64}$/;
 const EVENT_ID = /^[0-9a-f]{32}$/;
+/**
+ * An HPKE-sealed attention payload: a 32-byte encapsulated key, a 16-byte
+ * tag, and a small JSON body, as hex. Bounded so the APNs payload stays well
+ * inside Apple's 4 KiB limit.
+ */
+const SEALED_PAYLOAD = /^(?:[0-9a-f]{2}){48,1024}$/;
 
 function unixSeconds(now: () => number): number {
   return Math.floor(now() / 1000);
@@ -677,18 +683,22 @@ export function createRouter(dependencies: ApiDependencies): Router {
   });
 
   /**
-   * A host asks for one generic attention alert to a paired phone. The body
-   * names the phone and an opaque event id; nothing about the session, the
-   * prompt, or the approval travels here, and the payload sent to APNs is a
-   * fixed sentence. Delivery is best effort and never required for the
-   * phone's own foreground refresh.
+   * A host asks for one attention alert to a paired phone. The body names
+   * the phone and an opaque event id, and may carry an opaque `sealed` blob
+   * the Mac encrypted to the phone; nothing about the session, the prompt,
+   * or the approval travels here in a form this service can read. The blob
+   * is forwarded to APNs and never stored. Delivery is best effort and never
+   * required for the phone's own foreground refresh.
    */
   router.post('/v1/attention', async (context) => {
     const host = await requireDevice(context);
-    const input = body(context, ['clientDeviceId', 'eventId']);
+    const input = body(context, ['clientDeviceId', 'eventId', 'sealed']);
     if (host.role !== 'host') throw forbidden('only a host device may request attention');
     const clientDeviceId = validate.opaqueId(input, 'clientDeviceId');
     const eventId = validate.requiredString(input, 'eventId', EVENT_ID);
+    const sealed = input.sealed === undefined
+      ? undefined
+      : validate.requiredString(input, 'sealed', SEALED_PAYLOAD);
     const client = await store.getDevice(clientDeviceId);
     const pairing = client ? await store.getPairing(host.id, client.id) : null;
     if (!client || client.accountId !== host.accountId || client.revokedAt !== null || !pairing) {
@@ -713,6 +723,7 @@ export function createRouter(dependencies: ApiDependencies): Router {
       token: registration.pushToken,
       collapseId: eventId,
       expiresAt: unixSeconds(now) + ATTENTION_TTL_SECONDS,
+      ...(sealed ? { sealed } : {}),
     });
     if (outcome === 'invalid_token') {
       // Apple says this token will never work again; keeping it would only

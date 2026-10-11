@@ -388,6 +388,10 @@ struct SessionsView: View {
     /// a terminal still asks for Face ID and a grant still gates it.
     private func openLinkedSession() {
         guard let session = model.takeRequestedSession() else { return }
+        // A link or a tapped alert opens over the list, not under a sheet.
+        showingSettings = false
+        creating = nil
+        stopping = nil
         select(session)
     }
 

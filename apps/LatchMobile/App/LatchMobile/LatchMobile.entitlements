@@ -3,13 +3,22 @@
 <plist version="1.0">
 <dict>
 	<!--
-	  Generic attention alerts only. The payload is a fixed sentence; the phone
-	  fetches real state over the authenticated Remote Link after it opens.
-	  `development` matches a development-signed build and the control plane's
+	  Attention alerts. The visible payload is a fixed sentence unless the
+	  notification service extension opens the blob the Mac sealed to this
+	  phone and names the session. `development` matches a development-signed build and the control plane's
 	  APNS_ENVIRONMENT=sandbox; a TestFlight/App Store build is re-signed with
 	  `production` by Xcode automatically.
 	-->
 	<key>aps-environment</key>
 	<string>development</string>
+	<!--
+	  Shared with LatchNotificationService so it can read the notification
+	  key (and nothing else: the identity and pairing records stay in the
+	  app's own default group).
+	-->
+	<key>keychain-access-groups</key>
+	<array>
+		<string>$(AppIdentifierPrefix)dev.cooperativ.latch.shared</string>
+	</array>
 </dict>
 </plist>

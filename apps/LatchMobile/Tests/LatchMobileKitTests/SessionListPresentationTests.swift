@@ -24,6 +24,29 @@ final class SessionListPresentationTests: XCTestCase {
         )
     }
 
+    func testAgentBadgeFollowsTheMacsPhaseOnlyWhileRunning() throws {
+        func badge(_ phase: String?, state: String = "running") -> AgentActivity? {
+            SessionSummary(
+                id: "a", name: "a", state: state, cwd: "/", commandLabel: "claude",
+                createdAt: "2026-09-25T00:00:00Z", connector: .named("claude"), agentPhase: phase
+            ).agentActivity
+        }
+        XCTAssertEqual(badge("working"), .working)
+        XCTAssertEqual(badge("awaiting_input"), .needsYou)
+        XCTAssertEqual(badge("idle"), .done)
+        XCTAssertNil(badge("starting"), "nothing true to say yet")
+        XCTAssertNil(badge(nil), "an older Mac or an unobserved session")
+        XCTAssertNil(badge("working", state: "exited"), "a stopped session has no live phase")
+
+        let json = Data("""
+        {"id":"ses_1","name":"n","state":"running","cwd":"/","command_label":"claude",
+         "created_at":"2026-09-25T00:00:00Z","connector":"claude","agent_phase":"awaiting_input"}
+        """.utf8)
+        let decoded = try JSONDecoder().decode(SessionSummary.self, from: json)
+        XCTAssertEqual(decoded.agentPhase, "awaiting_input")
+        XCTAssertEqual(decoded.agentActivity?.label, "Needs you")
+    }
+
     func testRunningHoldsEverySessionWhoseProgramStillExists() {
         XCTAssertEqual(SessionListSection(state: "running"), .running)
         XCTAssertEqual(SessionListSection(state: "creating"), .running)

@@ -4,7 +4,7 @@ use axum::http::header;
 
 #[test]
 fn every_registered_handler_comes_from_the_shared_route_table() {
-    assert_eq!(ROUTES.len(), 11);
+    assert_eq!(ROUTES.len(), 12);
     let mut ids = ROUTES.iter().map(|route| route.id).collect::<Vec<_>>();
     ids.sort_by_key(|id| *id as u8);
     ids.dedup();
@@ -37,8 +37,10 @@ fn current_capabilities_advertise_browsing_and_creation() {
         stop_session: true,
         attachments: true,
         agent_models: true,
+        notification_key: true,
     })
     .unwrap();
+    assert_eq!(value["notificationKey"], true);
     assert_eq!(value["browseDirectories"], true);
     assert_eq!(value["createSession"], true);
     assert_eq!(value["stopSession"], true);

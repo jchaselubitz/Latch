@@ -66,6 +66,7 @@ pub(crate) enum RouteId {
     Conversation,
     Attachments,
     AgentModels,
+    NotificationKey,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -89,6 +90,15 @@ pub(crate) struct RouteSpec {
 pub const ATTACHMENT_MAX_BYTES: u64 = 25 * 1024 * 1024;
 
 pub(crate) const ROUTES: &[RouteSpec] = &[
+    // Read-only in effect: the key only lets the Mac seal alerts *to* this
+    // device, so the lowest grant that receives alerts may set it.
+    RouteSpec {
+        id: RouteId::NotificationKey,
+        pattern: "/v2/notifications/key",
+        method: "PUT",
+        required_grant: Grant::Observe,
+        streamed_body_limit: None,
+    },
     RouteSpec {
         id: RouteId::Capabilities,
         pattern: "/v2/capabilities",
@@ -236,6 +246,12 @@ mod tests {
             ("/v2/sessions/ses_1/conversation", Grant::Observe),
             ("/v2/agents/claude/models", Grant::Control),
         ];
+        let notification_key = ROUTES
+            .iter()
+            .find(|route| route.id == RouteId::NotificationKey)
+            .expect("notification key route");
+        assert_eq!(notification_key.method, "PUT");
+        assert_eq!(notification_key.required_grant, Grant::Observe);
         for (target, expected) in cases {
             assert_eq!(
                 route_for("GET", target).map(|(_, grant)| grant),

@@ -192,9 +192,13 @@ struct RemoteAttentionEvent: Codable, Equatable, Identifiable, Sendable {
     let deviceID: String
     let kind: String
     let createdAt: UInt64
+    /// HPKE ciphertext the gateway sealed to the phone's notification key, as
+    /// hex. Forwarded untouched; neither Desktop nor the control plane can
+    /// read it. Absent when the phone registered no key.
+    var sealed: String? = nil
 
     enum CodingKeys: String, CodingKey {
-        case kind, createdAt
+        case kind, createdAt, sealed
         case eventID = "eventId"
         case deviceID = "deviceId"
     }

@@ -129,6 +129,9 @@ public struct GatewayEndpoints: Codable, Equatable, Sendable {
     /// creation. Absent on a Mac that predates model choice, which then
     /// starts every agent on the Mac's own default.
     public var agentModels: Bool
+    /// Register the key attention alerts are sealed to. Absent on a Mac that
+    /// predates sealed alerts, whose notifications stay generic.
+    public var notificationKey: Bool
 
     public init(
         sessions: Bool = false,
@@ -139,7 +142,8 @@ public struct GatewayEndpoints: Codable, Equatable, Sendable {
         createSession: Bool = false,
         stopSession: Bool = false,
         attachments: Bool = false,
-        agentModels: Bool = false
+        agentModels: Bool = false,
+        notificationKey: Bool = false
     ) {
         self.sessions = sessions
         self.preview = preview
@@ -150,6 +154,7 @@ public struct GatewayEndpoints: Codable, Equatable, Sendable {
         self.stopSession = stopSession
         self.attachments = attachments
         self.agentModels = agentModels
+        self.notificationKey = notificationKey
     }
 
     // Hand-written so an older Mac, whose document has no `preview` key at
@@ -167,6 +172,7 @@ public struct GatewayEndpoints: Codable, Equatable, Sendable {
         stopSession = try container.decodeIfPresent(Bool.self, forKey: .stopSession) ?? false
         attachments = try container.decodeIfPresent(Bool.self, forKey: .attachments) ?? false
         agentModels = try container.decodeIfPresent(Bool.self, forKey: .agentModels) ?? false
+        notificationKey = try container.decodeIfPresent(Bool.self, forKey: .notificationKey) ?? false
     }
 }
 
@@ -180,6 +186,7 @@ public enum GatewayEndpointsName: String, CaseIterable, Sendable {
     case stopSession
     case attachments
     case agentModels
+    case notificationKey
 }
 
 public extension GatewayEndpoints {
@@ -194,6 +201,7 @@ public extension GatewayEndpoints {
         case .stopSession: return stopSession
         case .attachments: return attachments
         case .agentModels: return agentModels
+        case .notificationKey: return notificationKey
         }
     }
 }

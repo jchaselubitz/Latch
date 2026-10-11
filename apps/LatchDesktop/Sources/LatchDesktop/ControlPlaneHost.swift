@@ -239,8 +239,9 @@ protocol ControlPlaneHostAPI: Sendable {
     func relayAdmission(deviceToken: String, peerDeviceID: String) async throws -> ControlPlaneRelayAdmission
     func renewRelayLease(deviceToken: String, leaseID: String) async throws -> ControlPlaneLeaseExtension
     func setRelayEnabled(accountToken: String, enabled: Bool) async throws
-    /// Asks for one generic attention alert. Returns whether it was delivered.
-    func notifyAttention(deviceToken: String, clientDeviceID: String, eventID: String) async throws -> Bool
+    /// Asks for one attention alert, optionally carrying a payload sealed to
+    /// the phone. Returns whether it was delivered.
+    func notifyAttention(deviceToken: String, clientDeviceID: String, eventID: String, sealed: String?) async throws -> Bool
 }
 
 actor HTTPControlPlaneHostAPI: ControlPlaneHostAPI {
@@ -342,11 +343,12 @@ actor HTTPControlPlaneHostAPI: ControlPlaneHostAPI {
         )
     }
 
-    func notifyAttention(deviceToken: String, clientDeviceID: String, eventID: String) async throws -> Bool {
+    func notifyAttention(deviceToken: String, clientDeviceID: String, eventID: String, sealed: String?) async throws -> Bool {
         struct Response: Decodable { let delivered: Bool }
+        var body: [String: Any] = ["clientDeviceId": clientDeviceID, "eventId": eventID]
+        if let sealed { body["sealed"] = sealed }
         let response: Response = try await send(
-            path: "/v1/attention", method: "POST", token: deviceToken,
-            body: ["clientDeviceId": clientDeviceID, "eventId": eventID]
+            path: "/v1/attention", method: "POST", token: deviceToken, body: body
         )
         return response.delivered
     }
@@ -634,10 +636,10 @@ final class ControlPlaneHost {
         return RemoteLinkAdmission(relayURL: admission.relayUrl, admission: admission.admission)
     }
 
-    func notifyAttention(clientDeviceID: String, eventID: String) async throws -> Bool {
+    func notifyAttention(clientDeviceID: String, eventID: String, sealed: String? = nil) async throws -> Bool {
         let (address, credentials) = try configuredCredentials()
         return try await apiFactory(address).notifyAttention(
-            deviceToken: credentials.deviceToken, clientDeviceID: clientDeviceID, eventID: eventID
+            deviceToken: credentials.deviceToken, clientDeviceID: clientDeviceID, eventID: eventID, sealed: sealed
         )
     }
 

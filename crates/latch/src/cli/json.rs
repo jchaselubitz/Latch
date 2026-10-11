@@ -52,6 +52,14 @@ pub struct SessionSummary {
     /// connector-less sessions, so no `skip_serializing_if` here.
     #[serde(default)]
     pub connector: Option<String>,
+    /// The hosted agent's conversation phase, in the conversation-state
+    /// schema's vocabulary (`working`, `awaiting_input`, `idle`, ...).
+    ///
+    /// Only the gateway fills it, and only for an agent session the Hub is
+    /// already observing; `latch list --json` never does, so absent means
+    /// "not known here", never "not an agent".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_phase: Option<String>,
 }
 
 /// `latch list --json`.

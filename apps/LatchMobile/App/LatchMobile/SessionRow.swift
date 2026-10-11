@@ -44,6 +44,8 @@ struct SessionRow: View {
                 Text("Stopping…")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
+            } else if let activity = session.agentActivity {
+                AgentActivityBadge(activity: activity)
             }
         }
         .accessibilityElement(children: .combine)
@@ -73,6 +75,7 @@ struct SessionRow: View {
 
     private var accessibilityState: String {
         if isStopping { return "Stopping" }
+        if let activity = session.agentActivity { return activity.label }
         return session.connector == .none ? "Shell, \(session.state)" : session.state
     }
 
@@ -85,6 +88,38 @@ struct SessionRow: View {
         case .chat: "Opens the conversation"
         case .chatUnavailable: "Chat is unavailable; opens recovery options"
         case .unavailable: "Cannot be opened"
+        }
+    }
+}
+
+/// A small capsule saying what a running agent is doing. "Needs you" is the
+/// only one drawn to catch the eye; the others stay quiet.
+struct AgentActivityBadge: View {
+    let activity: AgentActivity
+
+    var body: some View {
+        Text(activity.label)
+            .font(.caption.weight(.semibold))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .foregroundStyle(foreground)
+            .background(background, in: Capsule())
+            .accessibilityHidden(true)
+    }
+
+    private var foreground: Color {
+        switch activity {
+        case .needsYou: .white
+        case .working: .blue
+        case .done: .secondary
+        }
+    }
+
+    private var background: Color {
+        switch activity {
+        case .needsYou: .orange
+        case .working: .blue.opacity(0.15)
+        case .done: Color.secondary.opacity(0.15)
         }
     }
 }

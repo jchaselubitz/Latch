@@ -110,10 +110,22 @@ ambiguous outcomes are reconciled through `operation_status`, and a receipt
 the gateway no longer holds is reviewed rather than resent. Session creation
 retries reuse the same request id, which the Mac scopes to this device.
 
-Attention notifications are generic: the control plane pushes a fixed
-sentence when a watched session finishes or needs input; the app fetches real
-state over the authenticated link when it opens. The APNs token is the only
-thing registered, and it is removed on revoke or unpair.
+Attention notifications name the session without the cloud learning it. After
+each discovery the app registers a dedicated X25519 notification key with the
+Mac (`PUT /v2/notifications/key`). When an agent session finishes a turn or
+needs input, the Mac seals `{session id, name, what happened}` to that key with
+HPKE and the control plane forwards the opaque blob with a fixed generic
+sentence and `mutable-content`. The `LatchNotificationService` extension opens
+it locally and rewrites the alert ("auth-refactor · Needs your input");
+anything it cannot open is shown as the generic sentence. Tapping an alert
+opens that session through the same request a `latch://` link makes.
+
+The notification key lives in the `dev.cooperativ.latch.shared` keychain
+group, `AfterFirstUnlockThisDeviceOnly`, because the extension must read it
+while the phone is locked; the Noise identity and pairing record stay
+`WhenUnlocked` in the app's own group. A stolen notification key reveals only
+the names of sessions that asked for attention. The APNs token is removed on
+revoke or unpair.
 
 Settings → Diagnostics runs real suspend/resume cycles through the owner and
 writes content-free per-attempt stage timings to Files › Latch ›

@@ -75,6 +75,7 @@ pub fn list(options: ListOptions) -> anyhow::Result<ListReport> {
             last_activity_at: Some(engine::format_rfc3339(activity)),
             idle_ms: Some(now.duration_since(activity).unwrap_or_default().as_millis() as u64),
             connector,
+            agent_phase: None,
         });
     }
     sessions.sort_by_key(|session| session.idle_ms);

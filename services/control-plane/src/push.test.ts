@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { generateKeyPairSync } from 'node:crypto';
 import { after, describe, it } from 'node:test';
 
-import { ATTENTION_PAYLOAD, Http2ApnsSender, apnsHost, classifyResponse } from './apns.ts';
+import { ATTENTION_PAYLOAD, Http2ApnsSender, apnsHost, attentionPayload, classifyResponse } from './apns.ts';
 import { loadConfig } from './config.ts';
 import { FakeApns, enrollPair, startHarness } from './test-harness.ts';
 
@@ -91,6 +91,45 @@ describe('attention delivery', () => {
     const dump = JSON.stringify(harness.store.snapshot());
     assert.equal(dump.includes('prompt'), false);
     assert.equal(dump.includes(TOKEN), true, 'the opaque token is the one thing stored');
+  });
+
+  it('forwards a sealed blob as a mutable alert without storing it, and bounds it', async () => {
+    const apns = new FakeApns();
+    const harness = await startHarness({}, { apns });
+    after(() => harness.close());
+    const { host, client } = await enrollPair(harness, 'observe');
+    await harness.request('PUT', '/v1/push-registrations', { token: client.token, body: { pushToken: TOKEN } });
+    const sealed = 'c3'.repeat(120);
+
+    const sent = await harness.request('POST', '/v1/attention', {
+      token: host.token, body: { clientDeviceId: client.deviceId, eventId: EVENT, sealed },
+    });
+    assert.equal(sent.status, 202);
+    assert.deepEqual(sent.body, { eventId: EVENT, delivered: true });
+    assert.equal(apns.deliveries[0]!.sealed, sealed);
+    assert.deepEqual(attentionPayload(apns.deliveries[0]!), {
+      aps: {
+        alert: { title: 'Latch', body: 'Your Mac needs your attention.' },
+        sound: 'default',
+        'thread-id': 'latch-attention',
+        'mutable-content': 1,
+        category: 'LATCH_ATTENTION',
+      },
+      latch: { e: EVENT, c: sealed },
+    });
+    // Without a blob the payload is exactly the generic one.
+    assert.equal(attentionPayload({ collapseId: EVENT }), ATTENTION_PAYLOAD);
+    // Forwarded, never retained.
+    assert.equal(JSON.stringify(harness.store.snapshot()).includes(sealed), false);
+
+    for (const bad of ['C3'.repeat(60), 'c3'.repeat(10), 'c3'.repeat(1025), 'c', 42]) {
+      const refused = await harness.request('POST', '/v1/attention', {
+        token: host.token, body: { clientDeviceId: client.deviceId, eventId: 'e'.repeat(32), sealed: bad },
+      });
+      assert.equal(refused.status, 400, `sealed ${String(bad).slice(0, 8)} must be refused`);
+      assert.equal(refused.body.field, 'sealed');
+    }
+    assert.equal(apns.deliveries.length, 1);
   });
 
   it('refuses unpaired, foreign, or controller callers and is unregistered without a token', async () => {

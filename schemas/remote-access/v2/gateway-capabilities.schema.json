@@ -33,7 +33,8 @@
         "createSession": { "type": "boolean", "description": "Create a standard host shell at the control grant. Absence means unavailable." },
         "stopSession": { "type": "boolean", "description": "Stop one running session at the control grant. Absence means unavailable." },
         "attachments": { "type": "boolean", "description": "Upload one file into the session's working directory at the interact grant, so a message can reference it by path. Absence means unavailable." },
-        "agentModels": { "type": "boolean", "description": "List the models a hosted agent can start with, at the control grant (GET /v2/agents/{agent}/models), and accept `model` on session creation. Absence means unavailable: create agents without choosing a model." }
+        "agentModels": { "type": "boolean", "description": "List the models a hosted agent can start with, at the control grant (GET /v2/agents/{agent}/models), and accept `model` on session creation. Absence means unavailable: create agents without choosing a model." },
+        "notificationKey": { "type": "boolean", "description": "Register the X25519 public key this device's attention notifications are sealed to (PUT /v2/notifications/key) at the observe grant. Absence means alerts stay generic." }
       },
       "additionalProperties": false
     },

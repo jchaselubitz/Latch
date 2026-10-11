@@ -123,11 +123,14 @@ idle sleep only while the Mac is on external power and at least one phone is
 authenticated. Lid close, manual sleep, and low battery still sleep the Mac;
 the phone shows the Mac as offline until it wakes and the helper re-admits.
 
-Attention notifications: the gateway keeps observing sessions a phone has
-opened and spools one content-free event per finished turn or pending
-request; Desktop forwards the opaque event id to the control plane, which
-pushes a fixed generic sentence. Nothing about the session, prompt, or output
-leaves the Mac.
+Attention notifications: the gateway observes every running agent session
+(and any session a phone opened) and spools one event per paired phone per
+finished turn or pending request. When the phone registered a notification
+key, the event carries the session id, name, and transition sealed to that key
+with HPKE. Desktop forwards the opaque event id and sealed blob to the control
+plane, which cannot read the blob and pushes it with a fixed generic sentence
+for the phone's notification extension to open. No prompt or output is ever
+included, and nothing about the session leaves the Mac readable.
 
 TLS or peer-pin failures are terminal for that attempt. Transient WSS, lease,
 helper, or shared-gateway failures trigger bounded supervision backoff.

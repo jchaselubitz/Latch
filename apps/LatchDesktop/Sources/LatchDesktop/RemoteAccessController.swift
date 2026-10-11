@@ -376,8 +376,10 @@ final class RemoteAccessController: ObservableObject {
                     controller.devices.first { $0.deviceID == localID && !$0.revoked }?.controlPlaneDeviceID
                 }
             },
-            notify: { clientID, eventID in
-                _ = try await controlPlane.notifyAttention(clientDeviceID: clientID, eventID: eventID)
+            notify: { clientID, event in
+                _ = try await controlPlane.notifyAttention(
+                    clientDeviceID: clientID, eventID: event.eventID, sealed: event.sealed
+                )
             }
         )
         attention = Task { await forwarder.run() }

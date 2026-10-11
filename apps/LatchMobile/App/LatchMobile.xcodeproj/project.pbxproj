@@ -42,7 +42,35 @@
 		ABCDEF0123456789ABCD0080 /* ConversationNotices.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD007F /* ConversationNotices.swift */; };
 		ABCDEF0123456789ABCD0084 /* ConversationPreviews.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD0083 /* ConversationPreviews.swift */; };
 		ABCDEF0123456789ABCD0102 /* FloatingControl.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD0101 /* FloatingControl.swift */; };
+		ABCDEF0123456789ABCD0205 /* NotificationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD0200 /* NotificationService.swift */; };
+		ABCDEF0123456789ABCD020E /* LatchNotificationKit in Frameworks */ = {isa = PBXBuildFile; productRef = ABCDEF0123456789ABCD020D /* LatchNotificationKit */; };
+		ABCDEF0123456789ABCD0210 /* LatchNotificationKit in Frameworks */ = {isa = PBXBuildFile; productRef = ABCDEF0123456789ABCD020F /* LatchNotificationKit */; };
+		ABCDEF0123456789ABCD0213 /* LatchNotificationService.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD0203 /* LatchNotificationService.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		ABCDEF0123456789ABCD0211 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = ABCDEF0123456789ABCD0001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = ABCDEF0123456789ABCD0209;
+			remoteInfo = LatchNotificationService;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		ABCDEF0123456789ABCD0214 /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				ABCDEF0123456789ABCD0213 /* LatchNotificationService.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		ABCDEF0123456789ABCD0003 /* Latch.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Latch.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -80,6 +108,10 @@
 		ABCDEF0123456789ABCD007F /* ConversationNotices.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationNotices.swift; sourceTree = "<group>"; };
 		ABCDEF0123456789ABCD0083 /* ConversationPreviews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationPreviews.swift; sourceTree = "<group>"; };
 		ABCDEF0123456789ABCD0101 /* FloatingControl.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FloatingControl.swift; sourceTree = "<group>"; };
+		ABCDEF0123456789ABCD0200 /* NotificationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationService.swift; sourceTree = "<group>"; };
+		ABCDEF0123456789ABCD0201 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		ABCDEF0123456789ABCD0202 /* LatchNotificationService.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = LatchNotificationService.entitlements; sourceTree = "<group>"; };
+		ABCDEF0123456789ABCD0203 /* LatchNotificationService.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = LatchNotificationService.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -90,6 +122,15 @@
 				ABCDEF0123456789ABCD001B /* LatchMobileKit in Frameworks */,
 				ABCDEF0123456789ABCD0024 /* LatchTransportNative in Frameworks */,
 				ABCDEF0123456789ABCD0038 /* SwiftTerm in Frameworks */,
+				ABCDEF0123456789ABCD0210 /* LatchNotificationKit in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		ABCDEF0123456789ABCD0207 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				ABCDEF0123456789ABCD020E /* LatchNotificationKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -100,6 +141,7 @@
 			isa = PBXGroup;
 			children = (
 				ABCDEF0123456789ABCD0005 /* LatchMobile */,
+				ABCDEF0123456789ABCD0204 /* LatchNotificationService */,
 				ABCDEF0123456789ABCD0006 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -140,6 +182,7 @@
 			isa = PBXGroup;
 			children = (
 				ABCDEF0123456789ABCD0003 /* Latch.app */,
+				ABCDEF0123456789ABCD0203 /* LatchNotificationService.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -169,6 +212,16 @@
 			path = Support;
 			sourceTree = "<group>";
 		};
+		ABCDEF0123456789ABCD0204 /* LatchNotificationService */ = {
+			isa = PBXGroup;
+			children = (
+				ABCDEF0123456789ABCD0200 /* NotificationService.swift */,
+				ABCDEF0123456789ABCD0201 /* Info.plist */,
+				ABCDEF0123456789ABCD0202 /* LatchNotificationService.entitlements */,
+			);
+			path = LatchNotificationService;
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
@@ -179,20 +232,43 @@
 				ABCDEF0123456789ABCD000D /* Sources */,
 				ABCDEF0123456789ABCD000E /* Frameworks */,
 				ABCDEF0123456789ABCD000F /* Resources */,
+				ABCDEF0123456789ABCD0214 /* Embed Foundation Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				ABCDEF0123456789ABCD0212 /* PBXTargetDependency */,
 			);
 			name = LatchMobile;
 			packageProductDependencies = (
 				ABCDEF0123456789ABCD001A /* LatchMobileKit */,
 				ABCDEF0123456789ABCD0023 /* LatchTransportNative */,
 				ABCDEF0123456789ABCD0037 /* SwiftTerm */,
+				ABCDEF0123456789ABCD020F /* LatchNotificationKit */,
 			);
 			productName = LatchMobile;
 			productReference = ABCDEF0123456789ABCD0003 /* Latch.app */;
 			productType = "com.apple.product-type.application";
+		};
+		ABCDEF0123456789ABCD0209 /* LatchNotificationService */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = ABCDEF0123456789ABCD020A /* Build configuration list for PBXNativeTarget "LatchNotificationService" */;
+			buildPhases = (
+				ABCDEF0123456789ABCD0206 /* Sources */,
+				ABCDEF0123456789ABCD0207 /* Frameworks */,
+				ABCDEF0123456789ABCD0208 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = LatchNotificationService;
+			packageProductDependencies = (
+				ABCDEF0123456789ABCD020D /* LatchNotificationKit */,
+			);
+			productName = LatchNotificationService;
+			productReference = ABCDEF0123456789ABCD0203 /* LatchNotificationService.appex */;
+			productType = "com.apple.product-type.app-extension";
 		};
 /* End PBXNativeTarget section */
 
@@ -210,6 +286,9 @@
 								enabled = 1;
 							};
 						};
+						CreatedOnToolsVersion = 16.0;
+					};
+					ABCDEF0123456789ABCD0209 = {
 						CreatedOnToolsVersion = 16.0;
 					};
 				};
@@ -232,6 +311,7 @@
 			projectRoot = "";
 			targets = (
 				ABCDEF0123456789ABCD0002 /* LatchMobile */,
+				ABCDEF0123456789ABCD0209 /* LatchNotificationService */,
 			);
 		};
 /* End PBXProject section */
@@ -242,6 +322,13 @@
 			buildActionMask = 2147483647;
 			files = (
 				ABCDEF0123456789ABCD001D /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		ABCDEF0123456789ABCD0208 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -286,7 +373,23 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		ABCDEF0123456789ABCD0206 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				ABCDEF0123456789ABCD0205 /* NotificationService.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		ABCDEF0123456789ABCD0212 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = ABCDEF0123456789ABCD0209 /* LatchNotificationService */;
+			targetProxy = ABCDEF0123456789ABCD0211 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		ABCDEF0123456789ABCD0009 /* Debug */ = {
@@ -383,6 +486,52 @@
 			};
 			name = Release;
 		};
+		ABCDEF0123456789ABCD020B /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = LatchNotificationService/LatchNotificationService.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = X84RPB4674;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = LatchNotificationService/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "dev.cooperativ.latch.mobile.notification-service";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		ABCDEF0123456789ABCD020C /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = LatchNotificationService/LatchNotificationService.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = X84RPB4674;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = LatchNotificationService/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "dev.cooperativ.latch.mobile.notification-service";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -400,6 +549,15 @@
 			buildConfigurations = (
 				ABCDEF0123456789ABCD000B /* Debug */,
 				ABCDEF0123456789ABCD000C /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		ABCDEF0123456789ABCD020A /* Build configuration list for PBXNativeTarget "LatchNotificationService" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				ABCDEF0123456789ABCD020B /* Debug */,
+				ABCDEF0123456789ABCD020C /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
@@ -437,6 +595,14 @@
 			isa = XCSwiftPackageProductDependency;
 			package = ABCDEF0123456789ABCD0036 /* XCRemoteSwiftPackageReference "SwiftTerm" */;
 			productName = SwiftTerm;
+		};
+		ABCDEF0123456789ABCD020D /* LatchNotificationKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = LatchNotificationKit;
+		};
+		ABCDEF0123456789ABCD020F /* LatchNotificationKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = LatchNotificationKit;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

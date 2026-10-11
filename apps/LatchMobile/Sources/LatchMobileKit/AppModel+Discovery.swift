@@ -1,4 +1,5 @@
 import Foundation
+import LatchNotificationKit
 
 // MARK: - Discovery
 
@@ -145,6 +146,7 @@ extension AppModel {
                 highlightedSessionID = nil
             }
             resumeInterruptedTerminals()
+            registerNotificationKey(using: gateway, capabilities: capabilities)
             await refreshSessions()
         } catch let error as LatchError {
             linkState = Self.linkFailure(error)
@@ -158,5 +160,18 @@ extension AppModel {
     func probeGateway() async -> Bool {
         guard let gateway else { return false }
         return (try? await gateway.discover()) != nil
+    }
+}
+
+extension AppModel {
+    /// Gives the Mac this device's notification key, creating it on first
+    /// use, so its alerts arrive sealed and name the session. Best effort and
+    /// off the discovery path: a refusal only leaves alerts generic.
+    func registerNotificationKey(using gateway: LatchGateway, capabilities: GatewayCapabilities) {
+        guard GatewayCompatibility.supports(endpoint: .notificationKey, capabilities: capabilities),
+              let store = notificationKeys,
+              let key = store.loadOrCreate() else { return }
+        let publicKey = NotificationKeyStore.publicKeyHex(key)
+        Task { try? await gateway.registerNotificationKey(publicKeyHex: publicKey) }
     }
 }

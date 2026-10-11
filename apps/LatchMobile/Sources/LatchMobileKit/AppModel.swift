@@ -1,4 +1,5 @@
 import Foundation
+import LatchNotificationKit
 import Observation
 
 /// The app's link to one computer, shared by both tabs.
@@ -213,6 +214,10 @@ public final class AppModel {
     /// late suspension tear the fresh link down with nobody left to retry.
     var pendingSuspension: Task<Void, Never>?
 
+    /// Where this device's notification key lives, shared with the
+    /// notification service extension. Nil leaves alerts generic.
+    let notificationKeys: NotificationKeyStore?
+
     /// Armed only by the USB harness's launch argument; writes one
     /// `cold_open` record for this process and then goes quiet.
     public let coldOpen: ColdOpenRecorder
@@ -230,9 +235,11 @@ public final class AppModel {
         agentModelStore: any AgentModelPreferenceStoring = UserDefaultsAgentModelPreferenceStore(),
         terminalConnector: TerminalConnecting? = nil,
         terminalUnlock: TerminalUnlock? = nil,
+        notificationKeys: NotificationKeyStore? = nil,
         coldOpen: ColdOpenRecorder? = nil
     ) {
         self.coldOpen = coldOpen ?? ColdOpenRecorder()
+        self.notificationKeys = notificationKeys
         self.pathReporter = pathReporter
         self.terminalUnlock = terminalUnlock ?? TerminalUnlock()
         self.terminalConnector = terminalConnector

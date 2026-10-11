@@ -1,20 +1,26 @@
 //! Attention producer for paired phones.
 //!
-//! A phone that opened a session's conversation has *watched* it. From then
-//! on, while the gateway runs, the Hub keeps observing that session through a
-//! subscription this module owns — not the phone's socket, which is gone the
-//! moment the phone is in a pocket — and every transition into "needs input"
-//! or "finished working" becomes one content-free attention event in an
-//! owner-only spool. Desktop forwards spool entries to the control plane,
-//! which pushes a generic APNs alert; the phone fetches the real state over
-//! the authenticated link after it opens.
+//! Every running agent session on this Mac is watched on behalf of every
+//! paired device that may observe, as is any session a phone explicitly
+//! opened. While the gateway runs, the Hub keeps observing those sessions
+//! through subscriptions this module owns — not a phone's socket, which is
+//! gone the moment the phone is in a pocket — and every transition into
+//! "needs input" or "finished working" becomes one attention event per
+//! device in an owner-only spool. Desktop forwards spool entries to the
+//! control plane, which pushes an APNs alert.
+//!
+//! What leaves the Mac in the clear is still only an opaque event id. When
+//! the device registered a notification key, the event also carries a
+//! payload sealed to that key with HPKE (see [`seal`]): the session id, its
+//! name, and which transition happened. The control plane forwards those
+//! bytes without being able to read them, and the phone's notification
+//! extension opens them to say which session needs attention.
 //!
 //! Nothing here reads harness transcripts or takes a terminal surface. The
 //! only signal is the Hub-normalized `ConversationState` phase and pending
-//! request, and the only things written are opaque event ids, the Mac-local
-//! opaque device id, and timestamps.
+//! request.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -29,6 +35,8 @@ use crate::cli::remote_access::{self, DevicePermission};
 use crate::conversation::{ConversationHub, ConversationId, ConversationPhase};
 use crate::session::paths::{LatchHome, DIR_MODE, FILE_MODE};
 
+pub mod seal;
+
 /// Sessions one device may keep the gateway observing on its behalf.
 pub const MAX_WATCHED_SESSIONS_PER_DEVICE: usize = 16;
 /// Devices with retained watches.
@@ -40,6 +48,11 @@ pub const MAX_DEDUPE_RECORDS: usize = 256;
 pub const SPOOL_TTL: Duration = Duration::from_secs(10 * 60);
 /// How often watched sessions are examined for transitions.
 pub const TICK: Duration = Duration::from_secs(2);
+/// Running agent sessions watched automatically, most recently active first.
+pub const MAX_AUTO_WATCHED_SESSIONS: usize = 32;
+/// How often the session list behind automatic watches is re-read. Listing
+/// touches every session directory, so it runs far less often than the tick.
+pub const SESSION_REFRESH: Duration = Duration::from_secs(10);
 
 /// Which Hub transition produced an event. Stays on the Mac; the cloud
 /// payload carries only the opaque event id.
@@ -56,8 +69,9 @@ pub enum AttentionKind {
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AttentionEvent {
-    /// Random-looking but deterministic: hash of session, generation,
-    /// revision, and kind, so one transition is never spooled twice.
+    /// Random-looking but deterministic: hash of device, session,
+    /// generation, revision, and kind, so one transition is spooled once per
+    /// device and two devices never collide in the control plane's dedupe.
     pub event_id: String,
     /// Mac-local opaque controller id from the device store.
     pub device_id: String,
@@ -65,6 +79,21 @@ pub struct AttentionEvent {
     pub kind: AttentionKind,
     /// Unix seconds.
     pub created_at: u64,
+    /// Session the transition happened in. Mac-local; never sent in the clear.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// HPKE-sealed notification payload for this device, as lowercase hex,
+    /// when the device registered a notification key. Opaque to everything
+    /// between the Mac and the phone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sealed: Option<String>,
+}
+
+/// What a notification can say about a session.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct SessionLabel {
+    name: String,
+    title: Option<String>,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -90,6 +119,13 @@ struct State {
     observed: HashMap<String, Observed>,
     /// Hub subscriptions this watcher owns, per session.
     subscriptions: HashMap<String, u64>,
+    /// Running agent sessions watched for every device, refreshed every
+    /// [`SESSION_REFRESH`].
+    automatic: Vec<String>,
+    /// Labels of the sessions last listed, for sealed payloads.
+    labels: HashMap<String, SessionLabel>,
+    /// Unix seconds of the last session listing, `None` before the first.
+    listed_at: Option<u64>,
 }
 
 /// Owner of watched-session subscriptions and the attention spool.
@@ -115,6 +151,9 @@ impl AttentionWatcher {
                 persisted,
                 observed: HashMap::new(),
                 subscriptions: HashMap::new(),
+                automatic: Vec::new(),
+                labels: HashMap::new(),
+                listed_at: None,
             })),
         }
     }
@@ -156,15 +195,23 @@ impl AttentionWatcher {
 
     fn tick_at(&self, now: u64) -> Result<Vec<AttentionEvent>> {
         let devices = remote_access::list_devices(&self.home).unwrap_or_default();
-        let allowed: HashSet<String> = devices
+        let allowed: Vec<String> = devices
             .iter()
             .filter(|device| {
                 !device.revoked && device.permission.permits(DevicePermission::Observe)
             })
             .map(|device| device.device_id.clone())
             .collect();
+        let listing = self
+            .session_listing_due(now)
+            .then(|| list_agent_sessions(&self.home));
         let mut spooled = Vec::new();
         let mut state = self.state.lock().expect("attention poisoned");
+        if let Some((automatic, labels)) = listing {
+            state.automatic = automatic;
+            state.labels = labels;
+            state.listed_at = Some(now);
+        }
         let before = state.persisted.watches.len();
         state
             .persisted
@@ -173,18 +220,24 @@ impl AttentionWatcher {
         if state.persisted.watches.len() != before {
             let _ = persist(&self.home, &state.persisted);
         }
-        let watched: Vec<(String, Vec<String>)> = state
-            .persisted
-            .watches
-            .iter()
-            .map(|(device, list)| (device.clone(), list.iter().cloned().collect()))
-            .collect();
+        // Which devices each session is watched for: every allowed device for
+        // a running agent session, plus whatever a device opened explicitly.
+        let mut watchers: HashMap<String, Vec<String>> = HashMap::new();
+        for device in &allowed {
+            let explicit = state.persisted.watches.get(device);
+            let sessions = state.automatic.iter().chain(explicit.into_iter().flatten());
+            for session in sessions {
+                let list = watchers.entry(session.clone()).or_default();
+                if !list.contains(device) {
+                    list.push(device.clone());
+                }
+            }
+        }
         // Drop subscriptions for sessions nobody watches any more.
-        let live: HashSet<&String> = watched.iter().flat_map(|(_, list)| list.iter()).collect();
         let stale: Vec<String> = state
             .subscriptions
             .keys()
-            .filter(|id| !live.contains(id))
+            .filter(|id| !watchers.contains_key(*id))
             .cloned()
             .collect();
         for session in stale {
@@ -194,41 +247,48 @@ impl AttentionWatcher {
             }
             state.observed.remove(&session);
         }
-        for (device, sessions) in watched {
-            for session in sessions {
-                let id = ConversationId::new(session.as_str());
-                if self.hub.ensure_watched(&id).is_err() {
-                    continue;
-                }
-                if !state.subscriptions.contains_key(&session) {
-                    let Some((subscriber, _)) = self.hub.subscribe(&id, DevicePermission::Observe)
-                    else {
-                        continue;
-                    };
-                    state.subscriptions.insert(session.clone(), subscriber);
-                }
-                if let Some(subscriber) = state.subscriptions.get(&session) {
-                    // The queue is bounded; draining discards fanout this
-                    // watcher never renders.
-                    let _ = self.hub.drain(&id, *subscriber);
-                }
-                let Some(snapshot) = self.hub.snapshot(&id, 0) else {
+        let mut sessions: Vec<_> = watchers.into_iter().collect();
+        sessions.sort();
+        for (session, devices) in sessions {
+            let id = ConversationId::new(session.as_str());
+            if self.hub.ensure_watched(&id).is_err() {
+                continue;
+            }
+            if !state.subscriptions.contains_key(&session) {
+                let Some((subscriber, _)) = self.hub.subscribe(&id, DevicePermission::Observe)
+                else {
                     continue;
                 };
-                let current = Observed {
-                    phase: snapshot.state.phase,
-                    pending: snapshot.state.pending_request.is_some(),
-                };
-                let previous = state.observed.insert(session.clone(), current.clone());
-                let Some(previous) = previous else {
-                    // The first observation is a baseline, not a transition:
-                    // a helper restart must not re-notify the state it finds.
-                    continue;
-                };
-                let Some(kind) = transition(previous, current) else {
-                    continue;
-                };
+                state.subscriptions.insert(session.clone(), subscriber);
+            }
+            if let Some(subscriber) = state.subscriptions.get(&session) {
+                // The queue is bounded; draining discards fanout this
+                // watcher never renders.
+                let _ = self.hub.drain(&id, *subscriber);
+            }
+            let Some(snapshot) = self.hub.snapshot(&id, 0) else {
+                continue;
+            };
+            let current = Observed {
+                phase: snapshot.state.phase,
+                pending: snapshot.state.pending_request.is_some(),
+            };
+            // One observation per session per tick, shared by every device:
+            // observing per device would let the first device consume the
+            // transition and leave the rest seeing no change.
+            let previous = state.observed.insert(session.clone(), current.clone());
+            let Some(previous) = previous else {
+                // The first observation is a baseline, not a transition:
+                // a helper restart must not re-notify the state it finds.
+                continue;
+            };
+            let Some(kind) = transition(previous, current) else {
+                continue;
+            };
+            let label = state.labels.get(&session).cloned().unwrap_or_default();
+            for device in devices {
                 let event_id = event_id(
+                    &device,
                     &session,
                     &snapshot.generation.as_wire(),
                     snapshot.revision.get(),
@@ -237,11 +297,18 @@ impl AttentionWatcher {
                 if state.persisted.delivered.iter().any(|id| *id == event_id) {
                     continue;
                 }
+                let sealed = remote_access::notification_key(&self.home, &device).and_then(|key| {
+                    let payload =
+                        seal::Payload::new(&session, &label.name, label.title.as_deref(), kind);
+                    seal::seal(&key, &event_id, &payload).ok()
+                });
                 let event = AttentionEvent {
                     event_id: event_id.clone(),
-                    device_id: device.clone(),
+                    device_id: device,
                     kind,
                     created_at: now,
+                    session_id: Some(session.clone()),
+                    sealed,
                 };
                 if spool(&self.home, &event).is_ok() {
                     state.persisted.delivered.push_back(event_id);
@@ -257,6 +324,13 @@ impl AttentionWatcher {
         }
         let _ = sweep_spool(&self.home, now);
         Ok(spooled)
+    }
+
+    fn session_listing_due(&self, now: u64) -> bool {
+        let state = self.state.lock().expect("attention poisoned");
+        state
+            .listed_at
+            .is_none_or(|at| now.saturating_sub(at) >= SESSION_REFRESH.as_secs())
     }
 
     /// Runs `tick` forever at [`TICK`]. Errors are content-free and swallowed:
@@ -289,9 +363,17 @@ fn transition(previous: Observed, current: Observed) -> Option<AttentionKind> {
     }
 }
 
-fn event_id(session: &str, generation: &str, revision: u64, kind: AttentionKind) -> String {
+fn event_id(
+    device: &str,
+    session: &str,
+    generation: &str,
+    revision: u64,
+    kind: AttentionKind,
+) -> String {
     let mut digest = sha2::Sha256::new();
-    digest.update(b"latch-attention/v1\0");
+    digest.update(b"latch-attention/v2\0");
+    digest.update(device.as_bytes());
+    digest.update([0]);
     digest.update(session.as_bytes());
     digest.update([0]);
     digest.update(generation.as_bytes());
@@ -307,6 +389,43 @@ fn event_id(session: &str, generation: &str, revision: u64, kind: AttentionKind)
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+/// Running agent sessions, most recently active first and bounded, plus a
+/// label for every listed session. A listing failure watches nothing new
+/// rather than failing the tick.
+fn list_agent_sessions(home: &LatchHome) -> (Vec<String>, HashMap<String, SessionLabel>) {
+    let Ok(report) =
+        crate::cli::manage::list(crate::cli::manage::ListOptions { home: home.clone() })
+    else {
+        return (Vec::new(), HashMap::new());
+    };
+    let labels = report
+        .sessions
+        .iter()
+        .map(|session| {
+            (
+                session.id.clone(),
+                SessionLabel {
+                    name: session.name.clone(),
+                    title: session.title.clone(),
+                },
+            )
+        })
+        .collect();
+    let mut agents: Vec<_> = report
+        .sessions
+        .iter()
+        .filter(|session| session.connector.is_some() && session.state == "running")
+        .collect();
+    // Smallest idle time first: the session most recently active.
+    agents.sort_by_key(|session| session.idle_ms.unwrap_or(u64::MAX));
+    let automatic = agents
+        .into_iter()
+        .take(MAX_AUTO_WATCHED_SESSIONS)
+        .map(|session| session.id.clone())
+        .collect();
+    (automatic, labels)
 }
 
 fn runtime_dir(home: &LatchHome) -> PathBuf {
@@ -598,6 +717,92 @@ mod tests {
         )
         .unwrap();
         assert!(restarted.tick_at(1_006).unwrap().is_empty());
+    }
+
+    #[test]
+    fn every_watching_device_gets_its_own_event_and_only_keyed_devices_a_sealed_one() {
+        use hpke::{Deserializable, Kem as _, OpModeR, Serializable};
+        type Kem = hpke::kem::X25519HkdfSha256;
+
+        let (directory, home, first) = enrolled_home();
+        remote_access::authorize_enrollment(
+            &home,
+            &format!("enr_{}", "3".repeat(32)),
+            &"cd".repeat(32),
+            "Tablet",
+            DevicePermission::Observe,
+            &format!("dev_{}", "4".repeat(32)),
+        )
+        .unwrap();
+        let second = remote_access::list_devices(&home)
+            .unwrap()
+            .into_iter()
+            .find(|device| device.device_id != first)
+            .unwrap()
+            .device_id;
+        let (secret, public) = Kem::gen_keypair();
+        let public_hex: String = public
+            .to_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        remote_access::set_notification_key(&home, &first, &public_hex).unwrap();
+
+        let hub = ConversationHub::with_connector_factory(
+            directory.path().join("hub"),
+            Arc::new(|_| Box::new(IdleConnector) as Box<dyn Connector>),
+        )
+        .unwrap();
+        let id = ConversationId::new("ses_shared");
+        hub.ensure_watched(&id).unwrap();
+        let set = |phase| {
+            hub.apply_poll(&id, vec![ConnectorMutation::State(state(phase, None))])
+                .unwrap()
+        };
+        set(ConversationPhase::Working);
+        let watcher = AttentionWatcher::new(home.clone(), hub.clone());
+        watcher.watch("ses_shared", &first);
+        watcher.watch("ses_shared", &second);
+        assert!(watcher.tick_at(2_000).unwrap().is_empty());
+        set(ConversationPhase::AwaitingInput);
+        let mut events = watcher.tick_at(2_001).unwrap();
+        events.sort_by(|a, b| a.device_id.cmp(&b.device_id));
+        assert_eq!(events.len(), 2, "one transition, one event per device");
+        assert_ne!(events[0].event_id, events[1].event_id);
+        let keyed = events
+            .iter()
+            .find(|event| event.device_id == first)
+            .unwrap();
+        let plain = events
+            .iter()
+            .find(|event| event.device_id == second)
+            .unwrap();
+        assert!(plain.sealed.is_none());
+        assert_eq!(keyed.session_id.as_deref(), Some("ses_shared"));
+
+        let wire = keyed.sealed.as_deref().expect("sealed payload");
+        let bytes: Vec<u8> = (0..wire.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&wire[i..i + 2], 16).unwrap())
+            .collect();
+        let (encapped, ciphertext) = bytes.split_at(32);
+        let opened =
+            hpke::single_shot_open::<hpke::aead::ChaCha20Poly1305, hpke::kdf::HkdfSha256, Kem>(
+                &OpModeR::Base,
+                &secret,
+                &<Kem as hpke::Kem>::EncappedKey::from_bytes(encapped).unwrap(),
+                seal::INFO,
+                ciphertext,
+                keyed.event_id.as_bytes(),
+            )
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&opened).unwrap();
+        assert_eq!(payload["s"], "ses_shared");
+        assert_eq!(payload["k"], "approval");
+        // Nothing readable about the session sits in the clear on the wire.
+        let spooled = serde_json::to_string(keyed).unwrap();
+        assert!(!wire.contains("ses_shared"));
+        assert!(spooled.contains("\"sealed\""));
     }
 
     #[test]

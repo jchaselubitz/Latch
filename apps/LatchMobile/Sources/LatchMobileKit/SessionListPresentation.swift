@@ -90,6 +90,39 @@ public extension SessionSummary {
     }
 }
 
+/// What a running agent is doing, as the list's badge says it.
+public enum AgentActivity: Equatable, Sendable {
+    /// Mid-turn: thinking or running tools.
+    case working
+    /// Waiting on a permission, a question, or the person's input.
+    case needsYou
+    /// Its turn is over and it is waiting for the next prompt.
+    case done
+
+    public var label: String {
+        switch self {
+        case .working: "Working"
+        case .needsYou: "Needs you"
+        case .done: "Done"
+        }
+    }
+}
+
+public extension SessionSummary {
+    /// The badge for this row, or nil when there is nothing true to say: a
+    /// shell, a stopped session, an agent still starting, or a Mac that
+    /// reported no phase.
+    var agentActivity: AgentActivity? {
+        guard state == "running" else { return nil }
+        switch agentPhase {
+        case "working": return .working
+        case "awaiting_input": return .needsYou
+        case "idle": return .done
+        default: return nil
+        }
+    }
+}
+
 /// A session's title split the way the list reads it: what the session is
 /// about first, and the handle it was launched under beneath.
 ///

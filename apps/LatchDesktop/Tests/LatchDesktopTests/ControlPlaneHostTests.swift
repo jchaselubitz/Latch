@@ -97,8 +97,10 @@ private final class StubControlPlaneHostAPI: ControlPlaneHostAPI, @unchecked Sen
     func setRelayEnabled(accountToken: String, enabled: Bool) async throws { relayEnabled.append(enabled) }
 
     var attention: [(String, String)] = []
-    func notifyAttention(deviceToken: String, clientDeviceID: String, eventID: String) async throws -> Bool {
+    var sealedAttention: [String?] = []
+    func notifyAttention(deviceToken: String, clientDeviceID: String, eventID: String, sealed: String?) async throws -> Bool {
         attention.append((clientDeviceID, eventID))
+        sealedAttention.append(sealed)
         return true
     }
 }

@@ -29,7 +29,20 @@ let targets: [Target] = [
     ),
     .target(
         name: "LatchMobileKit",
+        dependencies: ["LatchNotificationKit"],
         path: "Sources/LatchMobileKit"
+    ),
+    // What the notification service extension needs and nothing more: the
+    // notification key, opening a sealed alert, and its words. The extension
+    // runs under a tight memory limit, so it links this, not the whole kit.
+    .target(
+        name: "LatchNotificationKit",
+        path: "Sources/LatchNotificationKit"
+    ),
+    .testTarget(
+        name: "LatchNotificationKitTests",
+        dependencies: ["LatchNotificationKit"],
+        path: "Tests/LatchNotificationKitTests"
     ),
     .testTarget(
         name: "LatchMobileKitTests",
@@ -58,6 +71,7 @@ let targets: [Target] = [
 
 let products: [Product] = [
     .library(name: "LatchMobileKit", targets: ["LatchMobileKit"]),
+    .library(name: "LatchNotificationKit", targets: ["LatchNotificationKit"]),
     .library(name: "LatchTransportNative", targets: ["LatchTransportNative"])
 ]
 

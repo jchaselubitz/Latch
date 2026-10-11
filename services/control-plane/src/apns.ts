@@ -1,11 +1,13 @@
 /**
- * Generic APNs attention delivery.
+ * APNs attention delivery.
  *
- * The payload is fixed and content-free: every notification says the same
- * sentence. Which session, what it printed, what it is asking, and where it
- * lives are fetched by the phone over the authenticated Remote Link after it
- * opens. The only per-notification inputs are the opaque device token and an
- * opaque collapse id derived from the Mac's event id.
+ * The visible alert is fixed and content-free: every notification says the
+ * same sentence unless the phone itself rewrites it. A host may attach an
+ * opaque `sealed` blob — an HPKE ciphertext the Mac sealed to a key only the
+ * phone holds — which is forwarded verbatim with `mutable-content` set so the
+ * phone's notification service extension can open it and name the session.
+ * This service cannot read it, never stores it, and never logs it; if the
+ * extension cannot open it, the generic sentence is what the person sees.
  *
  * Token-based authentication (ES256 JWT) is used so no certificate has to be
  * renewed. Node's `fetch` cannot speak HTTP/2, which APNs requires, so the
@@ -36,13 +38,15 @@ export interface ApnsDelivery {
   readonly collapseId: string;
   /** Unix seconds after which APNs discards an undelivered alert. */
   readonly expiresAt: number;
+  /** Opaque hex ciphertext for the phone's notification extension. */
+  readonly sealed?: string;
 }
 
 export interface ApnsSender {
   send(delivery: ApnsDelivery): Promise<ApnsOutcome>;
 }
 
-/** The only payload this service ever sends. */
+/** The generic payload: all a phone without a notification key ever gets. */
 export const ATTENTION_PAYLOAD = Object.freeze({
   aps: {
     alert: { title: 'Latch', body: 'Your Mac needs your attention.' },
@@ -50,6 +54,23 @@ export const ATTENTION_PAYLOAD = Object.freeze({
     'thread-id': 'latch-attention',
   },
 });
+
+/** Category the phone registers for sealed attention alerts. */
+export const ATTENTION_CATEGORY = 'LATCH_ATTENTION';
+
+/**
+ * The payload for one delivery. Without a sealed blob it is exactly
+ * {@link ATTENTION_PAYLOAD}. With one, the same generic alert is marked
+ * mutable and carries the blob and the event id it is bound to, which is
+ * everything the extension needs and nothing this service can read.
+ */
+export function attentionPayload(delivery: Pick<ApnsDelivery, 'collapseId' | 'sealed'>): object {
+  if (!delivery.sealed) return ATTENTION_PAYLOAD;
+  return {
+    aps: { ...ATTENTION_PAYLOAD.aps, 'mutable-content': 1, category: ATTENTION_CATEGORY },
+    latch: { e: delivery.collapseId, c: delivery.sealed },
+  };
+}
 
 const INVALID_TOKEN_REASONS = new Set(['BadDeviceToken', 'Unregistered', 'DeviceTokenNotForTopic']);
 const JWT_LIFETIME_SECONDS = 50 * 60;
@@ -124,7 +145,7 @@ export class Http2ApnsSender implements ApnsSender {
         request.on('data', (chunk: Buffer) => { chunks.push(chunk); });
         request.on('end', () => finish(classifyResponse(status, Buffer.concat(chunks).toString('utf8'))));
         request.on('error', () => finish('failed'));
-        request.end(JSON.stringify(ATTENTION_PAYLOAD));
+        request.end(JSON.stringify(attentionPayload(delivery)));
       });
     } finally {
       session.close();

@@ -9,7 +9,7 @@ use axum::extract::{Extension, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde::Serialize;
 use tokio::net::TcpListener;
@@ -33,7 +33,8 @@ use crate::cli::attach::SessionLookupError;
 use crate::cli::create::{self, RemoteSessionError, RemoteSessionRequest};
 use crate::cli::json::{CapabilitiesReport, CreateReport, CreatedSession};
 use crate::cli::manage::{self, InspectOptions, ListOptions, StopRequest};
-use crate::conversation::ConversationHub;
+use crate::cli::remote_access;
+use crate::conversation::{ConversationHub, ConversationId, ConversationPhase};
 use crate::session::paths::LatchHome;
 #[cfg(test)]
 use authority::apply_cors;
@@ -201,6 +202,7 @@ fn register(router: Router<AppState>, spec: RouteSpec) -> Router<AppState> {
         RouteId::Conversation => router.route(spec.pattern, get(conversation_ws)),
         RouteId::Attachments => router.route(spec.pattern, post(upload_attachment)),
         RouteId::AgentModels => router.route(spec.pattern, get(agent_models_catalog)),
+        RouteId::NotificationKey => router.route(spec.pattern, put(set_notification_key)),
     }
 }
 
@@ -243,6 +245,7 @@ struct GatewayEndpoints {
     stop_session: bool,
     attachments: bool,
     agent_models: bool,
+    notification_key: bool,
 }
 
 async fn gateway_capabilities(State(state): State<AppState>) -> Response {
@@ -258,6 +261,7 @@ async fn gateway_capabilities(State(state): State<AppState>) -> Response {
             stop_session: true,
             attachments: true,
             agent_models: true,
+            notification_key: true,
         },
         features: GatewayFeatures {
             exclusive_terminal: true,
@@ -272,11 +276,91 @@ async fn gateway_capabilities(State(state): State<AppState>) -> Response {
 
 async fn list_sessions(State(state): State<AppState>) -> Result<Response, ApiError> {
     let home = state.home.clone();
-    let report = tokio::task::spawn_blocking(move || manage::list(ListOptions { home }))
+    let mut report = tokio::task::spawn_blocking(move || manage::list(ListOptions { home }))
         .await
         .map_err(|_| internal("list sessions"))?
         .map_err(map_engine_error)?;
+    // A phase the Hub already has costs one lookup; a session it is not yet
+    // observing is left unknown rather than started here, so listing stays
+    // cheap and side-effect free.
+    for session in &mut report.sessions {
+        if session.connector.is_none() || session.state != "running" {
+            continue;
+        }
+        let id = ConversationId::new(session.id.as_str());
+        session.agent_phase = state
+            .conversation_hub
+            .snapshot(&id, 0)
+            .map(|snapshot| phase_wire(snapshot.state.phase).to_owned());
+    }
     Ok(Json(report).into_response())
+}
+
+/// The conversation-state schema's spelling of a phase.
+fn phase_wire(phase: ConversationPhase) -> &'static str {
+    match phase {
+        ConversationPhase::Starting => "starting",
+        ConversationPhase::Idle => "idle",
+        ConversationPhase::Working => "working",
+        ConversationPhase::AwaitingInput => "awaiting_input",
+        ConversationPhase::Exited => "exited",
+        ConversationPhase::Unavailable => "unavailable",
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct NotificationKeyRequest {
+    public_key: String,
+}
+
+/// Upper bound on a notification-key body: one 64-character hex key.
+const MAX_NOTIFICATION_KEY_BODY_BYTES: usize = 256;
+
+/// Records the key this paired device's attention alerts are sealed to.
+///
+/// Only a proxied device may call this, and only for itself: the device is
+/// the one the loopback proxy proved, never a field in the body.
+async fn set_notification_key(
+    State(state): State<AppState>,
+    Extension(device): Extension<DeviceContext>,
+    body: axum::body::Bytes,
+) -> Result<Response, ApiError> {
+    let Some(device) = device.0 else {
+        return Err(ApiError::coded(
+            StatusCode::BAD_REQUEST,
+            "device_required",
+            "only a paired device can register a notification key",
+        ));
+    };
+    if body.len() > MAX_NOTIFICATION_KEY_BODY_BYTES {
+        return Err(ApiError::coded(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "invalid_request",
+            "notification key body is too large",
+        ));
+    }
+    let request: NotificationKeyRequest = serde_json::from_slice(&body).map_err(|_| {
+        ApiError::coded(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "expected {\"publicKey\": \"<64 lowercase hex>\"}",
+        )
+    })?;
+    let home = state.home.clone();
+    tokio::task::spawn_blocking(move || {
+        remote_access::set_notification_key(&home, &device, &request.public_key)
+    })
+    .await
+    .map_err(|_| internal("set notification key"))?
+    .map_err(|error| {
+        ApiError::coded(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            error.to_string(),
+        )
+    })?;
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 #[derive(serde::Deserialize)]

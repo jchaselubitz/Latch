@@ -22,6 +22,9 @@ struct TerminalView: View {
     @State private var terminal: TerminalSession?
     @State private var surface = SwiftTermSurface()
     @State private var coordinator: TerminalGeometryCoordinator?
+    /// The grid last sent to the pty, mirrored here so the surface is framed
+    /// at it. The coordinator owns the decision; this only observes it.
+    @State private var declaredGrid: TerminalGrid?
     @State private var viewport: CGSize = .zero
     @State private var pump: Task<Void, Never>?
     @State private var didOpen = false
@@ -389,21 +392,47 @@ struct TerminalView: View {
     /// ~59 columns while the pty had been told 100 — the exact mismatch the
     /// geometry rule exists to prevent. Panning is what pays for keeping the
     /// desk's grid.
+    ///
+    /// The surface is framed at its grid in both directions. The keyboard
+    /// shortens the viewport, not the grid, so while it is up the surface
+    /// scrolls vertically and is kept pinned to its bottom, where a shell
+    /// prompt and an agent's input box live.
     private var surfaceView: some View {
+        let grid = displayedGrid
         let fontSize = TerminalGeometry.fontSize(cols: grid.cols, viewportWidth: viewport.width)
-        let size = TerminalGeometry.pixelSize(cols: grid.cols, rows: grid.rows, fontSize: fontSize)
-        let pans = size.width > viewport.width + 1
-        return ScrollView(pans ? [.horizontal] : [], showsIndicators: pans) {
-            SwiftTermSurfaceView(surface: surface, fontSize: fontSize)
-                .frame(width: max(size.width, viewport.width))
-                // Deaf until attached. The emulator's view raises the keyboard
-                // on a tap of its own accord, and over a still that would be a
-                // keyboard with no key bar and nowhere for its keystrokes to
-                // go. Panning still works: only the surface stops taking
-                // touches, not the scroll view around it.
-                .allowsHitTesting(isAttached)
+        return ScrollViewReader { reader in
+            ScrollView([.horizontal, .vertical]) {
+                VStack(spacing: 0) {
+                    SwiftTermSurfaceView(surface: surface, fontSize: fontSize, grid: grid)
+                        // Deaf until attached. The emulator's view raises the
+                        // keyboard on a tap of its own accord, and over a still
+                        // that would be a keyboard with no key bar and nowhere
+                        // for its keystrokes to go. Panning still works: only
+                        // the surface stops taking touches, not the scroll view
+                        // around it.
+                        .allowsHitTesting(isAttached)
+                    Color.clear.frame(height: 0).id(Self.surfaceBottom)
+                }
+                .frame(minWidth: viewport.width, minHeight: viewport.height, alignment: .topLeading)
+            }
+            .scrollBounceBehavior(.basedOnSize, axes: [.horizontal, .vertical])
+            .defaultScrollAnchor(.bottomLeading)
+            .onChange(of: viewport.height) { _, _ in
+                reader.scrollTo(Self.surfaceBottom, anchor: .bottomLeading)
+            }
         }
         .background(Color.black)
+    }
+
+    private static let surfaceBottom = "surface-bottom"
+
+    /// The grid the surface is framed at. Once attached that is the grid the
+    /// pty was last told, not whatever `grid` would say for the current
+    /// viewport: under the readable preference `grid` follows the viewport,
+    /// and the keyboard must not change what the emulator lays out.
+    private var displayedGrid: TerminalGrid {
+        if isAttached, let declaredGrid { return declaredGrid }
+        return grid
     }
 
     private func still(over message: String, dimmed: Bool, showProgress: Bool) -> some View {
@@ -503,6 +532,7 @@ struct TerminalView: View {
         surface.reset()
         startPump(terminal)
         coordinator(for: terminal).establish(grid)
+        declaredGrid = grid
         terminal.attach(cols: grid.cols, rows: grid.rows)
     }
 
@@ -573,6 +603,7 @@ struct TerminalView: View {
     private func coordinator(for terminal: TerminalSession) -> TerminalGeometryCoordinator {
         if let coordinator { return coordinator }
         let created = TerminalGeometryCoordinator { grid in
+            declaredGrid = grid
             terminal.resize(cols: grid.cols, rows: grid.rows)
         }
         coordinator = created
@@ -620,9 +651,12 @@ struct TerminalStillView: View {
     @Environment(AppModel.self) private var model
     @State private var surface = SwiftTermSurface()
     @State private var failure: String?
+    /// The captured pane's own grid, so the still is laid out the way the
+    /// pane was. Until it arrives there is nothing to lay out.
+    @State private var grid = TerminalGeometry.minimumGrid
 
     var body: some View {
-        SwiftTermSurfaceView(surface: surface, fontSize: 11)
+        SwiftTermSurfaceView(surface: surface, fontSize: 11, grid: grid)
             // A still with nothing behind it: it must not raise a keyboard.
             .allowsHitTesting(false)
             .background(Color.black)
@@ -637,6 +671,9 @@ struct TerminalStillView: View {
             .task {
                 do {
                     let preview = try await model.previewSession(for: session)
+                    if preview.cols > 0, preview.rows > 0 {
+                        grid = TerminalGrid(cols: preview.cols, rows: preview.rows)
+                    }
                     surface.reset()
                     surface.feed(Data("\u{1B}[?25l".utf8) + Data(preview.content.utf8))
                 } catch {

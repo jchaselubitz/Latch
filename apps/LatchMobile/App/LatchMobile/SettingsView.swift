@@ -391,6 +391,7 @@ struct SettingsView: View {
         case .stopSession: return "Session stop"
         case .attachments: return "Attachments"
         case .agentModels: return "Model choice"
+        case .notificationKey: return "Detailed notifications"
         }
     }
 

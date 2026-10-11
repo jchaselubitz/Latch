@@ -146,6 +146,36 @@ final class SwiftTermSurface: NSObject, SessionTerminalSurface {
         view.controlModifier = armed
     }
 
+    /// Applies the point size the geometry rule chose. Idempotent, because
+    /// SwiftUI asks for a size and updates the view in either order.
+    func applyFont(size fontSize: CGFloat) {
+        guard view.font.pointSize != fontSize else { return }
+        view.font = UIFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
+    }
+
+    /// The exact frame that makes the emulator lay out `grid` — no more, no less.
+    ///
+    /// SwiftTerm derives its own cols and rows from its bounds
+    /// (`Int(bounds / cell)`) and resizes its terminal to match. Anything but a
+    /// whole number of its *real* cells therefore gives the emulator a grid the
+    /// pty was never told about, and every absolute cursor move the agent makes
+    /// lands on the wrong cell: a full-screen TUI's prompt is drawn on top of
+    /// other rows, or clipped, while the pty itself is fine. So the frame is
+    /// measured off SwiftTerm's own cell, not estimated from a font ratio.
+    ///
+    /// The half point of slack keeps floating-point division from flooring a
+    /// row or column away; it is far less than one cell.
+    func frameSize(for grid: TerminalGrid) -> CGSize {
+        let terminal = view.getTerminal()
+        let current = view.getOptimalFrameSize().size
+        let cellWidth = current.width / CGFloat(max(terminal.cols, 1))
+        let cellHeight = current.height / CGFloat(max(terminal.rows, 1))
+        return CGSize(
+            width: cellWidth * CGFloat(grid.cols) + 0.5,
+            height: cellHeight * CGFloat(grid.rows) + 0.5
+        )
+    }
+
     func setFocus(_ focused: Bool) {
         if focused {
             _ = view.becomeFirstResponder()
@@ -213,27 +243,70 @@ extension SwiftTermSurface: TerminalViewDelegate {
 
 // MARK: - SwiftUI
 
-/// Puts the surface's view on screen.
+/// Puts the surface's view on screen at exactly its declared grid.
 ///
 /// The surface is created and owned by the caller rather than by
 /// `makeUIView`, because it outlives any single layout pass: bytes are fed
 /// into it from `TerminalSession.output` while SwiftUI is free to rebuild the
 /// view tree around it.
+///
+/// The emulator sits inside a host view rather than being handed to SwiftUI
+/// directly, so that whatever size SwiftUI gives the host — wider than the
+/// grid, or shorter than it while the keyboard is up — the emulator itself is
+/// always framed at `grid` and never re-derives a different one.
 struct SwiftTermSurfaceView: UIViewRepresentable {
     let surface: SwiftTermSurface
     /// Point size for the grid the caller chose. The geometry rule derives it
     /// from cols and the viewport width — font size follows from the grid, not
     /// the other way round.
     var fontSize: CGFloat
+    /// The grid the pty was told. The emulator must lay out exactly this.
+    var grid: TerminalGrid
 
-    func makeUIView(context: Context) -> SwiftTerm.TerminalView {
-        surface.view
+    func makeUIView(context: Context) -> SwiftTermHostView {
+        SwiftTermHostView(terminal: surface.view)
     }
 
-    func updateUIView(_ view: SwiftTerm.TerminalView, context: Context) {
-        if view.font.pointSize != fontSize {
-            view.font = UIFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
+    func updateUIView(_ host: SwiftTermHostView, context: Context) {
+        surface.applyFont(size: fontSize)
+        host.terminalSize = surface.frameSize(for: grid)
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: SwiftTermHostView, context: Context) -> CGSize? {
+        surface.applyFont(size: fontSize)
+        return surface.frameSize(for: grid)
+    }
+}
+
+/// Holds the emulator at a fixed size, pinned top-leading.
+final class SwiftTermHostView: UIView {
+    private let terminal: UIView
+
+    var terminalSize: CGSize = .zero {
+        didSet {
+            guard terminalSize != oldValue else { return }
+            invalidateIntrinsicContentSize()
+            setNeedsLayout()
         }
+    }
+
+    init(terminal: UIView) {
+        self.terminal = terminal
+        super.init(frame: .zero)
+        backgroundColor = .black
+        clipsToBounds = true
+        addSubview(terminal)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    override var intrinsicContentSize: CGSize { terminalSize }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        let frame = CGRect(origin: .zero, size: terminalSize)
+        if terminal.frame != frame { terminal.frame = frame }
     }
 }
 

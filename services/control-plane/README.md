@@ -49,7 +49,7 @@ returned once and only their digests are stored.
 | `POST /v1/relay-leases/:id/renew` | device | Issue a signed lease-extension claim. |
 | `GET/POST /v1/relay-revocations` | relay | Pull and acknowledge durable invalidations. |
 | `PUT/DELETE /v1/push-registrations` | controller | Register or remove the phone's opaque APNs token. |
-| `POST /v1/attention` | host | Ask for one generic attention alert to a paired phone, deduplicated by opaque event id. |
+| `POST /v1/attention` | host | Ask for one attention alert to a paired phone, deduplicated by opaque event id, optionally carrying an opaque `sealed` blob forwarded (never stored) for the phone's notification extension. |
 
 Enrollment also uses an independent 256-bit QR-only secret. That secret is
 mixed into the Noise prologue by the endpoints and is never sent here.
@@ -66,8 +66,10 @@ Copy `.env.example`. Required secrets are:
 Attention notifications are optional and need `APNS_KEY_ID`, `APNS_TEAM_ID`,
 and `APNS_PRIVATE_KEY_PEM` together, plus `APNS_TOPIC` (the iOS bundle id) and
 `APNS_ENVIRONMENT` (`sandbox` for development-signed builds, `production` for
-TestFlight/App Store signing). The payload is a fixed sentence; the service
-stores only the opaque token and opaque event ids, removes the token when
+TestFlight/App Store signing). The visible payload is a fixed sentence; a
+host may attach an HPKE blob sealed to the phone, which is forwarded under a
+top-level `latch` key with `mutable-content` and never stored or logged. The
+service stores only the opaque token and opaque event ids, removes the token when
 Apple reports it invalid, and removes it on revoke or unpair. Without APNs
 configuration the attention route answers `unconfigured` and nothing else
 changes: notifications are best effort and never required for the phone's

@@ -5,7 +5,8 @@ import Foundation
 /// The gateway writes one content-free entry per Hub transition it noticed
 /// for a watched session; this poll reads them through the `latch` CLI, maps
 /// the Mac-local device id to the paired phone's control-plane id, asks the
-/// control plane for one generic alert, and acknowledges the entry. An entry
+/// control plane for one alert — carrying the entry's sealed payload, which
+/// only the phone can open — and acknowledges the entry. An entry
 /// whose device is unknown or unpaired is acknowledged without a request:
 /// there is nobody to tell. Delivery failures leave the entry for the next
 /// poll until the gateway's own spool expiry discards it, so a control-plane
@@ -23,7 +24,9 @@ final class AttentionForwarder: @unchecked Sendable {
     typealias Fetch = @Sendable () async throws -> [RemoteAttentionEvent]
     typealias Acknowledge = @Sendable (String) async throws -> Void
     typealias DirectoryID = @Sendable (String) async -> String?
-    typealias Notify = @Sendable (String, String) async throws -> Void
+    /// The phone's control-plane id and the event, whose opaque `sealed`
+    /// payload travels with the alert when present.
+    typealias Notify = @Sendable (String, RemoteAttentionEvent) async throws -> Void
 
     static let interval: Duration = .seconds(2)
 
@@ -51,7 +54,7 @@ final class AttentionForwarder: @unchecked Sendable {
                 continue
             }
             do {
-                try await notify(clientID, event.eventID)
+                try await notify(clientID, event)
                 try? await acknowledge(event.eventID)
                 outcome.forwarded += 1
             } catch let error as ControlPlaneHostError where error.isPermanentAttentionRefusal {

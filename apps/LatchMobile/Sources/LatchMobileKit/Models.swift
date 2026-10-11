@@ -41,6 +41,10 @@ public struct SessionSummary: Decodable, Equatable, Identifiable, Sendable {
     public let lastActivityAt: String?
     public let idleMs: Int?
     public let connector: SessionConnector
+    /// The agent's conversation phase as the Mac's Hub last saw it
+    /// (`working`, `awaiting_input`, `idle`, ...). Nil for a shell, a stopped
+    /// session, a session the Hub is not observing, or an older Mac.
+    public let agentPhase: String?
 
     private enum CodingKeys: String, CodingKey {
         case id
@@ -53,6 +57,7 @@ public struct SessionSummary: Decodable, Equatable, Identifiable, Sendable {
         case lastActivityAt = "last_activity_at"
         case idleMs = "idle_ms"
         case connector
+        case agentPhase = "agent_phase"
     }
 
     public init(
@@ -65,7 +70,8 @@ public struct SessionSummary: Decodable, Equatable, Identifiable, Sendable {
         createdAt: String,
         lastActivityAt: String? = nil,
         idleMs: Int? = nil,
-        connector: SessionConnector = .unknown
+        connector: SessionConnector = .unknown,
+        agentPhase: String? = nil
     ) {
         self.id = id
         self.name = name
@@ -77,6 +83,7 @@ public struct SessionSummary: Decodable, Equatable, Identifiable, Sendable {
         self.lastActivityAt = lastActivityAt
         self.idleMs = idleMs
         self.connector = connector
+        self.agentPhase = agentPhase
     }
 
     // Written out rather than synthesized because `connector` has three
@@ -94,6 +101,7 @@ public struct SessionSummary: Decodable, Equatable, Identifiable, Sendable {
         createdAt = try container.decode(String.self, forKey: .createdAt)
         lastActivityAt = try container.decodeIfPresent(String.self, forKey: .lastActivityAt)
         idleMs = try container.decodeIfPresent(Int.self, forKey: .idleMs)
+        agentPhase = try container.decodeIfPresent(String.self, forKey: .agentPhase)
         if !container.contains(.connector) {
             connector = .unknown
         } else if try container.decodeNil(forKey: .connector) {

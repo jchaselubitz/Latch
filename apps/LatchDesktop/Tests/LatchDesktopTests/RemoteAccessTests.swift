@@ -187,11 +187,12 @@ final class RemoteLinkLifecycleTests: XCTestCase {
         final class Recorder: @unchecked Sendable {
             var acknowledged: [String] = []
             var notified: [(String, String)] = []
+            var sealed: [String?] = []
             var fail = false
         }
         let recorder = Recorder()
         let events = [
-            RemoteAttentionEvent(eventID: "1".repeat32, deviceID: "local-a", kind: "completion", createdAt: 1),
+            RemoteAttentionEvent(eventID: "1".repeat32, deviceID: "local-a", kind: "completion", createdAt: 1, sealed: "ab12"),
             RemoteAttentionEvent(eventID: "2".repeat32, deviceID: "unknown", kind: "approval", createdAt: 2),
         ]
         let forwarder = AttentionForwarder(
@@ -200,12 +201,14 @@ final class RemoteLinkLifecycleTests: XCTestCase {
             directoryID: { $0 == "local-a" ? "dev_cloud" : nil },
             notify: { client, event in
                 if recorder.fail { throw ControlPlaneHostError.transport("down") }
-                recorder.notified.append((client, event))
+                recorder.notified.append((client, event.eventID))
+                recorder.sealed.append(event.sealed)
             }
         )
         var outcome = await forwarder.forwardOnce()
         XCTAssertEqual(outcome, AttentionForwarder.Outcome(forwarded: 1, skipped: 1, retained: 0))
         XCTAssertEqual(recorder.notified.map(\.0), ["dev_cloud"])
+        XCTAssertEqual(recorder.sealed, ["ab12"], "the sealed payload travels with its event, untouched")
         XCTAssertEqual(recorder.acknowledged.sorted(), ["1".repeat32, "2".repeat32].sorted())
 
         recorder.fail = true

@@ -130,7 +130,11 @@ Residual risks accepted for this release: a single relay replica is a single
 point of availability (not confidentiality); the relay hostname currently
 resolves through the platform's edge, so an IPv6-only phone may reach it via
 carrier NAT64 rather than native IPv6; attention notifications carry a fixed
-sentence and no identifiers, but their timing reveals that some session
-changed state; and the Mac's 250 ms grant check bounds, rather than
+sentence plus an HPKE blob only the phone's notification key opens, so the
+control plane and Apple learn no session identity, but timing reveals that
+some session changed state and the blob's length roughly tracks the session
+name's; a phone's notification key is readable after first unlock (so the
+extension can run while locked), so a seized, once-unlocked phone can name
+the sessions in alerts it receives; and the Mac's 250 ms grant check bounds, rather than
 eliminates, the window in which a just-revoked phone can still receive
 bytes.

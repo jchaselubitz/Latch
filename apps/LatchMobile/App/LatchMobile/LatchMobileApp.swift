@@ -1,4 +1,5 @@
 import LatchMobileKit
+import LatchNotificationKit
 import LatchTransportNative
 import Network
 import SwiftUI
@@ -13,9 +14,11 @@ struct LatchMobileApp: App {
     // the Settings indicator.
     @State private var model: AppModel = {
         let pathReporter = RemotePathReporter()
+        let accessGroup = Bundle.main.object(forInfoDictionaryKey: "LatchKeychainAccessGroup") as? String
         return AppModel(
             linkConnector: NativeRemoteLinkConnector(pathReporter: pathReporter),
-            pathReporter: pathReporter
+            pathReporter: pathReporter,
+            notificationKeys: .keychain(accessGroup: accessGroup)
         )
     }()
     @State private var pairing = PairingModel(
@@ -33,6 +36,7 @@ struct LatchMobileApp: App {
                 .environment(diagnostics)
                 .task {
                     pushDelegate.pairing = pairing
+                    pushDelegate.model = model
                     await pairing.restore()
                     // The Mac may have changed this grant while the phone was
                     // closed. Read it before the paired route snapshots the
@@ -59,11 +63,21 @@ struct LatchMobileApp: App {
 }
 
 /// Receives the APNs device token and hands it to the pairing model, which
-/// registers it with the paired device credential. Notifications carry no
-/// content; opening one simply brings the app to the foreground, where the
-/// ordinary resume path refreshes real state over the authenticated link.
+/// registers it with the paired device credential, and opens the session an
+/// alert names when it is tapped.
+///
+/// The control plane's payload is a fixed sentence. The notification service
+/// extension rewrites it locally from the sealed blob and leaves the session
+/// id in `userInfo`; an alert it could not open has none, and tapping it
+/// simply brings the app forward to the list.
 final class PushDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
     @MainActor var pairing: PairingModel?
+    /// Set once the scene's model exists. A tap that launched the app can
+    /// arrive first; it waits in `pendingSessionID` until then.
+    @MainActor var model: AppModel? {
+        didSet { openPendingSession() }
+    }
+    @MainActor private var pendingSessionID: String?
 
     func application(
         _ application: UIApplication,
@@ -109,6 +123,28 @@ final class PushDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCen
         willPresent notification: UNNotification
     ) async -> UNNotificationPresentationOptions {
         []
+    }
+
+    /// A tapped alert opens the session it named, through the same request a
+    /// `latch://` link makes, so it lands under the same grant and screens.
+    @MainActor
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse
+    ) async {
+        guard response.actionIdentifier == UNNotificationDefaultActionIdentifier,
+              let sessionID = AttentionNotification.sessionID(in: response.notification.request.content.userInfo),
+              SessionDeepLink.url(forSession: sessionID) != nil
+        else { return }
+        pendingSessionID = sessionID
+        openPendingSession()
+    }
+
+    @MainActor
+    private func openPendingSession() {
+        guard let model, let sessionID = pendingSessionID else { return }
+        pendingSessionID = nil
+        Task { await model.requestSession(id: sessionID) }
     }
 }
 
