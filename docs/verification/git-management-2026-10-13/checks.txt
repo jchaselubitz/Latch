@@ -1,0 +1,109 @@
+
+Git fixtures
+------------
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 10.88s
+test result: ok. 118 passed; 0 failed; 0 ignored; 0 measured; 279 filtered out; finished in 18.31s
+
+Required workspace check
+------------------------
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 9.05s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 28.60s
+test result: ok. 395 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 43.63s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 21.59s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.80s
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.03s
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.50s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.31s
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.11s
+test result: FAILED. 11 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.86s
+error: test failed, to rerun pass `-p latch-term --test snapshot_roundtrip`
+error: recipe `check` failed on line 32 with exit code 101
+
+Isolated terminal reproduction
+------------------------------
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.66s
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.36s
+error: test failed, to rerun pass `-p latch-term --test snapshot_roundtrip`
+
+Swift
+-----
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.010 (0.011) seconds
+	 Executed 5 tests, with 0 failures (0 unexpected) in 0.292 (0.293) seconds
+	 Executed 5 tests, with 0 failures (0 unexpected) in 0.292 (0.306) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.001 (0.002) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.002 (0.002) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.003 (0.004) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.003 (0.006) seconds
+	 Executed 5 tests, with 0 failures (0 unexpected) in 0.009 (0.010) seconds
+	 Executed 5 tests, with 0 failures (0 unexpected) in 0.009 (0.010) seconds
+	 Executed 5 tests, with 0 failures (0 unexpected) in 0.009 (0.012) seconds
+	 Executed 9 tests, with 0 failures (0 unexpected) in 1.300 (1.301) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.003 (0.004) seconds
+	 Executed 6 tests, with 0 failures (0 unexpected) in 0.004 (0.004) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.060 (0.060) seconds
+	 Executed 10 tests, with 0 failures (0 unexpected) in 0.010 (0.011) seconds
+	 Executed 5 tests, with 0 failures (0 unexpected) in 0.001 (0.002) seconds
+	 Executed 14 tests, with 0 failures (0 unexpected) in 0.003 (0.004) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.048 (0.049) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.473 (0.474) seconds
+	 Executed 18 tests, with 0 failures (0 unexpected) in 0.029 (0.031) seconds
+	 Executed 14 tests, with 0 failures (0 unexpected) in 0.053 (0.054) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.027 (0.027) seconds
+	 Executed 22 tests, with 0 failures (0 unexpected) in 0.011 (0.012) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.097 (0.097) seconds
+	 Executed 17 tests, with 0 failures (0 unexpected) in 0.317 (0.319) seconds
+	 Executed 9 tests, with 0 failures (0 unexpected) in 0.001 (0.002) seconds
+	 Executed 10 tests, with 0 failures (0 unexpected) in 0.002 (0.003) seconds
+	 Executed 8 tests, with 0 failures (0 unexpected) in 0.003 (0.003) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.002 (0.003) seconds
+	 Executed 10 tests, with 0 failures (0 unexpected) in 0.160 (0.160) seconds
+	 Executed 12 tests, with 0 failures (0 unexpected) in 0.010 (0.011) seconds
+	 Executed 14 tests, with 0 failures (0 unexpected) in 0.209 (0.211) seconds
+	 Executed 21 tests, with 0 failures (0 unexpected) in 0.039 (0.040) seconds
+	 Executed 21 tests, with 0 failures (0 unexpected) in 0.023 (0.025) seconds
+	 Executed 22 tests, with 0 failures (0 unexpected) in 0.016 (0.018) seconds
+	 Executed 11 tests, with 0 failures (0 unexpected) in 0.323 (0.325) seconds
+	 Executed 12 tests, with 0 failures (0 unexpected) in 0.006 (0.007) seconds
+	 Executed 6 tests, with 0 failures (0 unexpected) in 0.423 (0.423) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.003 (0.003) seconds
+	 Executed 10 tests, with 0 failures (0 unexpected) in 0.341 (0.343) seconds
+	 Executed 6 tests, with 0 failures (0 unexpected) in 0.001 (0.002) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.001 (0.001) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.000 (0.001) seconds
+	 Executed 6 tests, with 0 failures (0 unexpected) in 0.001 (0.001) seconds
+	 Executed 6 tests, with 0 failures (0 unexpected) in 0.092 (0.093) seconds
+	 Executed 15 tests, with 0 failures (0 unexpected) in 0.005 (0.006) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.003 (0.004) seconds
+	 Executed 9 tests, with 0 failures (0 unexpected) in 0.005 (0.006) seconds
+	 Executed 7 tests, with 0 failures (0 unexpected) in 0.147 (0.148) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.003 (0.003) seconds
+	 Executed 10 tests, with 0 failures (0 unexpected) in 0.012 (0.013) seconds
+	 Executed 10 tests, with 0 failures (0 unexpected) in 0.001 (0.002) seconds
+	 Executed 12 tests, with 0 failures (0 unexpected) in 1.132 (1.134) seconds
+	 Executed 10 tests, with 0 failures (0 unexpected) in 2.371 (2.372) seconds
+	 Executed 7 tests, with 0 failures (0 unexpected) in 2.145 (2.200) seconds
+	 Executed 5 tests, with 0 failures (0 unexpected) in 0.015 (0.017) seconds
+	 Executed 427 tests, with 1 test skipped and 0 failures (0 unexpected) in 9.935 (10.031) seconds
+	 Executed 427 tests, with 1 test skipped and 0 failures (0 unexpected) in 9.935 (10.034) seconds
+
+Normal app
+----------
+** BUILD SUCCEEDED **
+
+Live HTTP
+---------
+{"result": "pass", "requests": 70, "runtime": "/private/tmp/latch-git-verification-6w2kyx69/runtime.json"}
+
+Web
+---
+ℹ tests 19
+ℹ pass 19
+ℹ fail 0
+ℹ skipped 0

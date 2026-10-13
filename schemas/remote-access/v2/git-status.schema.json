@@ -1,0 +1,346 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://latch.cooperativ.dev/schemas/remote-access/v2/git-status.schema.json",
+  "title": "LatchGitStatusV2",
+  "description": "The Git state of one working tree on the gateway host (GET /v2/git/status?path=, control grant), parsed from `git status --porcelain=v2 -z --branch`. Reading it records the repository on the host's recent list. It never fetches: ahead/behind are against the remote-tracking ref as last fetched, and lastFetchedAt says when that was.",
+  "$defs": {
+    "entry": {
+      "type": "object",
+      "required": [
+        "path",
+        "pathKey",
+        "origPath",
+        "origPathKey",
+        "area",
+        "change",
+        "conflict",
+        "submodule",
+        "additions",
+        "deletions",
+        "binary",
+        "fingerprint"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Path relative to the root, for display. Bytes that are not UTF-8 are shown as U+FFFD."
+        },
+        "pathKey": {
+          "type": "string",
+          "pattern": "^([0-9a-f]{2})+$",
+          "description": "The path's exact bytes, hex-encoded. The diff route takes this, never the display path."
+        },
+        "origPath": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The path before a staged rename or copy."
+        },
+        "origPathKey": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^([0-9a-f]{2})+$"
+        },
+        "area": {
+          "enum": [
+            "conflicted",
+            "staged",
+            "unstaged",
+            "untracked"
+          ]
+        },
+        "change": {
+          "enum": [
+            "modified",
+            "added",
+            "deleted",
+            "renamed",
+            "copied",
+            "type_changed",
+            "untracked",
+            "conflicted"
+          ]
+        },
+        "conflict": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[ADU]{2}$",
+          "description": "Git's two-letter unmerged code (UU, AA, DU, ...) for a conflicted entry."
+        },
+        "submodule": {
+          "type": "boolean"
+        },
+        "additions": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "deletions": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "binary": {
+          "type": "boolean"
+        },
+        "fingerprint": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{16,64}$",
+          "description": "Digest of this entry as the host saw it: Git's record for the path and, outside the staged area, the file's size, modification time and inode. A stage or unstage of selected files sends it back; a different value on the host means the file changed after it was shown, and the request is refused as refresh_required."
+        }
+      },
+      "additionalProperties": false
+    },
+    "preconditions": {
+      "type": "object",
+      "description": "The state a mutation was reviewed against. The phone copies these from the status (or branch list) it showed and sends them back unchanged; each operation rechecks the parts that matter to it, on the host, immediately before acting.",
+      "required": [
+        "branch",
+        "head",
+        "index",
+        "worktree"
+      ],
+      "properties": {
+        "branch": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Checked-out branch, or null when HEAD is detached."
+        },
+        "head": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{40,64}$",
+          "description": "HEAD's commit, or null on an unborn branch."
+        },
+        "index": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "Digest of every index-side difference from HEAD (staged and conflicted records with their object ids) plus any operation in progress."
+        },
+        "worktree": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "Digest of every record status listed, with each unstaged, untracked or conflicted file's size, modification time and inode."
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "type": "object",
+  "required": [
+    "root",
+    "name",
+    "kind",
+    "head",
+    "upstream",
+    "lastFetchedAt",
+    "operation",
+    "entries",
+    "entriesTruncated",
+    "totalEntries",
+    "sessions",
+    "observedAt",
+    "preconditions"
+  ],
+  "properties": {
+    "root": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^/"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "kind": {
+      "enum": [
+        "repository",
+        "linked_worktree",
+        "submodule"
+      ]
+    },
+    "head": {
+      "type": "object",
+      "required": [
+        "branch",
+        "oid",
+        "detached"
+      ],
+      "properties": {
+        "branch": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The checked-out branch, or null when HEAD is detached."
+        },
+        "oid": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{40,64}$",
+          "description": "The commit HEAD names, or null on an unborn branch."
+        },
+        "detached": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "upstream": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "required": [
+        "name",
+        "ahead",
+        "behind"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "The tracking ref, such as origin/main."
+        },
+        "ahead": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "Null when the tracking ref no longer exists locally."
+        },
+        "behind": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "lastFetchedAt": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "RFC 3339 modification time of FETCH_HEAD, or null when this worktree has never fetched."
+    },
+    "operation": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "required": [
+        "kind",
+        "step",
+        "total"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "merge",
+            "rebase",
+            "cherry_pick",
+            "revert"
+          ]
+        },
+        "step": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "total": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "headName": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Rebase: the branch being rebased (without refs/heads/), or null for a detached HEAD."
+        },
+        "onto": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Rebase: the commit being rebased onto."
+        },
+        "stoppedAt": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Rebase: the commit Git stopped at, when it recorded one."
+        },
+        "mergeHead": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Merge: the commit being merged."
+        },
+        "summary": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Merge: the first line of the message Git prepared, such as \"Merge remote-tracking branch 'origin/main'\". At most 200 characters."
+        }
+      },
+      "additionalProperties": false,
+      "description": "The merge, rebase, cherry-pick or revert in progress. Detail fields are omitted when Git did not record them."
+    },
+    "entries": {
+      "type": "array",
+      "maxItems": 2000,
+      "items": {
+        "$ref": "#/$defs/entry"
+      }
+    },
+    "entriesTruncated": {
+      "type": "boolean",
+      "description": "True when more changes exist than fit in one response."
+    },
+    "totalEntries": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "sessions": {
+      "type": "array",
+      "items": {
+        "$ref": "git-repository-list.schema.json#/$defs/session"
+      }
+    },
+    "observedAt": {
+      "type": "string",
+      "description": "RFC 3339 time the host read this state."
+    },
+    "preconditions": {
+      "$ref": "#/$defs/preconditions"
+    }
+  },
+  "additionalProperties": false
+}

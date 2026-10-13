@@ -35,6 +35,7 @@ struct TerminalView: View {
     @State private var unlockRefusal: String?
     @State private var showingDetails = false
     @State private var openingConversation = false
+    @State private var openingRepository = false
     @State private var confirmingStop = false
     @State private var explainingStopGrant = false
 
@@ -79,6 +80,10 @@ struct TerminalView: View {
         }
         .navigationDestination(isPresented: $openingConversation) {
             ChatView(session: session)
+                .pushedOverSessionColumn()
+        }
+        .navigationDestination(isPresented: $openingRepository) {
+            RepositoryView(folder: session.cwd)
                 .pushedOverSessionColumn()
         }
         .sessionStopPrompts(
@@ -152,7 +157,8 @@ struct TerminalView: View {
     private var detailsActions: SessionDetailsActions {
         var actions = SessionDetailsActions(
             stop: stopRequest,
-            isStopping: model.stoppingSessionIDs.contains(session.id)
+            isStopping: model.stoppingSessionIDs.contains(session.id),
+            repository: model.advertisesGit ? { openingRepository = true } : nil
         )
         if chromeStatus.offersReattach {
             actions.primaryTitle = terminal == nil ? "Attach" : "Reattach"
@@ -180,6 +186,14 @@ struct TerminalView: View {
                     Label("Open conversation", systemImage: "bubble.left.and.bubble.right")
                 }
                 .accessibilityLabel("Open the conversation instead")
+            }
+            if model.advertisesGit {
+                Button {
+                    openingRepository = true
+                } label: {
+                    Label("Open repository", systemImage: "arrow.triangle.branch")
+                }
+                .accessibilityHint("Shows this folder's Git repository")
             }
             if let link = SessionDeepLink.url(forSession: session.id) {
                 Button {

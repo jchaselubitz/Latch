@@ -29,6 +29,15 @@ SCHEMA_NAMES = (
     "gateway-capabilities.schema.json",
     "gateway-readiness.schema.json",
     "terminal-connection.schema.json",
+    "git-repository.schema.json",
+    "git-repository-list.schema.json",
+    "git-status.schema.json",
+    "git-file-diff.schema.json",
+    "git-branch-list.schema.json",
+    "git-mutation-request.schema.json",
+    "git-mutation-receipt.schema.json",
+    "git-sync.schema.json",
+    "git-push.schema.json",
 )
 
 
@@ -131,6 +140,586 @@ pub struct AgentModelCatalog {
     pub models: Vec<AgentModel>,
     /// The owner's configured default, which may be an alias outside `models`.
     pub default_model: Option<String>,
+}
+
+/// What kind of working tree a resolved folder belongs to. Bare repositories
+/// have no working tree and are refused rather than reported.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GitWorktreeKind {
+    Repository,
+    LinkedWorktree,
+    Submodule,
+}
+
+/// `GET /v2/git/resolve`: a folder resolved to its working tree root.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GitRepository {
+    pub root: String,
+    pub name: String,
+    pub kind: GitWorktreeKind,
+}
+
+/// A running Latch session whose folder resolves to a working tree.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GitSessionRef {
+    pub id: String,
+    pub name: String,
+    pub title: Option<String>,
+    pub command_label: String,
+    pub connector: Option<String>,
+    pub agent_phase: Option<String>,
+    pub idle_ms: Option<u64>,
+    pub active: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GitRepositorySummary {
+    pub root: String,
+    pub name: String,
+    pub kind: GitWorktreeKind,
+    pub sessions: Vec<GitSessionRef>,
+    pub last_opened_at: Option<String>,
+}
+
+/// `GET /v2/git/repositories`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GitRepositoryList {
+    pub from_sessions: Vec<GitRepositorySummary>,
+    pub recent: Vec<GitRepositorySummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GitHead {
+    pub branch: Option<String>,
+    pub oid: Option<String>,
+    pub detached: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GitUpstream {
+    pub name: String,
+    pub ahead: Option<u64>,
+    pub behind: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GitOperationKind {
+    Merge,
+    Rebase,
+    CherryPick,
+    Revert,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GitOperation {
+    pub kind: GitOperationKind,
+    pub step: Option<u32>,
+    pub total: Option<u32>,
+    /// Rebase: the branch being rebased, without `refs/heads/`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_name: Option<String>,
+    /// Rebase: the commit being rebased onto.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub onto: Option<String>,
+    /// Rebase: the commit Git stopped at.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopped_at: Option<String>,
+    /// Merge: the commit being merged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_head: Option<String>,
+    /// Merge: the first line of the message Git prepared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum GitChangeArea {
+    Conflicted,
+    Staged,
+    Unstaged,
+    Untracked,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GitChangeKind {
+    Modified,
+    Added,
+    Deleted,
+    Renamed,
+    Copied,
+    TypeChanged,
+    Untracked,
+    Conflicted,
+}
+
+/// One changed path in one area. A file changed both in the index and in
+/// the working tree is two entries, one per area.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GitStatusEntry {
+    pub path: String,
+    pub path_key: String,
+    pub orig_path: Option<String>,
+    pub orig_path_key: Option<String>,
+    pub area: GitChangeArea,
+    pub change: GitChangeKind,
+    pub conflict: Option<String>,
+    pub submodule: bool,
+    pub additions: Option<u64>,
+    pub deletions: Option<u64>,
+    pub binary: bool,
+    /// Digest of the entry as the host saw it; a selected-file mutation
+    /// sends it back and is refused if the file changed since.
+    pub fingerprint: String,
+}
+
+/// The state a mutation was reviewed against. The phone copies it from the
+/// status or branch list it showed; each operation rechecks the parts that
+/// matter to it immediately before acting.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GitPreconditions {
+    pub branch: Option<String>,
+    pub head: Option<String>,
+    pub index: String,
+    pub worktree: String,
+}
+
+/// `GET /v2/git/status`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GitStatus {
+    pub root: String,
+    pub name: String,
+    pub kind: GitWorktreeKind,
+    pub head: GitHead,
+    pub upstream: Option<GitUpstream>,
+    pub last_fetched_at: Option<String>,
+    pub operation: Option<GitOperation>,
+    pub entries: Vec<GitStatusEntry>,
+    pub entries_truncated: bool,
+    pub total_entries: u64,
+    pub sessions: Vec<GitSessionRef>,
+    pub observed_at: String,
+    pub preconditions: GitPreconditions,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GitDiffKind {
+    Text,
+    Binary,
+    TooLarge,
+    Submodule,
+    Directory,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GitDiffLineKind {
+    Context,
+    Added,
+    Removed,
+    Note,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GitDiffLine {
+    pub kind: GitDiffLineKind,
+    pub old_line: Option<u32>,
+    pub new_line: Option<u32>,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GitDiffHunk {
+    pub index: u32,
+    pub header: String,
+    pub old_start: u32,
+    pub old_lines: u32,
+    pub new_start: u32,
+    pub new_lines: u32,
+    pub lines: Vec<GitDiffLine>,
+    pub omitted_lines: u32,
+}
+
+/// `GET /v2/git/diff`: one bounded page of one file's diff.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GitFileDiff {
+    pub root: String,
+    pub path: String,
+    pub path_key: String,
+    pub orig_path: Option<String>,
+    pub area: GitChangeArea,
+    pub kind: GitDiffKind,
+    pub additions: u64,
+    pub deletions: u64,
+    pub hunks: Vec<GitDiffHunk>,
+    pub total_hunks: u32,
+    pub next_cursor: Option<String>,
+    pub notes: Vec<String>,
+}
+
+/// One local branch in `GET /v2/git/branches`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GitBranch {
+    pub name: String,
+    pub oid: String,
+    pub current: bool,
+    pub upstream: Option<String>,
+    pub ahead: Option<u64>,
+    pub behind: Option<u64>,
+    pub upstream_gone: bool,
+    pub subject: String,
+    pub committed_at: Option<String>,
+    pub checked_out_elsewhere: bool,
+}
+
+/// `GET /v2/git/branches`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GitBranchList {
+    pub root: String,
+    pub head: GitHead,
+    pub branches: Vec<GitBranch>,
+    pub truncated: bool,
+    pub preconditions: GitPreconditions,
+}
+
+/// A whole file named by a stage or unstage request.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitFileRef {
+    pub path_key: String,
+    pub area: GitChangeArea,
+    pub fingerprint: String,
+}
+
+/// `POST /v2/git/stage` and `POST /v2/git/unstage`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitIndexRequest {
+    pub request_id: String,
+    pub path: String,
+    pub expected: GitPreconditions,
+    #[serde(default)]
+    pub files: Vec<GitFileRef>,
+    #[serde(default)]
+    pub all: Option<Vec<GitChangeArea>>,
+    /// Stage conflicted files even if they still contain conflict markers.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub confirm_conflict_markers: bool,
+}
+
+/// `POST /v2/git/commit`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitCommitRequest {
+    pub request_id: String,
+    pub path: String,
+    pub expected: GitPreconditions,
+    pub summary: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+/// `POST /v2/git/branches/create`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitCreateBranchRequest {
+    pub request_id: String,
+    pub path: String,
+    pub expected: GitPreconditions,
+    pub name: String,
+    pub start_point: String,
+    pub start_oid: String,
+    pub switch: bool,
+}
+
+/// `POST /v2/git/branches/switch`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitSwitchBranchRequest {
+    pub request_id: String,
+    pub path: String,
+    pub expected: GitPreconditions,
+    pub name: String,
+    pub oid: String,
+}
+
+/// `POST /v2/git/fetch`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitFetchRequest {
+    pub request_id: String,
+    pub path: String,
+    pub expected: GitPreconditions,
+    pub remote: String,
+}
+
+/// `POST /v2/git/fast-forward`, `/v2/git/merge` and `/v2/git/rebase`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitUpdateRequest {
+    pub request_id: String,
+    pub path: String,
+    pub expected: GitPreconditions,
+    pub upstream: String,
+    pub upstream_oid: String,
+}
+
+/// `POST /v2/git/push`: the source, remote and destination exactly as the
+/// push review showed them.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitPushRequest {
+    pub request_id: String,
+    pub path: String,
+    pub expected: GitPreconditions,
+    pub remote: String,
+    pub remote_url: Option<String>,
+    pub destination: String,
+    pub source_branch: String,
+    pub source_oid: String,
+    pub destination_oid: Option<String>,
+}
+
+/// `POST /v2/git/push/reconcile`: an earlier push's request id.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitPushReconcileRequest {
+    pub request_id: String,
+}
+
+/// The operations Continue and Abort act on.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GitControlledOperation {
+    Merge,
+    Rebase,
+}
+
+/// `POST /v2/git/continue` and `POST /v2/git/abort`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitOperationControlRequest {
+    pub request_id: String,
+    pub path: String,
+    pub expected: GitPreconditions,
+    pub operation: GitControlledOperation,
+    #[serde(default)]
+    pub confirmed: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GitMutationKind {
+    Stage,
+    Unstage,
+    Commit,
+    CreateBranch,
+    SwitchBranch,
+    Fetch,
+    FastForward,
+    Merge,
+    Rebase,
+    ContinueOperation,
+    AbortOperation,
+    Push,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GitReceiptState {
+    Pending,
+    Completed,
+    Rejected,
+    Uncertain,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GitMutationOutcome {
+    pub code: String,
+    pub message: String,
+    pub git_output: Option<String>,
+    pub git_output_truncated: bool,
+    pub head: Option<String>,
+    pub branch: Option<String>,
+    pub commit: Option<String>,
+    pub files: Vec<String>,
+    pub reconciled: bool,
+}
+
+/// Git's latest progress line for a pending request.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GitProgress {
+    pub message: String,
+    pub percent: Option<u8>,
+    pub updated_at: String,
+}
+
+/// The host's durable, device-scoped record of one Git mutation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GitMutationReceipt {
+    pub request_id: String,
+    pub operation: GitMutationKind,
+    pub root: String,
+    pub state: GitReceiptState,
+    pub accepted_at: String,
+    pub finished_at: Option<String>,
+    pub outcome: Option<GitMutationOutcome>,
+    /// When Git was started, after the recheck.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    /// Git's latest progress while pending, from this gateway process.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<GitProgress>,
+}
+
+/// The upstream a sync is reviewed against.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GitSyncUpstream {
+    pub name: String,
+    #[serde(rename = "ref")]
+    pub reference: String,
+    pub remote: Option<String>,
+    pub remote_url: Option<String>,
+    pub oid: Option<String>,
+    pub gone: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GitRemote {
+    pub name: String,
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GitCommitSummary {
+    pub oid: String,
+    pub subject: String,
+    pub author: String,
+    pub committed_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GitSyncRelation {
+    UpToDate,
+    Behind,
+    Ahead,
+    Diverged,
+    NoUpstream,
+    UpstreamGone,
+    Detached,
+    Unborn,
+}
+
+/// `GET /v2/git/sync`: the upstream as last fetched; never fetches.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GitSyncPreview {
+    pub root: String,
+    pub head: GitHead,
+    pub upstream: Option<GitSyncUpstream>,
+    pub remotes: Vec<GitRemote>,
+    pub last_fetched_at: Option<String>,
+    pub relation: GitSyncRelation,
+    pub ahead: Option<u64>,
+    pub behind: Option<u64>,
+    pub fast_forward_blocked_reason: Option<String>,
+    pub incoming: Vec<GitCommitSummary>,
+    pub next_cursor: Option<String>,
+    pub operation: Option<GitOperation>,
+    pub preconditions: GitPreconditions,
+}
+
+/// The local branch a push sends.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GitPushSource {
+    pub branch: String,
+    pub oid: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GitPushSelectedBy {
+    Upstream,
+    Request,
+}
+
+/// The remote branch a push is reviewed against, as last fetched.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GitPushTarget {
+    pub remote: String,
+    pub remote_url: Option<String>,
+    pub destination: String,
+    pub destination_ref: String,
+    pub tracking_ref: Option<String>,
+    pub destination_oid: Option<String>,
+    pub selected_by: GitPushSelectedBy,
+    pub new_branch: bool,
+    pub is_default_branch: bool,
+    pub default_branch: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GitPushSuggestion {
+    pub remote: String,
+    pub destination: String,
+}
+
+/// `GET /v2/git/push/preview`: what a push would send; never contacts the
+/// remote.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GitPushPreview {
+    pub root: String,
+    pub head: GitHead,
+    pub source: Option<GitPushSource>,
+    pub remotes: Vec<GitRemote>,
+    pub target: Option<GitPushTarget>,
+    pub selection_required: bool,
+    pub selection_reason: Option<String>,
+    pub suggestion: Option<GitPushSuggestion>,
+    pub last_fetched_at: Option<String>,
+    pub ahead: Option<u64>,
+    pub behind: Option<u64>,
+    pub blocked_reason: Option<String>,
+    pub rejection_likely_reason: Option<String>,
+    pub outgoing: Vec<GitCommitSummary>,
+    pub next_cursor: Option<String>,
+    pub operation: Option<GitOperation>,
+    pub preconditions: GitPreconditions,
+}
+
+/// `POST /v2/git/push/reconcile`: the receipt after asking the remote.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GitPushReconciliation {
+    pub receipt: GitMutationReceipt,
+    pub remote_checked: bool,
+    pub remote_oid: Option<String>,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -463,6 +1052,277 @@ export type GatewayFeatures = {
   exclusiveTerminal: boolean;
   sessionAgents?: SessionAgent[];
   attachmentMaxBytes?: number;
+};
+/** Git routes (all at the control grant), served when the matching
+ * `endpoints.git*` key is true. Paths are display text; `pathKey` is the
+ * hex-encoded exact bytes the diff route takes. */
+export type GitWorktreeKind = 'repository' | 'linked_worktree' | 'submodule';
+export type GitRepository = { root: string; name: string; kind: GitWorktreeKind };
+export type GitSessionRef = {
+  id: string;
+  name: string;
+  title: string | null;
+  commandLabel: string;
+  connector: string | null;
+  agentPhase: string | null;
+  idleMs: number | null;
+  active: boolean;
+};
+export type GitRepositorySummary = GitRepository & {
+  sessions: GitSessionRef[];
+  lastOpenedAt: string | null;
+};
+export type GitRepositoryList = {
+  fromSessions: GitRepositorySummary[];
+  recent: GitRepositorySummary[];
+};
+export type GitChangeArea = 'conflicted' | 'staged' | 'unstaged' | 'untracked';
+export type GitStatusEntry = {
+  path: string;
+  pathKey: string;
+  origPath: string | null;
+  origPathKey: string | null;
+  area: GitChangeArea;
+  change:
+    | 'modified'
+    | 'added'
+    | 'deleted'
+    | 'renamed'
+    | 'copied'
+    | 'type_changed'
+    | 'untracked'
+    | 'conflicted';
+  conflict: string | null;
+  submodule: boolean;
+  additions: number | null;
+  deletions: number | null;
+  binary: boolean;
+  fingerprint: string;
+};
+/** Sent back unchanged with every mutation; the Mac rechecks it. */
+export type GitPreconditions = {
+  branch: string | null;
+  head: string | null;
+  index: string;
+  worktree: string;
+};
+/** The merge, rebase, cherry-pick or revert in progress. */
+export type GitOperation = {
+  kind: 'merge' | 'rebase' | 'cherry_pick' | 'revert';
+  step: number | null;
+  total: number | null;
+  headName?: string | null;
+  onto?: string | null;
+  stoppedAt?: string | null;
+  mergeHead?: string | null;
+  summary?: string | null;
+};
+export type GitStatus = GitRepository & {
+  head: { branch: string | null; oid: string | null; detached: boolean };
+  upstream: { name: string; ahead: number | null; behind: number | null } | null;
+  lastFetchedAt: string | null;
+  operation: GitOperation | null;
+  entries: GitStatusEntry[];
+  entriesTruncated: boolean;
+  totalEntries: number;
+  sessions: GitSessionRef[];
+  observedAt: string;
+  preconditions: GitPreconditions;
+};
+export type GitDiffLine = {
+  kind: 'context' | 'added' | 'removed' | 'note';
+  oldLine: number | null;
+  newLine: number | null;
+  text: string;
+  truncated?: boolean;
+};
+export type GitDiffHunk = {
+  index: number;
+  header: string;
+  oldStart: number;
+  oldLines: number;
+  newStart: number;
+  newLines: number;
+  lines: GitDiffLine[];
+  omittedLines: number;
+};
+export type GitFileDiff = {
+  root: string;
+  path: string;
+  pathKey: string;
+  origPath: string | null;
+  area: GitChangeArea;
+  kind: 'text' | 'binary' | 'too_large' | 'submodule' | 'directory';
+  additions: number;
+  deletions: number;
+  hunks: GitDiffHunk[];
+  totalHunks: number;
+  nextCursor: string | null;
+  notes: string[];
+};
+export type GitBranch = {
+  name: string;
+  oid: string;
+  current: boolean;
+  upstream: string | null;
+  ahead: number | null;
+  behind: number | null;
+  upstreamGone: boolean;
+  subject: string;
+  committedAt: string | null;
+  checkedOutElsewhere: boolean;
+};
+export type GitBranchList = {
+  root: string;
+  head: { branch: string | null; oid: string | null; detached: boolean };
+  branches: GitBranch[];
+  truncated: boolean;
+  preconditions: GitPreconditions;
+};
+/** Git mutations (POST, control grant). `requestId` is a UUID scoped to the
+ * device; the answer is always a receipt. */
+export type GitFileRef = {
+  pathKey: string;
+  area: 'conflicted' | 'staged' | 'unstaged' | 'untracked';
+  fingerprint: string;
+};
+type GitMutationBase = { requestId: string; path: string; expected: GitPreconditions };
+export type GitIndexRequest = GitMutationBase & {
+  files?: GitFileRef[];
+  all?: Array<'staged' | 'unstaged' | 'untracked'> | null;
+  confirmConflictMarkers?: boolean;
+};
+export type GitCommitRequest = GitMutationBase & { summary: string; description?: string | null };
+export type GitCreateBranchRequest = GitMutationBase & {
+  name: string;
+  startPoint: string;
+  startOid: string;
+  switch: boolean;
+};
+export type GitSwitchBranchRequest = GitMutationBase & { name: string; oid: string };
+export type GitFetchRequest = GitMutationBase & { remote: string };
+export type GitUpdateRequest = GitMutationBase & { upstream: string; upstreamOid: string };
+export type GitPushRequest = GitMutationBase & {
+  remote: string;
+  remoteUrl: string | null;
+  destination: string;
+  sourceBranch: string;
+  sourceOid: string;
+  destinationOid: string | null;
+};
+export type GitPushReconcileRequest = { requestId: string };
+export type GitOperationControlRequest = GitMutationBase & {
+  operation: 'merge' | 'rebase';
+  confirmed?: boolean;
+};
+export type GitMutationOutcome = {
+  code: string;
+  message: string;
+  gitOutput: string | null;
+  gitOutputTruncated: boolean;
+  head: string | null;
+  branch: string | null;
+  commit: string | null;
+  files: string[];
+  reconciled: boolean;
+};
+export type GitMutationReceipt = {
+  requestId: string;
+  operation:
+    | 'stage'
+    | 'unstage'
+    | 'commit'
+    | 'create_branch'
+    | 'switch_branch'
+    | 'fetch'
+    | 'fast_forward'
+    | 'merge'
+    | 'rebase'
+    | 'continue_operation'
+    | 'abort_operation'
+    | 'push';
+  root: string;
+  state: 'pending' | 'completed' | 'rejected' | 'uncertain';
+  acceptedAt: string;
+  finishedAt: string | null;
+  outcome: GitMutationOutcome | null;
+  startedAt?: string | null;
+  progress?: { message: string; percent: number | null; updatedAt: string } | null;
+};
+export type GitCommitSummary = {
+  oid: string;
+  subject: string;
+  author: string;
+  committedAt: string | null;
+};
+/** `GET /v2/git/sync`: the upstream as last fetched. Never fetches. */
+export type GitSyncPreview = {
+  root: string;
+  head: { branch: string | null; oid: string | null; detached: boolean };
+  upstream: {
+    name: string;
+    ref: string;
+    remote: string | null;
+    remoteUrl: string | null;
+    oid: string | null;
+    gone: boolean;
+  } | null;
+  remotes: Array<{ name: string; url: string | null }>;
+  lastFetchedAt: string | null;
+  relation:
+    | 'up_to_date'
+    | 'behind'
+    | 'ahead'
+    | 'diverged'
+    | 'no_upstream'
+    | 'upstream_gone'
+    | 'detached'
+    | 'unborn';
+  ahead: number | null;
+  behind: number | null;
+  fastForwardBlockedReason: string | null;
+  incoming: GitCommitSummary[];
+  nextCursor: string | null;
+  operation: GitOperation | null;
+  preconditions: GitPreconditions;
+};
+export type GitPushTarget = {
+  remote: string;
+  remoteUrl: string | null;
+  destination: string;
+  destinationRef: string;
+  trackingRef: string | null;
+  destinationOid: string | null;
+  selectedBy: 'upstream' | 'request';
+  newBranch: boolean;
+  isDefaultBranch: boolean;
+  defaultBranch: string | null;
+};
+/** `GET /v2/git/push/preview`: what a push would send. Never contacts the remote. */
+export type GitPushPreview = {
+  root: string;
+  head: { branch: string | null; oid: string | null; detached: boolean };
+  source: { branch: string; oid: string } | null;
+  remotes: Array<{ name: string; url: string | null }>;
+  target: GitPushTarget | null;
+  selectionRequired: boolean;
+  selectionReason: string | null;
+  suggestion: { remote: string; destination: string } | null;
+  lastFetchedAt: string | null;
+  ahead: number | null;
+  behind: number | null;
+  blockedReason: string | null;
+  rejectionLikelyReason: string | null;
+  outgoing: GitCommitSummary[];
+  nextCursor: string | null;
+  operation: GitOperation | null;
+  preconditions: GitPreconditions;
+};
+export type GitPushReconciliation = {
+  receipt: GitMutationReceipt;
+  remoteChecked: boolean;
+  remoteOid: string | null;
+  message: string;
 };
 export type GatewayReadiness = {
   formatVersion: 2;

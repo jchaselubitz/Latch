@@ -132,6 +132,163 @@ fn fixed_gateway_proxy_rejects_forged_authority_paths_and_pipelining() {
         .contains("x-latch-device-grant: control"));
 }
 
+/// The paired proxy enforces the same table for Git: every route needs
+/// control, a lower grant is refused before the gateway sees the request,
+/// and no Git write is routable through Remote Link at all.
+#[test]
+fn git_routes_through_the_paired_proxy_need_control() {
+    let targets = [
+        "/v2/git/repositories",
+        "/v2/git/resolve?path=%2FUsers%2Fperson%2Frepo",
+        "/v2/git/status?path=%2FUsers%2Fperson%2Frepo",
+        "/v2/git/diff?path=%2FUsers%2Fperson%2Frepo&file=61&area=staged",
+    ];
+    for target in targets {
+        let request = format!("GET {target} HTTP/1.1\r\nHost: latch\r\n\r\n");
+        for permission in [DevicePermission::Observe, DevicePermission::Interact] {
+            assert!(
+                authorize_and_inject(
+                    request.as_bytes().to_vec(),
+                    permission,
+                    "phone-local-id",
+                    "internal-token",
+                )
+                .is_err(),
+                "{permission:?} must not reach {target}"
+            );
+        }
+        let (injected, required) = authorize_and_inject(
+            request.as_bytes().to_vec(),
+            DevicePermission::Control,
+            "phone-local-id",
+            "internal-token",
+        )
+        .unwrap();
+        assert_eq!(required, DevicePermission::Control);
+        assert!(String::from_utf8(injected)
+            .unwrap()
+            .to_ascii_lowercase()
+            .contains("x-latch-device-grant: control"));
+    }
+    for request in [
+        "POST /v2/git/status HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}",
+        "GET /v2/git/fetch HTTP/1.1\r\nHost: latch\r\n\r\n",
+        "GET /v2/git/status/../../sessions HTTP/1.1\r\nHost: latch\r\n\r\n",
+        "GET /v2/git/status?path=%2E%2E%2Fetc HTTP/1.1\r\nHost: latch\r\n\r\n",
+    ] {
+        assert!(
+            authorize_and_inject(
+                request.as_bytes().to_vec(),
+                DevicePermission::Control,
+                "phone-local-id",
+                "internal-token",
+            )
+            .is_err(),
+            "{request}"
+        );
+    }
+}
+
+/// Git mutations and receipt lookups pass the paired proxy only at control,
+/// carry the proxy's device id to the gateway, and the proxy forwards no
+/// Git route the table does not name.
+#[test]
+fn git_mutations_through_the_paired_proxy_need_control() {
+    let body = r#"{"requestId":"0b7c2f4e-9a7d-4a8e-9c1e-2f3a4b5c6d7e"}"#;
+    let mut requests = [
+        "/v2/git/stage",
+        "/v2/git/unstage",
+        "/v2/git/commit",
+        "/v2/git/branches/create",
+        "/v2/git/branches/switch",
+        "/v2/git/fetch",
+        "/v2/git/fast-forward",
+        "/v2/git/merge",
+        "/v2/git/rebase",
+        "/v2/git/continue",
+        "/v2/git/abort",
+        "/v2/git/push",
+        "/v2/git/push/reconcile",
+    ]
+    .iter()
+    .map(|target| {
+        format!(
+            "POST {target} HTTP/1.1\r\nHost: latch\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+    })
+    .collect::<Vec<_>>();
+    requests.push("GET /v2/git/branches?path=%2Fr HTTP/1.1\r\nHost: latch\r\n\r\n".to_owned());
+    requests.push(
+        "GET /v2/git/sync?path=%2Fr&cursor=v1-ab-50 HTTP/1.1\r\nHost: latch\r\n\r\n".to_owned(),
+    );
+    requests.push(
+        "GET /v2/git/receipts/0b7c2f4e-9a7d-4a8e-9c1e-2f3a4b5c6d7e HTTP/1.1\r\nHost: latch\r\n\r\n"
+            .to_owned(),
+    );
+    requests.push(
+        "GET /v2/git/push/preview?path=%2Fr&remote=origin&destination=main HTTP/1.1\r\nHost: latch\r\n\r\n"
+            .to_owned(),
+    );
+    for request in &requests {
+        for permission in [DevicePermission::Observe, DevicePermission::Interact] {
+            assert!(
+                authorize_and_inject(
+                    request.as_bytes().to_vec(),
+                    permission,
+                    "phone-local-id",
+                    "internal-token",
+                )
+                .is_err(),
+                "{permission:?} must not reach {request}"
+            );
+        }
+        let (injected, required) = authorize_and_inject(
+            request.as_bytes().to_vec(),
+            DevicePermission::Control,
+            "phone-local-id",
+            "internal-token",
+        )
+        .unwrap();
+        assert_eq!(required, DevicePermission::Control);
+        let injected = String::from_utf8(injected).unwrap().to_ascii_lowercase();
+        assert!(
+            injected.contains("x-latch-device-grant: control"),
+            "{request}"
+        );
+        assert!(
+            injected.contains("x-latch-device-id: phone-local-id"),
+            "{request}"
+        );
+    }
+    for request in [
+        "POST /v2/git/push/preview HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}",
+        "POST /v2/git/push/force HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}",
+        "GET /v2/git/push HTTP/1.1\r\nHost: latch\r\n\r\n",
+        "POST /v2/git/push/../../sessions HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}",
+        "POST /v2/git/branches/delete HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}",
+        "POST /v2/git/reset HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}",
+        "POST /v2/git/pull HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}",
+        "POST /v2/git/sync HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}",
+        "GET /v2/git/merge HTTP/1.1\r\nHost: latch\r\n\r\n",
+        "POST /v2/git/abort/../../sessions HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}",
+        "POST /v2/git/receipts/0b7c2f4e-9a7d-4a8e-9c1e-2f3a4b5c6d7e HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}",
+        "GET /v2/git/commit HTTP/1.1\r\nHost: latch\r\n\r\n",
+        "POST /v2/git/stage/../../sessions HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}",
+    ] {
+        assert!(
+            authorize_and_inject(
+                request.as_bytes().to_vec(),
+                DevicePermission::Control,
+                "phone-local-id",
+                "internal-token",
+            )
+            .is_err(),
+            "{request}"
+        );
+    }
+}
+
 /// The attachments route is the one route whose body is not buffered.
 /// Its headers still pass through every check above, it is still gated by
 /// the route table's grant, and its body is bounded by what it declares.

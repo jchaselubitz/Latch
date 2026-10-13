@@ -30,6 +30,13 @@ struct SessionsView: View {
     /// refreshes without it: the open screen keeps its session.
     @State private var pushedSessions: [String: SessionSummary] = [:]
     @State private var showingSettings = false
+    /// The Repositories sheet, and the folder it chose, opened once the
+    /// sheet has gone so the push is not made under a dismissing sheet.
+    @State private var showingRepositories = false
+    @State private var chosenRepository: String?
+    /// The repository open over the list (stack) or in the detail column.
+    @State private var openRepository: RepositoryPush?
+    @State private var explainingGitGrant = false
     /// What the search field filters the list by: title, folder, or agent.
     @State private var searchQuery = ""
 
@@ -64,6 +71,25 @@ struct SessionsView: View {
         .sheet(isPresented: $showingSettings) {
             SettingsView()
         }
+        .sheet(isPresented: $showingRepositories, onDismiss: {
+            guard let folder = chosenRepository else { return }
+            chosenRepository = nil
+            showRepository(folder)
+        }) {
+            RepositoriesSheet { folder in chosenRepository = folder }
+        }
+        .alert("This phone can't open repositories", isPresented: $explainingGitGrant) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(model.gitUnavailableExplanation ?? "")
+        }
+        // A chip on the repository screen opens its session, over whatever
+        // the repository was opened from.
+        .environment(\.openSession, { sessionID in
+            guard let session = model.sessions.first(where: { $0.id == sessionID }) else { return }
+            openRepository = nil
+            select(session)
+        })
         .alert(
             "This phone can't start a session",
             isPresented: $explainingGrant
@@ -87,8 +113,10 @@ struct SessionsView: View {
             // not under a sheet or on top of another session.
             guard let sessionID = SessionDeepLink.sessionID(from: url) else { return }
             showingSettings = false
+            showingRepositories = false
             creating = nil
             stopping = nil
+            openRepository = nil
             selectedSessionID = nil
             Task { await model.requestSession(id: sessionID) }
         }
@@ -132,6 +160,9 @@ struct SessionsView: View {
                     destination(for: session, route: model.route(for: session))
                 }
             }
+            .navigationDestination(item: $openRepository) { push in
+                RepositoryView(folder: push.folder)
+            }
         }
     }
 
@@ -158,6 +189,9 @@ struct SessionsView: View {
             if let session = selectedSession {
                 destination(for: session, route: model.route(for: session))
                     .navigationBarBackButtonHidden(true)
+            } else if let repository = openRepository {
+                RepositoryView(folder: repository.folder)
+                    .navigationBarBackButtonHidden(true)
             } else {
                 ContentUnavailableView {
                     Label(
@@ -177,7 +211,7 @@ struct SessionsView: View {
                 .accessibilityIdentifier("sessions.detail.empty")
             }
         }
-        .id(selectedSessionID ?? "none")
+        .id(selectedSessionID ?? openRepository.map { "repository:" + $0.folder } ?? "none")
         .environment(\.sessionBrowserLayout, .columns)
     }
 
@@ -296,6 +330,9 @@ struct SessionsView: View {
                 newSessionPill
             }
             Spacer(minLength: 12)
+            if model.advertisesGit {
+                repositoriesButton
+            }
             Button {
                 showingSettings = true
             } label: {
@@ -375,6 +412,38 @@ struct SessionsView: View {
         .foregroundStyle(.white)
     }
 
+    /// Beside the gear when the Mac serves the Git routes, dimmed without the
+    /// grant so the alert can say what to change. Opens repositories; it
+    /// never attaches to a terminal.
+    private var repositoriesButton: some View {
+        Button {
+            if model.canUseGit {
+                showingRepositories = true
+            } else if model.gitUnavailableExplanation != nil {
+                explainingGitGrant = true
+            }
+        } label: {
+            FloatingControl(systemImage: "arrow.triangle.branch", size: 48)
+                .foregroundStyle(.primary)
+        }
+        .buttonStyle(.plain)
+        .opacity(model.canUseGit ? 1 : 0.45)
+        .accessibilityLabel("Repositories")
+        .accessibilityHint(
+            model.canUseGit
+                ? "Shows Git repositories on your Mac"
+                : "Unavailable until this phone has control of your Mac"
+        )
+        .accessibilityIdentifier("sessions.repositories")
+    }
+
+    private func showRepository(_ folder: String) {
+        if browserLayout == .columns {
+            selectedSessionID = nil
+        }
+        openRepository = RepositoryPush(folder: folder)
+    }
+
     private func startCreating(_ mode: FolderBrowserMode) {
         if model.canCreateNewSession(agent: mode.agent) {
             creating = mode
@@ -397,6 +466,9 @@ struct SessionsView: View {
 
     private func select(_ session: SessionSummary) {
         pushedSessions[session.id] = session
+        if browserLayout == .columns {
+            openRepository = nil
+        }
         selectedSessionID = session.id
     }
 
@@ -646,4 +718,9 @@ struct SessionsView: View {
 /// built from the live row.
 private struct SessionPush: Hashable {
     let sessionID: String
+}
+
+/// A repository opened from the list, named by the folder it was opened for.
+private struct RepositoryPush: Hashable {
+    let folder: String
 }

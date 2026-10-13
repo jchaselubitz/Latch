@@ -1,0 +1,130 @@
+// Temporary simulator-only harness. Append to LatchMobileApp.swift, replace
+// RootView() in WindowGroup with VerificationEntryView(), and bypass its
+// pairing task when LATCH_VERIFY_SCREEN is set. Remove after screenshots.
+#if DEBUG && targetEnvironment(simulator)
+struct VerificationDirectTransport: GatewayTransport {
+    let gatewayLink: GatewayLink
+}
+
+@MainActor @Observable final class VerificationConnection {
+    var online = true
+}
+
+struct VerificationEntryView: View {
+    var body: some View {
+        if ProcessInfo.processInfo.environment["LATCH_VERIFY_SCREEN"] != nil {
+            VerificationGitView()
+        } else {
+            RootView()
+        }
+    }
+}
+
+struct VerificationGitView: View {
+    @State private var repository: GitRepositoryModel?
+    @State private var branches: GitBranchesModel?
+    @State private var sync: GitSyncModel?
+    @State private var push: GitPushModel?
+    @State private var repositories: GitRepositoryListModel?
+    @State private var connection = VerificationConnection()
+    @State private var error: String?
+    private let options = ProcessInfo.processInfo.environment
+    private var screen: String { options["LATCH_VERIFY_SCREEN"] ?? "repository" }
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if let repository {
+                    switch screen {
+                    case "diff":
+                        if let entry = repository.orderedEntries.first {
+                            GitDiffView(repository: repository, entry: entry)
+                        }
+                    case "commit": CommitSheet(repository: repository)
+                    case "branches":
+                        if let branches { BranchesSheet(repository: repository, model: branches, openCommit: {}) }
+                    case "sync":
+                        if let sync { SyncSheet(repository: repository, model: sync) }
+                    case "push":
+                        if let push {
+                            PushReviewView(repository: repository, model: push, backToSync: { _ in }, closeSheet: {})
+                        }
+                    case "repositories":
+                        if let repositories {
+                            RepositoriesSheet(choose: { _ in }, verificationList: repositories)
+                        }
+                    default: RepositoryView(folder: repository.folder, preloaded: repository)
+                    }
+                } else if let error {
+                    Text(error).accessibilityIdentifier("verification.error")
+                } else { ProgressView("Reading disposable gateway…") }
+            }
+        }
+        .task {
+            guard repository == nil else { return }
+            do {
+                let link = try GatewayLink(address: options["LATCH_VERIFY_URL"]!, token: options["LATCH_VERIFY_TOKEN"]!)
+                let gateway = LatchGateway(transport: VerificationDirectTransport(gatewayLink: link))
+                let capabilities = try await gateway.discover()
+                let path = options["LATCH_VERIFY_PATH"]!
+                let support = GitMutationSupport(endpoints: capabilities.endpoints)
+                let model = GitRepositoryModel(
+                    folder: path,
+                    read: { try await gateway.gitStatus(path: $0) },
+                    readDiff: { try await gateway.gitDiff(path: $0, fileKey: $1, area: $2, cursor: $3) },
+                    isOnline: { connection.online }, support: support,
+                    mutate: { try await gateway.gitMutation($0) },
+                    lookupReceipt: { try await gateway.gitReceipt(requestID: $0) },
+                    readBranches: { try await gateway.gitBranches(path: $0) },
+                    readSync: { try await gateway.gitSync(path: $0, cursor: $1) },
+                    readPush: { try await gateway.gitPushPreview(path: $0, remote: $1?.remote, destination: $1?.destination, cursor: $2) },
+                    checkRemote: { try await gateway.gitPushReconcile(requestId: $0) }
+                )
+                await model.refresh()
+                if let error = model.error { throw LatchError.transport(error) }
+                if screen == "stage" { await model.applyToSection(.untracked) }
+                if screen == "completed" {
+                    await model.commit(summary: "Simulator reviewed commit", description: "")
+                }
+                if screen == "rejected" {
+                    let expected = model.status!.preconditions!
+                    await model.mutations.perform(.switchBranch(GitSwitchBranchRequest(
+                        requestId: UUID().uuidString, path: path, expected: expected,
+                        name: "does-not-exist", oid: expected.head!
+                    )))
+                }
+                if screen == "refresh-required" {
+                    let current = model.status!.preconditions!
+                    let stale = GitPreconditions(branch: current.branch, head: String(repeating: "0", count: 40), index: current.index, worktree: current.worktree)
+                    await model.mutations.perform(.commit(GitCommitRequest(
+                        requestId: UUID().uuidString, path: path, expected: stale,
+                        summary: "Must not commit", description: nil
+                    )))
+                }
+                if screen == "stale" { connection.online = false }
+                if screen == "branches" {
+                    branches = model.branchesModel()
+                    await branches?.load()
+                }
+                if screen == "sync" {
+                    sync = model.syncModel()
+                    await sync?.load()
+                }
+                if screen == "push" {
+                    push = model.pushModel()
+                    await push?.load()
+                }
+                if screen == "repositories" {
+                    let list = GitRepositoryListModel(listing: { try await gateway.gitRepositories() })
+                    await list.load()
+                    repositories = list
+                }
+                repository = model
+                print("LATCH_VERIFY_READY \(screen) \(model.status?.head.branch ?? "detached") \(model.status?.entries.count ?? 0)")
+            } catch { self.error = error.localizedDescription }
+        }
+    }
+}
+#else
+typealias VerificationEntryView = RootView
+#endif

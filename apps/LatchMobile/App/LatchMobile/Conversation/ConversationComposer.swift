@@ -12,8 +12,10 @@ struct ConversationSessionActions {
     /// Asks to stop; the caller confirms before anything is sent.
     var stop: (() -> Void)?
     var isStopping = false
+    /// Opens this session's Git repository without attaching to anything.
+    var openRepository: (() -> Void)?
 
-    var isEmpty: Bool { takeTerminal == nil && sessionLink == nil && stop == nil }
+    var isEmpty: Bool { takeTerminal == nil && sessionLink == nil && stop == nil && openRepository == nil }
 }
 
 /// The ordinary composer, and the one thing the chat screen is built around.
@@ -167,6 +169,12 @@ struct ConversationComposer: View {
                     Label("Take terminal", systemImage: "terminal")
                 }
                 .accessibilityHint("Opens the live terminal here and detaches it from your Mac.")
+            }
+            if let openRepository = sessionActions.openRepository {
+                Button(action: openRepository) {
+                    Label("Open repository", systemImage: "arrow.triangle.branch")
+                }
+                .accessibilityHint("Shows this folder's Git repository. It does not attach.")
             }
             if let link = sessionActions.sessionLink {
                 Button {

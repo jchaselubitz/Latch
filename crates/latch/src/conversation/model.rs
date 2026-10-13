@@ -198,15 +198,7 @@ pub enum ConversationPhase {
     Exited,
     Unavailable,
 }
-impl Default for Availability {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            reason: None,
-        }
-    }
-}
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Availability {
     pub enabled: bool,
     pub reason: Option<String>,

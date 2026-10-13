@@ -1,0 +1,414 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://latch.cooperativ.dev/schemas/remote-access/v2/git-mutation-request.schema.json",
+  "title": "LatchGitMutationRequestV2",
+  "description": "Bodies of the Git mutation routes (all POST, control grant). Every Git argument is chosen by the host from these typed fields; no field is passed to Git as an option. The host persists a pending receipt before Git runs and answers with the receipt (git-mutation-receipt.schema.json).",
+  "$defs": {
+    "requestId": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+      "description": "Idempotency key the phone generates once per user action. Scoped to the requesting device: repeating it with the same arguments returns the first receipt without running Git again; repeating it with different arguments is refused as request_id_conflict."
+    },
+    "folder": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^/",
+      "description": "The repository folder; resolved again to its working tree on every call."
+    },
+    "fileRef": {
+      "type": "object",
+      "required": [
+        "pathKey",
+        "area",
+        "fingerprint"
+      ],
+      "properties": {
+        "pathKey": {
+          "type": "string",
+          "pattern": "^([0-9a-f]{2})+$",
+          "description": "The entry's exact path bytes from status."
+        },
+        "area": {
+          "enum": [
+            "conflicted",
+            "staged",
+            "unstaged",
+            "untracked"
+          ],
+          "description": "The area the entry was shown in. Staging a conflicted file marks it resolved; it needs the gitStageResolved endpoint."
+        },
+        "fingerprint": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{16,64}$",
+          "description": "The entry's fingerprint from status."
+        }
+      },
+      "additionalProperties": false
+    },
+    "index": {
+      "type": "object",
+      "description": "POST /v2/git/stage and POST /v2/git/unstage. Stage rechecks branch, head and each file's fingerprint (or worktree for all); unstage rechecks head and each fingerprint (or index for all).",
+      "required": [
+        "requestId",
+        "path",
+        "expected"
+      ],
+      "properties": {
+        "requestId": {
+          "$ref": "#/$defs/requestId"
+        },
+        "path": {
+          "$ref": "#/$defs/folder"
+        },
+        "expected": {
+          "$ref": "git-status.schema.json#/$defs/preconditions"
+        },
+        "files": {
+          "type": "array",
+          "maxItems": 200,
+          "items": {
+            "$ref": "#/$defs/fileRef"
+          },
+          "description": "Whole files to stage (unstaged or untracked entries) or unstage (staged entries). Each must still have its fingerprint. A staged rename unstages both its paths."
+        },
+        "all": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "enum": [
+              "staged",
+              "unstaged",
+              "untracked"
+            ]
+          },
+          "uniqueItems": true,
+          "description": "Stage every unstaged and/or untracked entry, or unstage every staged entry, as listed when expected.worktree (stage) or expected.index (unstage) was taken. Exactly one of non-empty files or all is given."
+        },
+        "confirmConflictMarkers": {
+          "type": "boolean",
+          "description": "Stage conflicted files even if they still contain conflict markers. Without it the host refuses with conflict_markers and names the files, so the phone can ask first. Send only to a host advertising gitStageResolved; omit when false."
+        }
+      },
+      "additionalProperties": false
+    },
+    "commit": {
+      "type": "object",
+      "description": "POST /v2/git/commit. Rechecks branch, head and index, so the commit is exactly the reviewed staged changes on the reviewed branch; unstaged work is left as it is. Refused while a merge, rebase, cherry-pick or revert is in progress.",
+      "required": [
+        "requestId",
+        "path",
+        "expected",
+        "summary"
+      ],
+      "properties": {
+        "requestId": {
+          "$ref": "#/$defs/requestId"
+        },
+        "path": {
+          "$ref": "#/$defs/folder"
+        },
+        "expected": {
+          "$ref": "git-status.schema.json#/$defs/preconditions"
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000,
+          "description": "First line of the commit message. Must not contain a newline."
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 8192,
+          "description": "Optional body, separated from the summary by a blank line. At most 8 KiB, so the whole request fits the paired proxy's 32 KiB request bound."
+        }
+      },
+      "additionalProperties": false
+    },
+    "createBranch": {
+      "type": "object",
+      "description": "POST /v2/git/branches/create. Rechecks branch and head when switching.",
+      "required": [
+        "requestId",
+        "path",
+        "expected",
+        "name",
+        "startPoint",
+        "startOid",
+        "switch"
+      ],
+      "properties": {
+        "requestId": {
+          "$ref": "#/$defs/requestId"
+        },
+        "path": {
+          "$ref": "#/$defs/folder"
+        },
+        "expected": {
+          "$ref": "git-status.schema.json#/$defs/preconditions"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "description": "New local branch name. Refused unless it is plainly a branch name (no leading '-', no '~ ^ : ? * [ \\\\', '..', '@{', or other forms git check-ref-format rejects); Git checks it again."
+        },
+        "startPoint": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "description": "\"HEAD\" or the local branch the phone showed as the start, under the same name rules."
+        },
+        "startOid": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40,64}$",
+          "description": "The commit the phone reviewed. The branch is created at exactly this commit, and only if startPoint still names it."
+        },
+        "switch": {
+          "type": "boolean",
+          "description": "Also switch to the new branch. Git refuses if that would overwrite local changes; nothing is stashed or discarded."
+        }
+      },
+      "additionalProperties": false
+    },
+    "switchBranch": {
+      "type": "object",
+      "description": "POST /v2/git/branches/switch. Rechecks branch, head and the target's commit. Never forces; Git's refusal, with the files it named, is the result.",
+      "required": [
+        "requestId",
+        "path",
+        "expected",
+        "name",
+        "oid"
+      ],
+      "properties": {
+        "requestId": {
+          "$ref": "#/$defs/requestId"
+        },
+        "path": {
+          "$ref": "#/$defs/folder"
+        },
+        "expected": {
+          "$ref": "git-status.schema.json#/$defs/preconditions"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "description": "An existing local branch."
+        },
+        "oid": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40,64}$",
+          "description": "The commit the branch list showed for it."
+        }
+      },
+      "additionalProperties": false
+    },
+    "fetch": {
+      "type": "object",
+      "description": "POST /v2/git/fetch. Only ever sent because the user asked. Rechecks branch and head and that the remote still exists, then runs git fetch for that remote with the host's own configuration and credentials, never prompting. Fetching changes only remote-tracking refs and FETCH_HEAD.",
+      "required": [
+        "requestId",
+        "path",
+        "expected",
+        "remote"
+      ],
+      "properties": {
+        "requestId": {
+          "$ref": "#/$defs/requestId"
+        },
+        "path": {
+          "$ref": "#/$defs/folder"
+        },
+        "expected": {
+          "$ref": "git-status.schema.json#/$defs/preconditions"
+        },
+        "remote": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "description": "A remote name the sync preview listed."
+        }
+      },
+      "additionalProperties": false
+    },
+    "update": {
+      "type": "object",
+      "description": "POST /v2/git/fast-forward, /v2/git/merge and /v2/git/rebase. Rechecks branch, head, index, worktree, that no operation is in progress, and that the branch's upstream is still `upstream` at `upstreamOid`; then runs exactly that operation against upstreamOid. Fast-forward never falls back to merge or rebase. Nothing is stashed (autostash is off), reset or discarded.",
+      "required": [
+        "requestId",
+        "path",
+        "expected",
+        "upstream",
+        "upstreamOid"
+      ],
+      "properties": {
+        "requestId": {
+          "$ref": "#/$defs/requestId"
+        },
+        "path": {
+          "$ref": "#/$defs/folder"
+        },
+        "expected": {
+          "$ref": "git-status.schema.json#/$defs/preconditions"
+        },
+        "upstream": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "description": "The upstream name the sync preview showed, such as origin/main."
+        },
+        "upstreamOid": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40,64}$",
+          "description": "The upstream commit the phone reviewed."
+        }
+      },
+      "additionalProperties": false
+    },
+    "operationControl": {
+      "type": "object",
+      "description": "POST /v2/git/continue and /v2/git/abort. Rechecks branch, head, index, worktree and that `operation` is still the one in progress. Continue also refuses while any conflicted entry remains (unresolved_conflicts, naming the files) and accepts Git's prepared message. Abort requires confirmed: true.",
+      "required": [
+        "requestId",
+        "path",
+        "expected",
+        "operation"
+      ],
+      "properties": {
+        "requestId": {
+          "$ref": "#/$defs/requestId"
+        },
+        "path": {
+          "$ref": "#/$defs/folder"
+        },
+        "expected": {
+          "$ref": "git-status.schema.json#/$defs/preconditions"
+        },
+        "operation": {
+          "enum": [
+            "merge",
+            "rebase"
+          ]
+        },
+        "confirmed": {
+          "type": "boolean",
+          "description": "Abort only: the user confirmed it. Abort without it is refused."
+        }
+      },
+      "additionalProperties": false
+    },
+    "push": {
+      "type": "object",
+      "description": "POST /v2/git/push. Sends exactly sourceOid to refs/heads/<destination> on remote with a normal, never forced, push using the host's own credentials and configuration, without tags or submodules. Rechecks branch, head, the source branch's commit, the remote's push URL and the destination as last fetched; any change is refresh_required. The remote's refusal is returned, never repaired or retried.",
+      "required": [
+        "requestId",
+        "path",
+        "expected",
+        "remote",
+        "remoteUrl",
+        "destination",
+        "sourceBranch",
+        "sourceOid",
+        "destinationOid"
+      ],
+      "properties": {
+        "requestId": {
+          "$ref": "#/$defs/requestId"
+        },
+        "path": {
+          "$ref": "#/$defs/folder"
+        },
+        "expected": {
+          "$ref": "git-status.schema.json#/$defs/preconditions"
+        },
+        "remote": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "description": "The remote the push preview reviewed."
+        },
+        "remoteUrl": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 4096,
+          "description": "The redacted push URL the preview showed."
+        },
+        "destination": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "description": "Branch name on the remote, as reviewed."
+        },
+        "sourceBranch": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "sourceOid": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40,64}$"
+        },
+        "destinationOid": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{40,64}$",
+          "description": "The destination's commit as last fetched when reviewed; null when it was not known."
+        }
+      },
+      "additionalProperties": false
+    },
+    "pushReconcile": {
+      "type": "object",
+      "description": "POST /v2/git/push/reconcile, only when the user asks: settle this device's uncertain (or abandoned pending) push receipt by asking the remote where the destination is now. Never pushes. Answers with git-push.schema.json#/$defs/reconciliation.",
+      "required": [
+        "requestId"
+      ],
+      "properties": {
+        "requestId": {
+          "$ref": "#/$defs/requestId"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/index"
+    },
+    {
+      "$ref": "#/$defs/commit"
+    },
+    {
+      "$ref": "#/$defs/createBranch"
+    },
+    {
+      "$ref": "#/$defs/switchBranch"
+    },
+    {
+      "$ref": "#/$defs/fetch"
+    },
+    {
+      "$ref": "#/$defs/update"
+    },
+    {
+      "$ref": "#/$defs/operationControl"
+    },
+    {
+      "$ref": "#/$defs/push"
+    },
+    {
+      "$ref": "#/$defs/pushReconcile"
+    }
+  ]
+}

@@ -91,12 +91,14 @@ public enum FolderBrowserMode: Equatable, Hashable, Sendable, Identifiable {
     /// Start the named agent directly in the chosen folder.
     case createAgent(SessionAgent)
     case chooseDefault
+    /// Choose a folder and open the Git repository that contains it.
+    case chooseRepository
 
     /// Whether choosing a folder starts something on the Mac.
     public var isCreate: Bool {
         switch self {
         case .create, .createAgent: return true
-        case .chooseDefault: return false
+        case .chooseDefault, .chooseRepository: return false
         }
     }
 
@@ -113,6 +115,7 @@ public enum FolderBrowserMode: Equatable, Hashable, Sendable, Identifiable {
         case .create: return "create"
         case .createAgent(let agent): return "create." + agent.rawValue
         case .chooseDefault: return "chooseDefault"
+        case .chooseRepository: return "chooseRepository"
         }
     }
 }
@@ -148,6 +151,8 @@ public final class FolderBrowserModel {
     public typealias ListingModels = () async throws -> AgentModelCatalog
     public typealias AccessChecking = () -> Bool
     public typealias Created = (String) async -> Void
+    /// Resolves the current folder to the repository that contains it.
+    public typealias ResolvingRepository = (String) async throws -> GitRepository
 
     public let mode: FolderBrowserMode
     public private(set) var currentPage: DirectoryPage?
@@ -168,6 +173,8 @@ public final class FolderBrowserModel {
     public private(set) var modelListError: String?
     /// The model the next start names; `nil` is the agent's default on the Mac.
     public private(set) var selectedModelID: String?
+    /// The repository "Open repository here" resolved, for the presenter to open.
+    public private(set) var chosenRepository: GitRepository?
 
     private let initialPath: String?
     private let folderStore: any NewSessionFolderStoring
@@ -177,6 +184,7 @@ public final class FolderBrowserModel {
     private let didCreate: Created
     private let listModels: ListingModels?
     private let modelStore: (any AgentModelPreferenceStoring)?
+    private let resolveRepository: ResolvingRepository?
 
     public init(
         mode: FolderBrowserMode,
@@ -187,7 +195,8 @@ public final class FolderBrowserModel {
         hasAccess: @escaping AccessChecking = { true },
         didCreate: @escaping Created = { _ in },
         listModels: ListingModels? = nil,
-        modelStore: (any AgentModelPreferenceStoring)? = nil
+        modelStore: (any AgentModelPreferenceStoring)? = nil,
+        resolveRepository: ResolvingRepository? = nil
     ) {
         self.mode = mode
         self.initialPath = initialPath
@@ -198,6 +207,7 @@ public final class FolderBrowserModel {
         self.didCreate = didCreate
         self.listModels = listModels
         self.modelStore = modelStore
+        self.resolveRepository = resolveRepository
     }
 
     /// Whether this picker offers a model choice at all.
@@ -317,7 +327,7 @@ public final class FolderBrowserModel {
     /// one-off choice and never mutates the preference.
     @discardableResult
     public func useCurrentAsDefault() -> Bool {
-        guard !mode.isCreate, hasAccess(), let path = currentPage?.path else {
+        guard mode == .chooseDefault, hasAccess(), let path = currentPage?.path else {
             if !hasAccess() { error = NewSessionAccessError.unavailable.message }
             return false
         }
@@ -350,6 +360,24 @@ public final class FolderBrowserModel {
             if model != nil {
                 await loadModels()
             }
+        }
+    }
+
+    /// Asks the Mac which repository the current folder belongs to. A plain
+    /// folder or a bare repository is said in `error`, and nothing opens.
+    public func openRepositoryHere() async {
+        guard mode == .chooseRepository, let resolveRepository, let path = currentPage?.path else { return }
+        guard hasAccess() else {
+            error = NewSessionAccessError.unavailable.message
+            return
+        }
+        isLoading = true
+        defer { isLoading = false }
+        do {
+            chosenRepository = try await resolveRepository(path)
+            error = nil
+        } catch {
+            self.error = Self.message(for: error)
         }
     }
 

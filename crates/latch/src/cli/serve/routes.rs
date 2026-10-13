@@ -67,6 +67,27 @@ pub(crate) enum RouteId {
     Attachments,
     AgentModels,
     NotificationKey,
+    GitRepositories,
+    GitResolve,
+    GitStatus,
+    GitDiff,
+    GitBranches,
+    GitStage,
+    GitUnstage,
+    GitCommit,
+    GitCreateBranch,
+    GitSwitchBranch,
+    GitReceipt,
+    GitSync,
+    GitFetch,
+    GitFastForward,
+    GitMerge,
+    GitRebase,
+    GitContinue,
+    GitAbort,
+    GitPushPreview,
+    GitPush,
+    GitPushReconcile,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -188,6 +209,166 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
         required_grant: Grant::Control,
         streamed_body_limit: None,
     },
+    // A repository's file names and contents are the Mac's files, so every
+    // Git route, reading or changing, sits at the grant the folder browser
+    // does: a device that may not browse folders may not read repositories,
+    // and certainly may not change them.
+    RouteSpec {
+        id: RouteId::GitRepositories,
+        pattern: "/v2/git/repositories",
+        method: "GET",
+        required_grant: Grant::Control,
+        streamed_body_limit: None,
+    },
+    RouteSpec {
+        id: RouteId::GitResolve,
+        pattern: "/v2/git/resolve",
+        method: "GET",
+        required_grant: Grant::Control,
+        streamed_body_limit: None,
+    },
+    RouteSpec {
+        id: RouteId::GitStatus,
+        pattern: "/v2/git/status",
+        method: "GET",
+        required_grant: Grant::Control,
+        streamed_body_limit: None,
+    },
+    RouteSpec {
+        id: RouteId::GitDiff,
+        pattern: "/v2/git/diff",
+        method: "GET",
+        required_grant: Grant::Control,
+        streamed_body_limit: None,
+    },
+    RouteSpec {
+        id: RouteId::GitBranches,
+        pattern: "/v2/git/branches",
+        method: "GET",
+        required_grant: Grant::Control,
+        streamed_body_limit: None,
+    },
+    // Mutations. Each carries a device-scoped request id and answers with a
+    // durable receipt; none takes a Git argument from the phone.
+    RouteSpec {
+        id: RouteId::GitStage,
+        pattern: "/v2/git/stage",
+        method: "POST",
+        required_grant: Grant::Control,
+        streamed_body_limit: None,
+    },
+    RouteSpec {
+        id: RouteId::GitUnstage,
+        pattern: "/v2/git/unstage",
+        method: "POST",
+        required_grant: Grant::Control,
+        streamed_body_limit: None,
+    },
+    RouteSpec {
+        id: RouteId::GitCommit,
+        pattern: "/v2/git/commit",
+        method: "POST",
+        required_grant: Grant::Control,
+        streamed_body_limit: None,
+    },
+    RouteSpec {
+        id: RouteId::GitCreateBranch,
+        pattern: "/v2/git/branches/create",
+        method: "POST",
+        required_grant: Grant::Control,
+        streamed_body_limit: None,
+    },
+    RouteSpec {
+        id: RouteId::GitSwitchBranch,
+        pattern: "/v2/git/branches/switch",
+        method: "POST",
+        required_grant: Grant::Control,
+        streamed_body_limit: None,
+    },
+    // Reading a receipt reveals what this device changed, so it sits with
+    // the mutations; the handler scopes it to the requesting device.
+    RouteSpec {
+        id: RouteId::GitReceipt,
+        pattern: "/v2/git/receipts/{id}",
+        method: "GET",
+        required_grant: Grant::Control,
+        streamed_body_limit: None,
+    },
+    // Bringing other commits in. The preview reads only what the last fetch
+    // left; fetching is its own explicit request, never a side effect.
+    RouteSpec {
+        id: RouteId::GitSync,
+        pattern: "/v2/git/sync",
+        method: "GET",
+        required_grant: Grant::Control,
+        streamed_body_limit: None,
+    },
+    RouteSpec {
+        id: RouteId::GitFetch,
+        pattern: "/v2/git/fetch",
+        method: "POST",
+        required_grant: Grant::Control,
+        streamed_body_limit: None,
+    },
+    RouteSpec {
+        id: RouteId::GitFastForward,
+        pattern: "/v2/git/fast-forward",
+        method: "POST",
+        required_grant: Grant::Control,
+        streamed_body_limit: None,
+    },
+    RouteSpec {
+        id: RouteId::GitMerge,
+        pattern: "/v2/git/merge",
+        method: "POST",
+        required_grant: Grant::Control,
+        streamed_body_limit: None,
+    },
+    RouteSpec {
+        id: RouteId::GitRebase,
+        pattern: "/v2/git/rebase",
+        method: "POST",
+        required_grant: Grant::Control,
+        streamed_body_limit: None,
+    },
+    RouteSpec {
+        id: RouteId::GitContinue,
+        pattern: "/v2/git/continue",
+        method: "POST",
+        required_grant: Grant::Control,
+        streamed_body_limit: None,
+    },
+    RouteSpec {
+        id: RouteId::GitAbort,
+        pattern: "/v2/git/abort",
+        method: "POST",
+        required_grant: Grant::Control,
+        streamed_body_limit: None,
+    },
+    // Pushing. The preview reads only what the last fetch left; the push and
+    // the check of an uncertain push each contact the remote only because the
+    // user asked, and none accepts a refspec or option from the phone.
+    RouteSpec {
+        id: RouteId::GitPushPreview,
+        pattern: "/v2/git/push/preview",
+        method: "GET",
+        required_grant: Grant::Control,
+        streamed_body_limit: None,
+    },
+    RouteSpec {
+        id: RouteId::GitPush,
+        pattern: "/v2/git/push",
+        method: "POST",
+        required_grant: Grant::Control,
+        streamed_body_limit: None,
+    },
+    RouteSpec {
+        id: RouteId::GitPushReconcile,
+        pattern: "/v2/git/push/reconcile",
+        method: "POST",
+        required_grant: Grant::Control,
+        streamed_body_limit: None,
+    },
 ];
 
 /// Resolve one concrete HTTP target against the shared route table.
@@ -276,6 +457,138 @@ mod tests {
         assert!(route_for("GET", "/v2/sessions/ses_1/attachments").is_none());
         assert!(route_for("POST", "/v2/agents/claude/models").is_none());
         assert!(route_for("GET", "/v2/agents/claude").is_none());
+    }
+
+    /// Every Git read is a GET at the control grant, whatever its query
+    /// says, and nothing else under `/v2/git` is routable.
+    #[test]
+    fn git_reads_are_gets_and_require_control() {
+        for target in [
+            "/v2/git/repositories",
+            "/v2/git/resolve?path=%2FUsers%2Fperson%2Frepo",
+            "/v2/git/status?path=%2FUsers%2Fperson%2Frepo",
+            "/v2/git/diff?path=%2Fr&file=61&area=staged",
+            "/v2/git/diff?path=%2Fr&file=61&area=unstaged&cursor=v1-00-1",
+        ] {
+            assert_eq!(
+                route_for("GET", target).map(|(_, grant)| grant),
+                Some(Grant::Control),
+                "{target}"
+            );
+        }
+        for method in ["POST", "PUT", "DELETE"] {
+            for path in [
+                "/v2/git/repositories",
+                "/v2/git/resolve",
+                "/v2/git/status",
+                "/v2/git/diff",
+            ] {
+                assert!(route_for(method, path).is_none(), "{method} {path}");
+            }
+        }
+        for target in [
+            "/v2/git",
+            "/v2/git/fetch",
+            "/v2/git/status/extra",
+            "/v2/git/commit",
+            "/v2/git/stage",
+            "/v2/git/branches/switch",
+            "/v2/git/receipts",
+        ] {
+            assert!(route_for("GET", target).is_none(), "{target}");
+        }
+        for grant in [Grant::Observe, Grant::Interact] {
+            for target in [
+                "/v2/git/repositories",
+                "/v2/git/resolve",
+                "/v2/git/status",
+                "/v2/git/diff",
+            ] {
+                let (_, required) = route_for("GET", target).unwrap();
+                assert!(
+                    !grant.permits(required),
+                    "{grant:?} must not reach {target}"
+                );
+            }
+        }
+    }
+
+    /// Every Git mutation is a POST at the control grant and the receipt
+    /// lookup a GET at the same grant; observing and interacting devices
+    /// reach none of them, and none of them streams a body past the proxy.
+    #[test]
+    fn git_mutations_are_posts_and_require_control() {
+        let posts = [
+            "/v2/git/stage",
+            "/v2/git/unstage",
+            "/v2/git/commit",
+            "/v2/git/branches/create",
+            "/v2/git/branches/switch",
+            "/v2/git/fetch",
+            "/v2/git/fast-forward",
+            "/v2/git/merge",
+            "/v2/git/rebase",
+            "/v2/git/continue",
+            "/v2/git/abort",
+            "/v2/git/push",
+            "/v2/git/push/reconcile",
+        ];
+        for target in posts {
+            let (spec, grant) = route_for("POST", target).expect(target);
+            assert_eq!(grant, Grant::Control, "{target}");
+            assert_eq!(spec.streamed_body_limit, None, "{target}");
+            for method in ["GET", "PUT", "DELETE"] {
+                assert!(route_for(method, target).is_none(), "{method} {target}");
+            }
+        }
+        let reads = [
+            "/v2/git/branches?path=%2Fr",
+            "/v2/git/receipts/0b7c2f4e-9a7d-4a8e-9c1e-2f3a4b5c6d7e",
+            "/v2/git/sync?path=%2Fr",
+            "/v2/git/sync?path=%2Fr&cursor=v1-abc-50",
+            "/v2/git/push/preview?path=%2Fr",
+            "/v2/git/push/preview?path=%2Fr&remote=origin&destination=main&cursor=p1-a-b-50",
+        ];
+        for target in reads {
+            assert_eq!(
+                route_for("GET", target).map(|(_, grant)| grant),
+                Some(Grant::Control),
+                "{target}"
+            );
+        }
+        assert!(route_for(
+            "POST",
+            "/v2/git/receipts/0b7c2f4e-9a7d-4a8e-9c1e-2f3a4b5c6d7e"
+        )
+        .is_none());
+        assert!(route_for("POST", "/v2/git/branches").is_none());
+        assert!(route_for("POST", "/v2/git/push/preview").is_none());
+        assert!(route_for("GET", "/v2/git/push").is_none());
+        assert!(route_for("GET", "/v2/git/push/reconcile").is_none());
+        assert!(route_for("POST", "/v2/git/push/force").is_none());
+        assert!(route_for("POST", "/v2/git/branches/delete").is_none());
+        assert!(route_for("POST", "/v2/git/clean").is_none());
+        assert!(route_for("POST", "/v2/git/reset").is_none());
+        assert!(route_for("POST", "/v2/git/pull").is_none());
+        assert!(route_for("POST", "/v2/git/stash").is_none());
+        assert!(route_for("POST", "/v2/git/sync").is_none());
+        assert!(route_for("GET", "/v2/git/fetch").is_none());
+        for grant in [Grant::Observe, Grant::Interact] {
+            for target in posts {
+                let (_, required) = route_for("POST", target).unwrap();
+                assert!(
+                    !grant.permits(required),
+                    "{grant:?} must not reach {target}"
+                );
+            }
+            for target in reads {
+                let (_, required) = route_for("GET", target).unwrap();
+                assert!(
+                    !grant.permits(required),
+                    "{grant:?} must not reach {target}"
+                );
+            }
+        }
     }
 
     /// Only the attachments route streams its body. Every other request stays

@@ -15,6 +15,7 @@ use serde::Serialize;
 use tokio::net::TcpListener;
 
 mod authority;
+mod git;
 mod readiness;
 mod uploads;
 use super::attention::AttentionWatcher;
@@ -203,6 +204,27 @@ fn register(router: Router<AppState>, spec: RouteSpec) -> Router<AppState> {
         RouteId::Attachments => router.route(spec.pattern, post(upload_attachment)),
         RouteId::AgentModels => router.route(spec.pattern, get(agent_models_catalog)),
         RouteId::NotificationKey => router.route(spec.pattern, put(set_notification_key)),
+        RouteId::GitRepositories => router.route(spec.pattern, get(git::git_repositories)),
+        RouteId::GitResolve => router.route(spec.pattern, get(git::git_resolve)),
+        RouteId::GitStatus => router.route(spec.pattern, get(git::git_status)),
+        RouteId::GitDiff => router.route(spec.pattern, get(git::git_diff)),
+        RouteId::GitBranches => router.route(spec.pattern, get(git::git_branches)),
+        RouteId::GitStage => router.route(spec.pattern, post(git::git_stage)),
+        RouteId::GitUnstage => router.route(spec.pattern, post(git::git_unstage)),
+        RouteId::GitCommit => router.route(spec.pattern, post(git::git_commit)),
+        RouteId::GitCreateBranch => router.route(spec.pattern, post(git::git_create_branch)),
+        RouteId::GitSwitchBranch => router.route(spec.pattern, post(git::git_switch_branch)),
+        RouteId::GitReceipt => router.route(spec.pattern, get(git::git_receipt)),
+        RouteId::GitSync => router.route(spec.pattern, get(git::git_sync)),
+        RouteId::GitFetch => router.route(spec.pattern, post(git::git_fetch)),
+        RouteId::GitFastForward => router.route(spec.pattern, post(git::git_fast_forward)),
+        RouteId::GitMerge => router.route(spec.pattern, post(git::git_merge)),
+        RouteId::GitRebase => router.route(spec.pattern, post(git::git_rebase)),
+        RouteId::GitContinue => router.route(spec.pattern, post(git::git_continue)),
+        RouteId::GitAbort => router.route(spec.pattern, post(git::git_abort)),
+        RouteId::GitPushPreview => router.route(spec.pattern, get(git::git_push_preview)),
+        RouteId::GitPush => router.route(spec.pattern, post(git::git_push)),
+        RouteId::GitPushReconcile => router.route(spec.pattern, post(git::git_push_reconcile)),
     }
 }
 
@@ -246,6 +268,28 @@ struct GatewayEndpoints {
     attachments: bool,
     agent_models: bool,
     notification_key: bool,
+    git_repositories: bool,
+    git_resolve: bool,
+    git_status: bool,
+    git_diff: bool,
+    git_branches: bool,
+    git_stage: bool,
+    git_unstage: bool,
+    git_commit: bool,
+    git_create_branch: bool,
+    git_switch_branch: bool,
+    git_receipts: bool,
+    git_sync: bool,
+    git_fetch: bool,
+    git_fast_forward: bool,
+    git_merge: bool,
+    git_rebase: bool,
+    git_continue: bool,
+    git_abort: bool,
+    git_stage_resolved: bool,
+    git_push_preview: bool,
+    git_push: bool,
+    git_push_reconcile: bool,
 }
 
 async fn gateway_capabilities(State(state): State<AppState>) -> Response {
@@ -262,6 +306,28 @@ async fn gateway_capabilities(State(state): State<AppState>) -> Response {
             attachments: true,
             agent_models: true,
             notification_key: true,
+            git_repositories: true,
+            git_resolve: true,
+            git_status: true,
+            git_diff: true,
+            git_branches: true,
+            git_stage: true,
+            git_unstage: true,
+            git_commit: true,
+            git_create_branch: true,
+            git_switch_branch: true,
+            git_receipts: true,
+            git_sync: true,
+            git_fetch: true,
+            git_fast_forward: true,
+            git_merge: true,
+            git_rebase: true,
+            git_continue: true,
+            git_abort: true,
+            git_stage_resolved: true,
+            git_push_preview: true,
+            git_push: true,
+            git_push_reconcile: true,
         },
         features: GatewayFeatures {
             exclusive_terminal: true,
@@ -275,6 +341,12 @@ async fn gateway_capabilities(State(state): State<AppState>) -> Response {
 }
 
 async fn list_sessions(State(state): State<AppState>) -> Result<Response, ApiError> {
+    Ok(Json(session_report(&state).await?).into_response())
+}
+
+/// The session list as the gateway serves it: the engine's rows plus the
+/// agent phase the Hub already knows.
+async fn session_report(state: &AppState) -> Result<crate::cli::json::ListReport, ApiError> {
     let home = state.home.clone();
     let mut report = tokio::task::spawn_blocking(move || manage::list(ListOptions { home }))
         .await
@@ -293,7 +365,7 @@ async fn list_sessions(State(state): State<AppState>) -> Result<Response, ApiErr
             .snapshot(&id, 0)
             .map(|snapshot| phase_wire(snapshot.state.phase).to_owned());
     }
-    Ok(Json(report).into_response())
+    Ok(report)
 }
 
 /// The conversation-state schema's spelling of a phase.
@@ -503,7 +575,7 @@ async fn create_session(
 
 /// Accepts only a canonical hyphenated UUID, the one shape the contract
 /// promises and the only shape the phone generates.
-fn is_request_id(value: &str) -> bool {
+pub(super) fn is_request_id(value: &str) -> bool {
     let groups = [8, 4, 4, 4, 12];
     let mut parts = value.split('-');
     for expected in groups {

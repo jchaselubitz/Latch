@@ -70,26 +70,28 @@ fn cursor_chat_sends_and_observes_two_turns() {
     let mut can_send = false;
     for expected in ["LATCH_CURSOR_FIRST", "LATCH_CURSOR_SECOND"] {
         let deadline = Instant::now() + Duration::from_secs(90);
-        while !can_send {
-            let result = connector
-                .poll(PollBudget {
-                    max_records: 100,
-                    deadline: Duration::from_secs(3),
-                })
-                .unwrap();
-            if result.mutations.iter().any(|mutation| {
-                matches!(mutation,
-                ConnectorMutation::State(state) if state.send_message.enabled)
-            }) {
-                break;
+        if !can_send {
+            loop {
+                let result = connector
+                    .poll(PollBudget {
+                        max_records: 100,
+                        deadline: Duration::from_secs(3),
+                    })
+                    .unwrap();
+                if result.mutations.iter().any(|mutation| {
+                    matches!(mutation,
+                    ConnectorMutation::State(state) if state.send_message.enabled)
+                }) {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "Cursor never offered its empty composer"
+                );
+                connector
+                    .wait_for_activity(Duration::from_millis(200), Duration::from_millis(500))
+                    .unwrap();
             }
-            assert!(
-                Instant::now() < deadline,
-                "Cursor never offered its empty composer"
-            );
-            connector
-                .wait_for_activity(Duration::from_millis(200), Duration::from_millis(500))
-                .unwrap();
         }
         can_send = false;
         let result = connector.apply(ConnectorAction {

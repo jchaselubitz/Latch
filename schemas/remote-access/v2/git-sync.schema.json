@@ -1,0 +1,220 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://latch.cooperativ.dev/schemas/remote-access/v2/git-sync.schema.json",
+  "title": "LatchGitSyncPreviewV2",
+  "description": "GET /v2/git/sync?path=&cursor= at the control grant: the current branch's upstream as last fetched, its remote, the incoming commits one bounded page at a time, and whether a fast-forward is possible. Read-only: it never fetches. The phone sends upstream and upstreamOid back with an update.",
+  "type": "object",
+  "$defs": {
+    "commit": {
+      "type": "object",
+      "required": [
+        "oid",
+        "subject",
+        "author",
+        "committedAt"
+      ],
+      "properties": {
+        "oid": {
+          "type": "string"
+        },
+        "subject": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "author": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "committedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "root",
+    "head",
+    "upstream",
+    "remotes",
+    "lastFetchedAt",
+    "relation",
+    "ahead",
+    "behind",
+    "fastForwardBlockedReason",
+    "incoming",
+    "nextCursor",
+    "operation",
+    "preconditions"
+  ],
+  "properties": {
+    "root": {
+      "type": "string",
+      "pattern": "^/"
+    },
+    "head": {
+      "type": "object",
+      "required": [
+        "branch",
+        "oid",
+        "detached"
+      ],
+      "properties": {
+        "branch": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "oid": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "detached": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "upstream": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "The current branch's configured upstream. Null on a detached HEAD or a branch with none.",
+      "required": [
+        "name",
+        "ref",
+        "remote",
+        "remoteUrl",
+        "oid",
+        "gone"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Short name, such as origin/main."
+        },
+        "ref": {
+          "type": "string",
+          "description": "Full ref, such as refs/remotes/origin/main."
+        },
+        "remote": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The remote it tracks, or null for a local upstream."
+        },
+        "remoteUrl": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The remote's fetch URL with any user name or password removed."
+        },
+        "oid": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The tracking ref's commit as last fetched; null when it is gone."
+        },
+        "gone": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "remotes": {
+      "type": "array",
+      "maxItems": 50,
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "url"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "description": "Remotes a fetch may name, URLs without credentials."
+    },
+    "lastFetchedAt": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "relation": {
+      "enum": [
+        "up_to_date",
+        "behind",
+        "ahead",
+        "diverged",
+        "no_upstream",
+        "upstream_gone",
+        "detached",
+        "unborn"
+      ]
+    },
+    "ahead": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "behind": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "fastForwardBlockedReason": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Why fast-forward only cannot bring the incoming commits in, as one sentence; null when it can. Git still decides when it runs."
+    },
+    "incoming": {
+      "type": "array",
+      "maxItems": 50,
+      "items": {
+        "$ref": "#/$defs/commit"
+      },
+      "description": "Commits on the upstream that are not on HEAD, newest first, one page."
+    },
+    "nextCursor": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Opaque cursor for the next page; refused with stale_cursor once the upstream moves."
+    },
+    "operation": {
+      "$ref": "git-status.schema.json#/properties/operation"
+    },
+    "preconditions": {
+      "$ref": "git-status.schema.json#/$defs/preconditions"
+    }
+  },
+  "additionalProperties": false
+}

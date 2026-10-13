@@ -27,6 +27,7 @@ struct ChatView: View {
     /// never one tap.
     @State private var confirmingStop = false
     @State private var explainingStopGrant = false
+    @State private var openingRepository = false
 
     /// The newest copy of this session the list has, so Stop disappears once
     /// the Mac reports the session ended.
@@ -61,7 +62,11 @@ struct ChatView: View {
             session: currentSession,
             status: screenContent?.statusLine,
             showingDetails: $showingDetails,
-            details: SessionDetailsActions(stop: stopRequest, isStopping: isStopping)
+            details: SessionDetailsActions(
+                stop: stopRequest,
+                isStopping: isStopping,
+                repository: repositoryRequest
+            )
         ) {
             SessionChromeBar(
                 title: session.headline.primary,
@@ -87,6 +92,10 @@ struct ChatView: View {
         }
         .navigationDestination(isPresented: $takingTerminal) {
             TerminalView(session: session, autoAttach: currentSession.isRunning)
+                .pushedOverSessionColumn()
+        }
+        .navigationDestination(isPresented: $openingRepository) {
+            RepositoryView(folder: session.cwd)
                 .pushedOverSessionColumn()
         }
         .sessionStopPrompts(
@@ -131,7 +140,15 @@ struct ChatView: View {
         }
         actions.stop = stopRequest
         actions.isStopping = isStopping
+        actions.openRepository = repositoryRequest
         return actions
+    }
+
+    /// Offered whenever the Mac serves the Git routes; the repository screen
+    /// itself asks for the owner and says if the folder is not in one.
+    private var repositoryRequest: (() -> Void)? {
+        guard appModel.advertisesGit else { return nil }
+        return { openingRepository = true }
     }
 
     /// Files for the next message. Offered only when the Mac serves the

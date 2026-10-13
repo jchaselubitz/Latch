@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://latch.cooperativ.dev/schemas/remote-access/v2/git-branch-list.schema.json",
+  "title": "LatchGitBranchListV2",
+  "description": "Local branches of one working tree (GET /v2/git/branches?path=, control grant). Read-only; never fetches, so ahead/behind are against tracking refs as last fetched.",
+  "type": "object",
+  "required": [
+    "root",
+    "head",
+    "branches",
+    "truncated",
+    "preconditions"
+  ],
+  "properties": {
+    "root": {
+      "type": "string",
+      "pattern": "^/"
+    },
+    "head": {
+      "$ref": "git-status.schema.json#/properties/head"
+    },
+    "branches": {
+      "type": "array",
+      "maxItems": 500,
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "oid",
+          "current",
+          "upstream",
+          "ahead",
+          "behind",
+          "upstreamGone",
+          "subject",
+          "committedAt",
+          "checkedOutElsewhere"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Short name, without refs/heads/."
+          },
+          "oid": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{40,64}$"
+          },
+          "current": {
+            "type": "boolean"
+          },
+          "upstream": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ahead": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "behind": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "upstreamGone": {
+            "type": "boolean",
+            "description": "The configured upstream's tracking ref no longer exists."
+          },
+          "subject": {
+            "type": "string",
+            "description": "Subject of the branch's last commit, bounded."
+          },
+          "committedAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "checkedOutElsewhere": {
+            "type": "boolean",
+            "description": "Checked out in another linked worktree; Git refuses to switch to it here."
+          }
+        },
+        "additionalProperties": false
+      },
+      "description": "Current branch first, then most recently committed."
+    },
+    "truncated": {
+      "type": "boolean",
+      "description": "More than 500 local branches exist; the most recently committed are listed."
+    },
+    "preconditions": {
+      "$ref": "git-status.schema.json#/$defs/preconditions"
+    }
+  },
+  "additionalProperties": false
+}

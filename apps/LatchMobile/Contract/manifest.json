@@ -3,7 +3,7 @@
   "generator": "Tools/generate-contract.py",
   "generated": {
     "path": "Sources/LatchMobileKit/Generated/LatchContract.swift",
-    "sha256": "7e0bb0fceb152a1cfb246d969755ce8802ae6dbc0e1ca9ae427742ae94c77ca0"
+    "sha256": "00b0f1369fd207ebeb77a347fa98b82d4a3e50f88a7d0c50053df75ce27d9587"
   },
   "schemas": [
     {
@@ -32,7 +32,7 @@
     },
     {
       "source": "schemas/remote-access/v2/gateway-capabilities.schema.json",
-      "sha256": "21bbe65ff2cc438f95d6673f51da7a7de34f071582774f23c23ba7b6f6701b29"
+      "sha256": "877853c5ba6387d0fc1b16e2cb01eca7254b4aca82620c36c59b4b56db9cc9b9"
     },
     {
       "source": "schemas/remote-access/v2/directory-page.schema.json",
@@ -41,6 +41,42 @@
     {
       "source": "schemas/remote-access/v2/terminal-connection.schema.json",
       "sha256": "18140d10735985ae150a6859e81207fb2808dd7bb22646b809ad58d97e8fc8a0"
+    },
+    {
+      "source": "schemas/remote-access/v2/git-repository.schema.json",
+      "sha256": "de9f14621be1fa91f7217452730987d09919513038d81669b133a5493bd36e9b"
+    },
+    {
+      "source": "schemas/remote-access/v2/git-repository-list.schema.json",
+      "sha256": "f5d982a7526507ae668c6b318be9610bf7e7b3ef67e15203a5339e8a809cda71"
+    },
+    {
+      "source": "schemas/remote-access/v2/git-status.schema.json",
+      "sha256": "d524e5dcbd3315c739b1174e518d3f5762904c98c97e1b1f6b3976adf9623858"
+    },
+    {
+      "source": "schemas/remote-access/v2/git-file-diff.schema.json",
+      "sha256": "b2416b3c663955b5007fe700f3d7838357e3bfbf1fbfd24554950ddc4b655ec3"
+    },
+    {
+      "source": "schemas/remote-access/v2/git-branch-list.schema.json",
+      "sha256": "70d097af803d957520b9cf352fc60e3f7930a7e2b34a589c52a0892839df9fc8"
+    },
+    {
+      "source": "schemas/remote-access/v2/git-mutation-request.schema.json",
+      "sha256": "a29b8dac9462e12cc20cf961cd8161af5559906a68a7a67afbb6232939099adb"
+    },
+    {
+      "source": "schemas/remote-access/v2/git-mutation-receipt.schema.json",
+      "sha256": "802e4c924ccf7e078e818ae850677375a8a1c082b76638a7bd1783c673db944f"
+    },
+    {
+      "source": "schemas/remote-access/v2/git-sync.schema.json",
+      "sha256": "9297e428bc6561b0af3d8910b2f822d3606c6c44cf3766eb4bffaaba938468b4"
+    },
+    {
+      "source": "schemas/remote-access/v2/git-push.schema.json",
+      "sha256": "5fdb681c0ede8b56a72c50338ce36ddba3a74b766986233d0224aa505c0222cf"
     }
   ]
 }

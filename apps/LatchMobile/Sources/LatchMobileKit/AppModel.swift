@@ -120,6 +120,10 @@ public final class AppModel {
     /// the conversation after every back-navigation.
     var conversationStores: [String: ConversationStore] = [:]
 
+    /// Keep in-flight Git receipts across back-navigation. Keys include
+    /// the Mac identity; these models and repository data stay in memory.
+    var gitRepositoryModels: [String: GitRepositoryModel] = [:]
+
     /// Terminal connections are retained here for the same reason, plus one
     /// more: while attached, the phone holds the session's only surface, so
     /// something outside the pushed screen must be able to release it.

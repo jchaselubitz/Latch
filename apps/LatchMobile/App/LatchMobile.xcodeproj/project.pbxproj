@@ -46,6 +46,13 @@
 		ABCDEF0123456789ABCD020E /* LatchNotificationKit in Frameworks */ = {isa = PBXBuildFile; productRef = ABCDEF0123456789ABCD020D /* LatchNotificationKit */; };
 		ABCDEF0123456789ABCD0210 /* LatchNotificationKit in Frameworks */ = {isa = PBXBuildFile; productRef = ABCDEF0123456789ABCD020F /* LatchNotificationKit */; };
 		ABCDEF0123456789ABCD0213 /* LatchNotificationService.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD0203 /* LatchNotificationService.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		ABCDEF0123456789ABCD0302 /* GitComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD0301 /* GitComponents.swift */; };
+		ABCDEF0123456789ABCD0304 /* RepositoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD0303 /* RepositoryView.swift */; };
+		ABCDEF0123456789ABCD0306 /* GitDiffView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD0305 /* GitDiffView.swift */; };
+		ABCDEF0123456789ABCD0308 /* RepositoriesSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD0307 /* RepositoriesSheet.swift */; };
+		ABCDEF0123456789ABCD030A /* GitChangeSheets.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD0309 /* GitChangeSheets.swift */; };
+		ABCDEF0123456789ABCD030C /* GitSyncSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD030B /* GitSyncSheet.swift */; };
+		ABCDEF0123456789ABCD030E /* GitPushView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789ABCD030D /* GitPushView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -112,6 +119,13 @@
 		ABCDEF0123456789ABCD0201 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		ABCDEF0123456789ABCD0202 /* LatchNotificationService.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = LatchNotificationService.entitlements; sourceTree = "<group>"; };
 		ABCDEF0123456789ABCD0203 /* LatchNotificationService.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = LatchNotificationService.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		ABCDEF0123456789ABCD0301 /* GitComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitComponents.swift; sourceTree = "<group>"; };
+		ABCDEF0123456789ABCD0303 /* RepositoryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RepositoryView.swift; sourceTree = "<group>"; };
+		ABCDEF0123456789ABCD0305 /* GitDiffView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitDiffView.swift; sourceTree = "<group>"; };
+		ABCDEF0123456789ABCD0307 /* RepositoriesSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RepositoriesSheet.swift; sourceTree = "<group>"; };
+		ABCDEF0123456789ABCD0309 /* GitChangeSheets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitChangeSheets.swift; sourceTree = "<group>"; };
+		ABCDEF0123456789ABCD030B /* GitSyncSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitSyncSheet.swift; sourceTree = "<group>"; };
+		ABCDEF0123456789ABCD030D /* GitPushView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitPushView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -161,6 +175,7 @@
 				ABCDEF0123456789ABCD011E /* BannerView.swift */,
 				ABCDEF0123456789ABCD0012 /* ChatView.swift */,
 				ABCDEF0123456789ABCD0070 /* Conversation */,
+				ABCDEF0123456789ABCD0300 /* Git */,
 				ABCDEF0123456789ABCD0013 /* SettingsView.swift */,
 				ABCDEF0123456789ABCD001E /* PairingView.swift */,
 				ABCDEF0123456789ABCD001F /* QRScannerView.swift */,
@@ -202,6 +217,20 @@
 				ABCDEF0123456789ABCD0083 /* ConversationPreviews.swift */,
 			);
 			path = Conversation;
+			sourceTree = "<group>";
+		};
+		ABCDEF0123456789ABCD0300 /* Git */ = {
+			isa = PBXGroup;
+			children = (
+				ABCDEF0123456789ABCD0301 /* GitComponents.swift */,
+				ABCDEF0123456789ABCD0303 /* RepositoryView.swift */,
+				ABCDEF0123456789ABCD0305 /* GitDiffView.swift */,
+				ABCDEF0123456789ABCD0307 /* RepositoriesSheet.swift */,
+				ABCDEF0123456789ABCD0309 /* GitChangeSheets.swift */,
+				ABCDEF0123456789ABCD030B /* GitSyncSheet.swift */,
+				ABCDEF0123456789ABCD030D /* GitPushView.swift */,
+			);
+			path = Git;
 			sourceTree = "<group>";
 		};
 		ABCDEF0123456789ABCD0100 /* Support */ = {
@@ -357,6 +386,13 @@
 				ABCDEF0123456789ABCD007A /* ConversationActivityDisclosure.swift in Sources */,
 				ABCDEF0123456789ABCD007C /* ConversationRequestCard.swift in Sources */,
 				ABCDEF0123456789ABCD007E /* ConversationComposer.swift in Sources */,
+				ABCDEF0123456789ABCD0302 /* GitComponents.swift in Sources */,
+				ABCDEF0123456789ABCD0304 /* RepositoryView.swift in Sources */,
+				ABCDEF0123456789ABCD0306 /* GitDiffView.swift in Sources */,
+				ABCDEF0123456789ABCD0308 /* RepositoriesSheet.swift in Sources */,
+				ABCDEF0123456789ABCD030A /* GitChangeSheets.swift in Sources */,
+				ABCDEF0123456789ABCD030C /* GitSyncSheet.swift in Sources */,
+				ABCDEF0123456789ABCD030E /* GitPushView.swift in Sources */,
 				ABCDEF0123456789ABCD00F1 /* ConversationAttachmentViews.swift in Sources */,
 				ABCDEF0123456789ABCD0080 /* ConversationNotices.swift in Sources */,
 				ABCDEF0123456789ABCD0084 /* ConversationPreviews.swift in Sources */,

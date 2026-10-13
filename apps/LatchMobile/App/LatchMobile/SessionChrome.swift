@@ -148,6 +148,9 @@ struct SessionDetailsActions {
     /// Asks to stop; the screen confirms before anything is sent.
     var stop: (() -> Void)?
     var isStopping = false
+    /// Opens the Git repository this session's folder is in, without
+    /// attaching to anything. Nil when the Mac has no Git routes.
+    var repository: (() -> Void)?
 }
 
 /// Folder, command and connector, plus whatever the screen can do from here.
@@ -181,6 +184,17 @@ struct SessionDetailsSheet: View {
                     LabeledContent("Connector", value: session.connector.detailLabel)
                     if let status {
                         LabeledContent("Status", value: status)
+                    }
+                }
+                if let repository = actions.repository {
+                    Section {
+                        Button {
+                            pick(repository)
+                        } label: {
+                            Label("Repository", systemImage: "arrow.triangle.branch")
+                        }
+                        .accessibilityHint("Opens the Git repository for this session's folder. It does not attach.")
+                        .accessibilityIdentifier("session.details.repository")
                     }
                 }
                 if let stop = actions.stop {
@@ -375,7 +389,7 @@ extension AppModel {
 /// because the pop gesture's own delegate refuses while the bar is hidden.
 /// This hands the gesture a delegate that allows it whenever there is a
 /// screen to go back to.
-private struct InteractivePopRestorer: UIViewControllerRepresentable {
+struct InteractivePopRestorer: UIViewControllerRepresentable {
     func makeUIViewController(context: Context) -> Controller { Controller() }
     func updateUIViewController(_ controller: Controller, context: Context) {}
 

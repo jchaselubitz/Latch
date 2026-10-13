@@ -77,6 +77,9 @@ pub struct ResumePosition {
 }
 
 /// What the Hub decided to send first.
+// Built once per subscription and consumed immediately, so boxing the
+// snapshot would only add an allocation to the common path.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug)]
 pub enum SubscribeOutcome {
     Resumed(Vec<RetainedMutation>),

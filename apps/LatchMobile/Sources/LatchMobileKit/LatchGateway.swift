@@ -164,6 +164,217 @@ public actor LatchGateway {
         return try await request(method: "POST", path: "/v2/sessions/\(sessionID)/stop")
     }
 
+    // MARK: Git (read-only)
+
+    /// Repositories the Mac offers to open: the working trees of its running
+    /// sessions, and the ones any paired phone opened recently. The Mac keeps
+    /// that list; this phone stores none of it.
+    public func gitRepositories() async throws -> GitRepositoryList {
+        try await require(.gitRepositories)
+        return try await get(path: "/v2/git/repositories")
+    }
+
+    /// Resolves a folder on the Mac to the root of its Git working tree, or
+    /// says why it is not one (a plain folder, a bare repository).
+    public func resolveGitRepository(path: String) async throws -> GitRepository {
+        try await require(.gitResolve)
+        return try await request(
+            method: "GET",
+            path: "/v2/git/resolve",
+            queryItems: [URLQueryItem(name: "path", value: path)]
+        )
+    }
+
+    /// One working tree's status. `path` may be any folder inside it; the
+    /// Mac resolves it again on every call. Reading never fetches.
+    public func gitStatus(path: String) async throws -> GitStatus {
+        try await require(.gitStatus)
+        return try await request(
+            method: "GET",
+            path: "/v2/git/status",
+            queryItems: [URLQueryItem(name: "path", value: path)]
+        )
+    }
+
+    /// One page of one changed file's diff. The file is named by the exact
+    /// bytes the status listed (`pathKey`), never by its display name.
+    public func gitDiff(
+        path: String,
+        fileKey: String,
+        area: GitChangeArea,
+        cursor: String? = nil
+    ) async throws -> GitFileDiff {
+        try await require(.gitDiff)
+        return try await request(
+            method: "GET",
+            path: "/v2/git/diff",
+            queryItems: [
+                URLQueryItem(name: "path", value: path),
+                URLQueryItem(name: "file", value: fileKey),
+                URLQueryItem(name: "area", value: area.rawValue),
+                cursor.map { URLQueryItem(name: "cursor", value: $0) }
+            ].compactMap { $0 }
+        )
+    }
+
+    // MARK: Git (changes)
+
+    /// Largest mutation body the phone sends. The paired proxy buffers whole
+    /// requests under 32 KiB; this leaves room for its headers.
+    static let maximumGitMutationBodyBytes = 30 * 1024
+
+    /// Local branches of the working tree at `path`. Never fetches.
+    public func gitBranches(path: String) async throws -> GitBranchList {
+        try await require(.gitBranches)
+        return try await request(
+            method: "GET",
+            path: "/v2/git/branches",
+            queryItems: [URLQueryItem(name: "path", value: path)]
+        )
+    }
+
+    /// The Sync sheet's preview: the upstream as last fetched, ahead/behind,
+    /// and a page of incoming commits. Never fetches. A next page whose
+    /// upstream moved throws `.git("stale_cursor")`; start again without one.
+    public func gitSync(path: String, cursor: String? = nil) async throws -> GitSyncPreview {
+        try await require(.gitSync)
+        return try await request(
+            method: "GET",
+            path: "/v2/git/sync",
+            queryItems: [
+                URLQueryItem(name: "path", value: path),
+                cursor.map { URLQueryItem(name: "cursor", value: $0) }
+            ].compactMap { $0 }
+        )
+    }
+
+    /// Sends one Git change. The answer is always the Mac's receipt for it,
+    /// pending when the Mac is still running it (a repeat of a request it is
+    /// already working on, or a fetch, merge or rebase that outlasted the
+    /// Mac's wait: `202` with Git's progress); a refusal before acceptance
+    /// throws `.git`.
+    public func gitMutation(_ action: GitMutationAction) async throws -> GitMutationReceipt {
+        try await require(.gitReceipts)
+        let encoder = JSONEncoder()
+        let body: Data
+        let route: String
+        do {
+            switch action {
+            case .stage(let request):
+                try await require(.gitStage)
+                // Marking a conflicted file resolved is its own capability:
+                // an older Mac's contract refuses the area and the flag.
+                if action.stagesConflictedFiles {
+                    try await require(.gitStageResolved)
+                }
+                route = "/v2/git/stage"
+                body = try encoder.encode(request)
+            case .unstage(let request):
+                try await require(.gitUnstage)
+                route = "/v2/git/unstage"
+                body = try encoder.encode(request)
+            case .commit(let request):
+                try await require(.gitCommit)
+                route = "/v2/git/commit"
+                body = try encoder.encode(request)
+            case .createBranch(let request):
+                try await require(.gitCreateBranch)
+                route = "/v2/git/branches/create"
+                body = try encoder.encode(request)
+            case .switchBranch(let request):
+                try await require(.gitSwitchBranch)
+                route = "/v2/git/branches/switch"
+                body = try encoder.encode(request)
+            case .fetch(let request):
+                try await require(.gitFetch)
+                route = "/v2/git/fetch"
+                body = try encoder.encode(request)
+            case .fastForward(let request):
+                try await require(.gitFastForward)
+                route = "/v2/git/fast-forward"
+                body = try encoder.encode(request)
+            case .merge(let request):
+                try await require(.gitMerge)
+                route = "/v2/git/merge"
+                body = try encoder.encode(request)
+            case .rebase(let request):
+                try await require(.gitRebase)
+                route = "/v2/git/rebase"
+                body = try encoder.encode(request)
+            case .continueOperation(let request):
+                try await require(.gitContinue)
+                route = "/v2/git/continue"
+                body = try encoder.encode(request)
+            case .abortOperation(let request):
+                try await require(.gitAbort)
+                route = "/v2/git/abort"
+                body = try encoder.encode(request)
+            case .push(let request):
+                try await require(.gitPush)
+                route = "/v2/git/push"
+                body = try encoder.encode(request)
+            }
+        } catch let error as LatchError {
+            throw error
+        } catch {
+            throw LatchError.malformedResponse(String(describing: error))
+        }
+        guard body.count <= Self.maximumGitMutationBodyBytes else {
+            throw LatchError.git(
+                code: "request_too_large",
+                reason: "That is too many files to change at once from the phone. Use Stage all, or fewer files."
+            )
+        }
+        return try await request(method: "POST", path: route, body: body)
+    }
+
+    /// The push review: what a push of the current branch would send, to
+    /// its upstream or, when `remote` and `destination` are given, to the
+    /// destination the person chose. Never contacts the remote. A next page
+    /// whose refs moved throws `.git("stale_cursor")`.
+    public func gitPushPreview(
+        path: String, remote: String? = nil, destination: String? = nil, cursor: String? = nil
+    ) async throws -> GitPushPreview {
+        try await require(.gitPushPreview)
+        var items = [URLQueryItem(name: "path", value: path)]
+        // The Mac takes both or neither.
+        if let remote, let destination {
+            items.append(URLQueryItem(name: "remote", value: remote))
+            items.append(URLQueryItem(name: "destination", value: destination))
+        }
+        if let cursor { items.append(URLQueryItem(name: "cursor", value: cursor)) }
+        return try await request(method: "GET", path: "/v2/git/push/preview", queryItems: items)
+    }
+
+    /// Sends a reviewed push. Same receipts as every other change.
+    public func gitPush(_ request: GitPushRequest) async throws -> GitMutationReceipt {
+        try await gitMutation(.push(request))
+    }
+
+    /// Asks the Mac to check the remote for a push it could not confirm.
+    /// `.git("still_running")` while Git is still running that push.
+    public func gitPushReconcile(requestId: String) async throws -> GitPushReconciliation {
+        try await require(.gitReceipts)
+        try await require(.gitPushReconcile)
+        let body: Data
+        do {
+            body = try JSONEncoder().encode(GitPushReconcileRequest(requestId: requestId))
+        } catch {
+            throw LatchError.malformedResponse(String(describing: error))
+        }
+        return try await request(method: "POST", path: "/v2/git/push/reconcile", body: body)
+    }
+
+    /// This device's receipt for one Git change. `.git("receipt_not_found")`
+    /// means the Mac never accepted that request id.
+    public func gitReceipt(requestID: String) async throws -> GitMutationReceipt {
+        try await require(.gitReceipts)
+        guard let encoded = requestID.addingPercentEncoding(withAllowedCharacters: .alphanumerics.union(["-"])) else {
+            throw LatchError.git(code: "invalid_request", reason: "That request id is malformed.")
+        }
+        return try await get(path: "/v2/git/receipts/\(encoded)")
+    }
+
     /// Tells the Mac which key to seal this device's attention alerts to.
     ///
     /// The device is the one the link authenticated, never a field here, so
@@ -378,6 +589,12 @@ public actor LatchGateway {
         if let code, ["attachment_too_large", "workspace_unavailable", "attachments_folder_unsafe"]
             .contains(code) {
             return .refused(reason.isEmpty ? "Your Mac could not save that attachment." : reason)
+        }
+        // A Git route's refusal is a sentence written for the phone; the
+        // code says which one, so a screen can act on it (a stale cursor
+        // reloads the diff) without parsing the words.
+        if path.hasPrefix("/v2/git/"), let code, status != 401, status != 403 || code == "unreadable_directory" {
+            return .git(code: code, reason: reason.isEmpty ? "Git on your Mac could not answer." : reason)
         }
         if status == 401 || (status == 403 && code != "unreadable_directory") {
             return .unauthorized

@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://latch.cooperativ.dev/schemas/remote-access/v2/git-repository-list.schema.json",
+  "title": "LatchGitRepositoryListV2",
+  "description": "Repositories the gateway host offers to open (GET /v2/git/repositories, control grant): the working trees that running Latch sessions' folders resolve to, and the repositories any paired device opened recently. The host keeps the recent list; phones store none of it. Nothing here touches the network.",
+  "$defs": {
+    "session": {
+      "type": "object",
+      "description": "A running Latch session whose folder resolves to this working tree.",
+      "required": ["id", "name", "title", "commandLabel", "connector", "agentPhase", "idleMs", "active"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string" },
+        "title": { "type": ["string", "null"] },
+        "commandLabel": { "type": "string" },
+        "connector": { "type": ["string", "null"], "description": "The session's conversation connector (`claude`, `codex`), or null for a plain terminal." },
+        "agentPhase": { "type": ["string", "null"], "description": "The conversation-state phase when the gateway is observing the agent." },
+        "idleMs": { "type": ["integer", "null"], "minimum": 0 },
+        "active": { "type": "boolean", "description": "True while the session produced output in the last few seconds or its agent turn is running." }
+      },
+      "additionalProperties": false
+    },
+    "repository": {
+      "type": "object",
+      "required": ["root", "name", "kind", "sessions", "lastOpenedAt"],
+      "properties": {
+        "root": { "type": "string", "minLength": 1, "pattern": "^/" },
+        "name": { "type": "string", "minLength": 1 },
+        "kind": { "enum": ["repository", "linked_worktree", "submodule"] },
+        "sessions": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/session" } },
+        "lastOpenedAt": { "type": ["string", "null"], "description": "RFC 3339 time any paired device last opened this repository, when it is on the recent list." }
+      },
+      "additionalProperties": false
+    }
+  },
+  "type": "object",
+  "required": ["fromSessions", "recent"],
+  "properties": {
+    "fromSessions": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/repository" } },
+    "recent": {
+      "type": "array",
+      "maxItems": 20,
+      "description": "Most recently opened first, excluding repositories already listed under fromSessions and ones that no longer resolve.",
+      "items": { "$ref": "#/$defs/repository" }
+    }
+  },
+  "additionalProperties": false
+}

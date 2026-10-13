@@ -1,0 +1,169 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://latch.cooperativ.dev/schemas/remote-access/v2/git-mutation-receipt.schema.json",
+  "title": "LatchGitMutationReceiptV2",
+  "description": "The host's durable record of one Git mutation, scoped to the device that sent it. Every mutation route answers with it (202 while pending, 200 otherwise), and GET /v2/git/receipts/{requestId} returns it later to the same device only. The host writes it as pending before Git runs, so after a lost response or a host restart the phone reads it instead of repeating the action.",
+  "type": "object",
+  "required": [
+    "requestId",
+    "operation",
+    "root",
+    "state",
+    "acceptedAt",
+    "finishedAt",
+    "outcome"
+  ],
+  "properties": {
+    "requestId": {
+      "type": "string"
+    },
+    "operation": {
+      "enum": [
+        "stage",
+        "unstage",
+        "commit",
+        "create_branch",
+        "switch_branch",
+        "fetch",
+        "fast_forward",
+        "merge",
+        "rebase",
+        "continue_operation",
+        "abort_operation",
+        "push"
+      ]
+    },
+    "root": {
+      "type": "string",
+      "pattern": "^/"
+    },
+    "state": {
+      "enum": [
+        "pending",
+        "completed",
+        "rejected",
+        "uncertain"
+      ],
+      "description": "pending: accepted and running, or not yet reconciled. completed: Git did it. rejected: nothing was changed (Git refused, or the state changed since review: code refresh_required). uncertain: the host cannot tell whether Git finished (it was interrupted or timed out and the repository does not settle the question); read the repository before acting again."
+    },
+    "acceptedAt": {
+      "type": "string"
+    },
+    "finishedAt": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "outcome": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "required": [
+        "code",
+        "message",
+        "gitOutput",
+        "gitOutputTruncated",
+        "head",
+        "branch",
+        "commit",
+        "files",
+        "reconciled"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "description": "Stable reason: staged, unstaged, committed, branch_created, switched; refresh_required, operation_in_progress, nothing_to_commit, identity_missing, signing_failed, hook_failed, would_overwrite, branch_exists, invalid_branch_name, not_found, git_refused, not_applied; fetched, up_to_date, fast_forwarded, merged, rebased, stopped (Git stopped a merge or rebase; files lists conflicted paths), continued, aborted; not_fast_forward, unresolved_conflicts, conflict_markers, no_operation, no_upstream, remote_not_found, auth_failed, network_failed, local_changes, hook_failed; pushed, up_to_date, already_on_remote; non_fast_forward, remote_rejected, auth_failed, network_failed, remote_not_found, hook_failed, push_unconfirmed (the host cannot tell from this Mac whether the remote accepted a push: check the remote); interrupted, timed_out. Unknown codes are shown by message."
+        },
+        "message": {
+          "type": "string",
+          "description": "One plain sentence for the phone to show."
+        },
+        "gitOutput": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 16384,
+          "description": "Git's own output (stderr then stdout), bounded, for a refusal or failure."
+        },
+        "gitOutputTruncated": {
+          "type": "boolean"
+        },
+        "head": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "HEAD's commit after the operation (or at reconciliation)."
+        },
+        "branch": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Checked-out branch after the operation."
+        },
+        "commit": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The commit a completed commit created, or the commit a completed push left at the destination."
+        },
+        "files": {
+          "type": "array",
+          "maxItems": 200,
+          "items": {
+            "type": "string"
+          },
+          "description": "Files Git named in a refusal, such as the local changes a switch would overwrite."
+        },
+        "reconciled": {
+          "type": "boolean",
+          "description": "True when the host decided this outcome by reading the repository after an interruption rather than from Git's exit."
+        }
+      },
+      "additionalProperties": false
+    },
+    "startedAt": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "When Git was started for this request, after the recheck. Absent or null: Git has not been started (or the host predates this field)."
+    },
+    "progress": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "Git's latest progress line while the request is pending, as last seen by this gateway process. Absent once settled or after a host restart. Progress, and a phone that stops waiting, say nothing about whether Git has stopped.",
+      "required": [
+        "message",
+        "percent",
+        "updatedAt"
+      ],
+      "properties": {
+        "message": {
+          "type": "string",
+          "maxLength": 512
+        },
+        "percent": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 100
+        },
+        "updatedAt": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://latch.cooperativ.dev/schemas/remote-access/v2/git-repository.schema.json",
+  "title": "LatchGitRepositoryV2",
+  "description": "One folder on the gateway host resolved to the canonical root of the Git working tree that contains it (GET /v2/git/resolve, control grant). The gateway resolves the folder again on every Git call; this answer is what the phone shows and sends back, never a capability.",
+  "type": "object",
+  "required": ["root", "name", "kind"],
+  "properties": {
+    "root": { "type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^/", "description": "Canonical absolute path of the working tree's top level." },
+    "name": { "type": "string", "minLength": 1, "description": "The root's last path component, for display." },
+    "kind": {
+      "enum": ["repository", "linked_worktree", "submodule"],
+      "description": "A plain repository, a linked worktree (`git worktree add`, whose .git is a file), or a submodule checkout. Bare repositories are refused, not reported."
+    }
+  },
+  "additionalProperties": false
+}

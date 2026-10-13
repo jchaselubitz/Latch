@@ -247,6 +247,8 @@ public enum LatchError: Error, Equatable, Sendable {
     case agentUnavailable(SessionAgent)
     /// The transport failed.
     case transport(String)
+    /// A Git route refused, with its stable code and the sentence to show.
+    case git(code: String, reason: String)
 
     /// The version disagreement behind this error, when that is what it is.
     ///
@@ -284,6 +286,8 @@ public enum LatchError: Error, Equatable, Sendable {
             return "Your Mac's Latch does not start \(agent.displayName) sessions. Update Latch on the Mac."
         case .transport(let detail):
             return detail
+        case .git(_, let reason):
+            return reason
         }
     }
 }

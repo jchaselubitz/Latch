@@ -4,11 +4,24 @@ use axum::http::header;
 
 #[test]
 fn every_registered_handler_comes_from_the_shared_route_table() {
-    assert_eq!(ROUTES.len(), 12);
+    assert_eq!(ROUTES.len(), 33);
     let mut ids = ROUTES.iter().map(|route| route.id).collect::<Vec<_>>();
     ids.sort_by_key(|id| *id as u8);
     ids.dedup();
     assert_eq!(ids.len(), ROUTES.len());
+}
+
+#[tokio::test]
+async fn git_wire_bound_counts_json_escaping_and_never_sends_a_512_kib_payload() {
+    let error = git::bounded_json(StatusCode::OK, "\u{1}".repeat(100_000)).unwrap_err();
+    assert_eq!(error.code, "response_too_large");
+    let response = error.into_response();
+    let bytes = axum::body::to_bytes(response.into_body(), 512 * 1024)
+        .await
+        .unwrap();
+    assert!(bytes.len() < 512 * 1024);
+    let response = git::bounded_json(StatusCode::ACCEPTED, "small").unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
 }
 
 #[test]
@@ -38,8 +51,56 @@ fn current_capabilities_advertise_browsing_and_creation() {
         attachments: true,
         agent_models: true,
         notification_key: true,
+        git_repositories: true,
+        git_resolve: true,
+        git_status: true,
+        git_diff: true,
+        git_branches: true,
+        git_stage: true,
+        git_unstage: true,
+        git_commit: true,
+        git_create_branch: true,
+        git_switch_branch: true,
+        git_receipts: true,
+        git_sync: true,
+        git_fetch: true,
+        git_fast_forward: true,
+        git_merge: true,
+        git_rebase: true,
+        git_continue: true,
+        git_abort: true,
+        git_stage_resolved: true,
+        git_push_preview: true,
+        git_push: true,
+        git_push_reconcile: true,
     })
     .unwrap();
+    for name in [
+        "gitRepositories",
+        "gitResolve",
+        "gitStatus",
+        "gitDiff",
+        "gitBranches",
+        "gitStage",
+        "gitUnstage",
+        "gitCommit",
+        "gitCreateBranch",
+        "gitSwitchBranch",
+        "gitReceipts",
+        "gitSync",
+        "gitFetch",
+        "gitFastForward",
+        "gitMerge",
+        "gitRebase",
+        "gitContinue",
+        "gitAbort",
+        "gitStageResolved",
+        "gitPushPreview",
+        "gitPush",
+        "gitPushReconcile",
+    ] {
+        assert_eq!(value[name], true, "{name}");
+    }
     assert_eq!(value["notificationKey"], true);
     assert_eq!(value["browseDirectories"], true);
     assert_eq!(value["createSession"], true);
@@ -705,4 +766,572 @@ fn directory_failures_have_stable_codes_without_path_detail() {
         assert_eq!(mapped.code, code);
         assert!(!mapped.message.contains("/Users/"));
     }
+}
+
+/// Every Git route is refused below the control grant on the loopback
+/// router, before any folder is resolved or Git is run, and reached at
+/// control through the same route table.
+#[tokio::test]
+async fn git_routes_are_refused_below_the_control_grant() {
+    let harness = harness().await;
+    let work = harness.work.to_str().unwrap().replace('/', "%2F");
+    let targets = [
+        "/v2/git/repositories".to_owned(),
+        format!("/v2/git/resolve?path={work}"),
+        format!("/v2/git/status?path={work}"),
+        format!("/v2/git/diff?path={work}&file=61&area=unstaged"),
+    ];
+    for target in &targets {
+        for grant in ["observe", "interact"] {
+            let (status, _) = send(&harness, "GET", target, Some(grant), "").await;
+            assert_eq!(status, 403, "{grant} must not reach {target}");
+        }
+        let (status, body) = send(&harness, "GET", target, Some("control"), "").await;
+        assert_ne!(status, 403, "control reaches {target}: {body}");
+        // Git routes are reads; a write method is not a route at all.
+        let (status, _) = send(&harness, "POST", target, Some("control"), "").await;
+        assert!(status == 404 || status == 405, "POST {target} -> {status}");
+    }
+}
+
+/// A folder that is not a repository is a stable code with no path in it.
+#[tokio::test]
+async fn git_refusals_have_stable_codes_without_path_detail() {
+    let harness = harness().await;
+    let plain = tempfile::Builder::new()
+        .tempdir_in("/tmp")
+        .expect("plain folder outside any repository");
+    let path = plain.path().to_str().unwrap().replace('/', "%2F");
+    let (status, body) = send(
+        &harness,
+        "GET",
+        &format!("/v2/git/status?path={path}"),
+        Some("control"),
+        "",
+    )
+    .await;
+    assert_eq!(status, 422, "{body}");
+    assert_eq!(body["error"], "not_a_repository");
+    assert!(!body["reason"].as_str().unwrap().contains("/tmp"));
+
+    let (status, body) = send(&harness, "GET", "/v2/git/status", Some("control"), "").await;
+    assert_eq!(status, 400);
+    assert_eq!(body["error"], "invalid_request");
+    let (status, body) = send(
+        &harness,
+        "GET",
+        &format!("/v2/git/diff?path={path}&file=61&area=everything"),
+        Some("control"),
+        "",
+    )
+    .await;
+    assert_eq!(status, 400);
+    assert_eq!(body["error"], "invalid_request");
+}
+
+/// Sends `body` as the loopback proxy would for a paired device.
+async fn send_as_device(
+    harness: &Harness,
+    method: &str,
+    target: &str,
+    device: &str,
+    body: &str,
+) -> (u16, serde_json::Value) {
+    let request = format!(
+        "{method} {target} HTTP/1.1\r\nHost: gateway\r\nAuthorization: Bearer gateway-token\r\nContent-Type: application/json\r\nConnection: close\r\n{DEVICE_GRANT_HEADER}: control\r\n{}: {device}\r\nContent-Length: {}\r\n\r\n{body}",
+        crate::cli::serve::routes::DEVICE_ID_HEADER,
+        body.len()
+    );
+    send_raw(harness, request.into_bytes()).await
+}
+
+/// Runs Git for fixture setup without any global configuration.
+fn fixture_git(dir: &std::path::Path, words: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .current_dir(dir)
+        .args(words)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .output()
+        .expect("git");
+    assert!(
+        output.status.success(),
+        "git {words:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// A repository in the harness's work folder with one committed file and
+/// one unstaged edit.
+fn harness_repository(harness: &Harness) -> String {
+    let root = std::fs::canonicalize(&harness.work).unwrap();
+    fixture_git(&root, &["init", "-q", "-b", "main"]);
+    for (key, value) in [
+        ("user.name", "Latch Test"),
+        ("user.email", "t@example.invalid"),
+        ("commit.gpgsign", "false"),
+    ] {
+        fixture_git(&root, &["config", key, value]);
+    }
+    std::fs::write(root.join("README.md"), "one\n").unwrap();
+    fixture_git(&root, &["add", "README.md"]);
+    fixture_git(&root, &["commit", "-q", "-m", "initial"]);
+    std::fs::write(root.join("README.md"), "two\n").unwrap();
+    root.to_str().unwrap().to_owned()
+}
+
+const GIT_MUTATIONS: [&str; 13] = [
+    "/v2/git/stage",
+    "/v2/git/unstage",
+    "/v2/git/commit",
+    "/v2/git/branches/create",
+    "/v2/git/branches/switch",
+    "/v2/git/fetch",
+    "/v2/git/fast-forward",
+    "/v2/git/merge",
+    "/v2/git/rebase",
+    "/v2/git/continue",
+    "/v2/git/abort",
+    "/v2/git/push",
+    "/v2/git/push/reconcile",
+];
+
+/// Every Git mutation, the branch list and the receipt lookup are refused
+/// below control on the loopback router, before the body is read or any
+/// folder resolved, and are not reachable with another method.
+#[tokio::test]
+async fn git_mutations_are_refused_below_the_control_grant() {
+    let harness = harness().await;
+    for target in GIT_MUTATIONS {
+        for grant in ["observe", "interact"] {
+            let (status, _) = send(&harness, "POST", target, Some(grant), "{}").await;
+            assert_eq!(status, 403, "{grant} must not reach {target}");
+        }
+        let (status, body) = send(&harness, "POST", target, Some("control"), "{}").await;
+        assert_eq!(
+            status, 400,
+            "control reaches {target} and its body is checked: {body}"
+        );
+        let (status, _) = send(&harness, "GET", target, Some("control"), "").await;
+        assert!(status == 404 || status == 405, "GET {target} -> {status}");
+    }
+    let work = harness.work.to_str().unwrap().replace('/', "%2F");
+    for target in [
+        format!("/v2/git/branches?path={work}"),
+        format!("/v2/git/sync?path={work}"),
+        format!("/v2/git/push/preview?path={work}"),
+        "/v2/git/receipts/0b7c2f4e-9a7d-4a8e-9c1e-2f3a4b5c6d7e".to_owned(),
+    ] {
+        for grant in ["observe", "interact"] {
+            let (status, _) = send(&harness, "GET", &target, Some(grant), "").await;
+            assert_eq!(status, 403, "{grant} must not reach {target}");
+        }
+    }
+}
+
+/// A mutation is shaped and typed before anything is accepted: no free-form
+/// field, no Git option, no path outside the working tree.
+#[tokio::test]
+async fn git_mutation_bodies_are_checked_before_acceptance() {
+    let harness = harness().await;
+    let root = harness_repository(&harness);
+    let expected = serde_json::json!({
+        "branch": "main",
+        "head": "0".repeat(40),
+        "index": "0".repeat(64),
+        "worktree": "0".repeat(64),
+    });
+    let file = |key: &str, area: &str| serde_json::json!({"pathKey": key, "area": area, "fingerprint": "0".repeat(32)});
+    let id = "0b7c2f4e-9a7d-4a8e-9c1e-2f3a4b5c6d7e";
+    let cases = [
+        (
+            "/v2/git/stage",
+            serde_json::json!({"requestId": "not-a-uuid", "path": root, "expected": expected, "files": [file("61", "unstaged")]}),
+        ),
+        (
+            "/v2/git/stage",
+            serde_json::json!({"requestId": id, "path": root, "expected": expected, "files": [file("61", "unstaged")], "args": ["--force"]}),
+        ),
+        (
+            "/v2/git/stage",
+            serde_json::json!({"requestId": id, "path": root, "expected": expected, "files": [file("61", "unstaged")], "all": ["untracked"]}),
+        ),
+        (
+            "/v2/git/stage",
+            serde_json::json!({"requestId": id, "path": root, "expected": expected, "all": ["conflicted"]}),
+        ),
+        (
+            "/v2/git/unstage",
+            serde_json::json!({"requestId": id, "path": root, "expected": expected, "files": [file("61", "staged")], "confirmConflictMarkers": true}),
+        ),
+        (
+            "/v2/git/fetch",
+            serde_json::json!({"requestId": id, "path": root, "expected": expected, "remote": "--upload-pack=touch /tmp/x"}),
+        ),
+        (
+            "/v2/git/fetch",
+            serde_json::json!({"requestId": id, "path": root, "expected": expected, "remote": "origin main"}),
+        ),
+        (
+            "/v2/git/fetch",
+            serde_json::json!({"requestId": id, "path": root, "expected": expected, "remote": "origin", "refspec": "+refs/*:refs/*"}),
+        ),
+        (
+            "/v2/git/fast-forward",
+            serde_json::json!({"requestId": id, "path": root, "expected": expected, "upstream": "origin/main", "upstreamOid": "origin/main"}),
+        ),
+        (
+            "/v2/git/merge",
+            serde_json::json!({"requestId": id, "path": root, "expected": expected, "upstream": "-Xours", "upstreamOid": "0".repeat(40)}),
+        ),
+        (
+            "/v2/git/merge",
+            serde_json::json!({"requestId": id, "path": root, "expected": expected, "upstream": "origin/main", "upstreamOid": "0".repeat(40), "strategy": "ours"}),
+        ),
+        (
+            "/v2/git/rebase",
+            serde_json::json!({"requestId": id, "path": root, "expected": expected, "upstream": "origin/main", "upstreamOid": "0".repeat(40), "interactive": true}),
+        ),
+        (
+            "/v2/git/continue",
+            serde_json::json!({"requestId": id, "path": root, "expected": expected, "operation": "cherry_pick"}),
+        ),
+        (
+            "/v2/git/abort",
+            serde_json::json!({"requestId": id, "path": root, "expected": expected, "operation": "rebase", "confirmed": true, "hard": true}),
+        ),
+        (
+            "/v2/git/stage",
+            serde_json::json!({"requestId": id, "path": root, "expected": expected, "files": [file("2e2e2f6574632f706173737764", "unstaged")]}),
+        ),
+        (
+            "/v2/git/stage",
+            serde_json::json!({"requestId": id, "path": root, "expected": expected, "files": [file("2f6574632f706173737764", "unstaged")]}),
+        ),
+        (
+            "/v2/git/unstage",
+            serde_json::json!({"requestId": id, "path": root, "expected": expected, "all": ["unstaged"]}),
+        ),
+        (
+            "/v2/git/stage",
+            serde_json::json!({"requestId": id, "path": root, "expected": {"branch": "main", "head": "HEAD", "index": "x", "worktree": "y"}, "all": ["unstaged"]}),
+        ),
+        (
+            "/v2/git/commit",
+            serde_json::json!({"requestId": id, "path": root, "expected": expected, "summary": "two\nlines"}),
+        ),
+        (
+            "/v2/git/commit",
+            serde_json::json!({"requestId": id, "path": root, "expected": expected, "summary": "   "}),
+        ),
+        (
+            "/v2/git/branches/create",
+            serde_json::json!({"requestId": id, "path": root, "expected": expected, "name": "--force", "startPoint": "HEAD", "startOid": "0".repeat(40), "switch": false}),
+        ),
+        (
+            "/v2/git/branches/create",
+            serde_json::json!({"requestId": id, "path": root, "expected": expected, "name": "ok", "startPoint": "origin/main~3", "startOid": "0".repeat(40), "switch": false}),
+        ),
+        (
+            "/v2/git/branches/switch",
+            serde_json::json!({"requestId": id, "path": root, "expected": expected, "name": "@{-1}", "oid": "0".repeat(40)}),
+        ),
+        (
+            "/v2/git/branches/switch",
+            serde_json::json!({"requestId": id, "path": root, "expected": expected, "name": "main", "oid": "HEAD"}),
+        ),
+        (
+            "/v2/git/push",
+            serde_json::json!({"requestId": id, "path": root, "expected": expected, "remote": "origin", "remoteUrl": null, "destination": "main", "sourceBranch": "main", "sourceOid": "0".repeat(40), "destinationOid": null, "force": true}),
+        ),
+        (
+            "/v2/git/push",
+            serde_json::json!({"requestId": id, "path": root, "expected": expected, "remote": "--receive-pack=touch /tmp/x", "remoteUrl": null, "destination": "main", "sourceBranch": "main", "sourceOid": "0".repeat(40), "destinationOid": null}),
+        ),
+        (
+            "/v2/git/push",
+            serde_json::json!({"requestId": id, "path": root, "expected": expected, "remote": "origin", "remoteUrl": null, "destination": "-f", "sourceBranch": "main", "sourceOid": "0".repeat(40), "destinationOid": null}),
+        ),
+        (
+            "/v2/git/push",
+            serde_json::json!({"requestId": id, "path": root, "expected": expected, "remote": "origin", "remoteUrl": null, "destination": "main:refs/tags/x", "sourceBranch": "main", "sourceOid": "0".repeat(40), "destinationOid": null}),
+        ),
+        (
+            "/v2/git/push",
+            serde_json::json!({"requestId": id, "path": root, "expected": expected, "remote": "origin", "remoteUrl": null, "destination": "main", "sourceBranch": "main", "sourceOid": "HEAD", "destinationOid": null}),
+        ),
+        (
+            "/v2/git/push",
+            serde_json::json!({"requestId": id, "path": root, "expected": expected, "remote": "origin", "remoteUrl": null, "destination": "main", "sourceBranch": "--all", "sourceOid": "0".repeat(40), "destinationOid": null}),
+        ),
+        (
+            "/v2/git/push",
+            serde_json::json!({"requestId": id, "path": root, "expected": expected, "remote": "origin", "remoteUrl": null, "destination": "main", "sourceBranch": "main", "sourceOid": "0".repeat(40), "destinationOid": "origin/main"}),
+        ),
+        (
+            "/v2/git/push",
+            serde_json::json!({"requestId": id, "path": root, "expected": expected, "remote": "origin", "remoteUrl": null, "destination": "main", "sourceBranch": "main", "sourceOid": "0".repeat(40), "destinationOid": null, "refspec": "+refs/heads/*:refs/heads/*"}),
+        ),
+        (
+            "/v2/git/push/reconcile",
+            serde_json::json!({"requestId": "not-a-uuid"}),
+        ),
+        (
+            "/v2/git/push/reconcile",
+            serde_json::json!({"requestId": id, "push": true}),
+        ),
+    ];
+    for (target, body) in cases {
+        let (status, reply) =
+            send(&harness, "POST", target, Some("control"), &body.to_string()).await;
+        assert_eq!(status, 400, "{target} {body}: {reply}");
+        assert_eq!(reply["error"], "invalid_request");
+    }
+    // The push preview takes no option or revision expression either.
+    let folder = root.replace('/', "%2F");
+    for query in [
+        "remote=--upload-pack%3Dtouch%20%2Ftmp%2Fx&destination=main",
+        "remote=origin&destination=main~1",
+        "remote=origin&destination=HEAD",
+        "remote=origin",
+        "destination=main",
+    ] {
+        let target = format!("/v2/git/push/preview?path={folder}&{query}");
+        let (status, reply) = send(&harness, "GET", &target, Some("control"), "").await;
+        assert_eq!(status, 400, "{target}: {reply}");
+        assert_eq!(reply["error"], "invalid_request");
+    }
+    // Abort is refused unless the user confirmed it.
+    for body in [
+        serde_json::json!({"requestId": id, "path": root, "expected": expected, "operation": "merge"}),
+        serde_json::json!({"requestId": id, "path": root, "expected": expected, "operation": "merge", "confirmed": false}),
+    ] {
+        let (status, reply) = send(
+            &harness,
+            "POST",
+            "/v2/git/abort",
+            Some("control"),
+            &body.to_string(),
+        )
+        .await;
+        assert_eq!(status, 400, "{body}: {reply}");
+        assert_eq!(reply["error"], "confirmation_required");
+    }
+    // Nothing above was accepted.
+    let (status, reply) = send(
+        &harness,
+        "GET",
+        &format!("/v2/git/receipts/{id}"),
+        Some("control"),
+        "",
+    )
+    .await;
+    assert_eq!(status, 404, "{reply}");
+    assert_eq!(reply["error"], "receipt_not_found");
+
+    let large = serde_json::json!({"requestId": id, "path": root, "expected": expected, "summary": "x", "description": "y".repeat(40 * 1024)});
+    let (status, _) = send(
+        &harness,
+        "POST",
+        "/v2/git/commit",
+        Some("control"),
+        &large.to_string(),
+    )
+    .await;
+    assert_eq!(status, 413);
+}
+
+/// Through the real router: a stage is accepted for one device, replayed by
+/// the same id without running again, refused when the id is reused for
+/// something else, and its receipt is invisible to every other device.
+#[tokio::test]
+async fn git_receipts_are_scoped_to_the_device_through_the_router() {
+    let harness = harness().await;
+    let root = harness_repository(&harness);
+    let encoded = root.replace('/', "%2F");
+    let (status, status_body) = send_as_device(
+        &harness,
+        "GET",
+        &format!("/v2/git/status?path={encoded}"),
+        "phone-a",
+        "",
+    )
+    .await;
+    assert_eq!(status, 200, "{status_body}");
+    let readme = status_body["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["path"] == "README.md")
+        .unwrap()
+        .clone();
+    let id = "0b7c2f4e-9a7d-4a8e-9c1e-2f3a4b5c6d7e";
+    let body = serde_json::json!({
+        "requestId": id,
+        "path": root,
+        "expected": status_body["preconditions"],
+        "files": [{"pathKey": readme["pathKey"], "area": "unstaged", "fingerprint": readme["fingerprint"]}],
+    })
+    .to_string();
+    let (status, first) = send_as_device(&harness, "POST", "/v2/git/stage", "phone-a", &body).await;
+    assert_eq!(status, 200, "{first}");
+    assert_eq!(first["state"], "completed");
+    assert_eq!(first["outcome"]["code"], "staged");
+
+    let (status, replay) =
+        send_as_device(&harness, "POST", "/v2/git/stage", "phone-a", &body).await;
+    assert_eq!(status, 200);
+    assert_eq!(replay, first);
+
+    let reused = body.replace("\"area\":\"unstaged\"", "\"area\":\"untracked\"");
+    assert_ne!(reused, body);
+    let (status, conflict) =
+        send_as_device(&harness, "POST", "/v2/git/stage", "phone-a", &reused).await;
+    assert_eq!(status, 409, "{conflict}");
+    assert_eq!(conflict["error"], "request_id_conflict");
+
+    let lookup = format!("/v2/git/receipts/{id}");
+    let (status, mine) = send_as_device(&harness, "GET", &lookup, "phone-a", "").await;
+    assert_eq!(status, 200);
+    assert_eq!(mine, first);
+    let (status, theirs) = send_as_device(&harness, "GET", &lookup, "phone-b", "").await;
+    assert_eq!(status, 404, "{theirs}");
+    assert_eq!(theirs["error"], "receipt_not_found");
+    let (status, _) = send(&harness, "GET", &lookup, Some("control"), "").await;
+    assert_eq!(status, 404);
+}
+
+/// The sync preview is a read at control: it serves what the last fetch
+/// left (here, a repository with no remote) and refuses a cursor that no
+/// longer describes the upstream.
+#[tokio::test]
+async fn git_sync_previews_without_fetching_and_maps_a_stale_cursor() {
+    let harness = harness().await;
+    let root = harness_repository(&harness);
+    let path = root.replace('/', "%2F");
+    let (status, body) = send(
+        &harness,
+        "GET",
+        &format!("/v2/git/sync?path={path}"),
+        Some("control"),
+        "",
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["relation"], "no_upstream");
+    assert_eq!(body["upstream"], serde_json::Value::Null);
+    assert_eq!(body["incoming"], serde_json::json!([]));
+    assert!(body["fastForwardBlockedReason"].is_string());
+    assert!(body["preconditions"]["index"].is_string());
+
+    let (status, body) = send(
+        &harness,
+        "GET",
+        &format!("/v2/git/sync?path={path}&cursor=v1-{}-50", "a".repeat(40)),
+        Some("control"),
+        "",
+    )
+    .await;
+    assert_eq!(status, 409, "{body}");
+    assert_eq!(body["error"], "stale_cursor");
+}
+
+/// The push preview is a read at control that never contacts a remote (here
+/// there is none to contact); a push check is scoped to the device that
+/// sent the push and is only for pushes.
+#[tokio::test]
+async fn git_push_preview_and_checks_through_the_router() {
+    let harness = harness().await;
+    let root = harness_repository(&harness);
+    let path = root.replace('/', "%2F");
+    let (status, preview) = send(
+        &harness,
+        "GET",
+        &format!("/v2/git/push/preview?path={path}"),
+        Some("control"),
+        "",
+    )
+    .await;
+    assert_eq!(status, 200, "{preview}");
+    assert_eq!(preview["source"]["branch"], "main");
+    assert_eq!(preview["target"], serde_json::Value::Null);
+    assert_eq!(preview["selectionRequired"], false);
+    assert!(preview["blockedReason"]
+        .as_str()
+        .unwrap()
+        .contains("no remotes"));
+    let (status, stale) = send(
+        &harness,
+        "GET",
+        &format!("/v2/git/push/preview?path={path}&cursor=p1-a-b-50"),
+        Some("control"),
+        "",
+    )
+    .await;
+    assert_eq!(status, 409, "{stale}");
+    assert_eq!(stale["error"], "stale_cursor");
+
+    let id = "0b7c2f4e-9a7d-4a8e-9c1e-2f3a4b5c6d7e";
+    let check = serde_json::json!({ "requestId": id }).to_string();
+    let (status, missing) = send_as_device(
+        &harness,
+        "POST",
+        "/v2/git/push/reconcile",
+        "phone-a",
+        &check,
+    )
+    .await;
+    assert_eq!(status, 404, "{missing}");
+    assert_eq!(missing["error"], "receipt_not_found");
+
+    // A receipt that is not a push cannot be checked against a remote, and
+    // another device cannot even find it.
+    let (_, status_body) = send_as_device(
+        &harness,
+        "GET",
+        &format!("/v2/git/status?path={path}"),
+        "phone-a",
+        "",
+    )
+    .await;
+    let readme = status_body["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["path"] == "README.md")
+        .unwrap()
+        .clone();
+    let stage = serde_json::json!({
+        "requestId": id,
+        "path": root,
+        "expected": status_body["preconditions"],
+        "files": [{"pathKey": readme["pathKey"], "area": "unstaged", "fingerprint": readme["fingerprint"]}],
+    })
+    .to_string();
+    let (status, _) = send_as_device(&harness, "POST", "/v2/git/stage", "phone-a", &stage).await;
+    assert_eq!(status, 200);
+    let (status, not_push) = send_as_device(
+        &harness,
+        "POST",
+        "/v2/git/push/reconcile",
+        "phone-a",
+        &check,
+    )
+    .await;
+    assert_eq!(status, 409, "{not_push}");
+    assert_eq!(not_push["error"], "not_a_push");
+    let (status, theirs) = send_as_device(
+        &harness,
+        "POST",
+        "/v2/git/push/reconcile",
+        "phone-b",
+        &check,
+    )
+    .await;
+    assert_eq!(status, 404, "{theirs}");
+    assert_eq!(theirs["error"], "receipt_not_found");
 }

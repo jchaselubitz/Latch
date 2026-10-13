@@ -1,0 +1,262 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://latch.cooperativ.dev/schemas/remote-access/v2/git-push.schema.json",
+  "title": "LatchGitPushPreviewV2",
+  "description": "GET /v2/git/push/preview?path=&remote=&destination=&cursor= at the control grant: what a push of the current branch would send, as last fetched. Read-only and offline: it never contacts the remote. Without remote and destination it reviews the branch's upstream; a branch without an upstream on a remote is never given a destination silently (selectionRequired). The phone sends remote, remoteUrl, destination, sourceBranch, sourceOid and destinationOid back with POST /v2/git/push, which is refused with refresh_required if any of them moved.",
+  "type": "object",
+  "$defs": {
+    "target": {
+      "type": "object",
+      "required": [
+        "remote",
+        "remoteUrl",
+        "destination",
+        "destinationRef",
+        "trackingRef",
+        "destinationOid",
+        "selectedBy",
+        "newBranch",
+        "isDefaultBranch",
+        "defaultBranch"
+      ],
+      "properties": {
+        "remote": {
+          "type": "string",
+          "description": "Remote name, as `git remote` lists it."
+        },
+        "remoteUrl": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The URL a push to this remote uses (pushurl if set), with any user name or password removed."
+        },
+        "destination": {
+          "type": "string",
+          "description": "Branch name on the remote, such as main."
+        },
+        "destinationRef": {
+          "type": "string",
+          "description": "Full destination ref on the remote, refs/heads/<destination>."
+        },
+        "trackingRef": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The local remote-tracking ref for the destination, such as refs/remotes/origin/main; null when the remote's fetch configuration maps it nowhere."
+        },
+        "destinationOid": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The destination's commit as last fetched; null when this Mac has not seen it. Never proof of what the remote holds now."
+        },
+        "selectedBy": {
+          "enum": [
+            "upstream",
+            "request"
+          ],
+          "description": "upstream: the branch's configured upstream. request: the remote and destination the phone named."
+        },
+        "newBranch": {
+          "type": "boolean",
+          "description": "The destination was not known to exist as of the last fetch; the push would create it."
+        },
+        "isDefaultBranch": {
+          "type": "boolean",
+          "description": "The destination is the remote's default branch as last fetched (refs/remotes/<remote>/HEAD). Informational; it goes through the same review."
+        },
+        "defaultBranch": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "reconciliation": {
+      "type": "object",
+      "description": "POST /v2/git/push/reconcile: the push receipt after the host asked the remote (git ls-remote, the user's explicit action) where the destination is now. The receipt is settled only when the evidence decides it; otherwise it stays uncertain.",
+      "required": [
+        "receipt",
+        "remoteChecked",
+        "remoteOid",
+        "message"
+      ],
+      "properties": {
+        "receipt": {
+          "$ref": "git-mutation-receipt.schema.json"
+        },
+        "remoteChecked": {
+          "type": "boolean",
+          "description": "The remote answered. False: it could not be reached (message says why) and the receipt is unchanged."
+        },
+        "remoteOid": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Where the destination is on the remote now; null when it does not exist or was not checked."
+        },
+        "message": {
+          "type": "string",
+          "description": "One plain sentence on what the check found."
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "root",
+    "head",
+    "source",
+    "remotes",
+    "target",
+    "selectionRequired",
+    "selectionReason",
+    "suggestion",
+    "lastFetchedAt",
+    "ahead",
+    "behind",
+    "blockedReason",
+    "rejectionLikelyReason",
+    "outgoing",
+    "nextCursor",
+    "operation",
+    "preconditions"
+  ],
+  "properties": {
+    "root": {
+      "type": "string",
+      "pattern": "^/"
+    },
+    "head": {
+      "$ref": "git-sync.schema.json#/properties/head"
+    },
+    "source": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "The local branch a push would send and its commit. Null on a detached or unborn HEAD.",
+      "required": [
+        "branch",
+        "oid"
+      ],
+      "properties": {
+        "branch": {
+          "type": "string"
+        },
+        "oid": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "remotes": {
+      "$ref": "git-sync.schema.json#/properties/remotes"
+    },
+    "target": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/target"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The reviewed remote and destination; null while a destination must still be chosen."
+    },
+    "selectionRequired": {
+      "type": "boolean",
+      "description": "No destination was chosen and the branch has no upstream on a remote: the phone must have the user pick a remote and destination explicitly."
+    },
+    "selectionReason": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "suggestion": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "A remote and destination name the phone may pre-fill for the user to confirm. Never pushed to without that confirmation.",
+      "required": [
+        "remote",
+        "destination"
+      ],
+      "properties": {
+        "remote": {
+          "type": "string"
+        },
+        "destination": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "lastFetchedAt": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "ahead": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "description": "Commits the push would send, as last fetched."
+    },
+    "behind": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "description": "Commits on the destination (as last fetched) that the source lacks."
+    },
+    "blockedReason": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Why nothing can be pushed from this state, as one sentence; null when a push can be offered."
+    },
+    "rejectionLikelyReason": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Why the remote will probably refuse a normal push (the destination has commits the source lacks). Git still decides."
+    },
+    "outgoing": {
+      "type": "array",
+      "maxItems": 50,
+      "items": {
+        "$ref": "git-sync.schema.json#/$defs/commit"
+      },
+      "description": "Commits the push would send, newest first, one page."
+    },
+    "nextCursor": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Opaque cursor for the next page; refused with stale_cursor once the source or destination moves."
+    },
+    "operation": {
+      "$ref": "git-status.schema.json#/properties/operation"
+    },
+    "preconditions": {
+      "$ref": "git-status.schema.json#/$defs/preconditions"
+    }
+  },
+  "additionalProperties": false
+}

@@ -10,6 +10,8 @@ import SwiftUI
 /// same paired tunnel as the session list.
 struct FolderPickerView: View {
     let mode: FolderBrowserMode
+    /// Receives the repository "Open repository here" resolved.
+    var onRepository: ((GitRepository) -> Void)?
 
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
@@ -73,6 +75,14 @@ struct FolderPickerView: View {
         }
         .onChange(of: browser.createdSessionID) { _, created in
             if created != nil { dismiss() }
+        }
+        .onChange(of: browser.chosenRepository) { _, repository in
+            guard let repository else { return }
+            if let onRepository {
+                onRepository(repository)
+            } else {
+                dismiss()
+            }
         }
     }
 
@@ -212,10 +222,12 @@ struct FolderPickerView: View {
                         model.reloadDefaultNewSessionFolder()
                         dismiss()
                     }
+                case .chooseRepository:
+                    Task { await browser.openRepositoryHere() }
                 }
             } label: {
                 HStack {
-                    if browser.isLoading, mode.isCreate {
+                    if browser.isLoading, mode.isCreate || mode == .chooseRepository {
                         ProgressView()
                     }
                     Text(primaryActionTitle)
@@ -305,7 +317,11 @@ struct FolderPickerView: View {
     }
 
     private var isPermitted: Bool {
-        mode.isCreate ? model.canCreateNewSession(agent: mode.agent) : model.canBrowseNewSessionFolders
+        switch mode {
+        case .create, .createAgent: model.canCreateNewSession(agent: mode.agent)
+        case .chooseDefault: model.canBrowseNewSessionFolders
+        case .chooseRepository: model.canBrowseNewSessionFolders && model.canUseGit
+        }
     }
 
     private var title: String {
@@ -313,6 +329,7 @@ struct FolderPickerView: View {
         case .create: return "New session"
         case .createAgent(let agent): return "New \(agent.displayName) session"
         case .chooseDefault: return "Default folder"
+        case .chooseRepository: return "Open a repository"
         }
     }
 
@@ -321,6 +338,7 @@ struct FolderPickerView: View {
         case .create: return "Start session here"
         case .createAgent(let agent): return "Start \(agent.displayName) here"
         case .chooseDefault: return "Use as default"
+        case .chooseRepository: return "Open repository here"
         }
     }
 
@@ -334,6 +352,8 @@ struct FolderPickerView: View {
             return "Starts \(agent.displayName) in this folder on your Mac. The session appears in the list; open it to talk to it."
         case .chooseDefault:
             return nil
+        case .chooseRepository:
+            return "Opens the Git repository that contains this folder. Nothing on your Mac changes."
         }
     }
 

@@ -16,6 +16,7 @@ mod auth;
 mod contract;
 mod conversation;
 mod directory;
+mod git;
 mod http;
 mod pty;
 pub(crate) mod routes;

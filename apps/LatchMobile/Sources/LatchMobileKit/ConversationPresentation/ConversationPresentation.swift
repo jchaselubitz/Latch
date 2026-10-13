@@ -113,6 +113,10 @@ public struct ConversationMessagePresentation: Identifiable, Equatable, Sendable
     /// For a message this phone sent that the host has not yet shown back:
     /// how its delivery stands. Nil for every message the host owns.
     public let pendingDelivery: ConversationOperationStatus?
+    /// When a user-role message is harness markup rather than prose — a
+    /// background task reporting back, another agent writing, a shell or
+    /// slash command — what it says, so the row can draw a card.
+    public let envelope: ConversationEnvelope?
 
     public init(
         id: String,
@@ -128,6 +132,7 @@ public struct ConversationMessagePresentation: Identifiable, Equatable, Sendable
         self.text = text
         self.status = status
         self.pendingDelivery = pendingDelivery
+        envelope = role == .user ? ConversationEnvelope.parse(text) : nil
     }
 
     /// Only states worth a word: an observed message needs no caption.
@@ -204,7 +209,7 @@ public struct ConversationActivityGroup: Identifiable, Equatable, Sendable {
     /// it has settled.
     public var summary: String {
         if let running = runningTool {
-            return "Running \(running.name)"
+            return "Running \(running.descriptor.title)"
         }
         let count = tools.count == 1 ? "Ran 1 tool" : "Ran \(tools.count) tools"
         let failed = failedCount

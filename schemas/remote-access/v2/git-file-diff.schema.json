@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://latch.cooperativ.dev/schemas/remote-access/v2/git-file-diff.schema.json",
+  "title": "LatchGitFileDiffV2",
+  "description": "One page of one changed file's diff (GET /v2/git/diff?path=&file=&area=&cursor=, control grant). The file must be listed by the current status in that area. Pages are bounded well under the phone's 512 KiB response limit; nextCursor asks for the hunks that follow. Binary, oversized, submodule and untracked-folder entries answer with no hunks and a kind that says why.",
+  "type": "object",
+  "required": ["root", "path", "pathKey", "origPath", "area", "kind", "additions", "deletions", "hunks", "totalHunks", "nextCursor", "notes"],
+  "properties": {
+    "root": { "type": "string", "minLength": 1, "pattern": "^/" },
+    "path": { "type": "string" },
+    "pathKey": { "type": "string", "pattern": "^([0-9a-f]{2})+$" },
+    "origPath": { "type": ["string", "null"] },
+    "area": { "enum": ["conflicted", "staged", "unstaged", "untracked"] },
+    "kind": { "enum": ["text", "binary", "too_large", "submodule", "directory"] },
+    "additions": { "type": "integer", "minimum": 0, "description": "Across the whole file, not just this page." },
+    "deletions": { "type": "integer", "minimum": 0 },
+    "hunks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["index", "header", "oldStart", "oldLines", "newStart", "newLines", "lines", "omittedLines"],
+        "properties": {
+          "index": { "type": "integer", "minimum": 0 },
+          "header": { "type": "string" },
+          "oldStart": { "type": "integer", "minimum": 0 },
+          "oldLines": { "type": "integer", "minimum": 0 },
+          "newStart": { "type": "integer", "minimum": 0 },
+          "newLines": { "type": "integer", "minimum": 0 },
+          "lines": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["kind", "oldLine", "newLine", "text"],
+              "properties": {
+                "kind": { "enum": ["context", "added", "removed", "note"] },
+                "oldLine": { "type": ["integer", "null"], "minimum": 1 },
+                "newLine": { "type": ["integer", "null"], "minimum": 1 },
+                "text": { "type": "string" },
+                "truncated": { "type": "boolean", "description": "Present and true when the line was cut to the gateway's line limit." }
+              },
+              "additionalProperties": false
+            }
+          },
+          "omittedLines": { "type": "integer", "minimum": 0, "description": "Lines of this hunk left out because the hunk alone exceeds one page." }
+        },
+        "additionalProperties": false
+      }
+    },
+    "totalHunks": { "type": "integer", "minimum": 0 },
+    "nextCursor": { "type": ["string", "null"], "maxLength": 160 },
+    "notes": { "type": "array", "items": { "type": "string" }, "description": "Header facts with no hunk of their own, such as a mode change." }
+  },
+  "additionalProperties": false
+}

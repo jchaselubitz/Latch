@@ -40,11 +40,20 @@ private struct ConversationToolRow: View {
     let tool: ConversationToolPresentation
 
     var body: some View {
+        let descriptor = tool.descriptor
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             Image(systemName: symbol)
                 .accessibilityLabel(statusLabel)
+            Image(systemName: descriptor.symbolName)
+                .frame(width: 16)
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
-                Text(tool.name).font(.caption.weight(.medium))
+                HStack(spacing: 4) {
+                    Text(descriptor.title).font(.caption.weight(.medium))
+                    if let provider = descriptor.provider {
+                        Text(provider).font(.caption2).foregroundStyle(.tertiary)
+                    }
+                }
                 if !tool.summary.isEmpty {
                     Text(tool.summary)
                         .font(.caption2)

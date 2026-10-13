@@ -84,9 +84,11 @@ extension AppModel {
     public func newSessionFolderBrowser(
         mode: FolderBrowserMode
     ) async -> FolderBrowserModel? {
-        let available = mode.isCreate
-            ? canCreateNewSession(agent: mode.agent)
-            : canBrowseNewSessionFolders
+        let available = switch mode {
+        case .create, .createAgent: canCreateNewSession(agent: mode.agent)
+        case .chooseDefault: canBrowseNewSessionFolders
+        case .chooseRepository: canBrowseNewSessionFolders && canUseGit
+        }
         guard available, let gateway else { return nil }
         let reason: String
         switch mode {
@@ -96,6 +98,8 @@ extension AppModel {
             reason = "Browse folders and start \(agent.displayName) on your Mac."
         case .chooseDefault:
             reason = "Browse folders on your Mac and choose a default."
+        case .chooseRepository:
+            reason = "Browse folders on your Mac and open a repository."
         }
         guard await unlockRemoteAccess(reason: reason) else { return nil }
 
@@ -141,7 +145,13 @@ extension AppModel {
                 self.highlightedSessionID = sessionID
             },
             listModels: listModels,
-            modelStore: agentModelStore
+            modelStore: agentModelStore,
+            resolveRepository: mode == .chooseRepository
+                ? { path in
+                    guard self.canUseGit else { throw NewSessionAccessError.unavailable }
+                    return try await gateway.resolveGitRepository(path: path)
+                }
+                : nil
         )
         await browser.load()
         return browser
