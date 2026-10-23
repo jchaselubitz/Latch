@@ -6,7 +6,7 @@ use super::*;
 /// normalized by `kind`.  The type aliases keep their identities concrete at
 /// the connector boundary while preventing protocol/HUB leakage.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct SavedCheckpoint {
+pub(super) struct SavedCheckpoint {
     source: Option<PathBuf>,
     #[serde(default)]
     source_identity: Option<SourceIdentity>,
@@ -108,7 +108,12 @@ impl JsonlConnector {
             last_turn_close: self.last_turn_close.clone(),
             turn_outcome: self.turn_outcome,
             commands: self.commands.clone(),
-            last_state: self.last_state.clone(),
+            // The catalog is already in `commands`. Keep the comparison state
+            // without a second copy in every runtime delta and compact base.
+            last_state: self.last_state.clone().map(|mut state| {
+                state.commands = None;
+                state
+            }),
             screen_can_send: self.screen_can_send,
         }
     }
@@ -126,7 +131,10 @@ impl JsonlConnector {
         self.last_turn_close = runtime.last_turn_close;
         self.turn_outcome = runtime.turn_outcome;
         self.commands = runtime.commands;
-        self.last_state = runtime.last_state;
+        self.last_state = runtime.last_state.map(|mut state| {
+            state.commands = self.commands.clone();
+            state
+        });
         self.screen_can_send = runtime.screen_can_send;
     }
 
@@ -191,15 +199,33 @@ impl JsonlConnector {
         // changed binding deliberately replays from offset zero instead.
         if checkpoint.source == self.source && checkpoint.agent_session_id == self.agent_session_id
         {
-            self.offset = checkpoint.offset;
-            self.source_identity = checkpoint.source_identity;
-            self.hook_offset = checkpoint.hook_offset;
-            self.active_chain = checkpoint.active_chain;
-            self.chain_items = checkpoint.chain_items;
-            self.malformed_records = checkpoint.malformed_records;
-            self.restore_runtime(checkpoint.runtime);
+            self.adopt_checkpoint(checkpoint);
         }
         Ok(())
+    }
+
+    /// Unlike action restore, recovery must rewind a rejected binding change
+    /// too. The next poll refreshes the authoritative binding again and emits
+    /// its rebuild before replaying records from the new source.
+    pub(super) fn recover_saved_checkpoint(&mut self, bytes: &[u8]) -> Result<()> {
+        let checkpoint: SavedCheckpoint = serde_json::from_slice(bytes)?;
+        self.source = checkpoint.source.clone();
+        self.agent_session_id = checkpoint.agent_session_id.clone();
+        self.adopt_checkpoint(checkpoint);
+        self.last_state = None;
+        self.last_screen_refresh = None;
+        self.refresh_screen = self.live_screen;
+        Ok(())
+    }
+
+    pub(super) fn adopt_checkpoint(&mut self, checkpoint: SavedCheckpoint) {
+        self.offset = checkpoint.offset;
+        self.source_identity = checkpoint.source_identity;
+        self.hook_offset = checkpoint.hook_offset;
+        self.active_chain = checkpoint.active_chain;
+        self.chain_items = checkpoint.chain_items;
+        self.malformed_records = checkpoint.malformed_records;
+        self.restore_runtime(checkpoint.runtime);
     }
 
     pub(super) fn merge_checkpoint_delta(&mut self, delta: &CheckpointDelta) -> Result<()> {
@@ -250,7 +276,11 @@ impl JsonlConnector {
     }
 
     pub(super) fn saved_checkpoint(&self) -> Result<Vec<u8>> {
-        Ok(serde_json::to_vec(&SavedCheckpoint {
+        Ok(serde_json::to_vec(&self.capture_checkpoint())?)
+    }
+
+    pub(super) fn capture_checkpoint(&self) -> SavedCheckpoint {
+        SavedCheckpoint {
             source: self.source.clone(),
             source_identity: self.source_identity,
             agent_session_id: self.agent_session_id.clone(),
@@ -260,6 +290,6 @@ impl JsonlConnector {
             malformed_records: self.malformed_records,
             hook_offset: self.hook_offset,
             runtime: self.runtime_checkpoint(),
-        })?)
+        }
     }
 }

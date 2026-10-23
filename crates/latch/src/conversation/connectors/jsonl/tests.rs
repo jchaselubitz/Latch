@@ -72,6 +72,7 @@ fn claude_cases_dir() -> PathBuf {
 fn poll_all(connector: &mut JsonlConnector) -> Vec<ConnectorMutation> {
     let budget = PollBudget {
         max_records: 512,
+        max_bytes: crate::conversation::MAX_CONVERSATION_BATCH_BYTES,
         deadline: std::time::Duration::from_secs(5),
     };
     let mut mutations = Vec::new();
@@ -83,6 +84,278 @@ fn poll_all(connector: &mut JsonlConnector) -> Vec<ConnectorMutation> {
         mutations.extend(result.mutations);
     }
     mutations
+}
+
+#[test]
+fn checkpoint_catalog_is_stored_once_and_restores_comparison_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.jsonl");
+    let mut connector = JsonlConnector::fixture("claude", source.clone());
+    let mut hello = bridge_record("hello", "2026-09-22T09:00:00Z");
+    hello["commands"] = serde_json::json!([
+        {"name": "catalog-marker", "description": "Only one stored catalog", "source": "builtin"}
+    ]);
+    connector.record(hello, 1);
+    connector
+        .poll(PollBudget {
+            max_records: 512,
+            max_bytes: crate::conversation::MAX_CONVERSATION_BATCH_BYTES,
+            deadline: Duration::from_secs(5),
+        })
+        .unwrap();
+    let checkpoint = connector.checkpoint_snapshot().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&checkpoint)
+            .matches("catalog-marker")
+            .count(),
+        1
+    );
+    let mut restored = JsonlConnector::fixture("claude", source.clone());
+    restored.restore_checkpoint(&checkpoint).unwrap();
+    assert_eq!(restored.last_state, connector.last_state);
+    assert_eq!(restored.state().commands, connector.state().commands);
+
+    // Old checkpoints contain the duplicate catalog. They must still restore.
+    let mut legacy: Value = serde_json::from_slice(&checkpoint).unwrap();
+    legacy["runtime"]["last_state"]["commands"] = legacy["runtime"]["commands"].clone();
+    restored
+        .restore_checkpoint(&serde_json::to_vec(&legacy).unwrap())
+        .unwrap();
+    assert_eq!(restored.last_state, connector.last_state);
+}
+
+#[tokio::test]
+async fn hub_catches_up_a_large_first_backlog_with_a_two_hundred_command_catalog() {
+    use crate::conversation::{
+        ConversationCache, ConversationHub, ConversationId, MAX_CONVERSATION_BATCH_BYTES,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.jsonl");
+    let home = LatchHome::new(dir.path().join("home"));
+    let session = SessionId::parse("ses_fixture").unwrap();
+    fs::create_dir_all(home.session(&session).dir()).unwrap();
+    let mut hello = bridge_record("hello", "2026-09-22T09:00:00Z");
+    hello["commands"] = Value::Array((0..200).map(|i| serde_json::json!({
+        "name": format!("command-{i}"), "description": "d".repeat(180), "source": "plugin"
+    })).collect());
+    fs::write(
+        home.session(&session).conversation_source_hooks(),
+        format!("{hello}\n"),
+    )
+    .unwrap();
+    let records: String = (0..450)
+        .map(|i| {
+            let mut value =
+                claude_user_message(&format!("message-{i}"), &format!("{i}:{}", "m".repeat(800)));
+            if i > 0 {
+                value["parentUuid"] = Value::from(format!("message-{}", i - 1));
+            }
+            format!("{value}\n")
+        })
+        .collect();
+    fs::write(&source, records).unwrap();
+    let make_connector = || {
+        let mut connector = JsonlConnector::fixture("claude", source.clone());
+        connector.home = home.clone();
+        connector
+    };
+    let id = ConversationId::new("ses_fixture");
+    let root = dir.path().join("cache");
+    let hub = ConversationHub::new(&root).unwrap();
+    hub.watch(
+        id.clone(),
+        Box::new(make_connector()),
+        ConversationState::starting(None),
+    )
+    .unwrap();
+    let budget = PollBudget {
+        max_records: 512,
+        max_bytes: MAX_CONVERSATION_BATCH_BYTES,
+        deadline: Duration::from_secs(5),
+    };
+    hub.poll_once(id.clone(), budget.clone()).await.unwrap();
+    let first_count = hub.snapshot(&id, 1000).unwrap().items.len();
+    assert!(
+        first_count > 0 && first_count < 450,
+        "backlog must span several polls"
+    );
+    for _ in 0..20 {
+        hub.poll_once(id.clone(), budget.clone()).await.unwrap();
+        assert_ne!(
+            hub.snapshot(&id, 1000).unwrap().state.phase,
+            ConversationPhase::Unavailable
+        );
+        let (_, _, _, batches) = ConversationCache::new(&root, id.as_str())
+            .load()
+            .unwrap()
+            .unwrap();
+        assert!(batches
+            .iter()
+            .all(|batch| serde_json::to_vec(batch).unwrap().len() <= MAX_CONVERSATION_BATCH_BYTES));
+    }
+    let snapshot = hub.snapshot(&id, 1000).unwrap();
+    assert_eq!(snapshot.items.len(), 450);
+    assert_eq!(snapshot.state.commands.as_ref().unwrap().len(), 200);
+    let position = snapshot.revision;
+    drop(hub);
+
+    let hub = ConversationHub::new(&root).unwrap();
+    hub.watch(
+        id.clone(),
+        Box::new(make_connector()),
+        ConversationState::starting(None),
+    )
+    .unwrap();
+    hub.poll_once(id.clone(), budget).await.unwrap();
+    let restored = hub.snapshot(&id, 1000).unwrap();
+    assert_eq!(restored.items, snapshot.items);
+    assert_eq!(restored.state, snapshot.state);
+    assert_eq!(
+        restored.revision, position,
+        "idle restart must not re-emit state or duplicate items"
+    );
+}
+
+#[tokio::test]
+async fn a_transient_failed_poll_recovers_without_new_source_records() {
+    use crate::conversation::{ConversationHub, ConversationId, MAX_CONVERSATION_BATCH_BYTES};
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.jsonl");
+    fs::write(
+        &source,
+        format!("{}\n", claude_user_message("one", "hello")),
+    )
+    .unwrap();
+    let hub = ConversationHub::new(dir.path().join("cache")).unwrap();
+    let id = ConversationId::new("ses_fixture");
+    hub.watch(
+        id.clone(),
+        Box::new(JsonlConnector::fixture("claude", source.clone())),
+        ConversationState::starting(None),
+    )
+    .unwrap();
+    let budget = PollBudget {
+        max_records: 512,
+        max_bytes: MAX_CONVERSATION_BATCH_BYTES,
+        deadline: Duration::from_secs(5),
+    };
+    hub.poll_once(id.clone(), budget.clone()).await.unwrap();
+    let healthy = hub.snapshot(&id, 100).unwrap();
+    // The real state was already emitted. No new records will arrive to move it.
+    let mut tiny = budget.clone();
+    tiny.max_bytes = 1;
+    hub.poll_once(id.clone(), tiny).await.unwrap();
+    assert_eq!(
+        hub.snapshot(&id, 100).unwrap().state.phase,
+        ConversationPhase::Unavailable
+    );
+    hub.poll_once(id.clone(), budget).await.unwrap();
+    let recovered = hub.snapshot(&id, 100).unwrap();
+    assert_eq!(recovered.state, healthy.state);
+    assert_eq!(recovered.items, healthy.items);
+}
+
+#[test]
+fn an_expanding_record_batch_rewinds_to_a_prefix_that_fits() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.jsonl");
+    // The source fits in one read, but normalized mutations plus stamps and
+    // branch/runtime deltas require more than the raw source byte count.
+    let text = "payload".repeat(5);
+    let records: String = (0..6)
+        .map(|i| {
+            let mut record = claude_user_message(&format!("m{i}"), &text);
+            if i > 0 {
+                record["parentUuid"] = Value::from(format!("m{}", i - 1));
+            }
+            format!("{record}\n")
+        })
+        .collect();
+    fs::write(&source, &records).unwrap();
+    let mut connector = JsonlConnector::fixture("claude", source);
+    let budget = PollBudget {
+        max_records: 512,
+        max_bytes: 3 * 1024,
+        deadline: Duration::from_secs(5),
+    };
+    let mut items = Vec::new();
+    assert!(records.len() < budget.max_bytes);
+    for index in 0..10 {
+        let poll = connector.poll(budget.clone()).unwrap();
+        if index == 0 {
+            assert!(connector.offset > 0 && connector.offset < records.len() as u64);
+        }
+        assert!(
+            serde_json::to_vec(&(&poll.mutations, &poll.checkpoint_delta))
+                .unwrap()
+                .len()
+                <= budget.max_bytes
+        );
+        items.extend(
+            poll.mutations
+                .into_iter()
+                .filter_map(|mutation| match mutation {
+                    ConnectorMutation::Upsert(item) => Some(item.id),
+                    _ => None,
+                }),
+        );
+    }
+    assert_eq!(connector.offset, records.len() as u64);
+    assert_eq!(
+        items,
+        (0..6)
+            .map(|i| ConversationItemId::native(format!("m{i}")))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn rejected_observation_replays_offsets_and_a_changed_binding() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("old.jsonl");
+    let replacement = dir.path().join("new.jsonl");
+    fs::write(&source, format!("{}\n", claude_user_message("old", "old"))).unwrap();
+    fs::write(
+        &replacement,
+        format!("{}\n", claude_user_message("new", "new")),
+    )
+    .unwrap();
+    let mut connector = JsonlConnector::fixture("claude", source);
+    connector.home = LatchHome::new(dir.path().join("home"));
+    fs::create_dir_all(connector.home.session(&connector.session).dir()).unwrap();
+    let budget = PollBudget {
+        max_records: 512,
+        max_bytes: crate::conversation::MAX_CONVERSATION_BATCH_BYTES,
+        deadline: Duration::from_secs(5),
+    };
+    let checkpoint = connector.checkpoint_snapshot().unwrap();
+    let rejected = connector.poll(budget.clone()).unwrap();
+    connector.recover_observation(&checkpoint).unwrap();
+    let retried = connector.poll(budget.clone()).unwrap();
+    assert_eq!(retried.mutations, rejected.mutations);
+    assert_eq!(retried.checkpoint_delta, rejected.checkpoint_delta);
+
+    let checkpoint = connector.checkpoint_snapshot().unwrap();
+    fs::write(
+        connector
+            .home
+            .session(&connector.session)
+            .conversation_source_binding(),
+        serde_json::json!({
+            "connector": "claude", "source": replacement, "agentSessionId": "replacement"
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let rejected = connector.poll(budget.clone()).unwrap();
+    assert!(matches!(
+        rejected.mutations.first(),
+        Some(ConnectorMutation::Rebuild { .. })
+    ));
+    connector.recover_observation(&checkpoint).unwrap();
+    let retried = connector.poll(budget).unwrap();
+    assert_eq!(retried.mutations, rejected.mutations);
+    assert_eq!(retried.checkpoint_delta, rejected.checkpoint_delta);
 }
 
 fn wire_status_message(status: &MessageStatus) -> &'static str {
@@ -208,6 +481,7 @@ fn project_case(source: PathBuf) -> (Vec<ConnectorMutation>, super::super::super
     assert!(connector
         .poll(PollBudget {
             max_records: 64,
+            max_bytes: crate::conversation::MAX_CONVERSATION_BATCH_BYTES,
             deadline: std::time::Duration::from_secs(1)
         })
         .unwrap()
@@ -450,6 +724,7 @@ fn conformance(agent: &'static str) {
     let result = connector
         .poll(PollBudget {
             max_records: 64,
+            max_bytes: crate::conversation::MAX_CONVERSATION_BATCH_BYTES,
             deadline: std::time::Duration::from_secs(1),
         })
         .unwrap();
@@ -506,6 +781,7 @@ fn conformance(agent: &'static str) {
     assert!(connector
         .poll(PollBudget {
             max_records: 64,
+            max_bytes: crate::conversation::MAX_CONVERSATION_BATCH_BYTES,
             deadline: std::time::Duration::from_secs(1)
         })
         .unwrap()
@@ -597,6 +873,7 @@ fn hundred_thousand_record_claude_append_reads_only_the_new_range() {
     let mut connector = JsonlConnector::fixture("claude", source.clone());
     let budget = PollBudget {
         max_records: 100_000,
+        max_bytes: crate::conversation::MAX_CONVERSATION_BATCH_BYTES,
         deadline: std::time::Duration::from_secs(1),
     };
     while connector.offset < fs::metadata(&source).unwrap().len() {
@@ -634,6 +911,7 @@ fn replacing_a_source_at_the_same_path_rebuilds_before_reading_it() {
     connector
         .poll(PollBudget {
             max_records: 64,
+            max_bytes: crate::conversation::MAX_CONVERSATION_BATCH_BYTES,
             deadline: std::time::Duration::from_secs(1),
         })
         .unwrap();
@@ -649,6 +927,7 @@ fn replacing_a_source_at_the_same_path_rebuilds_before_reading_it() {
     let result = connector
         .poll(PollBudget {
             max_records: 64,
+            max_bytes: crate::conversation::MAX_CONVERSATION_BATCH_BYTES,
             deadline: std::time::Duration::from_secs(1),
         })
         .unwrap();
@@ -675,6 +954,7 @@ fn malformed_middle_record_is_counted_and_does_not_wedge_following_records() {
     let result = connector
         .poll(PollBudget {
             max_records: 64,
+            max_bytes: crate::conversation::MAX_CONVERSATION_BATCH_BYTES,
             deadline: std::time::Duration::from_secs(1),
         })
         .unwrap();
@@ -702,6 +982,7 @@ fn runtime_delta_restores_a_pending_request_at_the_advanced_offset() {
     .unwrap();
     let budget = PollBudget {
         max_records: 64,
+        max_bytes: crate::conversation::MAX_CONVERSATION_BATCH_BYTES,
         deadline: std::time::Duration::from_secs(1),
     };
     let mut connector = JsonlConnector::fixture("codex", source.clone());
@@ -1256,6 +1537,7 @@ fn parallel_tool_results_survive_a_journal_replay() {
     let poll = connector
         .poll(PollBudget {
             max_records: 64,
+            max_bytes: crate::conversation::MAX_CONVERSATION_BATCH_BYTES,
             deadline: Duration::from_secs(1),
         })
         .unwrap();

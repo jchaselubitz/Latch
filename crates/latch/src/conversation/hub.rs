@@ -154,6 +154,7 @@ struct SessionActor {
     observation_connector: Arc<Mutex<Box<dyn Connector>>>,
     action_connector: Option<Arc<Mutex<Box<dyn Connector>>>>,
     latest_connector_checkpoint: Vec<u8>,
+    observation_needs_resync: bool,
     actions: Vec<ActionDescriptor>,
     cache: ConversationCache,
     subscribers: HashMap<u64, Subscriber>,
@@ -279,6 +280,11 @@ impl ConversationHub {
             }
         };
         let actions = connector.actions();
+        // A persisted temporary degradation must recover even when the source
+        // has not changed since the last successful observation.
+        if projection.state().phase == super::ConversationPhase::Unavailable {
+            connector.invalidate_state();
+        }
         // Establish a compact base before the first append-only batch.  Later
         // restarts replay only the bounded journal after this base.
         let persisted = operations
@@ -298,6 +304,7 @@ impl ConversationHub {
                 observation_connector: Arc::new(Mutex::new(connector)),
                 action_connector: action_connector.map(|connector| Arc::new(Mutex::new(connector))),
                 latest_connector_checkpoint: connector_checkpoint,
+                observation_needs_resync: false,
                 actions,
                 cache,
                 subscribers: HashMap::new(),
@@ -504,9 +511,6 @@ impl ConversationHub {
         checkpoint_delta: Option<super::CheckpointDelta>,
         connector_checkpoint: Option<Vec<u8>>,
     ) -> Result<()> {
-        if serde_json::to_vec(&mutations)?.len() > MAX_CONVERSATION_BATCH_BYTES {
-            anyhow::bail!("conversation transition batch exceeds aggregate byte budget");
-        }
         for mutation in &mutations {
             if let super::ConnectorMutation::Upsert(item) = mutation {
                 if serde_json::to_vec(item)?.len() > MAX_CONVERSATION_ITEM_BYTES {
@@ -519,9 +523,11 @@ impl ConversationHub {
             .sessions
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("unknown conversation"))?;
-        if let Some(checkpoint) = connector_checkpoint {
-            actor.latest_connector_checkpoint = checkpoint;
-        }
+        // Stage the reducer and reconciliation together. The exact stamped
+        // batch (including runtime deltas and operation records) must fit and
+        // reach the journal before any live state or subscriber moves ahead.
+        let mut projection = actor.projection.clone();
+        let mut operations = actor.operations.clone();
         // One source poll is one durable transition batch. Appending the
         // checkpoint delta for every emitted item would turn a normal
         // multi-block Claude record into O(mutations²) journal work.
@@ -565,8 +571,7 @@ impl ConversationHub {
                     {
                         let (operation_id, correlation, _) =
                             reconciliation_candidates.remove(index);
-                        let record = actor
-                            .operations
+                        let record = operations
                             .iter_mut()
                             .find(|record| record.id == operation_id)
                             .expect("candidate operation exists");
@@ -576,7 +581,7 @@ impl ConversationHub {
                     }
                 }
             }
-            match actor.projection.apply_connector(mutation) {
+            match projection.apply_connector(mutation) {
                 Ok(change) => applied.push(change),
                 // A truncation aimed at an item this projection never held
                 // removes nothing. Failing the batch instead would discard
@@ -587,37 +592,57 @@ impl ConversationHub {
             }
         }
         if !applied.is_empty() || checkpoint_delta.is_some() {
-            actor.cache.append(&super::CacheBatch {
+            let batch = super::CacheBatch {
                 mutations: applied
                     .iter()
                     .map(|change| change.stamped.clone())
                     .collect(),
                 checkpoint_delta,
                 operation_records: reconciled_records,
-            })?;
+            };
+            if serde_json::to_vec(&batch)?.len() > MAX_CONVERSATION_BATCH_BYTES {
+                anyhow::bail!("conversation transition batch exceeds aggregate byte budget");
+            }
+            actor.cache.append(&batch)?;
+            actor.projection = projection;
+            actor.operations = operations;
             for change in applied {
                 publish(actor, change);
             }
         }
+        if let Some(checkpoint) = connector_checkpoint {
+            actor.latest_connector_checkpoint = checkpoint;
+        }
+        actor.observation_needs_resync = false;
         compact_if_needed(actor)?;
         Ok(())
     }
     /// Executes observation on a blocking worker.  The state lock is released
     /// before source I/O begins, so a hung source cannot stall fanout/actions.
     pub async fn poll_once(&self, id: ConversationId, budget: PollBudget) -> Result<()> {
-        let connector = {
+        let (connector, recovery_checkpoint) = {
             let hub = self.inner.lock().expect("hub poisoned");
-            hub.sessions
+            let actor = hub
+                .sessions
                 .get(&id)
-                .ok_or_else(|| anyhow::anyhow!("unknown conversation"))?
-                .observation_connector
-                .clone()
+                .ok_or_else(|| anyhow::anyhow!("unknown conversation"))?;
+            (
+                actor.observation_connector.clone(),
+                actor
+                    .observation_needs_resync
+                    .then(|| actor.latest_connector_checkpoint.clone()),
+            )
         };
         let deadline = budget.deadline;
         let task = tokio::task::spawn_blocking(move || {
             let mut connector = connector
                 .lock()
                 .map_err(|_| anyhow::anyhow!("connector worker poisoned"))?;
+            if let Some(checkpoint) = recovery_checkpoint {
+                // Also rewind offsets after rejected/failed polls. Restoring
+                // only last_state would permanently lose rejected items.
+                connector.recover_observation(&checkpoint)?;
+            }
             let result = connector.poll(budget)?;
             let checkpoint = connector.checkpoint_snapshot()?;
             Ok::<_, anyhow::Error>((result, checkpoint))
@@ -721,20 +746,21 @@ impl ConversationHub {
             .sessions
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("unknown conversation"))?;
+        actor.observation_needs_resync = true;
         let mut state = actor.projection.snapshot(0).state;
         state.phase = super::ConversationPhase::Unavailable;
         state.send_message.enabled = false;
         state.cancel_turn.enabled = false;
         state.cancel_turn.reason = Some(reason.clone());
         state.send_message.reason = Some(reason);
-        let applied = actor
-            .projection
-            .apply_connector(super::ConnectorMutation::State(state))?;
+        let mut projection = actor.projection.clone();
+        let applied = projection.apply_connector(super::ConnectorMutation::State(state))?;
         actor.cache.append(&super::CacheBatch {
             mutations: vec![applied.stamped.clone()],
             checkpoint_delta: None,
             operation_records: vec![],
         })?;
+        actor.projection = projection;
         publish(actor, applied);
         Ok(())
     }
@@ -1473,6 +1499,73 @@ mod tests {
     }
 
     #[test]
+    fn full_batch_rejection_preserves_projection_operations_and_checkpoint() {
+        let temp = tempfile::tempdir().unwrap();
+        let hub = ConversationHub::new(temp.path()).unwrap();
+        let id = ConversationId::new("ses_full_batch");
+        hub.watch(
+            id.clone(),
+            Box::new(FakeConnector),
+            ConversationState::starting(None),
+        )
+        .unwrap();
+        let (subscriber, before) = hub.subscribe(&id, Grant::Interact).unwrap();
+        let action = ConnectorAction {
+            id: ACTION_SEND_MESSAGE.into(),
+            payload: json!({"text": "hello"}),
+        };
+        hub.begin_action(
+            &id,
+            subscriber,
+            &before.operation_epoch,
+            "op-reconcile".into(),
+            &action,
+        )
+        .unwrap();
+        hub.finish_action(
+            &id,
+            "op-reconcile",
+            Ok(ApplyResult::Accepted { correlation: None }),
+        )
+        .unwrap();
+        hub.drain(&id, subscriber);
+        let before = hub.snapshot(&id, 10).unwrap();
+        let (checkpoint, operations) = {
+            let inner = hub.inner.lock().unwrap();
+            let actor = &inner.sessions[&id];
+            (
+                actor.latest_connector_checkpoint.clone(),
+                serde_json::to_value(&actor.operations).unwrap(),
+            )
+        };
+        let delta = CheckpointDelta {
+            source_offsets: vec![],
+            active_branch_delta: vec![],
+            connector_state: Some(vec![42; MAX_CONVERSATION_BATCH_BYTES]),
+        };
+        let observed = ConnectorMutation::Upsert(ObservedItem {
+            id: ConversationItemId::native("observed"),
+            created_at: "now".into(),
+            kind: super::super::ConversationItemKind::Message {
+                role: MessageRole::User,
+                text: "hello".into(),
+                status: MessageStatus::Observed,
+            },
+        });
+        assert!(hub
+            .apply_poll_with_checkpoint(&id, vec![observed], Some(delta), Some(vec![99]))
+            .is_err());
+        assert_eq!(hub.snapshot(&id, 10).unwrap(), before);
+        assert!(hub.drain(&id, subscriber).is_empty());
+        let inner = hub.inner.lock().unwrap();
+        let actor = &inner.sessions[&id];
+        assert_eq!(actor.latest_connector_checkpoint, checkpoint);
+        assert_eq!(serde_json::to_value(&actor.operations).unwrap(), operations);
+        let (_, _, _, batches) = actor.cache.load().unwrap().unwrap();
+        assert!(!batches.iter().any(|batch| batch.checkpoint_delta.is_some()));
+    }
+
+    #[test]
     fn item_and_snapshot_byte_budgets_are_enforced_before_persistence() {
         let temp = tempfile::tempdir().unwrap();
         let hub = ConversationHub::new(temp.path()).unwrap();
@@ -1639,6 +1732,7 @@ mod tests {
             id,
             PollBudget {
                 max_records: 64,
+                max_bytes: crate::conversation::MAX_CONVERSATION_BATCH_BYTES,
                 deadline: Duration::from_secs(1),
             },
         )
@@ -1662,6 +1756,7 @@ mod tests {
             id.clone(),
             PollBudget {
                 max_records: 1,
+                max_bytes: crate::conversation::MAX_CONVERSATION_BATCH_BYTES,
                 deadline: Duration::from_secs(1),
             },
         )
@@ -1702,6 +1797,7 @@ mod tests {
                     polling_id,
                     PollBudget {
                         max_records: 1,
+                        max_bytes: crate::conversation::MAX_CONVERSATION_BATCH_BYTES,
                         deadline: Duration::from_secs(1),
                     },
                 )

@@ -24,6 +24,8 @@ pub enum Detection {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PollBudget {
     pub max_records: usize,
+    /// Maximum encoded transition bytes, including checkpoint deltas.
+    pub max_bytes: usize,
     pub deadline: Duration,
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -32,8 +34,41 @@ pub struct CheckpointDelta {
     pub active_branch_delta: Vec<BranchEntry>,
     /// Connector-private, bounded runtime state needed to make the offsets
     /// usable after restart (for example one pending request and active tools).
-    #[serde(default)]
+    #[serde(default, with = "compact_bytes")]
     pub connector_state: Option<Vec<u8>>,
+}
+
+/// New journals use base64; existing number-array journals remain readable.
+mod compact_bytes {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(
+        bytes: &Option<Vec<u8>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        match bytes {
+            Some(bytes) => serializer.serialize_some(&STANDARD.encode(bytes)),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Vec<u8>>, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Encoded {
+            Compact(String),
+            Legacy(Vec<u8>),
+        }
+        Option::<Encoded>::deserialize(deserializer)?
+            .map(|encoded| match encoded {
+                Encoded::Compact(value) => STANDARD.decode(value).map_err(serde::de::Error::custom),
+                Encoded::Legacy(value) => Ok(value),
+            })
+            .transpose()
+    }
 }
 impl CheckpointDelta {
     pub fn is_empty(&self) -> bool {
@@ -102,6 +137,15 @@ pub trait Connector: Send {
         Ok(())
     }
     fn poll(&mut self, budget: PollBudget) -> Result<PollResult>;
+    /// Re-emit authoritative state after the Hub temporarily degraded it.
+    fn invalidate_state(&mut self) {}
+    /// Rewind a failed observation to the last durable checkpoint. Runs on
+    /// the serialized worker, after any timed-out poll has finished.
+    fn recover_observation(&mut self, checkpoint: &[u8]) -> Result<()> {
+        self.restore_checkpoint(checkpoint)?;
+        self.invalidate_state();
+        Ok(())
+    }
     fn actions(&self) -> Vec<ActionDescriptor>;
     fn apply(&mut self, action: ConnectorAction, deadline: Duration) -> Result<ApplyResult>;
     fn reconcile(

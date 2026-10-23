@@ -3,12 +3,41 @@
 //! is consumed only once its line is complete.
 use super::*;
 
+/// Shared by both sources so hooks cannot spend the transcript's budget twice.
+pub(super) struct SourceBudget {
+    records: usize,
+    bytes: usize,
+    pub(super) consumed_records: usize,
+}
+
+impl SourceBudget {
+    pub(super) fn new(budget: &PollBudget) -> Self {
+        Self {
+            records: budget.max_records,
+            bytes: budget.max_bytes,
+            consumed_records: 0,
+        }
+    }
+
+    fn take(&mut self, bytes: usize) -> bool {
+        if self.records == 0 || (self.consumed_records > 0 && bytes > self.bytes) {
+            return false;
+        }
+        // One large source line may normalize to a small item. Let it through
+        // alone; poll validates the encoded output and rewinds if it cannot fit.
+        self.records -= 1;
+        self.bytes = self.bytes.saturating_sub(bytes);
+        self.consumed_records += 1;
+        true
+    }
+}
+
 impl JsonlConnector {
     /// Reads complete hook records after `hook_offset`. Hooks carry the
     /// authoritative SessionStart binding and out-of-band permissions.
     pub(super) fn read_hook_sidecar(
         &mut self,
-        max_records: usize,
+        budget: &mut SourceBudget,
         mutations: &mut Vec<ConnectorMutation>,
         delta: &mut CheckpointDelta,
     ) -> Result<()> {
@@ -27,10 +56,10 @@ impl JsonlConnector {
             }
             let complete = complete_lines_len(&bytes);
             let mut consumed = 0usize;
-            for line in bytes[..complete]
-                .split_inclusive(|byte| *byte == b'\n')
-                .take(max_records)
-            {
+            for line in bytes[..complete].split_inclusive(|byte| *byte == b'\n') {
+                if !budget.take(line.len()) {
+                    break;
+                }
                 consumed += line.len();
                 if line.len() > MAX_RECORD_BYTES {
                     self.malformed_records += 1;
@@ -59,7 +88,7 @@ impl JsonlConnector {
     pub(super) fn read_transcript(
         &mut self,
         source: PathBuf,
-        max_records: usize,
+        budget: &mut SourceBudget,
         mutations: &mut Vec<ConnectorMutation>,
         delta: &mut CheckpointDelta,
     ) -> Result<()> {
@@ -113,10 +142,10 @@ impl JsonlConnector {
                     });
             }
             let mut consumed = 0usize;
-            for line in bytes[..complete]
-                .split_inclusive(|byte| *byte == b'\n')
-                .take(max_records)
-            {
+            for line in bytes[..complete].split_inclusive(|byte| *byte == b'\n') {
+                if !budget.take(line.len()) {
+                    break;
+                }
                 consumed += line.len();
                 if line.len() > MAX_RECORD_BYTES {
                     self.malformed_records += 1;

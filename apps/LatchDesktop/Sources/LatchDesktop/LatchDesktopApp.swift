@@ -3,6 +3,7 @@ import AppKit
 
 @main
 struct LatchDesktopApp: App {
+    @NSApplicationDelegateAdaptor(LatchDesktopAppDelegate.self) private var appDelegate
     /// Menu bar label + `.commands` observe only this small object so session
     /// list churn cannot reach `-[NSApplication setMainMenu:]`.
     @StateObject private var chrome = AppChromeState()
@@ -15,6 +16,14 @@ struct LatchDesktopApp: App {
         WindowGroup("Latch", id: "sessions") {
             SessionsView(store: runtime.store, updates: runtime.updates)
                 .frame(minWidth: 760, minHeight: 480)
+                .onAppear {
+                    // Keep the SwiftUI scene action available after its last
+                    // window closes so a Dock click can reopen the main screen.
+                    appDelegate.openMainWindow = {
+                        openWindow(id: "sessions")
+                        NSApp.activate(ignoringOtherApps: true)
+                    }
+                }
                 .task {
                     let store = runtime.store
                     let remoteAccess = runtime.remoteAccess
@@ -117,4 +126,14 @@ struct LatchDesktopApp: App {
         image.isTemplate = true
         return image
     }()
+}
+
+private final class LatchDesktopAppDelegate: NSObject, NSApplicationDelegate {
+    var openMainWindow: (() -> Void)?
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        guard !flag else { return true }
+        openMainWindow?()
+        return false
+    }
 }

@@ -33,6 +33,84 @@ impl Connector for JsonlConnector {
 
     fn poll(&mut self, budget: PollBudget) -> Result<PollResult> {
         let binding_replaced = self.refresh_binding();
+        let checkpoint = self.capture_checkpoint();
+        let mut attempt = budget;
+        attempt.max_bytes = attempt
+            .max_bytes
+            .min(crate::conversation::MAX_CONVERSATION_BATCH_BYTES);
+        loop {
+            let result = self.poll_sources(&attempt, binding_replaced);
+            let fits = match &result {
+                Ok((result, _)) => {
+                    // Reserve the maximum numeric stamp envelope per mutation
+                    // and the batch wrapper. Runtime is measured in its actual
+                    // journal encoding, including base64, rather than raw bytes.
+                    serde_json::to_vec(&(&result.mutations, &result.checkpoint_delta))?.len()
+                        + result.mutations.len() * 128
+                        + 1024
+                        <= attempt.max_bytes
+                }
+                Err(_) => false,
+            };
+            if fits {
+                return result.map(|(result, _)| result);
+            }
+            self.adopt_checkpoint(checkpoint.clone());
+            self.refresh_screen = self.live_screen;
+            let (_, consumed_records) = result?;
+            if consumed_records <= 1 {
+                anyhow::bail!("conversation source record exceeds poll byte budget");
+            }
+            // A single JSONL record can expand into several normalized items.
+            // Retry a smaller prefix without committing its offsets or runtime.
+            attempt.max_records = consumed_records / 2;
+        }
+    }
+
+    fn invalidate_state(&mut self) {
+        self.last_state = None;
+        self.refresh_screen = self.live_screen;
+    }
+
+    fn recover_observation(&mut self, checkpoint: &[u8]) -> Result<()> {
+        self.recover_saved_checkpoint(checkpoint)
+    }
+
+    fn actions(&self) -> Vec<ActionDescriptor> {
+        self.action_descriptors()
+    }
+
+    fn apply(&mut self, action: ConnectorAction, deadline: Duration) -> Result<ApplyResult> {
+        self.apply_action(action, deadline)
+    }
+
+    fn reconcile(
+        &self,
+        _outstanding: &[ConversationItemId],
+        _observed: &[ConversationItemId],
+    ) -> Vec<ConnectorMutation> {
+        Vec::new()
+    }
+
+    fn restore_checkpoint(&mut self, checkpoint: &[u8]) -> Result<()> {
+        self.restore_saved_checkpoint(checkpoint)
+    }
+
+    fn apply_checkpoint_delta(&mut self, delta: &CheckpointDelta) -> Result<()> {
+        self.merge_checkpoint_delta(delta)
+    }
+
+    fn checkpoint_snapshot(&self) -> Result<Vec<u8>> {
+        self.saved_checkpoint()
+    }
+}
+
+impl JsonlConnector {
+    fn poll_sources(
+        &mut self,
+        budget: &PollBudget,
+        binding_replaced: bool,
+    ) -> Result<(PollResult, usize)> {
         let runtime_before = self.runtime_checkpoint();
         #[cfg(test)]
         {
@@ -53,11 +131,12 @@ impl Connector for JsonlConnector {
         // authoritative SessionStart binding and out-of-band permissions, so
         // never fold them into the transcript offset or re-read either source
         // after an unrelated append.
+        let mut source_budget = super::source::SourceBudget::new(budget);
         if matches!(self.id, "claude" | "cursor") {
-            self.read_hook_sidecar(budget.max_records, &mut mutations, &mut delta)?;
+            self.read_hook_sidecar(&mut source_budget, &mut mutations, &mut delta)?;
         }
         if let Some(source) = self.source.clone() {
-            self.read_transcript(source, budget.max_records, &mut mutations, &mut delta)?;
+            self.read_transcript(source, &mut source_budget, &mut mutations, &mut delta)?;
         }
         let event_driven = self
             .control
@@ -89,13 +168,16 @@ impl Connector for JsonlConnector {
         if runtime_after != runtime_before {
             delta.connector_state = Some(serde_json::to_vec(&runtime_after)?);
         }
-        Ok(PollResult {
-            mutations,
-            checkpoint_delta: delta,
-        })
+        Ok((
+            PollResult {
+                mutations,
+                checkpoint_delta: delta,
+            },
+            source_budget.consumed_records,
+        ))
     }
 
-    fn actions(&self) -> Vec<ActionDescriptor> {
+    fn action_descriptors(&self) -> Vec<ActionDescriptor> {
         // Descriptors remain static because the Hub caches them when it creates
         // the actor. `apply` repeats the live validation immediately before
         // touching the kernel; pushed `ConversationState` is the UI availability.
@@ -121,7 +203,7 @@ impl Connector for JsonlConnector {
         ]
     }
 
-    fn apply(&mut self, action: ConnectorAction, deadline: Duration) -> Result<ApplyResult> {
+    fn apply_action(&mut self, action: ConnectorAction, deadline: Duration) -> Result<ApplyResult> {
         if action.id == crate::conversation::ACTION_CANCEL_TURN {
             return self.cancel_turn(deadline);
         }
@@ -294,25 +376,5 @@ impl Connector for JsonlConnector {
         self.screen_can_send = Some(false);
         self.last_screen_refresh = None;
         Ok(ApplyResult::Accepted { correlation: None })
-    }
-
-    fn reconcile(
-        &self,
-        _outstanding: &[ConversationItemId],
-        _observed: &[ConversationItemId],
-    ) -> Vec<ConnectorMutation> {
-        Vec::new()
-    }
-
-    fn restore_checkpoint(&mut self, checkpoint: &[u8]) -> Result<()> {
-        self.restore_saved_checkpoint(checkpoint)
-    }
-
-    fn apply_checkpoint_delta(&mut self, delta: &CheckpointDelta) -> Result<()> {
-        self.merge_checkpoint_delta(delta)
-    }
-
-    fn checkpoint_snapshot(&self) -> Result<Vec<u8>> {
-        self.saved_checkpoint()
     }
 }

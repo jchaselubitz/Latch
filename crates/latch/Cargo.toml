@@ -27,6 +27,7 @@ path = "src/lib.rs"
 # profile pointed at `latch`, every terminal window pays this cost.
 [dependencies]
 anyhow.workspace = true
+base64 = "0.22"
 axum.workspace = true
 clap.workspace = true
 httparse = "1"

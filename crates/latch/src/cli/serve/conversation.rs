@@ -50,6 +50,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(250);
 const EVENT_IDLE_RESYNC: Duration = Duration::from_secs(5);
 const POLL_BUDGET: PollBudget = PollBudget {
     max_records: 512,
+    max_bytes: crate::conversation::MAX_CONVERSATION_BATCH_BYTES,
     deadline: Duration::from_secs(5),
 };
 /// A connector action that has not answered by now is reported as ambiguous

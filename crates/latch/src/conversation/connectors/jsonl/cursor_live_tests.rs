@@ -75,6 +75,7 @@ fn cursor_chat_sends_and_observes_two_turns() {
                 let result = connector
                     .poll(PollBudget {
                         max_records: 100,
+                        max_bytes: crate::conversation::MAX_CONVERSATION_BATCH_BYTES,
                         deadline: Duration::from_secs(3),
                     })
                     .unwrap();
@@ -106,6 +107,7 @@ fn cursor_chat_sends_and_observes_two_turns() {
             let result = connector
                 .poll(PollBudget {
                     max_records: 100,
+                    max_bytes: crate::conversation::MAX_CONVERSATION_BATCH_BYTES,
                     deadline: Duration::from_secs(3),
                 })
                 .unwrap();

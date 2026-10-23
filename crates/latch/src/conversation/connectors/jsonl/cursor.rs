@@ -263,6 +263,7 @@ mod tests {
         connector.session = session.clone();
         let budget = PollBudget {
             max_records: 100,
+            max_bytes: crate::conversation::MAX_CONVERSATION_BATCH_BYTES,
             deadline: Duration::from_secs(1),
         };
         let first = connector.poll(budget.clone()).unwrap();

@@ -290,6 +290,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn legacy_number_array_runtime_delta_loads_and_reencodes_compactly() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = ConversationCache::new(temp.path(), "ses_legacy");
+        let projection = super::super::Projection::new(
+            super::super::OperationEpoch::new("epoch"),
+            super::super::ConversationState::starting(None),
+        );
+        cache.compact(&projection.snapshot(0), &[], &[]).unwrap();
+        let mut journal = fs::read_to_string(cache.journal_path()).unwrap();
+        journal.push_str(r#"{"mutations":[],"checkpoint_delta":{"source_offsets":[],"active_branch_delta":[],"connector_state":[0,1,127,128,255]},"operation_records":[]}"#);
+        journal.push('\n');
+        fs::write(cache.journal_path(), journal).unwrap();
+
+        let (_, _, _, batches) = cache.load().unwrap().unwrap();
+        let delta = batches[0].checkpoint_delta.as_ref().unwrap();
+        assert_eq!(
+            delta.connector_state.as_deref(),
+            Some([0, 1, 127, 128, 255].as_slice())
+        );
+        let compact = serde_json::to_value(delta).unwrap();
+        assert!(compact["connector_state"].is_string());
+        assert_eq!(
+            serde_json::from_value::<CheckpointDelta>(compact).unwrap(),
+            *delta
+        );
+
+        for value in [serde_json::json!(null), serde_json::json!([])] {
+            let decoded: CheckpointDelta = serde_json::from_value(serde_json::json!({
+                "source_offsets": [], "active_branch_delta": [], "connector_state": value
+            }))
+            .unwrap();
+            assert_eq!(
+                decoded.connector_state,
+                if value.is_null() { None } else { Some(vec![]) }
+            );
+        }
+        assert!(serde_json::from_value::<CheckpointDelta>(serde_json::json!({
+            "source_offsets": [], "active_branch_delta": [], "connector_state": "invalid base64!"
+        })).is_err());
+    }
+
+    #[test]
     fn gateway_lock_is_exclusive_and_recoverable_after_drop() {
         let temp = tempfile::tempdir().unwrap();
         let first = GatewayLock::acquire(temp.path()).unwrap();
