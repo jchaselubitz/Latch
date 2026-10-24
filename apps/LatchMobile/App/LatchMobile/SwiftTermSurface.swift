@@ -1,5 +1,6 @@
 #if canImport(UIKit)
 
+import CoreText
 import LatchMobileKit
 import SwiftTerm
 import SwiftUI
@@ -151,6 +152,29 @@ final class SwiftTermSurface: NSObject, SessionTerminalSurface {
     func applyFont(size fontSize: CGFloat) {
         guard view.font.pointSize != fontSize else { return }
         view.font = UIFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
+    }
+
+    /// The emulator's cell at any point size, measured the way SwiftTerm
+    /// measures its own: the advance of `W` and ascent + descent + leading,
+    /// snapped to the screen's pixels — width to the nearest, height up.
+    ///
+    /// The geometry rule picks font sizes and fitted grids from this, so it
+    /// has to be the renderer's number rather than a ratio. A ratio that is
+    /// off by 3% puts the last few columns of every fitted grid past the
+    /// right edge of the screen. `UIScreen.main` because it is the scale
+    /// SwiftTerm snaps to.
+    var cellMetrics: TerminalCellMetrics {
+        let scale = UIScreen.main.scale
+        return TerminalCellMetrics { fontSize in
+            let font = UIFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
+            let width = "W".size(withAttributes: [.font: font]).width
+            let ctFont = font as CTFont
+            let height = ceil(CTFontGetAscent(ctFont) + CTFontGetDescent(ctFont) + CTFontGetLeading(ctFont))
+            return CGSize(
+                width: max(1, (width * scale).rounded() / scale),
+                height: max(1, ceil(height * scale) / scale)
+            )
+        }
     }
 
     /// The exact frame that makes the emulator lay out `grid` — no more, no less.

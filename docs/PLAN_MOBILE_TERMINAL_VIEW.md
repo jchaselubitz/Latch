@@ -694,6 +694,29 @@ Font size follows from the grid (`viewportWidth / cols / advanceRatio`), not the
 other way round. Below the readable floor the font stops shrinking and the
 surface pans horizontally, with pinch-to-zoom adjusting font size only.
 
+### Amendment: the default is now Fit to Screen
+
+On devices, every grid ran off the right edge of iPhone and iPad screens. Two
+causes, both fixed:
+
+- **The cell advance was wrong.** `advanceRatio = 0.6` was an estimate; the
+  system monospaced face is `0.618`, and SwiftTerm snaps each cell to the
+  pixel grid. Every "fitted" font size therefore rendered ~3% wider than the
+  viewport. Font size is now searched against the renderer's own measured,
+  snapped cell (`TerminalCellMetrics`), so a grid that can fit does fit.
+- **Match the Mac pans by design.** A desk-wide grid cannot be shown at a
+  legible size on a phone, and a terminal cannot wrap on the client: the
+  program on the Mac addresses absolute cells, so only the program can reflow.
+
+The default preference is therefore *Fit to Screen* (stored as `readable`):
+the phone attaches at the largest grid that fits its viewport at 11 pt, so the
+pane is resized once on attach and the agent reflows to the phone's width.
+*Match the Mac* stays available for the no-`SIGWINCH` attach. The font floor
+below which the surface pans is now 9 pt rather than 11. The still is always
+framed at its own captured grid, and an attached terminal whose grid is wider
+than the screen offers **Fit to Screen** in its menu — the deliberate "fit to
+phone" action anticipated below. Rotation and the keyboard still never resize.
+
 ### Nothing about the viewport sends a resize
 
 Three consequences, and they are the point:

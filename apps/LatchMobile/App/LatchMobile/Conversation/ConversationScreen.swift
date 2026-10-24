@@ -187,6 +187,8 @@ struct ConversationScreen: View {
                     }
                 }
                 .padding(.horizontal, 20)
+                .frame(maxWidth: ConversationTranscript.maxColumnWidth)
+                .frame(maxWidth: .infinity)
             }
             if !content.operations.isEmpty {
                 ConversationOperationRows(operations: content.operations, actions: actions)
@@ -200,6 +202,8 @@ struct ConversationScreen: View {
                     resolveQuestions: actions.resolveQuestions
                 )
                 .id(request.requestId)
+                .frame(maxWidth: ConversationTranscript.maxColumnWidth)
+                .frame(maxWidth: .infinity)
             } else {
                 ConversationComposer(
                     draft: $draft,
@@ -212,6 +216,10 @@ struct ConversationScreen: View {
                     canUseSlashCommands: content.canUseSlashCommands,
                     send: actions.send
                 )
+                // Matches the transcript's readable column on iPad; the fade
+                // below still spans the full width.
+                .frame(maxWidth: ConversationTranscript.maxColumnWidth)
+                .frame(maxWidth: .infinity)
                 // A soft fade rather than a bar: the field floats, and the
                 // transcript passing beneath it stays out of the way.
                 .background {

@@ -14,6 +14,8 @@ struct ConversationTranscript: View {
     let loadOlder: () -> Void
     let showNewer: () -> Void
 
+    static let maxColumnWidth: CGFloat = 760
+
     @State private var follow = ConversationTailFollowState()
     @State private var viewportHeight: CGFloat = 0
     @State private var userIsDragging = false
@@ -56,6 +58,10 @@ struct ConversationTranscript: View {
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 12)
+                // A readable column on iPad; a no-op at iPhone widths. The
+                // scroll view itself stays full width so edge drags still scroll.
+                .frame(maxWidth: Self.maxColumnWidth)
+                .frame(maxWidth: .infinity)
             }
             .coordinateSpace(name: "conversation.transcript.scroll")
             // Dragging down through the keyboard pulls it away with the finger,

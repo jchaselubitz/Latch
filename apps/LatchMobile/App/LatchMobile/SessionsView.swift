@@ -260,6 +260,10 @@ struct SessionsView: View {
                 }
             }
             .toolbar(navigationBar, for: .navigationBar)
+            // A state that sizes to its content, like the Connecting spinner,
+            // would otherwise carry the inset up to the middle of the screen
+            // with it. Filling the screen keeps the gear where the list puts it.
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             // Every state, the unpaired ones included: the gear is the only
             // way to reach pairing now that there is no tab bar.
             .safeAreaInset(edge: .bottom) { floatingActions }

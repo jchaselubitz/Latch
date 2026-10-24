@@ -20,8 +20,6 @@ jobs:
         include:
           - target: aarch64-apple-darwin
             runner: macos-14
-          - target: x86_64-apple-darwin
-            runner: macos-15-intel
     runs-on: ${{ matrix.runner }}
     env:
       LATCH_RELEASE_TAG: ${{ github.ref_name }}

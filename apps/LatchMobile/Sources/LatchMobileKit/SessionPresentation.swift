@@ -84,21 +84,27 @@ public final class MemorySessionPresentationStore: SessionPresentationStoring, @
 ///
 /// Geometry is a choice, not a measurement: `cols`/`rows` are query parameters
 /// on the terminal socket and nothing requires them to describe the phone's
-/// screen. `matchMac` attaches at the pane's current size so it does not
-/// resize at all — no `SIGWINCH`, no reflow, and a paused prompt that cannot
-/// repaint transfers exactly as it stands.
+/// screen.
+///
+/// `readable` is the default because it is the only choice whose text ends
+/// at the right edge of the phone. A terminal cannot wrap on the client — the
+/// program on the Mac lays out absolute cells — so the pane is resized to a
+/// grid that fits this screen and the agent reflows itself, once, on attach.
+/// `matchMac` attaches at the pane's current size so it does not resize at
+/// all — no `SIGWINCH`, no reflow — at the price of panning a desk-wide grid.
+/// The raw value `readable` is kept because it is what earlier builds stored.
 public enum TerminalSize: String, CaseIterable, Codable, Sendable {
-    case matchMac
     case readable
+    case matchMac
     case fixed80x24
     case fixed100x30
 
-    public static let `default` = TerminalSize.matchMac
+    public static let `default` = TerminalSize.readable
 
     public var label: String {
         switch self {
+        case .readable: "Fit to Screen"
         case .matchMac: "Match the Mac"
-        case .readable: "Readable"
         case .fixed80x24: "80 × 24"
         case .fixed100x30: "100 × 30"
         }

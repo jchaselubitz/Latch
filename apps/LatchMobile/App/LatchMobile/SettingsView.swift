@@ -60,6 +60,14 @@ struct SettingsView: View {
                         .accessibilityIdentifier("settings.done")
                 }
             }
+            // Presented from here, not from the New sessions section: that
+            // section only exists while the link is `.linked`. The owner check
+            // the picker opens with backgrounds the app, and the rediscovery on
+            // return passes through `.connecting`, which removes the section and
+            // would take its sheet with it.
+            .sheet(isPresented: $choosingDefaultFolder) {
+                FolderPickerView(mode: .chooseDefault)
+            }
         }
     }
 
@@ -110,9 +118,10 @@ struct SettingsView: View {
             }
         } footer: {
             Text("""
-            Match the Mac attaches at the size the pane already has, so nothing on \
-            your Mac resizes or reflows. The other choices set the grid here and fit \
-            the text to it.
+            Fit to Screen resizes the session's terminal to this screen when you \
+            attach, so lines end at the edge; the program redraws once at the new \
+            width. Match the Mac attaches at the size the pane already has, so \
+            nothing on your Mac reflows, and you scroll sideways for the rest.
             """)
         }
     }
@@ -146,9 +155,6 @@ struct SettingsView: View {
                 Text("New sessions")
             } footer: {
                 Text(newSessionFooter)
-            }
-            .sheet(isPresented: $choosingDefaultFolder) {
-                FolderPickerView(mode: .chooseDefault)
             }
         }
     }

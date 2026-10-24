@@ -49,8 +49,7 @@ struct ConversationMessageRow: View, Equatable {
 
     private var bubble: some View {
             VStack(alignment: .trailing, spacing: 3) {
-                Text(message.text)
-                    .textSelection(.enabled)
+                SelectableText(AttributedString(message.text))
                     .padding(.horizontal, 12)
                     .padding(.vertical, 9)
                     .background(Color.accentColor.opacity(0.16), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
@@ -78,10 +77,10 @@ struct ConversationEnvelopeCard: View {
         VStack(alignment: .leading, spacing: 8) {
             header
             if let headline = envelope.headline {
-                Text(headline)
-                    .font(.subheadline)
-                    .foregroundStyle(envelope.tone == .failure ? Color.red : Color.primary)
-                    .textSelection(.enabled)
+                SelectableText(
+                    AttributedString(headline),
+                    style: .init(textStyle: .subheadline, color: envelope.tone == .failure ? .systemRed : .label)
+                )
             }
             if let content = envelope.body {
                 contentView(content)
@@ -156,14 +155,12 @@ struct ConversationEnvelopeCard: View {
         VStack(alignment: .leading, spacing: 4) {
             Group {
                 if envelope.bodyIsCode {
-                    Text(shown)
-                        .font(.caption.monospaced())
+                    SelectableText(AttributedString(shown), style: .init(textStyle: .caption1, monospaced: true))
                         .padding(8)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                        .textSelection(.enabled)
                 } else {
-                    ConversationMarkdownView(text: shown)
+                    ConversationMarkdownView(text: shown, textStyle: .subheadline)
                         .font(.subheadline)
                 }
             }

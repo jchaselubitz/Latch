@@ -12,41 +12,74 @@ public struct TerminalGrid: Equatable, Sendable {
     }
 }
 
-/// The geometry rule: the phone chooses the grid, and prefers the desk's.
+/// The size of one terminal cell at a given point size, in points.
 ///
-/// `cols` and `rows` are query parameters on the terminal socket, so nothing
-/// requires them to describe the phone's screen. Deriving them from pixels
-/// would mean a ~50-column grid in portrait, which resizes the pane,
-/// `SIGWINCH`es the child, and asks a layout drawn for 100 columns to survive
-/// being halved. Instead the phone picks a grid and renders it at whatever
-/// font size fits, panning when it does not.
-public enum TerminalGeometry {
-    /// Below this the font stops shrinking and the surface pans instead.
-    public static let readableFontSize: CGFloat = 11
-    /// The smallest grid the readable fit will settle for. A phone narrow
-    /// enough to need less than this pans rather than rendering a grid no
-    /// full-screen TUI is laid out for.
-    public static let minimumGrid = TerminalGrid(cols: 60, rows: 20)
+/// Fitting a grid to a screen is only as good as this number. The first cut
+/// used a flat `0.6 × size` advance; the system monospaced face is really
+/// `0.618`, and SwiftTerm snaps every cell to the pixel grid on top of that,
+/// so every "fitted" grid rendered a few percent wider than the screen and the
+/// last columns ran off the right edge. The app measures the renderer's own
+/// font; `systemMonospaced` reproduces the same arithmetic for tests.
+public struct TerminalCellMetrics: Sendable {
+    private let measure: @Sendable (CGFloat) -> CGSize
 
-    /// Width of one monospaced cell as a fraction of point size, for the
-    /// system monospaced face. Used only to turn a grid into a font size, so a
-    /// small inaccuracy costs a fraction of a point rather than a wrong grid.
-    public static let advanceRatio: CGFloat = 0.6
-    /// Line height as a multiple of point size, same caveat.
-    public static let lineHeightRatio: CGFloat = 1.2
+    public init(_ measure: @escaping @Sendable (CGFloat) -> CGSize) {
+        self.measure = measure
+    }
+
+    public func cell(atFontSize fontSize: CGFloat) -> CGSize {
+        measure(fontSize)
+    }
+
+    /// The system monospaced face's own ratios — `W`'s advance, and ascent +
+    /// descent + leading — snapped to `scale` the way SwiftTerm snaps them:
+    /// width to the nearest device pixel, height up to the next one.
+    public static func systemMonospaced(scale: CGFloat = 3) -> TerminalCellMetrics {
+        TerminalCellMetrics { fontSize in
+            let width = fontSize * 0.6181640625
+            let height = ceil(fontSize * 1.177734375)
+            return CGSize(
+                width: max(1, (width * scale).rounded() / scale),
+                height: max(1, ceil(height * scale) / scale)
+            )
+        }
+    }
+}
+
+/// The geometry rule: the phone chooses the grid, and by default chooses one
+/// that fits its own screen.
+///
+/// `cols` and `rows` are query parameters on the terminal socket, so the grid
+/// is a choice rather than a measurement. A terminal cannot wrap text on the
+/// client: a full-screen TUI addresses absolute cells, so the only way to get
+/// lines that end at the right edge of a phone is to tell the pty a grid that
+/// fits the phone and let the program on the other end reflow itself. That
+/// is `readable`, the default. `matchMac` keeps the desk's grid so nothing on
+/// the Mac reflows, and renders it at whatever font size fits, panning when
+/// even the smallest one does not.
+public enum TerminalGeometry {
+    /// The point size a fitted grid is chosen at.
+    public static let readableFontSize: CGFloat = 11
+    /// Below this the font stops shrinking and the surface pans instead.
+    public static let minimumFontSize: CGFloat = 9
+    /// The smallest grid the readable fit will settle for. A screen too narrow
+    /// for this many columns at the readable size gets a slightly smaller font
+    /// rather than a grid no full-screen TUI is laid out for.
+    public static let minimumGrid = TerminalGrid(cols: 60, rows: 20)
 
     /// The grid to attach at.
     ///
-    /// `matchMac` is the default and takes the preview's reported geometry:
-    /// attaching at the size the pane already has means the pane does not
-    /// resize at all — no `SIGWINCH`, no reflow, and a paused prompt that
-    /// cannot repaint transfers exactly as it stands. When there is no preview
-    /// there is nothing to match, so it falls through to the readable fit
-    /// rather than guessing.
+    /// `matchMac` takes the preview's reported geometry: attaching at the size
+    /// the pane already has means the pane does not resize at all — no
+    /// `SIGWINCH`, no reflow, and a paused prompt that cannot repaint
+    /// transfers exactly as it stands. When there is no preview there is
+    /// nothing to match, so it falls through to the readable fit rather than
+    /// guessing.
     public static func grid(
         for size: TerminalSize,
         preview: SessionPreview?,
-        viewport: CGSize
+        viewport: CGSize,
+        metrics: TerminalCellMetrics = .systemMonospaced()
     ) -> TerminalGrid {
         if let fixed = size.fixedGrid {
             return TerminalGrid(cols: fixed.cols, rows: fixed.rows)
@@ -54,50 +87,61 @@ public enum TerminalGeometry {
         if size == .matchMac, let preview, preview.cols > 0, preview.rows > 0 {
             return TerminalGrid(cols: preview.cols, rows: preview.rows)
         }
-        return readableGrid(viewport: viewport)
+        return readableGrid(viewport: viewport, metrics: metrics)
     }
 
-    /// The largest grid whose font size stays at or above the readable floor,
+    /// The largest grid that fits the viewport at the readable font size,
     /// never smaller than `minimumGrid`.
-    public static func readableGrid(viewport: CGSize) -> TerminalGrid {
-        let cellWidth = readableFontSize * advanceRatio
-        let cellHeight = readableFontSize * lineHeightRatio
-        let cols = viewport.width > 0 ? Int(viewport.width / cellWidth) : 0
-        let rows = viewport.height > 0 ? Int(viewport.height / cellHeight) : 0
-        return TerminalGrid(
-            cols: max(cols, minimumGrid.cols),
-            rows: max(rows, minimumGrid.rows)
-        )
+    ///
+    /// Rows are counted at the size the columns will actually render at,
+    /// which is below the readable size only when the minimum forced extra
+    /// columns onto a narrow screen.
+    public static func readableGrid(
+        viewport: CGSize,
+        metrics: TerminalCellMetrics = .systemMonospaced()
+    ) -> TerminalGrid {
+        let readable = metrics.cell(atFontSize: readableFontSize)
+        let fitted = viewport.width > 0 ? Int(viewport.width / readable.width) : 0
+        let cols = max(fitted, minimumGrid.cols)
+        let rendered = metrics.cell(atFontSize: fontSize(cols: cols, viewportWidth: viewport.width, metrics: metrics))
+        let rows = viewport.height > 0 ? Int(viewport.height / rendered.height) : 0
+        return TerminalGrid(cols: cols, rows: max(rows, minimumGrid.rows))
     }
 
-    /// The pixel size a chosen grid needs at a given font size.
-    ///
-    /// This is what makes panning real rather than a claim. A renderer lays out
-    /// whatever grid fits its own bounds, so a surface merely placed in the
-    /// viewport would silently render ~59 columns while the pty was told 100 —
-    /// which is exactly the mismatch the geometry rule exists to prevent. The
-    /// surface is framed at this size instead and the viewport scrolls over it.
-    ///
-    /// The width is biased slightly upward because the cell width here is a
-    /// ratio rather than the renderer's own metric: rendering a column or two
-    /// more than declared leaves them blank, while rendering fewer would clip
-    /// the pane. Phase 5 measures the real advance on a device.
-    public static func pixelSize(cols: Int, rows: Int, fontSize: CGFloat) -> CGSize {
-        CGSize(
-            width: ceil(CGFloat(cols) * fontSize * advanceRatio * 1.05),
-            height: ceil(CGFloat(rows) * fontSize * lineHeightRatio)
-        )
+    /// Whether `grid` renders without panning sideways in a viewport this wide.
+    public static func fitsWidth(
+        _ grid: TerminalGrid,
+        viewportWidth: CGFloat,
+        metrics: TerminalCellMetrics = .systemMonospaced()
+    ) -> Bool {
+        let size = fontSize(cols: grid.cols, viewportWidth: viewportWidth, metrics: metrics)
+        return CGFloat(grid.cols) * metrics.cell(atFontSize: size).width <= viewportWidth
     }
 
-    /// Point size for a chosen grid in a given viewport.
+    /// Point size for a chosen grid in a given viewport: the largest size, in
+    /// quarter points, whose real cells put every column on screen.
     ///
-    /// Font size follows from the grid, not the other way round. Below the
-    /// readable floor it stops shrinking and the caller pans horizontally
+    /// Font size follows from the grid, not the other way round. Below
+    /// `minimumFontSize` it stops shrinking and the caller pans horizontally
     /// instead, which is why this clamps rather than returning a hairline.
-    public static func fontSize(cols: Int, viewportWidth: CGFloat) -> CGFloat {
+    public static func fontSize(
+        cols: Int,
+        viewportWidth: CGFloat,
+        metrics: TerminalCellMetrics = .systemMonospaced()
+    ) -> CGFloat {
         guard cols > 0, viewportWidth > 0 else { return readableFontSize }
-        let fitted = viewportWidth / (CGFloat(cols) * advanceRatio)
-        return max(fitted, readableFontSize)
+        // Snapping moves a cell by up to half a device pixel either way, so a
+        // size a little above the face's unsnapped ratio can still fit — 11 pt
+        // snaps narrower than 10.75 pt at 3x. Start a point above the ratio's
+        // guess and come down a quarter point at a time until the snapped
+        // cells really fit; that is a handful of steps.
+        let ratio = metrics.cell(atFontSize: 100).width / 100
+        var size = ((viewportWidth / (CGFloat(cols) * ratio) + 1) * 4).rounded(.down) / 4
+        while size > minimumFontSize,
+              CGFloat(cols) * metrics.cell(atFontSize: size).width > viewportWidth {
+            size -= 0.25
+        }
+        return max(size, minimumFontSize)
     }
 }
 
@@ -108,8 +152,9 @@ public enum TerminalGeometry {
 /// phone that opened a terminal must not be visibly worse for the session than
 /// one that did not. The keyboard appearing, the device rotating, and the
 /// surface reporting the grid it settled on all reach the pty as nothing at
-/// all. Only a deliberate grid change — the Settings control, or a "fit to
-/// phone" action — emits, and that one is debounced.
+/// all. Only a deliberate grid change — the Settings control, or the
+/// terminal screen's "Fit to Screen" action — emits, and that one is
+/// debounced.
 @MainActor
 public final class TerminalGeometryCoordinator {
     /// The grid currently declared to the gateway.

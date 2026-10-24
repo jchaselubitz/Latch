@@ -51,9 +51,9 @@ refused and must be updated by their owner.
    tag.
 2. Configure the Apple signing and notarization secrets named in
    `.github/workflows/release-cli.yml`.
-3. The release workflow builds both macOS targets, signs and verifies all three
-   binaries, notarizes the archive, verifies its member manifest, publishes
-   checksums, and attaches provenance.
+3. The release workflow builds the Apple Silicon archive, signs and verifies
+   all three binaries, notarizes the archive, verifies its member manifest,
+   publishes checksums, and attaches provenance.
 
 For a local same-architecture archive:
 

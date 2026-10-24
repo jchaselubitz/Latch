@@ -22,9 +22,12 @@ struct TerminalView: View {
     @State private var terminal: TerminalSession?
     @State private var surface = SwiftTermSurface()
     @State private var coordinator: TerminalGeometryCoordinator?
-    /// The grid last sent to the pty, mirrored here so the surface is framed
-    /// at it. The coordinator owns the decision; this only observes it.
-    @State private var declaredGrid: TerminalGrid?
+    /// The grid of whatever the surface is showing: the captured pane's own
+    /// grid while a still is up, the grid last sent to the pty once attached.
+    /// The surface is framed at it, because bytes laid out for one grid and
+    /// drawn into another wrap into nonsense. The coordinator owns the
+    /// decision to resize; this only observes it.
+    @State private var surfaceGrid: TerminalGrid?
     @State private var viewport: CGSize = .zero
     @State private var pump: Task<Void, Never>?
     @State private var didOpen = false
@@ -176,6 +179,16 @@ struct TerminalView: View {
             }
             .disabled(isAttached)
             .accessibilityLabel("Refresh the still")
+            // Only while the live grid is not already as wide as the screen —
+            // after a rotation, or an attach under Match the Mac that pans.
+            // Columns only: the keyboard changes how many rows are visible,
+            // and that alone is not a reason to offer a resize.
+            if isAttached, surfaceGrid?.cols != fittedGrid.cols {
+                Button(action: fitToScreen) {
+                    Label("Fit to Screen", systemImage: "arrow.left.and.right.text.vertical")
+                }
+                .accessibilityHint("Resizes the session's terminal to fit this screen. The program in it redraws at the new width.")
+            }
             // The default presentation is a default, not a trap: a session
             // that could be a conversation can still be opened as one from
             // here, without changing the setting for every other session.
@@ -413,7 +426,11 @@ struct TerminalView: View {
     /// prompt and an agent's input box live.
     private var surfaceView: some View {
         let grid = displayedGrid
-        let fontSize = TerminalGeometry.fontSize(cols: grid.cols, viewportWidth: viewport.width)
+        let fontSize = TerminalGeometry.fontSize(
+            cols: grid.cols,
+            viewportWidth: viewport.width,
+            metrics: surface.cellMetrics
+        )
         return ScrollViewReader { reader in
             ScrollView([.horizontal, .vertical]) {
                 VStack(spacing: 0) {
@@ -440,13 +457,13 @@ struct TerminalView: View {
 
     private static let surfaceBottom = "surface-bottom"
 
-    /// The grid the surface is framed at. Once attached that is the grid the
-    /// pty was last told, not whatever `grid` would say for the current
-    /// viewport: under the readable preference `grid` follows the viewport,
-    /// and the keyboard must not change what the emulator lays out.
+    /// The grid the surface is framed at: the grid its content was laid out
+    /// for, not whatever `grid` would say for the current viewport. Under the
+    /// fit-to-screen preference `grid` follows the viewport, and neither the
+    /// keyboard nor a still captured at the Mac's width may change what the
+    /// emulator lays out. Before anything is painted there is only `grid`.
     private var displayedGrid: TerminalGrid {
-        if isAttached, let declaredGrid { return declaredGrid }
-        return grid
+        surfaceGrid ?? grid
     }
 
     private func still(over message: String, dimmed: Bool, showProgress: Bool) -> some View {
@@ -515,6 +532,9 @@ struct TerminalView: View {
     /// stray block parked wherever the content ended is the only visible
     /// artifact of a still.
     private func paint(_ value: SessionPreview) {
+        if value.cols > 0, value.rows > 0 {
+            surfaceGrid = TerminalGrid(cols: value.cols, rows: value.rows)
+        }
         surface.reset()
         var bytes = Data("\u{1B}[?25l".utf8)
         bytes.append(Data(value.content.utf8))
@@ -546,7 +566,7 @@ struct TerminalView: View {
         surface.reset()
         startPump(terminal)
         coordinator(for: terminal).establish(grid)
-        declaredGrid = grid
+        surfaceGrid = grid
         terminal.attach(cols: grid.cols, rows: grid.rows)
     }
 
@@ -587,14 +607,22 @@ struct TerminalView: View {
 
     // MARK: - Geometry
 
-    /// The grid this screen attaches at. Derived from the preference and the
-    /// preview, never from the keyboard or the orientation.
+    /// The grid this screen attaches at. Derived from the preference, the
+    /// preview, and — for the fit-to-screen default — the viewport at the
+    /// moment of attaching. Once attached, neither the keyboard nor the
+    /// orientation changes it.
     private var grid: TerminalGrid {
         TerminalGeometry.grid(
             for: model.terminalSize,
             preview: preview.value,
-            viewport: viewport
+            viewport: viewport,
+            metrics: surface.cellMetrics
         )
+    }
+
+    /// The grid that fits this screen as it is now, whatever the preference.
+    private var fittedGrid: TerminalGrid {
+        TerminalGeometry.readableGrid(viewport: viewport, metrics: surface.cellMetrics)
     }
 
     /// Whether this session could be shown as a conversation instead. It needs
@@ -617,7 +645,7 @@ struct TerminalView: View {
     private func coordinator(for terminal: TerminalSession) -> TerminalGeometryCoordinator {
         if let coordinator { return coordinator }
         let created = TerminalGeometryCoordinator { grid in
-            declaredGrid = grid
+            surfaceGrid = grid
             terminal.resize(cols: grid.cols, rows: grid.rows)
         }
         coordinator = created
@@ -636,6 +664,16 @@ struct TerminalView: View {
     private func requestGrid() {
         guard let terminal, isAttached else { return }
         coordinator(for: terminal).requestGrid(grid)
+    }
+
+    /// The deliberate "fit to phone" the geometry rule allows for: resizes the
+    /// pane to the grid that fits the screen as it stands, so a terminal that
+    /// pans — after a rotation, or attached under Match the Mac — can be
+    /// brought back inside the edges. Like the Settings control it reflows
+    /// the program once. It leaves the preference alone.
+    private func fitToScreen() {
+        guard let terminal, isAttached else { return }
+        coordinator(for: terminal).requestGrid(fittedGrid)
     }
 
     private static func message(for error: Error) -> String {
@@ -670,30 +708,45 @@ struct TerminalStillView: View {
     @State private var grid = TerminalGeometry.minimumGrid
 
     var body: some View {
-        SwiftTermSurfaceView(surface: surface, fontSize: 11, grid: grid)
-            // A still with nothing behind it: it must not raise a keyboard.
-            .allowsHitTesting(false)
-            .background(Color.black)
-            .overlay {
-                if let failure {
-                    Text(failure)
-                        .font(.footnote)
-                        .padding(12)
-                        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 10))
-                }
+        // Fitted to the width it is given and pinned to the leading edge. A
+        // grid wider than the smallest font can fit is clipped on the right
+        // rather than centred and clipped on both sides.
+        GeometryReader { proxy in
+            SwiftTermSurfaceView(
+                surface: surface,
+                fontSize: TerminalGeometry.fontSize(
+                    cols: grid.cols,
+                    viewportWidth: proxy.size.width,
+                    metrics: surface.cellMetrics
+                ),
+                grid: grid
+            )
+            .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topLeading)
+            .clipped()
+        }
+        // A still with nothing behind it: it must not raise a keyboard.
+        .allowsHitTesting(false)
+        .background(Color.black)
+        .overlay {
+            if let failure {
+                Text(failure)
+                    .font(.footnote)
+                    .padding(12)
+                    .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 10))
             }
-            .task {
-                do {
-                    let preview = try await model.previewSession(for: session)
-                    if preview.cols > 0, preview.rows > 0 {
-                        grid = TerminalGrid(cols: preview.cols, rows: preview.rows)
-                    }
-                    surface.reset()
-                    surface.feed(Data("\u{1B}[?25l".utf8) + Data(preview.content.utf8))
-                } catch {
-                    failure = "Could not read the screen."
+        }
+        .task {
+            do {
+                let preview = try await model.previewSession(for: session)
+                if preview.cols > 0, preview.rows > 0 {
+                    grid = TerminalGrid(cols: preview.cols, rows: preview.rows)
                 }
+                surface.reset()
+                surface.feed(Data("\u{1B}[?25l".utf8) + Data(preview.content.utf8))
+            } catch {
+                failure = "Could not read the screen."
             }
+        }
     }
 }
 

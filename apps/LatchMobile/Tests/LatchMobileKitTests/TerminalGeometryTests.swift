@@ -74,28 +74,50 @@ final class TerminalGeometryTests: XCTestCase {
     }
 
     /// Font size follows from the grid, not the other way round — and below
-    /// the readable floor it stops shrinking, because the surface pans instead.
-    func testFontSizeFollowsFromTheGridAndClampsAtTheReadableFloor() {
+    /// the floor it stops shrinking, because the surface pans instead.
+    func testFontSizeFollowsFromTheGridAndClampsAtTheFloor() {
         let roomy = TerminalGeometry.fontSize(cols: 40, viewportWidth: 390)
         XCTAssertGreaterThan(roomy, TerminalGeometry.readableFontSize)
         let cramped = TerminalGeometry.fontSize(cols: 200, viewportWidth: 390)
-        XCTAssertEqual(cramped, TerminalGeometry.readableFontSize)
+        XCTAssertEqual(cramped, TerminalGeometry.minimumFontSize)
+        XCTAssertFalse(TerminalGeometry.fitsWidth(TerminalGrid(cols: 200, rows: 50), viewportWidth: 390))
     }
 
-    /// The declared grid has to be laid out, not merely declared: a renderer
-    /// sizes itself to its bounds, so a surface dropped into the viewport
-    /// would render ~59 columns while the pty had been told 100.
-    func testTheDeclaredGridIsFramedLargerThanTheViewportSoTheSurfacePans() {
-        let viewport = CGSize(width: 390, height: 700)
-        let fontSize = TerminalGeometry.fontSize(cols: 100, viewportWidth: viewport.width)
-        let size = TerminalGeometry.pixelSize(cols: 100, rows: 30, fontSize: fontSize)
-        XCTAssertGreaterThan(size.width, viewport.width)
-        // Biased upward: rendering a spare column leaves it blank, rendering
-        // one too few would clip the pane.
-        XCTAssertGreaterThan(
-            size.width,
-            CGFloat(100) * fontSize * TerminalGeometry.advanceRatio
-        )
+    /// The bug this guards: the fit used a flat `0.6` advance while the real
+    /// face is `0.618` and pixel-snapped, so every fitted grid rendered a few
+    /// percent wider than the screen and its last columns ran off the right
+    /// edge. Every iPhone and iPad width, at both scales, in both orientations.
+    func testTheReadableFitPutsEveryColumnOnScreen() {
+        let widths: [CGFloat] = [375, 390, 393, 402, 430, 440, 667, 844, 852, 932, 744, 820, 834, 1024, 1180, 1366]
+        for scale: CGFloat in [2, 3] {
+            let metrics = TerminalCellMetrics.systemMonospaced(scale: scale)
+            for width in widths {
+                let viewport = CGSize(width: width, height: 700)
+                let grid = TerminalGeometry.readableGrid(viewport: viewport, metrics: metrics)
+                let fontSize = TerminalGeometry.fontSize(cols: grid.cols, viewportWidth: width, metrics: metrics)
+                let cell = metrics.cell(atFontSize: fontSize)
+                XCTAssertLessThanOrEqual(CGFloat(grid.cols) * cell.width, width, "\(width)pt @\(scale)x")
+                XCTAssertLessThanOrEqual(CGFloat(grid.rows) * cell.height, viewport.height, "\(width)pt @\(scale)x")
+                XCTAssertTrue(TerminalGeometry.fitsWidth(grid, viewportWidth: width, metrics: metrics))
+                // Fitting is not shrinking: the readable size is kept whenever
+                // the minimum grid did not force extra columns.
+                if grid.cols > TerminalGeometry.minimumGrid.cols {
+                    XCTAssertGreaterThanOrEqual(fontSize, TerminalGeometry.readableFontSize, "\(width)pt @\(scale)x")
+                }
+            }
+        }
+    }
+
+    /// A fixed or matched grid that fits at all fits exactly: the font is the
+    /// largest that keeps the last column on screen, not one estimated from a
+    /// ratio that leaves it clipped.
+    func testAGridThatCanFitIsSizedToTheEdgeAndNoFurther() {
+        let metrics = TerminalCellMetrics.systemMonospaced(scale: 3)
+        for (cols, width) in [(60, 393.0), (80, 844.0), (100, 852.0), (120, 820.0), (160, 1024.0)] as [(Int, CGFloat)] {
+            let size = TerminalGeometry.fontSize(cols: cols, viewportWidth: width, metrics: metrics)
+            XCTAssertLessThanOrEqual(CGFloat(cols) * metrics.cell(atFontSize: size).width, width)
+            XCTAssertGreaterThan(CGFloat(cols) * metrics.cell(atFontSize: size + 0.5).width, width)
+        }
     }
 
     // MARK: - When a resize is sent, which is almost never

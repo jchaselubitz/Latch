@@ -155,9 +155,10 @@ final class SessionRouteTests: XCTestCase {
         XCTAssertEqual(UserDefaultsSessionPresentationStore(defaults: defaults).load(), .terminal)
     }
 
-    func testTheTerminalSizeDefaultsToMatchingTheMac() {
+    func testTheTerminalSizeDefaultsToFittingTheScreen() {
         let store = MemoryTerminalSizeStore()
-        XCTAssertEqual(store.load(), .matchMac)
+        XCTAssertEqual(store.load(), .readable)
+        XCTAssertNil(TerminalSize.readable.fixedGrid)
         XCTAssertNil(TerminalSize.matchMac.fixedGrid)
         XCTAssertEqual(TerminalSize.fixed80x24.fixedGrid?.cols, 80)
         XCTAssertEqual(TerminalSize.fixed100x30.fixedGrid?.rows, 30)

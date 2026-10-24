@@ -25,33 +25,49 @@ struct SessionRow: View {
             }
 
             let headline = session.headline
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 3) {
                 Text(headline.primary)
                     .font(.body)
                     .lineLimit(2)
-                if let subtitle {
-                    subtitle
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+                // The status leads the line beneath the title rather than
+                // trailing beside it: there a long title squeezed the badge
+                // against the edge until it wrapped. Here the title has the
+                // full width, the badge keeps its shape, and the subtitle is
+                // what gives way.
+                if hasStatus || subtitle != nil {
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        status
+                            .fixedSize()
+                        if let subtitle {
+                            subtitle
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                    }
                 }
             }
-            .layoutPriority(1)
-
-            Spacer(minLength: 8)
-
-            if isStopping {
-                Text("Stopping…")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            } else if let activity = session.agentActivity {
-                AgentActivityBadge(activity: activity)
-            }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .accessibilityElement(children: .combine)
         .accessibilityValue(accessibilityState)
         .accessibilityHint(destinationLabel)
         .accessibilityAddTraits(isHighlighted || isCurrent ? [.isSelected] : [])
+    }
+
+    private var hasStatus: Bool {
+        isStopping || session.agentActivity != nil
+    }
+
+    @ViewBuilder
+    private var status: some View {
+        if isStopping {
+            Text("Stopping…")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        } else if let activity = session.agentActivity {
+            AgentActivityBadge(activity: activity)
+        }
     }
 
     /// The line under the description: handle, agent, then idle time, joined
@@ -111,7 +127,7 @@ struct AgentActivityBadge: View {
         switch activity {
         case .needsYou: .white
         case .working: .blue
-        case .done: .secondary
+        case .done: Self.doneGreen
         }
     }
 
@@ -119,7 +135,16 @@ struct AgentActivityBadge: View {
         switch activity {
         case .needsYou: .orange
         case .working: .blue.opacity(0.15)
-        case .done: Color.secondary.opacity(0.15)
+        case .done: .green.opacity(0.15)
         }
     }
+
+    /// System green is too light to read as caption text on its own tint in
+    /// light mode (about 2:1), so light mode takes the darker shade the
+    /// system uses at increased contrast. Dark mode reads fine as it is.
+    private static let doneGreen = Color(uiColor: UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? .systemGreen
+            : UIColor(red: 0.141, green: 0.541, blue: 0.239, alpha: 1)
+    })
 }
