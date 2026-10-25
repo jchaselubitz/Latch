@@ -1,5 +1,5 @@
 //! Generated from `schemas/remote-access/v2/*.schema.json`; do not edit by hand.
-//! Canonical schema set SHA-256: f13a91e2c96a0f440daacd3c011328bb64d4f1f2c42bb1105937ef120438d276
+//! Canonical schema set SHA-256: 9dd8707da286f9e25088b8895b680f697bef1cfb65cee42fe9136cb93485d760
 
 use serde::{Deserialize, Serialize};
 
@@ -679,6 +679,8 @@ pub struct GatewayFeatures {
     /// gateway serves that route; an older gateway omits the key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attachment_max_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_commit_message: Option<GitDraftReadiness>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -986,4 +988,117 @@ pub struct TerminalAttachedFrame {
     pub r#type: String,
     pub resume_capability: String,
     pub resume_window_seconds: u64,
+}
+
+// Cloud draft contracts; capability advertisement determines availability.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitDraftExpected {
+    pub branch: Option<String>,
+    pub head: Option<String>,
+    pub index: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitCommitMessageRequest {
+    pub request_id: String,
+    pub path: String,
+    pub expected: GitDraftExpected,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitDraftSource {
+    pub root: String,
+    pub branch: Option<String>,
+    pub head: Option<String>,
+    pub index: String,
+    pub captured_index: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GitDraftOmissionReason {
+    SensitivePath,
+    Credential,
+    Binary,
+    PatchLimit,
+    InvalidText,
+    Submodule,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitDraftOmission {
+    pub path: Option<String>,
+    pub reason: GitDraftOmissionReason,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitDraftCoverage {
+    pub total_files: u64,
+    pub included_files: u64,
+    pub patch_files: u64,
+    pub patch_bytes: u64,
+    pub omissions: Vec<GitDraftOmission>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitCommitMessageResponse {
+    pub request_id: String,
+    pub summary: String,
+    pub body: Option<String>,
+    pub source: GitDraftSource,
+    pub coverage: GitDraftCoverage,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GitDraftFailureCode {
+    Unsupported,
+    Unconfigured,
+    InvalidRequest,
+    Unauthorized,
+    NoStagedChanges,
+    StaleSource,
+    UnusableContext,
+    ContextTooLarge,
+    GitUnavailable,
+    ProviderRefusal,
+    ProviderError,
+    RateLimited,
+    TimedOut,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitCommitMessageFailure {
+    pub request_id: Option<String>,
+    pub code: GitDraftFailureCode,
+    pub message: String,
+    pub retry_after_seconds: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GitDraftReadinessState {
+    Unconfigured,
+    Ready,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitDraftReadiness {
+    pub state: GitDraftReadinessState,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitCommitMessageCancelRequest {
+    pub request_id: String,
 }

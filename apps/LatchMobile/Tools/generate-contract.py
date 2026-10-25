@@ -33,6 +33,7 @@ NAMES = (
     "git-mutation-receipt.schema.json",
     "git-sync.schema.json",
     "git-push.schema.json",
+    "git-commit-message.schema.json",
 )
 SOURCES = {
     f"schemas/remote-access/v2/{name}":
@@ -172,6 +173,7 @@ public struct GatewayEndpoints: Codable, Equatable, Sendable {
     public var gitPushPreview: Bool
     public var gitPush: Bool
     public var gitPushReconcile: Bool
+    public var gitCommitMessage: Bool
 
     public init(
         sessions: Bool = false,
@@ -205,7 +207,8 @@ public struct GatewayEndpoints: Codable, Equatable, Sendable {
         gitStageResolved: Bool = false,
         gitPushPreview: Bool = false,
         gitPush: Bool = false,
-        gitPushReconcile: Bool = false
+        gitPushReconcile: Bool = false,
+        gitCommitMessage: Bool = false
     ) {
         self.sessions = sessions
         self.preview = preview
@@ -239,6 +242,7 @@ public struct GatewayEndpoints: Codable, Equatable, Sendable {
         self.gitPushPreview = gitPushPreview
         self.gitPush = gitPush
         self.gitPushReconcile = gitPushReconcile
+        self.gitCommitMessage = gitCommitMessage
     }
 
     // Hand-written so an older Mac, whose document has no `preview` key at
@@ -279,6 +283,7 @@ public struct GatewayEndpoints: Codable, Equatable, Sendable {
         gitPushPreview = try container.decodeIfPresent(Bool.self, forKey: .gitPushPreview) ?? false
         gitPush = try container.decodeIfPresent(Bool.self, forKey: .gitPush) ?? false
         gitPushReconcile = try container.decodeIfPresent(Bool.self, forKey: .gitPushReconcile) ?? false
+        gitCommitMessage = try container.decodeIfPresent(Bool.self, forKey: .gitCommitMessage) ?? false
     }
 }
 
@@ -315,6 +320,7 @@ public enum GatewayEndpointsName: String, CaseIterable, Sendable {
     case gitPushPreview
     case gitPush
     case gitPushReconcile
+    case gitCommitMessage
 }
 
 public extension GatewayEndpoints {
@@ -352,6 +358,7 @@ public extension GatewayEndpoints {
         case .gitPushPreview: return gitPushPreview
         case .gitPush: return gitPush
         case .gitPushReconcile: return gitPushReconcile
+        case .gitCommitMessage: return gitCommitMessage
         }
     }
 }
@@ -1520,19 +1527,22 @@ public struct GatewayFeatures: Codable, Equatable, Sendable {
     /// Largest body the attachments route accepts, in bytes. `nil` on a Mac
     /// that does not serve the route.
     public var attachmentMaxBytes: Int?
+    public var gitCommitMessage: GitDraftReadiness?
 
     public init(
         exclusiveTerminal: Bool = false,
         sessionAgents: [SessionAgent] = [],
-        attachmentMaxBytes: Int? = nil
+        attachmentMaxBytes: Int? = nil,
+        gitCommitMessage: GitDraftReadiness? = nil
     ) {
         self.exclusiveTerminal = exclusiveTerminal
         self.sessionAgents = sessionAgents
         self.attachmentMaxBytes = attachmentMaxBytes
+        self.gitCommitMessage = gitCommitMessage
     }
 
     private enum CodingKeys: String, CodingKey {
-        case exclusiveTerminal, sessionAgents, attachmentMaxBytes
+        case exclusiveTerminal, sessionAgents, attachmentMaxBytes, gitCommitMessage
     }
 
     public init(from decoder: Decoder) throws {
@@ -1541,6 +1551,7 @@ public struct GatewayFeatures: Codable, Equatable, Sendable {
         let names = try container.decodeIfPresent([String].self, forKey: .sessionAgents) ?? []
         sessionAgents = names.compactMap(SessionAgent.init(rawValue:))
         attachmentMaxBytes = try? container.decodeIfPresent(Int.self, forKey: .attachmentMaxBytes)
+        gitCommitMessage = try? container.decodeIfPresent(GitDraftReadiness.self, forKey: .gitCommitMessage)
     }
 }
 
@@ -1937,6 +1948,49 @@ public enum ConversationClientMessage: Encodable, Equatable, Sendable {
 '''
 
 
+
+def draft_types(root) -> str:
+    definitions = load(root, "schemas/remote-access/v2/git-commit-message.schema.json")["$defs"]
+    def kind(node: dict) -> str:
+        if "$ref" in node:
+            return node["$ref"].split("/")[-1]
+        if isinstance(node.get("type"), list):
+            return kind({**node, "type": next(t for t in node["type"] if t != "null")}) + "?"
+        if node["type"] == "array":
+            return "[" + kind(node["items"]) + "]"
+        return {"string": "String", "integer": "UInt64"}[node["type"]]
+    out = "\n// Cloud draft contracts; capability advertisement determines availability.\n"
+    for name, node in definitions.items():
+        if "enum" in node:
+            out += f"public enum {name}: String, Codable, Sendable {{\n"
+            for value in node["enum"]:
+                parts = value.split("_")
+                case = parts[0] + "".join(v.title() for v in parts[1:])
+                out += f'    case {case} = "{value}"\n'
+            out += "}\n\n"
+        else:
+            out += f"public struct {name}: Codable, Equatable, Sendable {{\n"
+            out += "".join(f"    public var {k}: {kind(v)}\n" for k, v in node["properties"].items())
+            out += "\n    public init(" + ", ".join(f"{k}: {kind(v)}" for k, v in node["properties"].items()) + ") {\n"
+            out += "".join(f"        self.{k} = {k}\n" for k in node["properties"])
+            out += "    }\n"
+            # Codable synthesis omits nil optionals. Required nullable fields
+            # (notably branch/HEAD on unborn or detached sources) must instead
+            # encode explicit null, as the canonical JSON schema requires.
+            required = set(node.get("required", []))
+            if any(k in required and kind(v).endswith("?") for k, v in node["properties"].items()):
+                out += "\n    private enum CodingKeys: String, CodingKey {\n        case "
+                out += ", ".join(node["properties"]) + "\n    }\n"
+                out += "\n    public func encode(to encoder: Encoder) throws {\n"
+                out += "        var container = encoder.container(keyedBy: CodingKeys.self)\n"
+                for k in node["properties"]:
+                    method = "encode" if k in required else "encodeIfPresent"
+                    out += f"        try container.{method}({k}, forKey: .{k})\n"
+                out += "    }\n"
+            out += "}\n\n"
+    return out
+
+
 def outputs(root: Path) -> dict[Path, str]:
     files: dict[Path, str] = {}
     entries = []
@@ -1947,7 +2001,7 @@ def outputs(root: Path) -> dict[Path, str]:
         files[VENDORED / Path(relative).name] = text
         schema_texts.append(text)
         entries.append({"source": relative, "sha256": digest(text)})
-    source = swift_source(digest("".join(schema_texts)))
+    source = swift_source(digest("".join(schema_texts))) + draft_types(root)
     files[SWIFT] = source
     files[MANIFEST] = json.dumps({
         "protocolVersion": 2,

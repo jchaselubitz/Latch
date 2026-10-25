@@ -55,6 +55,16 @@ pub(super) async fn require_token(
     let expected = load_token(&state.token_file).unwrap_or_default();
     let presented = presented_token(request.headers()).unwrap_or_default();
     if !token_matches(&expected, &presented) {
+        if request.uri().path() == "/v2/git/commit-message"
+            || request.uri().path() == "/v2/git/commit-message/cancel"
+        {
+            let mut response = super::commit_message::failure(
+                None,
+                super::super::contract::GitDraftFailureCode::Unauthorized,
+            );
+            *response.status_mut() = StatusCode::UNAUTHORIZED;
+            return Ok(response);
+        }
         return Err(ApiError::new(StatusCode::UNAUTHORIZED, "invalid token"));
     }
 
@@ -112,6 +122,12 @@ pub(super) async fn require_token(
     let (_, required) = route_for(method, target)
         .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "route not found"))?;
     if !grant.permits(required) {
+        if target.starts_with("/v2/git/commit-message") {
+            return Ok(super::commit_message::failure(
+                None,
+                super::super::contract::GitDraftFailureCode::Unauthorized,
+            ));
+        }
         return Err(ApiError::new(
             StatusCode::FORBIDDEN,
             "device grant does not permit this route",

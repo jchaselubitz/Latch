@@ -13,6 +13,7 @@
 
 mod branches;
 mod command;
+pub(crate) mod commit_message;
 mod commit_review;
 mod diff;
 mod integrate;

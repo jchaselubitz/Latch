@@ -201,11 +201,19 @@ struct CommitSheet: View {
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
-    @State private var summary = ""
-    @State private var details = ""
+    @State private var draft: GitCommitDraftModel
+    @AppStorage("git.commitDraft.googleDisclosureAccepted") private var disclosureAccepted = false
+    @State private var showingDisclosure = false
     @State private var sent = false
     @FocusState private var summaryFocused: Bool
 
+    init(repository: GitRepositoryModel) {
+        self.repository = repository
+        _draft = State(initialValue: repository.commitDraftModel())
+    }
+
+    private var summary: String { draft.summary }
+    private var details: String { draft.details }
     private var status: GitStatus? { repository.status }
     private var staged: [GitStatusEntry] { repository.stagedEntries }
     private var trimmedSummary: String { GitCommitMessage.summary(summary) }
@@ -222,7 +230,7 @@ struct CommitSheet: View {
                     .plainRow()
                 }
                 Section {
-                    TextField("Summary", text: $summary, axis: .vertical)
+                    TextField("Summary", text: Binding(get: { draft.summary }, set: { draft.editSummary($0) }), axis: .vertical)
                         .lineLimit(1...3)
                         .focused($summaryFocused)
                         .submitLabel(.next)
@@ -230,11 +238,11 @@ struct CommitSheet: View {
                         .onChange(of: summary) { _, value in
                             // One line: Return moves on instead of breaking it.
                             if value.contains("\n") {
-                                summary = value.replacingOccurrences(of: "\n", with: "")
+                                draft.editSummary(value.replacingOccurrences(of: "\n", with: ""))
                                 summaryFocused = false
                             }
                         }
-                    TextField("Description (optional)", text: $details, axis: .vertical)
+                    TextField("Description (optional)", text: Binding(get: { draft.details }, set: { draft.editDetails($0) }), axis: .vertical)
                         .lineLimit(3...8)
                         .accessibilityIdentifier("commit.description")
                 } header: {
@@ -246,6 +254,7 @@ struct CommitSheet: View {
                          : "\(count) of \(GitCommitMessage.summaryGuide)")
                         .foregroundStyle(count > GitCommitMessage.summaryGuide ? .orange : .secondary)
                 }
+                draftSection
                 Section {
                     ForEach(staged) { entry in
                         HStack(spacing: 10) {
@@ -284,19 +293,82 @@ struct CommitSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
+                    Button("Cancel") {
+                        draft.dismiss()
+                        dismiss()
+                    }
                 }
             }
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 if !dynamicTypeSize.isAccessibilitySize { actionBar }
             }
             .onAppear { summaryFocused = !dynamicTypeSize.isAccessibilitySize }
+            .onDisappear { draft.dismiss() }
+            .onChange(of: draft.identity) { _, _ in draft.sourceDidChange() }
+            .onChange(of: ObjectIdentifier(repository)) { _, _ in
+                draft.dismiss()
+                draft = repository.commitDraftModel()
+            }
+            .alert("Send staged changes to Google?", isPresented: $showingDisclosure) {
+                Button("Cancel", role: .cancel) {}
+                Button("Send and Generate") {
+                    disclosureAccepted = true
+                    draft.startGeneration()
+                }
+            } message: {
+                Text("Your Mac sends selected staged source changes to Google Gemini to draft a message. Context is filtered and bounded, so some changes may be omitted. The Gemini key stays on your Mac. Review the editable result before committing.")
+            }
             .onChange(of: repository.mutations.phase) { _, phase in
                 // Done: the repository shows the toast and the new state.
                 if sent, case .completed(let action, _) = phase, action.kind == .commit {
                     dismiss()
                 }
             }
+        }
+    }
+
+    private var draftSection: some View {
+        Section {
+            if draft.isGenerating {
+                HStack {
+                    ProgressView().accessibilityLabel("Generating commit message")
+                    Text("Generating from staged changes…")
+                }
+                Button("Cancel Generation", role: .cancel) { draft.cancelGeneration() }
+                    .accessibilityIdentifier("commit.cancelGeneration")
+            } else {
+                Button {
+                    if disclosureAccepted { draft.startGeneration() }
+                    else { showingDisclosure = true }
+                } label: {
+                    Label(draft.result == nil ? "Generate Message" : "Regenerate Message", systemImage: "sparkles")
+                }
+                .disabled(!draft.canGenerate)
+                .accessibilityHint("Sends selected staged source changes from your Mac to Google Gemini.")
+                .accessibilityIdentifier("commit.generate")
+            }
+            if let note = draft.availabilityNote {
+                Text(note).font(.footnote).foregroundStyle(.secondary)
+            }
+            if let notice = draft.notice {
+                Text(notice).font(.footnote)
+                    .accessibilityIdentifier("commit.draftNotice")
+            }
+            if let coverage = draft.coverageNote {
+                Label(coverage, systemImage: "exclamationmark.triangle")
+                    .font(.footnote).foregroundStyle(.orange)
+            }
+            if draft.requiresReview {
+                Text("This draft describes an earlier branch, HEAD or staged index. Review all current staged files and the message, or regenerate before committing.")
+                    .font(.footnote).foregroundStyle(.orange)
+                Button("I Reviewed the Message and Staged Files") { draft.acknowledgeManualReview() }
+                    .disabled(!repository.canCommit || draft.isGenerating)
+                    .accessibilityIdentifier("commit.reviewDraft")
+            }
+        } header: {
+            Text("AI Draft")
+        } footer: {
+            Text("Generate sends selected staged changes to Google. Review for accuracy; generation does not commit or push.")
         }
     }
 
@@ -322,7 +394,10 @@ struct CommitSheet: View {
             }
             Button {
                 sent = true
-                Task { await repository.commit(summary: summary, description: details) }
+                Task {
+                    guard draft.canCommitMessage else { return }
+                    await repository.commit(summary: summary, description: details)
+                }
             } label: {
                 HStack {
                     if repository.mutations.phase.isWorking { ProgressView() }
@@ -334,7 +409,7 @@ struct CommitSheet: View {
                 .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
-            .disabled(!repository.canCommit || trimmedSummary.isEmpty)
+            .disabled(!repository.canCommit || trimmedSummary.isEmpty || !draft.canCommitMessage)
             .accessibilityIdentifier("commit.button")
             Text("Creates a commit on your Mac. Nothing is pushed.")
                 .font(.caption2)

@@ -406,6 +406,7 @@ struct SettingsView: View {
         case .gitStage: return "Staging"
         case .gitUnstage: return "Unstaging"
         case .gitCommit: return "Commits"
+        case .gitCommitMessage: return "AI commit-message drafts"
         case .gitCreateBranch: return "Branch creation"
         case .gitSwitchBranch: return "Branch switching"
         case .gitReceipts: return "Change receipts"

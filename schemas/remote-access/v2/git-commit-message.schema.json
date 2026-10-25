@@ -1,0 +1,304 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://latch.cooperativ.dev/schemas/remote-access/v2/git-commit-message.schema.json",
+  "title": "LatchGitCommitMessageV2",
+  "description": "Control-authorized explicit cloud drafting. Absent/false capability means manual commits; readiness describes local configuration only.",
+  "$defs": {
+    "GitDraftExpected": {
+      "type": "object",
+      "required": [
+        "branch",
+        "head",
+        "index"
+      ],
+      "properties": {
+        "branch": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "head": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{40,64}$"
+        },
+        "index": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "additionalProperties": false,
+      "description": "Copy branch, head and index from reviewed status. Worktree edits are deliberately irrelevant."
+    },
+    "GitCommitMessageRequest": {
+      "type": "object",
+      "required": [
+        "requestId",
+        "path",
+        "expected"
+      ],
+      "properties": {
+        "requestId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "path": {
+          "type": "string",
+          "pattern": "^/",
+          "maxLength": 4096
+        },
+        "expected": {
+          "$ref": "#/$defs/GitDraftExpected"
+        }
+      },
+      "additionalProperties": false,
+      "description": "POST /v2/git/commit-message, Control grant. Explicit user action after cloud disclosure. Correlation only, no durable receipt or automatic retries."
+    },
+    "GitDraftSource": {
+      "type": "object",
+      "required": [
+        "root",
+        "branch",
+        "head",
+        "index",
+        "capturedIndex"
+      ],
+      "properties": {
+        "root": {
+          "type": "string"
+        },
+        "branch": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "head": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "index": {
+          "type": "string"
+        },
+        "capturedIndex": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "description": "Local-only source identity: canonical worktree root, reviewed branch/HEAD/index and SHA-256 of captured index bytes. Never send root or branch to the provider. Recheck before and after generation; never rebind a returned draft to newer status."
+    },
+    "GitDraftOmissionReason": {
+      "type": "string",
+      "enum": [
+        "sensitive_path",
+        "credential",
+        "binary",
+        "patch_limit",
+        "invalid_text",
+        "submodule"
+      ]
+    },
+    "GitDraftOmission": {
+      "type": "object",
+      "required": [
+        "path",
+        "reason"
+      ],
+      "properties": {
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason": {
+          "$ref": "#/$defs/GitDraftOmissionReason"
+        }
+      },
+      "additionalProperties": false,
+      "description": "Sensitive path/credential omissions use null path, including in cloud context."
+    },
+    "GitDraftCoverage": {
+      "type": "object",
+      "required": [
+        "totalFiles",
+        "includedFiles",
+        "patchFiles",
+        "patchBytes",
+        "omissions"
+      ],
+      "properties": {
+        "totalFiles": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "includedFiles": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "patchFiles": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "patchBytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "omissions": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "$ref": "#/$defs/GitDraftOmission"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "description": "Manifest includes all safe metadata or capture is refused. Multiple omission reasons per file are allowed. Counts describe unique files; patchBytes is UTF-8 bytes."
+    },
+    "GitCommitMessageResponse": {
+      "type": "object",
+      "required": [
+        "requestId",
+        "summary",
+        "body",
+        "source",
+        "coverage"
+      ],
+      "properties": {
+        "requestId": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 72,
+          "pattern": "^[^\\r\\n]+$"
+        },
+        "body": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 2000
+        },
+        "source": {
+          "$ref": "#/$defs/GitDraftSource"
+        },
+        "coverage": {
+          "$ref": "#/$defs/GitDraftCoverage"
+        }
+      },
+      "additionalProperties": false,
+      "description": "Editable draft only; no staging, commit, hooks or persistent source/prompt. Summary is imperative and <=72 characters; optional short body."
+    },
+    "GitDraftFailureCode": {
+      "type": "string",
+      "enum": [
+        "unsupported",
+        "unconfigured",
+        "invalid_request",
+        "unauthorized",
+        "no_staged_changes",
+        "stale_source",
+        "unusable_context",
+        "context_too_large",
+        "git_unavailable",
+        "provider_refusal",
+        "provider_error",
+        "rate_limited",
+        "timed_out",
+        "cancelled"
+      ]
+    },
+    "GitCommitMessageFailure": {
+      "type": "object",
+      "required": [
+        "requestId",
+        "code",
+        "message",
+        "retryAfterSeconds"
+      ],
+      "properties": {
+        "requestId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "code": {
+          "$ref": "#/$defs/GitDraftFailureCode"
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 512
+        },
+        "retryAfterSeconds": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "description": "Typed failure, with sanitized fixed message; no raw Git/provider errors or credentials."
+    },
+    "GitDraftReadinessState": {
+      "type": "string",
+      "enum": [
+        "unconfigured",
+        "ready",
+        "unavailable"
+      ]
+    },
+    "GitDraftReadiness": {
+      "type": "object",
+      "required": [
+        "state"
+      ],
+      "properties": {
+        "state": {
+          "$ref": "#/$defs/GitDraftReadinessState"
+        }
+      },
+      "additionalProperties": false,
+      "description": "features.gitCommitMessage readiness, present only when endpoints.gitCommitMessage is true. Ready means local configuration accessible, not verified provider/model availability; unconfigured means no credential, unavailable means local configuration cannot be used. No credential details. Default model gemini-3.5-flash-lite, configured independently on Mac."
+    },
+    "GitCommitMessageCancelRequest": {
+      "type": "object",
+      "required": [
+        "requestId"
+      ],
+      "properties": {
+        "requestId": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "additionalProperties": false,
+      "description": "POST /v2/git/commit-message/cancel, Control grant; cancels only this device request. Returns 204 even if already finished or unknown. Cancel before discarding a pending draft."
+    }
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/GitCommitMessageRequest"
+    },
+    {
+      "$ref": "#/$defs/GitCommitMessageResponse"
+    },
+    {
+      "$ref": "#/$defs/GitCommitMessageFailure"
+    },
+    {
+      "$ref": "#/$defs/GitDraftReadiness"
+    },
+    {
+      "$ref": "#/$defs/GitCommitMessageCancelRequest"
+    }
+  ]
+}

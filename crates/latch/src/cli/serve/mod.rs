@@ -114,3 +114,5 @@ fn refuse_non_loopback(options: &ServeOptions) -> anyhow::Result<()> {
         options.bind
     );
 }
+
+pub(crate) mod commit_message_provider;

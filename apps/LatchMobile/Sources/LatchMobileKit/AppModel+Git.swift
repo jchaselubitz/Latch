@@ -102,6 +102,21 @@ extension AppModel {
             checkRemote: { [weak self] requestID in
                 guard let self else { throw GitAccessError.unavailable }
                 return try await self.currentGitGateway(macID: macID).gitPushReconcile(requestId: requestID)
+            },
+            draftSupported: { [weak self] in
+                self?.pairedDevice?.mac.deviceId == macID
+                    && self?.linkState.cachedCapabilities?.endpoints.gitCommitMessage == true
+            },
+            draftReadiness: { [weak self] in
+                self?.linkState.cachedCapabilities?.features.gitCommitMessage?.state
+            },
+            generateDraft: { [weak self] request in
+                guard let self else { throw GitAccessError.unavailable }
+                return try await self.currentGitGateway(macID: macID).gitCommitMessage(request)
+            },
+            cancelDraft: { [weak self] requestID in
+                guard let self else { return }
+                try? await self.currentGitGateway(macID: macID).cancelGitCommitMessage(requestID: requestID)
             }
         )
         await model.refresh()

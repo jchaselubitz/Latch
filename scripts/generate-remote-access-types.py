@@ -38,6 +38,7 @@ SCHEMA_NAMES = (
     "git-mutation-receipt.schema.json",
     "git-sync.schema.json",
     "git-push.schema.json",
+    "git-commit-message.schema.json",
 )
 
 
@@ -737,6 +738,8 @@ pub struct GatewayFeatures {
     /// gateway serves that route; an older gateway omits the key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attachment_max_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_commit_message: Option<GitDraftReadiness>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1052,6 +1055,7 @@ export type GatewayFeatures = {
   exclusiveTerminal: boolean;
   sessionAgents?: SessionAgent[];
   attachmentMaxBytes?: number;
+  gitCommitMessage?: GitDraftReadiness;
 };
 /** Git routes (all at the control grant), served when the matching
  * `endpoints.git*` key is true. Paths are display text; `pathKey` is the
@@ -1386,14 +1390,50 @@ def typescript_conversation() -> str:
     return "\nexport type ConversationItem = " + render(item, item) + ";\n" + "export type ConversationState = " + render(state, state) + ";\n" + "export type ConversationServerMessage =\n  | " + frames(True) + ";\n" + "export type ConversationClientMessage =\n  | " + frames(False) + ";\n"
 
 
+
+def draft_types(language: str) -> str:
+    """New draft types are derived directly from the additive canonical schema."""
+    import re
+    definitions = load("git-commit-message.schema.json")["$defs"]
+    def snake(name: str) -> str:
+        return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
+    def kind(node: dict) -> str:
+        if "$ref" in node:
+            return node["$ref"].split("/")[-1]
+        if isinstance(node.get("type"), list):
+            inner = kind({**node, "type": next(t for t in node["type"] if t != "null")})
+            return f"Option<{inner}>" if language == "rust" else inner + " | null"
+        if node["type"] == "array":
+            inner = kind(node["items"])
+            return f"Vec<{inner}>" if language == "rust" else f"Array<{inner}>"
+        return ({"string": "String", "integer": "u64"} if language == "rust" else {"string": "string", "integer": "number"})[node["type"]]
+    out = "\n// Cloud draft contracts; capability advertisement determines availability.\n"
+    for name, node in definitions.items():
+        if language == "rust":
+            out += '#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]\n'
+            if "enum" in node:
+                out += '#[serde(rename_all = "snake_case")]\n' + f"pub enum {name} {{\n"
+                out += "".join("    " + "".join(p.title() for p in v.split("_")) + ",\n" for v in node["enum"])
+            else:
+                out += '#[serde(rename_all = "camelCase", deny_unknown_fields)]\n' + f"pub struct {name} {{\n"
+                out += "".join(f"    pub {snake(k)}: {kind(v)},\n" for k, v in node["properties"].items())
+            out += "}\n\n"
+        else:
+            if "enum" in node:
+                out += f"export type {name} = " + " | ".join(json.dumps(v) for v in node["enum"]) + ";\n"
+            else:
+                out += f"export type {name} = {{\n" + "".join(f"  {k}: {kind(v)};\n" for k, v in node["properties"].items()) + "};\n"
+    return out.rstrip() + "\n"
+
+
 def main() -> None:
     documents = {name: load(name) for name in SCHEMA_NAMES}
     schema_digest = contract_digest()
     outputs = {
-        RUST: rust_source(schema_digest),
+        RUST: rust_source(schema_digest) + draft_types("rust"),
         TYPESCRIPT: typescript_source(
             schema_digest, documents["gateway-capabilities.schema.json"]
-        ),
+        ) + draft_types("typescript"),
     }
     if sys.argv[1:] == ["--check"]:
         stale = [path for path, source in outputs.items() if not path.is_file() or path.read_text() != source]

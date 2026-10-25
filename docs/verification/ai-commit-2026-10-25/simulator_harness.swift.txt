@@ -1,0 +1,58 @@
+// Reproduction only; never compile into the shipped app.
+// In a PRIVATE COPY of App, replace RootView with AIVerificationView and bypass pairing.
+// In that copy, let CommitSheet accept verificationDraft: GitCommitDraftModel? = nil
+// and initialize State from verificationDraft ?? repository.commitDraftModel().
+// Update the copied Xcode project local-package path to the real mobile package.
+// Use bundle id dev.cooperativ.latch.ai-verification.
+#if DEBUG && targetEnvironment(simulator)
+@MainActor struct AIVerificationView: View {
+    @State private var repository: GitRepositoryModel?
+    @State private var draft: GitCommitDraftModel?
+    private let screen = ProcessInfo.processInfo.environment["LATCH_AI_SCREEN"] ?? "ready"
+    var body: some View {
+        Group {
+            if let repository, let draft { CommitSheet(repository: repository, verificationDraft: draft) }
+            else { ProgressView("Preparing disposable UI fixture") }
+        }.task {
+            do {
+                var status = try JSONDecoder().decode(GitStatus.self, from: Data(Self.status.utf8))
+                let repository = GitRepositoryModel(
+                    folder: "/disposable/repo", read: { _ in status },
+                    readDiff: { _, _, _, _ in throw GitAccessError.unavailable },
+                    support: GitMutationSupport(commit: true),
+                    mutate: { _ in throw GitAccessError.unavailable },
+                    lookupReceipt: { _ in throw GitAccessError.unavailable }
+                )
+                await repository.refresh()
+                let draft = GitCommitDraftModel(repository: repository,
+                    supported: { screen != "older" }, readiness: { screen == "unconfigured" ? .unconfigured : .ready },
+                    generate: { request in
+                        try await Task.sleep(for: .seconds(screen == "loading" ? 60 : 1))
+                        return GitCommitMessageResponse(requestId: request.requestId,
+                            summary: "Keep picker selection visible", body: "- Preserve selection when refreshing the list",
+                            source: GitDraftSource(root: request.path, branch: request.expected.branch, head: request.expected.head,
+                                index: request.expected.index, capturedIndex: "fixture"),
+                            coverage: GitDraftCoverage(totalFiles: 2, includedFiles: 1, patchFiles: 1, patchBytes: 90,
+                                omissions: [GitDraftOmission(path: nil, reason: .sensitivePath)]))
+                    }, cancel: { _ in })
+                if screen == "generated" || screen == "stale" || screen == "loading" {
+                    draft.startGeneration()
+                    if screen != "loading" {
+                        while draft.isGenerating { try await Task.sleep(for: .milliseconds(10)) }
+                    }
+                    if screen == "stale" {
+                        status.preconditions?.index = "changed-index"
+                        await repository.refresh()
+                        draft.sourceDidChange()
+                    }
+                }
+                self.repository = repository
+                self.draft = draft
+            } catch { print("UI fixture preparation failed") }
+        }
+    }
+    static let status = #"{"root":"/disposable/repo","name":"repo","kind":"repository","head":{"branch":"main","oid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","detached":false},"upstream":null,"lastFetchedAt":null,"operation":null,"entries":[{"path":"App/Picker.swift","pathKey":"61","origPath":null,"origPathKey":null,"area":"staged","change":"modified","conflict":null,"submodule":false,"additions":3,"deletions":1,"binary":false,"fingerprint":"1111111111111111"}],"entriesTruncated":false,"totalEntries":1,"sessions":[],"observedAt":"2026-10-25T12:00:00Z","preconditions":{"branch":"main","head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","index":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","worktree":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}}"#
+}
+#else
+typealias AIVerificationView = RootView
+#endif

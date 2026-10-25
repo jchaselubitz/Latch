@@ -8,6 +8,7 @@
 
 pub mod agent_models;
 pub mod attach;
+pub mod commit_message;
 pub mod create;
 pub mod json;
 pub mod manage;

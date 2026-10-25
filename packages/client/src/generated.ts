@@ -1,5 +1,5 @@
 // Generated from schemas/remote-access/v2/*.schema.json; do not edit by hand.
-// Canonical schema set SHA-256: f13a91e2c96a0f440daacd3c011328bb64d4f1f2c42bb1105937ef120438d276
+// Canonical schema set SHA-256: 9dd8707da286f9e25088b8895b680f697bef1cfb65cee42fe9136cb93485d760
 
 
 export type TerminalCloseReason =
@@ -39,6 +39,7 @@ export type GatewayFeatures = {
   exclusiveTerminal: boolean;
   sessionAgents?: SessionAgent[];
   attachmentMaxBytes?: number;
+  gitCommitMessage?: GitDraftReadiness;
 };
 /** Git routes (all at the control grant), served when the matching
  * `endpoints.git*` key is true. Paths are display text; `pathKey` is the
@@ -353,8 +354,9 @@ export type GatewayEndpoints = {
   gitPushPreview?: boolean;
   gitPush?: boolean;
   gitPushReconcile?: boolean;
+  gitCommitMessage?: boolean;
 };
-export type GatewayEndpointName = 'sessions' | 'preview' | 'terminal' | 'conversation' | 'browseDirectories' | 'createSession' | 'stopSession' | 'attachments' | 'agentModels' | 'notificationKey' | 'gitRepositories' | 'gitResolve' | 'gitStatus' | 'gitDiff' | 'gitBranches' | 'gitStage' | 'gitUnstage' | 'gitCommit' | 'gitCreateBranch' | 'gitSwitchBranch' | 'gitReceipts' | 'gitSync' | 'gitFetch' | 'gitFastForward' | 'gitMerge' | 'gitRebase' | 'gitContinue' | 'gitAbort' | 'gitStageResolved' | 'gitPushPreview' | 'gitPush' | 'gitPushReconcile';
+export type GatewayEndpointName = 'sessions' | 'preview' | 'terminal' | 'conversation' | 'browseDirectories' | 'createSession' | 'stopSession' | 'attachments' | 'agentModels' | 'notificationKey' | 'gitRepositories' | 'gitResolve' | 'gitStatus' | 'gitDiff' | 'gitBranches' | 'gitStage' | 'gitUnstage' | 'gitCommit' | 'gitCreateBranch' | 'gitSwitchBranch' | 'gitReceipts' | 'gitSync' | 'gitFetch' | 'gitFastForward' | 'gitMerge' | 'gitRebase' | 'gitContinue' | 'gitAbort' | 'gitStageResolved' | 'gitPushPreview' | 'gitPush' | 'gitPushReconcile' | 'gitCommitMessage';
 
 export type ConversationItem = { id: string; ordinal: number; createdAt: string; kind: { type: "message"; role: "user" | "assistant"; text: string; status: "submitted" | "queued" | "observed" | "partial" | "complete" | "failed"; } | { type: "tool"; name: string; summary: string; status: "running" | "succeeded" | "failed"; parentMessageId?: string | null; } | { type: "request"; requestId: string; requestType: "permission" | "question"; prompt: string; choices: Array<string>; questions?: Array<{ question: string; header?: string; multiSelect: boolean; options: Array<{ label: string; description: string; }>; }>; status: "pending" | "resolved" | "dismissed"; }; };
 export type ConversationState = { phase: "starting" | "idle" | "working" | "awaiting_input" | "exited" | "unavailable"; sendMessage: { enabled: boolean; reason?: string | null; }; resolveRequest: { enabled: boolean; reason?: string | null; }; cancelTurn?: { enabled: boolean; reason?: string | null; }; turnOutcome?: "answer" | "aborted" | "refusal" | "error" | null; commands?: Array<{ name: string; description: string; source?: string; }>; pendingRequest: string | null; connector: null | { id: string; version: string; }; };
@@ -373,3 +375,55 @@ export type ConversationClientMessage =
   | { type: "cancel_turn"; operationEpoch: string; operationId: string; }
   | { type: "operation_status"; operationId: string; }
   | { type: "history_request"; requestId: string; beforeOrdinal: number; limit: number; };
+
+// Cloud draft contracts; capability advertisement determines availability.
+export type GitDraftExpected = {
+  branch: string | null;
+  head: string | null;
+  index: string;
+};
+export type GitCommitMessageRequest = {
+  requestId: string;
+  path: string;
+  expected: GitDraftExpected;
+};
+export type GitDraftSource = {
+  root: string;
+  branch: string | null;
+  head: string | null;
+  index: string;
+  capturedIndex: string;
+};
+export type GitDraftOmissionReason = "sensitive_path" | "credential" | "binary" | "patch_limit" | "invalid_text" | "submodule";
+export type GitDraftOmission = {
+  path: string | null;
+  reason: GitDraftOmissionReason;
+};
+export type GitDraftCoverage = {
+  totalFiles: number;
+  includedFiles: number;
+  patchFiles: number;
+  patchBytes: number;
+  omissions: Array<GitDraftOmission>;
+};
+export type GitCommitMessageResponse = {
+  requestId: string;
+  summary: string;
+  body: string | null;
+  source: GitDraftSource;
+  coverage: GitDraftCoverage;
+};
+export type GitDraftFailureCode = "unsupported" | "unconfigured" | "invalid_request" | "unauthorized" | "no_staged_changes" | "stale_source" | "unusable_context" | "context_too_large" | "git_unavailable" | "provider_refusal" | "provider_error" | "rate_limited" | "timed_out" | "cancelled";
+export type GitCommitMessageFailure = {
+  requestId: string | null;
+  code: GitDraftFailureCode;
+  message: string;
+  retryAfterSeconds: number | null;
+};
+export type GitDraftReadinessState = "unconfigured" | "ready" | "unavailable";
+export type GitDraftReadiness = {
+  state: GitDraftReadinessState;
+};
+export type GitCommitMessageCancelRequest = {
+  requestId: string;
+};

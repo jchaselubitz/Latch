@@ -15,6 +15,7 @@ use serde::Serialize;
 use tokio::net::TcpListener;
 
 mod authority;
+mod commit_message;
 mod git;
 mod readiness;
 mod uploads;
@@ -46,6 +47,7 @@ use uploads::upload_attachment;
 #[derive(Clone)]
 struct AppState {
     home: LatchHome,
+    drafts: commit_message::Drafts,
     token_file: std::path::PathBuf,
     latch_bin: std::path::PathBuf,
     gateway_instance_id: String,
@@ -107,6 +109,7 @@ impl IntoResponse for ApiError {
 
 /// Binds and serves until SIGINT/SIGTERM.
 pub async fn run(options: ServeOptions) -> anyhow::Result<()> {
+    crate::cli::commit_message::headless_keychain()?;
     let gateway_instance_id = gateway_instance_id();
     let connector_home = options.home.clone();
     let conversation_hub = ConversationHub::with_connector_factory(
@@ -118,6 +121,7 @@ pub async fn run(options: ServeOptions) -> anyhow::Result<()> {
     let attention = AttentionWatcher::new(options.home.clone(), conversation_hub.clone());
     tokio::spawn(attention.clone().run());
     let state = AppState {
+        drafts: commit_message::Drafts::default(),
         home: options.home,
         token_file: options.token_file,
         latch_bin: options.latch_bin,
@@ -180,6 +184,7 @@ pub(crate) fn test_router(
 ) -> Router {
     let attention = AttentionWatcher::new(home.clone(), conversation_hub.clone());
     router(AppState {
+        drafts: commit_message::Drafts::default(),
         home,
         token_file,
         latch_bin,
@@ -211,6 +216,8 @@ fn register(router: Router<AppState>, spec: RouteSpec) -> Router<AppState> {
         RouteId::GitBranches => router.route(spec.pattern, get(git::git_branches)),
         RouteId::GitStage => router.route(spec.pattern, post(git::git_stage)),
         RouteId::GitUnstage => router.route(spec.pattern, post(git::git_unstage)),
+        RouteId::GitCommitMessage => router.route(spec.pattern, post(commit_message::draft)),
+        RouteId::GitCommitMessageCancel => router.route(spec.pattern, post(commit_message::cancel)),
         RouteId::GitCommit => router.route(spec.pattern, post(git::git_commit)),
         RouteId::GitCreateBranch => router.route(spec.pattern, post(git::git_create_branch)),
         RouteId::GitSwitchBranch => router.route(spec.pattern, post(git::git_switch_branch)),
@@ -276,6 +283,7 @@ struct GatewayEndpoints {
     git_stage: bool,
     git_unstage: bool,
     git_commit: bool,
+    git_commit_message: bool,
     git_create_branch: bool,
     git_switch_branch: bool,
     git_receipts: bool,
@@ -314,6 +322,7 @@ async fn gateway_capabilities(State(state): State<AppState>) -> Response {
             git_stage: true,
             git_unstage: true,
             git_commit: true,
+            git_commit_message: true,
             git_create_branch: true,
             git_switch_branch: true,
             git_receipts: true,
@@ -330,6 +339,7 @@ async fn gateway_capabilities(State(state): State<AppState>) -> Response {
             git_push_reconcile: true,
         },
         features: GatewayFeatures {
+            git_commit_message: Some(commit_message::readiness(state.home.clone()).await),
             exclusive_terminal: true,
             session_agents: SESSION_AGENTS.to_vec(),
             attachment_max_bytes: Some(ATTACHMENT_MAX_BYTES),

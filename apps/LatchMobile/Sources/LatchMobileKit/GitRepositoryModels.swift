@@ -105,6 +105,10 @@ public final class GitRepositoryModel {
     let isOnline: () -> Bool
     private let now: () -> Date
     let makeRequestID: () -> String
+    private let draftSupported: () -> Bool
+    private let draftReadiness: () -> GitDraftReadinessState?
+    private let generateDraft: GitCommitDraftModel.Generate?
+    private let cancelDraft: GitCommitDraftModel.Cancel?
     /// Set when the link returns, until a status is read on it: every
     /// change waits for that fresh status, not just for the link.
     private(set) var awaitingFreshStatus = false
@@ -130,7 +134,11 @@ public final class GitRepositoryModel {
         readPush: GitPushModel.Reading? = nil,
         checkRemote: GitMutationRunner.RemoteCheck? = nil,
         makeRequestID: @escaping () -> String = { UUID().uuidString.lowercased() },
-        sleep: ((Double) async -> Void)? = nil
+        sleep: ((Double) async -> Void)? = nil,
+        draftSupported: @escaping () -> Bool = { false },
+        draftReadiness: @escaping () -> GitDraftReadinessState? = { nil },
+        generateDraft: GitCommitDraftModel.Generate? = nil,
+        cancelDraft: GitCommitDraftModel.Cancel? = nil
     ) {
         self.folder = folder
         self.read = read
@@ -142,6 +150,10 @@ public final class GitRepositoryModel {
         self.readSync = readSync
         self.readPush = readPush
         self.makeRequestID = makeRequestID
+        self.draftSupported = draftSupported
+        self.draftReadiness = draftReadiness
+        self.generateDraft = generateDraft
+        self.cancelDraft = cancelDraft
         let wired = mutate != nil && lookupReceipt != nil
         self.support = wired ? support : .none
         let unavailable: GitMutationRunner.Sending = { _ in throw GitAccessError.unavailable }
@@ -329,6 +341,16 @@ public final class GitRepositoryModel {
     }
 
     public var canCommit: Bool { offersCommit && commitBlockReason == nil }
+
+    public func commitDraftModel() -> GitCommitDraftModel {
+        GitCommitDraftModel(
+            repository: self,
+            supported: { [weak self] in self?.draftSupported() == true && self?.generateDraft != nil },
+            readiness: draftReadiness,
+            generate: generateDraft ?? { _ in throw GitAccessError.unavailable },
+            cancel: cancelDraft ?? { _ in }
+        )
+    }
 
     /// Commits exactly the staged files the person reviewed, on the branch
     /// they were shown. The summary is one line; the rest is the body.

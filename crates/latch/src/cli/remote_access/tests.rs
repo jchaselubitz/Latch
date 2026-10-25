@@ -196,6 +196,8 @@ fn git_routes_through_the_paired_proxy_need_control() {
 fn git_mutations_through_the_paired_proxy_need_control() {
     let body = r#"{"requestId":"0b7c2f4e-9a7d-4a8e-9c1e-2f3a4b5c6d7e"}"#;
     let mut requests = [
+        "/v2/git/commit-message",
+        "/v2/git/commit-message/cancel",
         "/v2/git/stage",
         "/v2/git/unstage",
         "/v2/git/commit",
@@ -563,6 +565,23 @@ async fn revoking_one_device_does_not_remove_another_devices_shared_gateway_auth
 
 #[tokio::test]
 async fn live_grant_change_closes_an_active_privileged_stream() {
+    assert_live_grant_change_closes_stream(
+        b"GET /v2/sessions/test/terminal HTTP/1.1\r\nHost: latch\r\nUpgrade: websocket\r\n\r\n",
+        false,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn draft_stream_closes_when_control_is_revoked() {
+    assert_live_grant_change_closes_stream(
+        b"POST /v2/git/commit-message HTTP/1.1\r\nHost: latch\r\nContent-Length: 2\r\n\r\n{}",
+        true,
+    )
+    .await;
+}
+
+async fn assert_live_grant_change_closes_stream(request: &[u8], revoke_device: bool) {
     let (_directory, home, key) = enrolled_home(DevicePermission::Control);
     let device_id = list_devices(&home).unwrap().remove(0).device_id;
     let gateway = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -591,15 +610,14 @@ async fn live_grant_change_closes_an_active_privileged_stream() {
         )
         .await
     });
-    client
-        .write_all(
-            b"GET /v2/sessions/test/terminal HTTP/1.1\r\nHost: latch\r\nUpgrade: websocket\r\n\r\n",
-        )
-        .await
-        .unwrap();
+    client.write_all(request).await.unwrap();
     client.flush().await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
-    grant(&home, &device_id, DevicePermission::Observe).unwrap();
+    if revoke_device {
+        revoke(&home, &device_id).unwrap();
+    } else {
+        grant(&home, &device_id, DevicePermission::Observe).unwrap();
+    }
     tokio::time::timeout(Duration::from_secs(2), proxy)
         .await
         .expect("grant enforcement did not close the stream")

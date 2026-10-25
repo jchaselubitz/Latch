@@ -285,6 +285,11 @@ enum Command {
         #[command(subcommand)]
         command: Option<ServeCommand>,
     },
+    /// Configure Mac-held Gemini credentials and commit-message model.
+    CommitMessage {
+        #[command(subcommand)]
+        command: CommitMessageCommand,
+    },
     /// Manage local Remote Link identity and controller grants.
     RemoteAccess {
         #[command(subcommand)]
@@ -318,6 +323,22 @@ enum Command {
     /// Capture one Cursor hook record. Internal only.
     #[command(hide = true, name = "__cursor-conversation-hook")]
     CursorConversationHook,
+}
+
+#[derive(Subcommand)]
+enum CommitMessageCommand {
+    /// Set or replace the Gemini key in macOS Keychain (hidden terminal prompt).
+    SetKey {
+        /// Read one line from stdin instead of the hidden terminal prompt.
+        #[arg(long)]
+        stdin: bool,
+    },
+    /// Remove the dedicated Gemini credential from Keychain.
+    RemoveKey,
+    /// Show noninteractive local configuration readiness; never contacts Google.
+    Status,
+    /// Show or set a non-secret Gemini model, picked up on the next request.
+    Model { value: Option<String> },
 }
 
 #[derive(Subcommand)]
@@ -742,6 +763,20 @@ fn dispatch(command: Option<Command>) -> Result<()> {
                 }),
             }
         }
+        Some(Command::CommitMessage { command }) => match command {
+            CommitMessageCommand::SetKey { stdin } => {
+                latch::cli::commit_message::configure("set-key", None, stdin)
+            }
+            CommitMessageCommand::RemoveKey => {
+                latch::cli::commit_message::configure("remove-key", None, false)
+            }
+            CommitMessageCommand::Status => {
+                latch::cli::commit_message::configure("status", None, false)
+            }
+            CommitMessageCommand::Model { value } => {
+                latch::cli::commit_message::configure("model", value.as_deref(), false)
+            }
+        },
         Some(Command::RemoteAccess { command }) => {
             let home = LatchHome::from_env()?;
             match command {

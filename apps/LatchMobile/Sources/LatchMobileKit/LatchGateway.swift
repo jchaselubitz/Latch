@@ -219,6 +219,21 @@ public actor LatchGateway {
 
     // MARK: Git (changes)
 
+    public func gitCommitMessage(_ draft: GitCommitMessageRequest) async throws -> GitCommitMessageResponse {
+        try await require(.gitCommitMessage)
+        let body = try JSONEncoder().encode(draft)
+        guard body.count <= 8 * 1024 else {
+            throw LatchError.git(code: "invalid_request", reason: "This repository path is too long to request a draft.")
+        }
+        return try await request(method: "POST", path: "/v2/git/commit-message", body: body, timeout: 75)
+    }
+
+    public func cancelGitCommitMessage(requestID: String) async throws {
+        try await require(.gitCommitMessage)
+        let body = try JSONEncoder().encode(GitCommitMessageCancelRequest(requestId: requestID))
+        let _: NoContent = try await request(method: "POST", path: "/v2/git/commit-message/cancel", body: body)
+    }
+
     /// Largest mutation body the phone sends. The paired proxy buffers whole
     /// requests under 32 KiB; this leaves room for its headers.
     static let maximumGitMutationBodyBytes = 30 * 1024
@@ -505,7 +520,8 @@ public actor LatchGateway {
         path: String,
         queryItems: [URLQueryItem] = [],
         body: Data? = nil,
-        contentType: String = "application/json"
+        contentType: String = "application/json",
+        timeout: TimeInterval? = nil
     ) async throws -> T {
         guard var components = URLComponents(url: link.url, resolvingAgainstBaseURL: false) else {
             throw LatchError.invalidURL(link.url.absoluteString)
@@ -516,6 +532,7 @@ public actor LatchGateway {
             throw LatchError.invalidURL(link.url.absoluteString + path)
         }
         var request = URLRequest(url: url)
+        if let timeout { request.timeoutInterval = timeout }
         request.httpMethod = method
         request.httpBody = body
         if !link.token.isEmpty {
@@ -536,6 +553,10 @@ public actor LatchGateway {
             throw LatchError.malformedResponse("no HTTP status")
         }
         guard (200..<300).contains(http.statusCode) else {
+            if path == "/v2/git/commit-message",
+               let failure = try? decoder.decode(GitCommitMessageFailure.self, from: data) {
+                throw GitCommitDraftError(failure: failure)
+            }
             throw Self.error(status: http.statusCode, path: path, data: data)
         }
         if data.isEmpty, let empty = NoContent() as? T {

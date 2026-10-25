@@ -3,7 +3,7 @@
   "generator": "Tools/generate-contract.py",
   "generated": {
     "path": "Sources/LatchMobileKit/Generated/LatchContract.swift",
-    "sha256": "00b0f1369fd207ebeb77a347fa98b82d4a3e50f88a7d0c50053df75ce27d9587"
+    "sha256": "8c6979cfc03f8034eb519156ec724a0eb04bc842c7e6a2975191af24cf6a3ee0"
   },
   "schemas": [
     {
@@ -32,7 +32,7 @@
     },
     {
       "source": "schemas/remote-access/v2/gateway-capabilities.schema.json",
-      "sha256": "877853c5ba6387d0fc1b16e2cb01eca7254b4aca82620c36c59b4b56db9cc9b9"
+      "sha256": "2e8aacd7d45fac9899a6397a53ce3f2d216b1d1cddeb71c8a81ab3e7c4f369f8"
     },
     {
       "source": "schemas/remote-access/v2/directory-page.schema.json",
@@ -77,6 +77,10 @@
     {
       "source": "schemas/remote-access/v2/git-push.schema.json",
       "sha256": "5fdb681c0ede8b56a72c50338ce36ddba3a74b766986233d0224aa505c0222cf"
+    },
+    {
+      "source": "schemas/remote-access/v2/git-commit-message.schema.json",
+      "sha256": "3123ca4a5e1b08cb0648c0503e5c44b5f0ad4db8be0df7940aa88c0b64f94549"
     }
   ]
 }

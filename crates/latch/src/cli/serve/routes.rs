@@ -75,6 +75,8 @@ pub(crate) enum RouteId {
     GitStage,
     GitUnstage,
     GitCommit,
+    GitCommitMessage,
+    GitCommitMessageCancel,
     GitCreateBranch,
     GitSwitchBranch,
     GitReceipt,
@@ -111,6 +113,20 @@ pub(crate) struct RouteSpec {
 pub const ATTACHMENT_MAX_BYTES: u64 = 25 * 1024 * 1024;
 
 pub(crate) const ROUTES: &[RouteSpec] = &[
+    RouteSpec {
+        id: RouteId::GitCommitMessage,
+        pattern: "/v2/git/commit-message",
+        method: "POST",
+        required_grant: Grant::Control,
+        streamed_body_limit: None,
+    },
+    RouteSpec {
+        id: RouteId::GitCommitMessageCancel,
+        pattern: "/v2/git/commit-message/cancel",
+        method: "POST",
+        required_grant: Grant::Control,
+        streamed_body_limit: None,
+    },
     // Read-only in effect: the key only lets the Mac seal alerts *to* this
     // device, so the lowest grant that receives alerts may set it.
     RouteSpec {

@@ -4,7 +4,7 @@ use axum::http::header;
 
 #[test]
 fn every_registered_handler_comes_from_the_shared_route_table() {
-    assert_eq!(ROUTES.len(), 33);
+    assert_eq!(ROUTES.len(), 35);
     let mut ids = ROUTES.iter().map(|route| route.id).collect::<Vec<_>>();
     ids.sort_by_key(|id| *id as u8);
     ids.dedup();
@@ -59,6 +59,7 @@ fn current_capabilities_advertise_browsing_and_creation() {
         git_stage: true,
         git_unstage: true,
         git_commit: true,
+        git_commit_message: true,
         git_create_branch: true,
         git_switch_branch: true,
         git_receipts: true,
@@ -101,6 +102,11 @@ fn current_capabilities_advertise_browsing_and_creation() {
     ] {
         assert_eq!(value[name], true, "{name}");
     }
+    assert_eq!(value["gitCommitMessage"], true);
+    assert!(ROUTES
+        .iter()
+        .any(|route| route.pattern == "/v2/git/commit-message"
+            && route.required_grant == Grant::Control));
     assert_eq!(value["notificationKey"], true);
     assert_eq!(value["browseDirectories"], true);
     assert_eq!(value["createSession"], true);
@@ -113,6 +119,7 @@ fn current_capabilities_advertise_browsing_and_creation() {
 #[test]
 fn current_capabilities_advertise_supported_session_agents() {
     let value = serde_json::to_value(GatewayFeatures {
+        git_commit_message: None,
         exclusive_terminal: true,
         session_agents: SESSION_AGENTS.to_vec(),
         attachment_max_bytes: None,
@@ -125,6 +132,7 @@ fn current_capabilities_advertise_supported_session_agents() {
     // A gateway that launches no agents omits the key, which an older
     // client decoding a closed object still accepts.
     let none = serde_json::to_value(GatewayFeatures {
+        git_commit_message: None,
         exclusive_terminal: true,
         session_agents: Vec::new(),
         attachment_max_bytes: None,
@@ -257,6 +265,100 @@ fn create_body(cwd: &str) -> String {
         "cwd": cwd,
     })
     .to_string()
+}
+
+#[tokio::test]
+async fn draft_endpoint_smoke_checks_control_configuration_and_readiness() {
+    let harness = harness().await;
+    let body = serde_json::json!({
+        "requestId": "12345678-1234-1234-1234-123456789abc",
+        "path": "/not-read-when-unconfigured",
+        "expected": { "branch": null, "head": null, "index": "a".repeat(64) }
+    })
+    .to_string();
+    let (status, value) = send(
+        &harness,
+        "POST",
+        "/v2/git/commit-message",
+        Some("observe"),
+        &body,
+    )
+    .await;
+    assert_eq!(status, 403);
+    assert_eq!(value["code"], "unauthorized");
+    let (status, value) = send(
+        &harness,
+        "POST",
+        "/v2/git/commit-message",
+        Some("control"),
+        &body,
+    )
+    .await;
+    assert_eq!(status, 503);
+    assert_eq!(value["code"], "unconfigured");
+    assert!(!value.to_string().contains("not-read"));
+    let (status, value) = send(&harness, "GET", "/v2/capabilities", Some("observe"), "").await;
+    assert_eq!(status, 200);
+    assert_eq!(value["endpoints"]["gitCommitMessage"], true);
+    assert_eq!(
+        value["features"]["gitCommitMessage"]["state"],
+        "unconfigured"
+    );
+    std::fs::write(
+        harness.home.root().join("commit-message-model"),
+        "https://other-host/model",
+    )
+    .unwrap();
+    let (status, value) = send(
+        &harness,
+        "POST",
+        "/v2/git/commit-message",
+        Some("control"),
+        &body,
+    )
+    .await;
+    assert_eq!(status, 502);
+    assert_eq!(value["code"], "provider_error");
+    let (_, value) = send(&harness, "GET", "/v2/capabilities", Some("observe"), "").await;
+    assert_eq!(
+        value["features"]["gitCommitMessage"]["state"],
+        "unavailable"
+    );
+}
+
+#[tokio::test]
+async fn draft_endpoint_rejects_invalid_requests_and_cancel_requires_control() {
+    let harness = harness().await;
+    for body in ["not JSON".to_owned(), "{}".into(), " ".repeat(8193),
+        serde_json::json!({"requestId":"bad-id", "path":"/never-read", "expected":{"branch":null,"head":null,"index":"a".repeat(64)}}).to_string()] {
+        let (status, value) = send(&harness, "POST", "/v2/git/commit-message", Some("control"), &body).await;
+        assert_eq!(status, 400);
+        assert_eq!(value["code"], "invalid_request");
+        assert!(!value.to_string().contains("never-read"));
+    }
+    let body = r#"{"requestId":"12345678-1234-1234-1234-123456789abc"}"#;
+    for grant in ["observe", "interact"] {
+        let (status, value) = send(
+            &harness,
+            "POST",
+            "/v2/git/commit-message/cancel",
+            Some(grant),
+            body,
+        )
+        .await;
+        assert_eq!(status, 403);
+        assert_eq!(value["code"], "unauthorized");
+    }
+    // No admission/configuration is required to cancel an unknown request.
+    let (status, _) = send(
+        &harness,
+        "POST",
+        "/v2/git/commit-message/cancel",
+        Some("control"),
+        body,
+    )
+    .await;
+    assert_eq!(status, 204);
 }
 
 #[tokio::test]
@@ -704,6 +806,7 @@ async fn a_symlinked_attachments_folder_is_refused() {
 #[test]
 fn current_capabilities_advertise_attachments_with_their_limit() {
     let value = serde_json::to_value(GatewayFeatures {
+        git_commit_message: None,
         exclusive_terminal: true,
         session_agents: Vec::new(),
         attachment_max_bytes: Some(ATTACHMENT_MAX_BYTES),
