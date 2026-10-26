@@ -216,15 +216,10 @@ enum UpdateInstaller {
     static func install(
         _ update: AvailableUpdate,
         replacing bundle: URL,
+        downloadedArchive: URL? = nil,
         session: URLSession = .shared
     ) async throws -> URL {
         try preflight(bundle)
-
-        let (downloaded, response) = try await session.download(from: update.archive)
-        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
-            try? FileManager.default.removeItem(at: downloaded)
-            throw UpdateError.unreadableFeed("the download answered HTTP \(http.statusCode)")
-        }
 
         let manager = FileManager.default
         let staging = try manager.url(
@@ -236,7 +231,16 @@ enum UpdateInstaller {
         defer { try? manager.removeItem(at: staging) }
 
         let archive = staging.appendingPathComponent("Latch.zip")
-        try manager.moveItem(at: downloaded, to: archive)
+        if let downloadedArchive {
+            try manager.copyItem(at: downloadedArchive, to: archive)
+        } else {
+            let (downloaded, response) = try await session.download(from: update.archive)
+            if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+                try? manager.removeItem(at: downloaded)
+                throw UpdateError.unreadableFeed("the download answered HTTP \(http.statusCode)")
+            }
+            try manager.moveItem(at: downloaded, to: archive)
+        }
 
         let expanded = staging.appendingPathComponent("expanded", isDirectory: true)
         try manager.createDirectory(at: expanded, withIntermediateDirectories: true)
@@ -259,6 +263,20 @@ enum UpdateInstaller {
             throw UpdateError.installFailed(error.localizedDescription)
         }
         return bundle
+    }
+
+    /// Downloads into a private temporary location that survives until this
+    /// app process exits, allowing the user to install later from the menu.
+    static func download(_ update: AvailableUpdate, session: URLSession = .shared) async throws -> URL {
+        let (downloaded, response) = try await session.download(from: update.archive)
+        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            try? FileManager.default.removeItem(at: downloaded)
+            throw UpdateError.unreadableFeed("the download answered HTTP \(http.statusCode)")
+        }
+        let destination = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Latch-update-\(update.version.description)-\(UUID().uuidString).zip")
+        try FileManager.default.moveItem(at: downloaded, to: destination)
+        return destination
     }
 
     /// Refuses, before anything is downloaded, the two cases where the swap
@@ -456,6 +474,7 @@ final class UpdateController: ObservableObject {
     }
 
     @Published private(set) var phase: Phase = .idle
+    @Published private(set) var downloadedUpdate: AvailableUpdate?
     @Published var isPresented = false
     @Published var automaticChecks: Bool {
         didSet { LatchClient.preferences.set(automaticChecks, forKey: Self.automaticKey) }
@@ -491,8 +510,7 @@ final class UpdateController: ObservableObject {
     /// True while an update is available or being installed, so the UI can
     /// offer it without inspecting the phase.
     var pendingUpdate: AvailableUpdate? {
-        if case .available(let update) = phase { return update }
-        return nil
+        downloadedUpdate
     }
 
     /// Checks on launch and once a day after that, when the user allows it.
@@ -531,9 +549,13 @@ final class UpdateController: ObservableObject {
             let release = try await feed.latestRelease()
             LatchClient.preferences.set(Date(), forKey: Self.lastCheckKey)
             if let update = try UpdateResolution.newerRelease(in: release, thanInstalled: installed) {
+                phase = .downloading
+                let archive = try await UpdateInstaller.download(update)
+                downloadedUpdate = update
+                downloadedArchive = archive
                 phase = .available(update)
-                if !userInitiated { isPresented = true }
             } else {
+                clearDownloadedUpdate()
                 phase = .upToDate
             }
         } catch {
@@ -545,7 +567,10 @@ final class UpdateController: ObservableObject {
     func install(_ update: AvailableUpdate) async {
         phase = .downloading
         do {
-            _ = try await UpdateInstaller.install(update, replacing: bundleURL)
+            guard downloadedUpdate == update, let downloadedArchive else {
+                throw UpdateError.unreadableFeed("the downloaded update is no longer available")
+            }
+            _ = try await UpdateInstaller.install(update, replacing: bundleURL, downloadedArchive: downloadedArchive)
             isPresented = false
             try UpdateInstaller.relaunch(bundleURL)
         } catch {
@@ -555,6 +580,18 @@ final class UpdateController: ObservableObject {
 
     func dismiss() {
         isPresented = false
-        phase = .idle
+        if let downloadedUpdate {
+            phase = .available(downloadedUpdate)
+        } else {
+            phase = .idle
+        }
+    }
+
+    private var downloadedArchive: URL?
+
+    private func clearDownloadedUpdate() {
+        if let downloadedArchive { try? FileManager.default.removeItem(at: downloadedArchive) }
+        downloadedArchive = nil
+        downloadedUpdate = nil
     }
 }

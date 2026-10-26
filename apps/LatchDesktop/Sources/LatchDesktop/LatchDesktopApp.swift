@@ -88,9 +88,13 @@ struct LatchDesktopApp: App {
             } openSettings: {
                 openSettingsWindow()
             } checkForUpdates: {
-                openWindow(id: "sessions")
-                NSApp.activate(ignoringOtherApps: true)
-                Task { await runtime.updates.check(userInitiated: true) }
+                if let update = runtime.updates.pendingUpdate {
+                    Task { await runtime.updates.install(update) }
+                } else {
+                    openWindow(id: "sessions")
+                    NSApp.activate(ignoringOtherApps: true)
+                    Task { await runtime.updates.check(userInitiated: true) }
+                }
             }
         } label: {
             Label {

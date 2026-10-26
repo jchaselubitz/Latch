@@ -101,10 +101,11 @@ to show Gatekeeper warnings when opened outside a developer workflow.
 
 Latch Desktop updates itself from the same GitHub release the CLI is published
 to. **Latch → Check for Updates…** (also in the menu-bar extra) compares
-`CFBundleShortVersionString` with the newest release and offers the
-`Latch-<version>-macos.zip` attached to it. Settings has a *Check for updates
-automatically* toggle; automatic checks run at launch and once a day, and only
-open a window when something is actually available.
+`CFBundleShortVersionString` with the newest release and downloads the
+`Latch-<version>-macos.zip` attached to it in the background. Once downloaded,
+the menu-bar item changes to **Update Latch**; selecting it installs and
+relaunches. Settings has a *Check for updates automatically* toggle; automatic
+checks run at launch and once a day without interrupting the user.
 
 Installing expands the archive with `ditto` into a replacement directory on the
 app's own volume, requires the download to be signed by the same Team ID as the
