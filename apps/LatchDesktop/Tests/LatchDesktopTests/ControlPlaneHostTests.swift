@@ -105,6 +105,26 @@ private final class StubControlPlaneHostAPI: ControlPlaneHostAPI, @unchecked Sen
     }
 }
 
+/// Holds a background thread inside `load()` until released, the way a
+/// keychain read waits on a pending access prompt.
+private final class PromptingHostEnrollmentStore: HostEnrollmentStoring, @unchecked Sendable {
+    let prompt = DispatchSemaphore(value: 0)
+    let backing = MemoryHostEnrollmentStore()
+
+    func load() async throws -> HostEnrollment? {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global().async {
+                self.prompt.wait()
+                continuation.resume()
+            }
+        }
+        return try backing.load()
+    }
+
+    func save(_ enrollment: HostEnrollment) async throws { try backing.save(enrollment) }
+    func clear() async throws { try backing.clear() }
+}
+
 @MainActor
 final class ControlPlaneHostTests: XCTestCase {
     private let macKey = String(repeating: "a", count: 64)
@@ -119,7 +139,7 @@ final class ControlPlaneHostTests: XCTestCase {
 
     private func host(
         api: StubControlPlaneHostAPI,
-        store: MemoryHostEnrollmentStore = MemoryHostEnrollmentStore()
+        store: HostEnrollmentStoring = MemoryHostEnrollmentStore()
     ) -> ControlPlaneHost {
         let value = ControlPlaneHost(store: store, defaults: defaults(), apiFactory: { _ in api })
         try! value.setAddress("https://control.example")
@@ -154,6 +174,23 @@ final class ControlPlaneHostTests: XCTestCase {
         XCTAssertEqual(api.rotations.count, 1)
         XCTAssertEqual(api.rotations[0].1, rotated)
         XCTAssertEqual(try store.load()?.publicKey, rotated)
+    }
+
+    func testPendingCredentialPromptLeavesTheMainActorFree() async throws {
+        let api = StubControlPlaneHostAPI()
+        let store = PromptingHostEnrollmentStore()
+        let value = host(api: api, store: store)
+        let assignments = Task { try await value.remoteLinkAssignments(publicKey: self.macKey, macName: "Mac") }
+
+        // Each yield lets the enrollment task run on the main actor; a
+        // synchronous credential read there would never hand it back.
+        for _ in 0..<100 { await Task.yield() }
+        XCTAssertTrue(api.accountClaims.isEmpty, "enrollment must wait for the credential read")
+
+        store.prompt.signal()
+        _ = try await assignments.value
+        XCTAssertEqual(api.accountClaims.count, 1)
+        XCTAssertEqual(try store.backing.load()?.publicKey, macKey)
     }
 
     func testEnrollmentGeneratesASeparateQRSecretAndKeepsHostAdmissionOutOfQR() async throws {

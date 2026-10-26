@@ -12,12 +12,17 @@ struct HostEnrollment: Codable, Equatable, Sendable {
 }
 
 protocol HostEnrollmentStoring: Sendable {
-    func load() throws -> HostEnrollment?
-    func save(_ enrollment: HostEnrollment) throws
-    func clear() throws
+    func load() async throws -> HostEnrollment?
+    func save(_ enrollment: HostEnrollment) async throws
+    func clear() async throws
 }
 
+/// Keychain calls block while macOS shows an access prompt (for example for a
+/// differently signed build), so they run on one serial queue off the main
+/// actor, in the order they were requested.
 struct KeychainHostEnrollmentStore: HostEnrollmentStoring {
+    private static let queue = DispatchQueue(label: "co.cooperativ.latch.control-plane.keychain")
+
     private let service: String
     private let account: String
 
@@ -37,7 +42,17 @@ struct KeychainHostEnrollmentStore: HostEnrollmentStoring {
         ]
     }
 
-    func load() throws -> HostEnrollment? {
+    func load() async throws -> HostEnrollment? { try await perform { try self.read() } }
+    func save(_ enrollment: HostEnrollment) async throws { try await perform { try self.write(enrollment) } }
+    func clear() async throws { try await perform { try self.delete() } }
+
+    private func perform<T: Sendable>(_ body: @escaping @Sendable () throws -> T) async throws -> T {
+        try await withCheckedThrowingContinuation { continuation in
+            Self.queue.async { continuation.resume(with: Result(catching: body)) }
+        }
+    }
+
+    private func read() throws -> HostEnrollment? {
         var request = query
         request[kSecReturnData as String] = true
         request[kSecMatchLimit as String] = kSecMatchLimitOne
@@ -54,7 +69,7 @@ struct KeychainHostEnrollmentStore: HostEnrollmentStoring {
         }
     }
 
-    func save(_ enrollment: HostEnrollment) throws {
+    private func write(_ enrollment: HostEnrollment) throws {
         let data = try JSONEncoder().encode(enrollment)
         SecItemDelete(query as CFDictionary)
         var request = query
@@ -66,7 +81,7 @@ struct KeychainHostEnrollmentStore: HostEnrollmentStoring {
         }
     }
 
-    func clear() throws {
+    private func delete() throws {
         let status = SecItemDelete(query as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw ControlPlaneHostError.storage("could not remove this Mac's control-plane credentials (\(status))")
@@ -467,21 +482,21 @@ final class ControlPlaneHost {
     func enrollment(publicKey: String, name: String) async throws -> HostEnrollment {
         guard let address else { throw ControlPlaneHostError.notConfigured }
         let api = apiFactory(address)
-        if let existing = try store.load(), existing.address == address.absoluteString {
+        if let existing = try await store.load(), existing.address == address.absoluteString {
             guard existing.publicKey != publicKey else { return existing }
             do {
                 try await api.rotateHostKey(
                     deviceToken: existing.deviceToken, deviceID: existing.deviceID, publicKey: publicKey
                 )
             } catch let error as ControlPlaneHostError where error.isStaleCredential {
-                try store.clear()
+                try await store.clear()
                 return try await freshEnrollment(api: api, address: address, publicKey: publicKey, name: name)
             }
             let rotated = HostEnrollment(
                 address: existing.address, accountToken: existing.accountToken,
                 deviceID: existing.deviceID, deviceToken: existing.deviceToken, publicKey: publicKey
             )
-            try store.save(rotated)
+            try await store.save(rotated)
             return rotated
         }
         return try await freshEnrollment(api: api, address: address, publicKey: publicKey, name: name)
@@ -506,7 +521,7 @@ final class ControlPlaneHost {
             address: address.absoluteString, accountToken: accountToken,
             deviceID: host.deviceID, deviceToken: host.deviceToken, publicKey: publicKey
         )
-        try store.save(result)
+        try await store.save(result)
         return result
     }
 
@@ -518,7 +533,7 @@ final class ControlPlaneHost {
         do {
             opened = try await api.openEnrollment(deviceToken: credentials.deviceToken)
         } catch let error as ControlPlaneHostError where error.isStaleCredential {
-            try store.clear()
+            try await store.clear()
             credentials = try await enrollment(publicKey: publicKey, name: macName)
             opened = try await api.openEnrollment(deviceToken: credentials.deviceToken)
         }
@@ -543,7 +558,7 @@ final class ControlPlaneHost {
         permission: DevicePermission,
         grantRevision: UInt64
     ) async throws -> ControlPlaneEnrollmentReceipt {
-        let (address, credentials) = try configuredCredentials()
+        let (address, credentials) = try await configuredCredentials()
         let receipt = try await apiFactory(address).completeEnrollment(
             deviceToken: credentials.deviceToken, enrollmentID: enrollmentID,
             controllerPublicKey: controllerPublicKey, permission: permission, grantRevision: grantRevision
@@ -559,7 +574,7 @@ final class ControlPlaneHost {
     }
 
     func cancelRemoteEnrollment(_ enrollmentID: String) async {
-        guard let address, let credentials = try? store.load(),
+        guard let address, let credentials = try? await store.load(),
               credentials.address == address.absoluteString else { return }
         try? await apiFactory(address).cancelEnrollment(
             deviceToken: credentials.deviceToken, enrollmentID: enrollmentID
@@ -567,14 +582,14 @@ final class ControlPlaneHost {
     }
 
     func mirrorPermission(clientDeviceID: String, permission: DevicePermission) async throws {
-        let (address, credentials) = try configuredCredentials()
+        let (address, credentials) = try await configuredCredentials()
         try await apiFactory(address).setPairingPermission(
             deviceToken: credentials.deviceToken, clientDeviceID: clientDeviceID, permission: permission
         )
     }
 
     func revokePairing(clientDeviceID: String) async throws {
-        let (address, credentials) = try configuredCredentials()
+        let (address, credentials) = try await configuredCredentials()
         try await apiFactory(address).revokePairing(
             deviceToken: credentials.deviceToken, clientDeviceID: clientDeviceID
         )
@@ -626,7 +641,7 @@ final class ControlPlaneHost {
 
     /// A fresh single-use admission for a helper whose relay socket ended.
     func freshRelayAdmission(peerDeviceID: String) async throws -> RemoteLinkAdmission {
-        let (address, credentials) = try configuredCredentials()
+        let (address, credentials) = try await configuredCredentials()
         let admission = try await apiFactory(address).relayAdmission(
             deviceToken: credentials.deviceToken, peerDeviceID: peerDeviceID
         )
@@ -637,28 +652,28 @@ final class ControlPlaneHost {
     }
 
     func notifyAttention(clientDeviceID: String, eventID: String, sealed: String? = nil) async throws -> Bool {
-        let (address, credentials) = try configuredCredentials()
+        let (address, credentials) = try await configuredCredentials()
         return try await apiFactory(address).notifyAttention(
             deviceToken: credentials.deviceToken, clientDeviceID: clientDeviceID, eventID: eventID, sealed: sealed
         )
     }
 
     func renewRemoteLinkLease(_ leaseID: String) async throws -> ControlPlaneLeaseExtension {
-        let (address, credentials) = try configuredCredentials()
+        let (address, credentials) = try await configuredCredentials()
         return try await apiFactory(address).renewRelayLease(
             deviceToken: credentials.deviceToken, leaseID: leaseID
         )
     }
 
     func setRelayEnabled(_ enabled: Bool) async throws {
-        let (address, credentials) = try configuredCredentials()
+        let (address, credentials) = try await configuredCredentials()
         try await apiFactory(address).setRelayEnabled(accountToken: credentials.accountToken, enabled: enabled)
     }
 
-    func forgetEnrollment() throws { try store.clear() }
+    func forgetEnrollment() async throws { try await store.clear() }
 
-    private func configuredCredentials() throws -> (URL, HostEnrollment) {
-        guard let address, let credentials = try store.load(),
+    private func configuredCredentials() async throws -> (URL, HostEnrollment) {
+        guard let address, let credentials = try await store.load(),
               credentials.address == address.absoluteString else {
             throw ControlPlaneHostError.notConfigured
         }

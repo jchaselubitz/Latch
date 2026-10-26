@@ -438,12 +438,18 @@ final class RemoteAccessController: ObservableObject {
         do {
             try controlPlane.setAddress(controlPlaneAddress)
             let current = controlPlane.address?.absoluteString
-            if current != previous {
-                try controlPlane.forgetEnrollment()
-                restartSupervision(clearLinks: true)
-            }
             controlPlaneAddress = current ?? ""
             errorMessage = nil
+            if current != previous {
+                Task {
+                    do {
+                        try await controlPlane.forgetEnrollment()
+                        restartSupervision(clearLinks: true)
+                    } catch {
+                        errorMessage = error.localizedDescription
+                    }
+                }
+            }
         } catch {
             errorMessage = error.localizedDescription
         }
