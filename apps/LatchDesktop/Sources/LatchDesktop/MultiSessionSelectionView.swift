@@ -17,7 +17,7 @@ struct MultiSessionSelectionView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             Text("\(store.selection.count) sessions selected")
-                .font(.largeTitle)
+                .font(.title2)
                 .fontWeight(.semibold)
             Text(summary)
                 .foregroundStyle(.secondary)
@@ -28,11 +28,23 @@ struct MultiSessionSelectionView: View {
                 .buttonStyle(.bordered)
             }
             List(selectedSessions) { session in
-                SessionRow(session: session)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(session.name)
+                        .fontWeight(.medium)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(session.displaySubtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(session.state.rawValue.capitalized)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.vertical, 4)
             }
             .listStyle(.inset)
         }
-        .padding(28)
+        .padding(16)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .confirmationDialog(
             "Stop \(liveCount) session\(liveCount == 1 ? "" : "s")?",

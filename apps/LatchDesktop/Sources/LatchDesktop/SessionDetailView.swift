@@ -17,16 +17,20 @@ struct SessionDetailView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 22) {
-                HStack(alignment: .top) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(session.name).font(.largeTitle).fontWeight(.semibold)
-                        if let title = session.title { Text(title).foregroundStyle(.secondary) }
-                    }
-                    Spacer()
+            VStack(alignment: .leading, spacing: 18) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(session.name).font(.title2).fontWeight(.semibold)
+                        .fixedSize(horizontal: false, vertical: true)
                     Text(session.state.rawValue.capitalized)
+                        .font(.caption)
                         .padding(.horizontal, 9).padding(.vertical, 4)
                         .background(.quaternary, in: Capsule())
+                    if let title = session.title {
+                        Text(title)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
 
                 OpenSessionButton(
@@ -35,7 +39,7 @@ struct SessionDetailView: View {
                     isEnabled: session.state.isAttachable && store.canAttachSessions
                 )
 
-                Grid(alignment: .leading, horizontalSpacing: 22, verticalSpacing: 10) {
+                VStack(alignment: .leading, spacing: 12) {
                     DetailRow(label: "Command", value: session.commandLabel)
                     if let kernel = session.kernel {
                         DetailRow(label: "Kernel", value: kernel)
@@ -57,7 +61,9 @@ struct SessionDetailView: View {
                 }
                 .textSelection(.enabled)
 
-                HStack {
+                Divider()
+
+                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], alignment: .leading, spacing: 8) {
                     Button("Rename…") {
                         renameValue = session.name
                         showingRename = true
@@ -68,15 +74,15 @@ struct SessionDetailView: View {
                     if session.state.isLive {
                         Button("Stop…") { destructiveAction = .stop }
                     }
-                    Spacer()
                     Button("Remove…", role: .destructive) {
                         destructiveAction = session.state.isLive ? .forceRemove : .remove
                     }
                 }
+                .buttonStyle(.bordered)
             }
-            .padding(28)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(16)
         }
-        .navigationTitle(session.name)
         .alert("Rename Session", isPresented: $showingRename) {
             TextField("Name", text: $renameValue)
             Button("Cancel", role: .cancel) {}
@@ -154,9 +160,14 @@ struct DetailRow: View {
     let value: String
 
     var body: some View {
-        GridRow {
-            Text(label).foregroundStyle(.secondary)
-            Text(value).frame(maxWidth: .infinity, alignment: .leading)
+        VStack(alignment: .leading, spacing: 3) {
+            Text(label)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.callout)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 }

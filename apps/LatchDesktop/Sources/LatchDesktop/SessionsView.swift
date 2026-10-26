@@ -8,9 +8,11 @@ struct SessionsView: View {
     @State private var showingCreate = false
     @State private var showingPrune = false
     @State private var pendingStop: PendingStopRequest?
+    @State private var searchFocusRequest = 0
+    @State private var showingInspector = false
 
     var body: some View {
-        NavigationSplitView {
+        HSplitView {
             List(store.filteredSessions, selection: $store.selection) { session in
                 SessionRow(session: session)
                     .tag(session.id)
@@ -43,7 +45,7 @@ struct SessionsView: View {
                         .disabled(otherLiveIDs.isEmpty)
                     }
             }
-            .searchable(text: $store.search, prompt: "Search sessions")
+            .listStyle(.inset)
             .overlay {
                 if store.sessions.isEmpty && !store.isRefreshing {
                     EmptyStateView(
@@ -53,27 +55,8 @@ struct SessionsView: View {
                     )
                 }
             }
-            .navigationTitle("Sessions")
-            .toolbar {
-                ToolbarItemGroup {
-                    Menu {
-                        Button("All") { store.stateFilter = nil }
-                        Divider()
-                        ForEach(SessionState.allCases, id: \.self) { state in
-                            Button(state.rawValue.capitalized) { store.stateFilter = state }
-                        }
-                    } label: {
-                        Label("Filter", systemImage: "line.3.horizontal.decrease.circle")
-                    }
-                    Button { showingCreate = true } label: {
-                        Label("New Session", systemImage: "plus")
-                    }
-                    .keyboardShortcut("n")
-                    .disabled(!store.canCreateSessions)
-                }
-            }
             // Fixed footer: bulk actions live here instead of the toolbar so they stay
-            // reachable regardless of list length or sidebar width.
+            // reachable regardless of list length.
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 SidebarFooter(
                     canStopSelected: store.hasSelectedLiveSessions,
@@ -90,24 +73,61 @@ struct SessionsView: View {
                     }
                 )
             }
-        } detail: {
-            if store.selection.count > 1 {
-                MultiSessionSelectionView(store: store)
-            } else if store.selection.count == 1,
-                      let selectedID = store.selection.first,
-                      let details = store.details,
-                      details.id == selectedID {
-                SessionDetailView(store: store, session: details)
-            } else {
-                EmptyStateView(
-                    title: "Select a Session",
-                    systemImage: "rectangle.stack",
-                    message: "Choose a session to inspect and manage it."
-                )
+            .frame(minWidth: 360, maxWidth: .infinity, maxHeight: .infinity)
+
+            if showingInspector {
+                VStack(spacing: 0) {
+                    HStack {
+                        Text("Session Info").font(.headline)
+                        Spacer()
+                        Button { showingInspector = false } label: {
+                            Label("Close Session Info", systemImage: "xmark")
+                        }
+                        .labelStyle(.iconOnly)
+                        .buttonStyle(.borderless)
+                        .help("Close Session Info")
+                    }
+                    .padding(16)
+                    Divider()
+                    inspectorContent
+                }
+                .frame(minWidth: 320, idealWidth: 340, maxWidth: 380, maxHeight: .infinity)
+                .background(.regularMaterial)
             }
         }
+        .navigationTitle("Sessions")
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
+                Menu {
+                    Button("All") { store.stateFilter = nil }
+                    Divider()
+                    ForEach(SessionState.allCases, id: \.self) { state in
+                        Button(state.rawValue.capitalized) { store.stateFilter = state }
+                    }
+                } label: {
+                    Label("Filter", systemImage: "line.3.horizontal.decrease.circle")
+                }
+                Button { showingCreate = true } label: {
+                    Label("New Session", systemImage: "plus")
+                }
+                .keyboardShortcut("n")
+                .disabled(!store.canCreateSessions)
+                Button { showingInspector.toggle() } label: {
+                    Label("Session Info", systemImage: "sidebar.right")
+                }
+                .help(showingInspector ? "Hide Session Info" : "Show Session Info")
+                .accessibilityValue(showingInspector ? "Shown" : "Hidden")
+            }
+            ToolbarItemGroup(placement: .navigation) {
+                SessionSearchField(text: $store.search, focusRequest: searchFocusRequest)
+                    .frame(width: 180)
+                    .background {
+                        Button("Search Sessions") { searchFocusRequest += 1 }
+                            .keyboardShortcut("f", modifiers: .command)
+                            .hidden()
+                            .accessibilityHidden(true)
+                    }
+                settingsButton
                 Button {
                     Task { await store.refresh(showsProgress: true) }
                 } label: {
@@ -116,13 +136,10 @@ struct SessionsView: View {
                 .disabled(store.isRefreshing)
             }
         }
-        // Without this the toolbar's sidebar section stops short of the split divider, so
-        // the sidebar's trailing border only exists below the toolbar.
-        .background(SidebarToolbarSeparator())
-        // Carries the sidebar's material across the rest of the titlebar so the header reads
-        // as one surface, and steps aside when the sidebar is collapsed.
-        .background(TitlebarSidebarMaterial())
-        .onChange(of: store.selection) { _ in Task { await store.loadDetails() } }
+        .onChange(of: store.selection) { selection in
+            if !selection.isEmpty { showingInspector = true }
+            Task { await store.loadDetails() }
+        }
         .onAppear { handleMenuRequests() }
         .onChange(of: store.shouldPresentNewSession) { requested in
             if requested { handleMenuRequests() }
@@ -160,6 +177,41 @@ struct SessionsView: View {
         } message: {
             Text(store.errorMessage ?? "")
         }
+    }
+
+    @ViewBuilder private var inspectorContent: some View {
+        if store.selection.count > 1 {
+            MultiSessionSelectionView(store: store)
+        } else if store.selection.count == 1,
+                  let selectedID = store.selection.first,
+                  let details = store.details,
+                  details.id == selectedID {
+            SessionDetailView(store: store, session: details)
+        } else {
+            EmptyStateView(
+                title: "Select a Session",
+                systemImage: "info.circle",
+                message: "Choose a session to inspect and manage it."
+            )
+        }
+    }
+
+    private var settingsButton: some View {
+        Group {
+            if #available(macOS 14.0, *) {
+                SettingsLink {
+                    Label("Settings", systemImage: "gearshape")
+                }
+            } else {
+                Button {
+                    NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+                } label: {
+                    Label("Settings", systemImage: "gearshape")
+                }
+            }
+        }
+        .labelStyle(.iconOnly)
+        .help("Open Settings")
     }
 
     private var errorBinding: Binding<Bool> {
@@ -234,6 +286,45 @@ struct SessionsView: View {
                 await store.previewPrune()
                 showingPrune = store.prunePreview != nil
             }
+        }
+    }
+}
+
+/// A native search field with live filtering and Command-F focus support.
+private struct SessionSearchField: NSViewRepresentable {
+    @Binding var text: String
+    let focusRequest: Int
+
+    func makeCoordinator() -> Coordinator { Coordinator(text: $text) }
+
+    func makeNSView(context: Context) -> NSSearchField {
+        let field = NSSearchField()
+        field.placeholderString = "Search sessions"
+        field.setAccessibilityLabel("Search sessions")
+        field.sendsSearchStringImmediately = true
+        field.sendsWholeSearchString = false
+        field.delegate = context.coordinator
+        return field
+    }
+
+    func updateNSView(_ field: NSSearchField, context: Context) {
+        context.coordinator.text = $text
+        if field.stringValue != text { field.stringValue = text }
+        if context.coordinator.focusRequest != focusRequest {
+            context.coordinator.focusRequest = focusRequest
+            field.window?.makeFirstResponder(field)
+        }
+    }
+
+    final class Coordinator: NSObject, NSSearchFieldDelegate {
+        var text: Binding<String>
+        var focusRequest = 0
+
+        init(text: Binding<String>) { self.text = text }
+
+        func controlTextDidChange(_ notification: Notification) {
+            guard let field = notification.object as? NSSearchField else { return }
+            text.wrappedValue = field.stringValue
         }
     }
 }

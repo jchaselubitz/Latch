@@ -5,6 +5,11 @@ shows, creates, opens, resizes, stops, renames, removes, and prunes local
 sessions from a SwiftUI window and menu-bar extra. It never reads `~/.latch`
 directly and does not own session lifetime.
 
+The session list is the main workspace. Select a session to open its information
+drawer on the right; close it with the drawer's close button or the **Session
+Info** toolbar button. Search, Settings, and Refresh are grouped on the left of
+the toolbar, with Filter, New Session, and Session Info on the right.
+
 Use **File → New Session…** to create a session and **Latch → Settings…** (or
 Command-Comma) to choose the default terminal Latch uses for attachments.
 Terminal, iTerm2, and Ghostty are built-in options. Choose **Custom** to select
