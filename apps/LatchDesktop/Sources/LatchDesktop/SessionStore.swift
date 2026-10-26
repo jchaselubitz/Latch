@@ -8,7 +8,7 @@ final class SessionStore: ObservableObject {
     @Published private(set) var details: InspectReport?
     @Published var selection = Set<String>()
     @Published var search = ""
-    @Published var stateFilter: SessionState?
+    @Published var filter: SessionFilter = .all
     @Published var isRefreshing = false
     @Published var errorMessage: String?
     @Published var prunePreview: PruneReport?
@@ -121,13 +121,29 @@ final class SessionStore: ObservableObject {
 
     var filteredSessions: [SessionSummary] {
         sessions.filter { session in
-            (stateFilter == nil || session.state == stateFilter) &&
+            filter.includes(session) &&
             (search.isEmpty || [session.name, session.title ?? "", session.commandLabel, session.cwd]
                 .contains { $0.localizedCaseInsensitiveContains(search) })
         }
     }
 
     var runningCount: Int { sessions.filter { $0.state == .running }.count }
+
+    func count(for filter: SessionFilter) -> Int {
+        sessions.filter(filter.includes).count
+    }
+
+    /// Working directories of the newest sessions, most recent first, so a
+    /// new session can start where recent work happened.
+    func recentDirectories(limit: Int = 4) -> [String] {
+        var seen = Set<String>()
+        return sessions
+            .sorted { $0.createdAt > $1.createdAt }
+            .map(\.cwd)
+            .filter { seen.insert($0).inserted }
+            .prefix(limit)
+            .map { $0 }
+    }
     var canCreateSessions: Bool { cliCapabilities?.capabilities.create == true }
     var canAttachSessions: Bool { cliCapabilities?.capabilities.localAttach == true }
     /// The selected CLI understands a declared agent launch. An older one
@@ -309,6 +325,15 @@ final class SessionStore: ObservableObject {
                 openInBackground: terminalOpenInBackground
             )
         }
+    }
+
+    /// Puts the shell command that attaches to a session on the pasteboard.
+    func copyAttachCommand(_ id: String) async {
+        let command = await client.attachmentCommand(for: id)
+            .map(TerminalLauncher.shellQuote)
+            .joined(separator: " ")
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(command, forType: .string)
     }
 
     func stop(_ id: String, force: Bool) async {

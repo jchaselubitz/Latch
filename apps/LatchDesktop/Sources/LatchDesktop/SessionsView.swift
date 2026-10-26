@@ -5,136 +5,22 @@ import UniformTypeIdentifiers
 struct SessionsView: View {
     @ObservedObject var store: SessionStore
     @ObservedObject var updates: UpdateController
+    @ObservedObject var remoteAccess: RemoteAccessController
     @State private var showingCreate = false
     @State private var showingPrune = false
     @State private var pendingStop: PendingStopRequest?
     @State private var searchFocusRequest = 0
-    @State private var showingInspector = false
+    @State private var showingInspector = true
 
     var body: some View {
-        HSplitView {
-            List(store.filteredSessions, selection: $store.selection) { session in
-                SessionRow(session: session)
-                    .tag(session.id)
-                    .contextMenu {
-                        let canOpen = session.state.isAttachable && store.canAttachSessions
-                        let otherLiveIDs = store.otherLiveSessionIDs(keeping: session.id)
-                        Button("Open in \(store.preferredTerminal.rawValue)") {
-                            Task { await store.open(session.id) }
-                        }
-                        .disabled(!canOpen)
-                        Divider()
-                        OpenBehaviorMenuItems(
-                            store: store,
-                            sessionID: session.id,
-                            isEnabled: canOpen
-                        )
-                        Divider()
-                        if session.state.isLive {
-                            Button("Stop…", role: .destructive) {
-                                pendingStop = stopTargets(for: session)
-                            }
-                        }
-                        Button("Stop Other Sessions…", role: .destructive) {
-                            pendingStop = PendingStopRequest(
-                                sessionIDs: otherLiveIDs,
-                                keepingID: session.id,
-                                keepingName: session.name
-                            )
-                        }
-                        .disabled(otherLiveIDs.isEmpty)
-                    }
-            }
-            .listStyle(.inset)
-            .overlay {
-                if store.sessions.isEmpty && !store.isRefreshing {
-                    EmptyStateView(
-                        title: "No Latch Sessions",
-                        systemImage: "rectangle.stack.badge.plus",
-                        message: "Create a persistent shell session to get started."
-                    )
-                }
-            }
-            // Fixed footer: bulk actions live here instead of the toolbar so they stay
-            // reachable regardless of list length.
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-                SidebarFooter(
-                    canStopSelected: store.hasSelectedLiveSessions,
-                    stopSelected: {
-                        let ids = store.selectedLiveSessionIDs
-                        guard !ids.isEmpty else { return }
-                        pendingStop = PendingStopRequest(sessionIDs: ids)
-                    },
-                    prune: {
-                        Task {
-                            await store.previewPrune()
-                            showingPrune = store.prunePreview != nil
-                        }
-                    }
-                )
-            }
-            .frame(minWidth: 360, maxWidth: .infinity, maxHeight: .infinity)
-
-            if showingInspector {
-                VStack(spacing: 0) {
-                    HStack {
-                        Text("Session Info").font(.headline)
-                        Spacer()
-                        Button { showingInspector = false } label: {
-                            Label("Close Session Info", systemImage: "xmark")
-                        }
-                        .labelStyle(.iconOnly)
-                        .buttonStyle(.borderless)
-                        .help("Close Session Info")
-                    }
-                    .padding(16)
-                    Divider()
-                    inspectorContent
-                }
-                .frame(minWidth: 320, idealWidth: 340, maxWidth: 380, maxHeight: .infinity)
-                .background(.regularMaterial)
-            }
+        NavigationSplitView {
+            SessionsSidebar(store: store, remoteAccess: remoteAccess, prune: startPrune)
+                .navigationSplitViewColumnWidth(min: 200, ideal: 224, max: 300)
+        } detail: {
+            sessionList
         }
-        .navigationTitle("Sessions")
-        .toolbar {
-            ToolbarItemGroup(placement: .primaryAction) {
-                Menu {
-                    Button("All") { store.stateFilter = nil }
-                    Divider()
-                    ForEach(SessionState.allCases, id: \.self) { state in
-                        Button(state.rawValue.capitalized) { store.stateFilter = state }
-                    }
-                } label: {
-                    Label("Filter", systemImage: "line.3.horizontal.decrease.circle")
-                }
-                Button { showingCreate = true } label: {
-                    Label("New Session", systemImage: "plus")
-                }
-                .keyboardShortcut("n")
-                .disabled(!store.canCreateSessions)
-                Button { showingInspector.toggle() } label: {
-                    Label("Session Info", systemImage: "sidebar.right")
-                }
-                .help(showingInspector ? "Hide Session Info" : "Show Session Info")
-                .accessibilityValue(showingInspector ? "Shown" : "Hidden")
-            }
-            ToolbarItemGroup(placement: .navigation) {
-                SessionSearchField(text: $store.search, focusRequest: searchFocusRequest)
-                    .frame(width: 180)
-                    .background {
-                        Button("Search Sessions") { searchFocusRequest += 1 }
-                            .keyboardShortcut("f", modifiers: .command)
-                            .hidden()
-                            .accessibilityHidden(true)
-                    }
-                settingsButton
-                Button {
-                    Task { await store.refresh(showsProgress: true) }
-                } label: {
-                    Label("Refresh", systemImage: "arrow.clockwise")
-                }
-                .disabled(store.isRefreshing)
-            }
+        .sessionInspector(isPresented: $showingInspector) {
+            inspectorContent
         }
         .onChange(of: store.selection) { selection in
             if !selection.isEmpty { showingInspector = true }
@@ -179,6 +65,119 @@ struct SessionsView: View {
         }
     }
 
+    private var sessionList: some View {
+        let sessions = store.filteredSessions
+        let running = sessions.filter(\.state.isLive)
+        let stopped = sessions.filter { !$0.state.isLive }
+        return List(selection: $store.selection) {
+            if !running.isEmpty {
+                Section("Running") {
+                    ForEach(running) { sessionRow($0) }
+                }
+            }
+            if !stopped.isEmpty {
+                Section("Stopped") {
+                    ForEach(stopped) { sessionRow($0) }
+                }
+            }
+        }
+        .listStyle(.inset)
+        .overlay {
+            if store.sessions.isEmpty && !store.isRefreshing {
+                EmptyStateView(
+                    title: "No Latch Sessions",
+                    systemImage: "rectangle.stack.badge.plus",
+                    message: "Create a persistent shell session to get started."
+                )
+            } else if sessions.isEmpty && !store.sessions.isEmpty {
+                EmptyStateView(
+                    title: "No Matching Sessions",
+                    systemImage: "line.3.horizontal.decrease.circle",
+                    message: "Nothing in \(store.filter.title) matches the current search."
+                )
+            }
+        }
+        .navigationTitle(store.filter.title)
+        .navigationSubtitle(listSubtitle)
+        // No minimum width here: on the macOS 26 SDK a fixed minimum on the
+        // detail column, next to an inspector, sends the split view into an
+        // endless constraint pass that AppKit aborts the app over.
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                SessionSearchField(text: $store.search, focusRequest: searchFocusRequest)
+                    .frame(width: 200)
+                    .background {
+                        Button("Search Sessions") { searchFocusRequest += 1 }
+                            .keyboardShortcut("f", modifiers: .command)
+                            .hidden()
+                            .accessibilityHidden(true)
+                    }
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Button { showingCreate = true } label: {
+                    Label("New Session", systemImage: "plus")
+                }
+                .keyboardShortcut("n")
+                .disabled(!store.canCreateSessions)
+                .help("New Session")
+                .latchProminentToolbarButton()
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Button { showingInspector.toggle() } label: {
+                    Label("Session Info", systemImage: "sidebar.right")
+                }
+                .help(showingInspector ? "Hide Session Info" : "Show Session Info")
+                .accessibilityValue(showingInspector ? "Shown" : "Hidden")
+            }
+        }
+    }
+
+    private func sessionRow(_ session: SessionSummary) -> some View {
+        SessionRow(session: session)
+            .tag(session.id)
+            .contextMenu {
+                let canOpen = session.state.isAttachable && store.canAttachSessions
+                let otherLiveIDs = store.otherLiveSessionIDs(keeping: session.id)
+                Button("Open in \(store.preferredTerminal.rawValue)") {
+                    Task { await store.open(session.id) }
+                }
+                .disabled(!canOpen)
+                Divider()
+                OpenBehaviorMenuItems(
+                    store: store,
+                    sessionID: session.id,
+                    isEnabled: canOpen
+                )
+                Divider()
+                Button("Copy Attach Command") {
+                    Task { await store.copyAttachCommand(session.id) }
+                }
+                Divider()
+                if session.state.isLive {
+                    Button("Stop…", role: .destructive) {
+                        pendingStop = stopTargets(for: session)
+                    }
+                }
+                Button("Stop Other Sessions…", role: .destructive) {
+                    pendingStop = PendingStopRequest(
+                        sessionIDs: otherLiveIDs,
+                        keepingID: session.id,
+                        keepingName: session.name
+                    )
+                }
+                .disabled(otherLiveIDs.isEmpty)
+            }
+    }
+
+    private var listSubtitle: String {
+        let running = store.filteredSessions.filter(\.state.isLive).count
+        let total = store.filteredSessions.count
+        if total == 0 { return "No sessions" }
+        if running == total { return "\(running) running" }
+        return "\(running) running · \(total - running) stopped"
+    }
+
     @ViewBuilder private var inspectorContent: some View {
         if store.selection.count > 1 {
             MultiSessionSelectionView(store: store)
@@ -193,25 +192,15 @@ struct SessionsView: View {
                 systemImage: "info.circle",
                 message: "Choose a session to inspect and manage it."
             )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 
-    private var settingsButton: some View {
-        Group {
-            if #available(macOS 14.0, *) {
-                SettingsLink {
-                    Label("Settings", systemImage: "gearshape")
-                }
-            } else {
-                Button {
-                    NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
-                } label: {
-                    Label("Settings", systemImage: "gearshape")
-                }
-            }
+    private func startPrune() {
+        Task {
+            await store.previewPrune()
+            showingPrune = store.prunePreview != nil
         }
-        .labelStyle(.iconOnly)
-        .help("Open Settings")
     }
 
     private var errorBinding: Binding<Bool> {
@@ -282,11 +271,47 @@ struct SessionsView: View {
         }
         if store.shouldPresentPrune {
             store.shouldPresentPrune = false
-            Task {
-                await store.previewPrune()
-                showingPrune = store.prunePreview != nil
+            startPrune()
+        }
+    }
+}
+
+/// Shows session details as a trailing inspector column on macOS 14 and later,
+/// and as a fixed-width drawer on macOS 13, which has no inspector.
+private struct SessionInspector<Inspector: View>: ViewModifier {
+    @Binding var isPresented: Bool
+    let inspector: () -> Inspector
+
+    func body(content: Content) -> some View {
+        if #available(macOS 14.0, *) {
+            content.inspector(isPresented: $isPresented) {
+                // A fixed minimum keeps the column from reporting a new size
+                // every time the selection swaps the content underneath it.
+                inspector()
+                    .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
+                    .inspectorColumnWidth(min: 300, ideal: 340, max: 420)
+            }
+        } else {
+            HStack(spacing: 0) {
+                content
+                if isPresented {
+                    Divider()
+                    inspector()
+                        .frame(width: 330)
+                        .frame(maxHeight: .infinity)
+                        .background(.regularMaterial)
+                }
             }
         }
+    }
+}
+
+private extension View {
+    func sessionInspector<Inspector: View>(
+        isPresented: Binding<Bool>,
+        @ViewBuilder content: @escaping () -> Inspector
+    ) -> some View {
+        modifier(SessionInspector(isPresented: isPresented, inspector: content))
     }
 }
 

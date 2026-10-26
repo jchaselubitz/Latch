@@ -6,38 +6,49 @@ struct SessionRow: View {
     let session: SessionSummary
 
     var body: some View {
-        HStack(spacing: 10) {
-            Circle()
-                .fill(stateColor)
-                .frame(width: 9, height: 9)
-                .accessibilityLabel(session.state.rawValue)
+        HStack(spacing: 11) {
+            AgentTile(agent: session.agent, size: 30)
+                .opacity(session.state.isLive ? 1 : 0.65)
             VStack(alignment: .leading, spacing: 2) {
-                Text(session.name).fontWeight(.medium).lineLimit(1)
-                Text(session.displaySubtitle)
-                    .font(.caption)
+                HStack(spacing: 6) {
+                    Text(session.name)
+                        .fontWeight(.semibold)
+                        .lineLimit(1)
+                    if session.state != .running {
+                        StatePill(state: session.state)
+                    }
+                }
+                Text(subtitle)
+                    .font(.callout)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
-            Spacer()
-            VStack(alignment: .trailing, spacing: 2) {
-                Text(session.state.rawValue)
-                if let idle = idleDescription {
+            Spacer(minLength: 8)
+            VStack(alignment: .trailing, spacing: 3) {
+                Text(session.abbreviatedDirectory)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(.quaternary.opacity(0.6), in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+                    .help(session.cwd)
+                if let idle = session.displayIdleLabel {
                     Text(idle)
+                        .font(.caption2)
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
                 }
             }
-            .font(.caption2)
-            .foregroundStyle(.secondary)
         }
-        .padding(.vertical, 3)
+        .padding(.vertical, 4)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(session.name), \(session.agent.title), \(session.state.label)")
     }
 
-    private var stateColor: Color {
-        switch session.state {
-        case .running: return .green
-        case .exited: return .secondary
-        case .lost: return .red
-        }
+    /// The directory already has its own chip, so an untitled session shows
+    /// only what it runs.
+    private var subtitle: String {
+        session.title == nil ? session.commandLabel : session.displaySubtitle
     }
-
-    private var idleDescription: String? { session.displayIdleLabel }
 }

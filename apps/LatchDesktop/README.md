@@ -5,10 +5,16 @@ shows, creates, opens, resizes, stops, renames, removes, and prunes local
 sessions from a SwiftUI window and menu-bar extra. It never reads `~/.latch`
 directly and does not own session lifetime.
 
-The session list is the main workspace. Select a session to open its information
-drawer on the right; close it with the drawer's close button or the **Session
-Info** toolbar button. Search, Settings, and Refresh are grouped on the left of
-the toolbar, with Filter, New Session, and Session Info on the right.
+The session list is the main workspace. The sidebar narrows it by state
+(Running, Exited, Lost) or by what a session runs (Claude Code, Codex, Shell),
+lists paired devices while remote access is on, and shows the selected CLI's
+health with Refresh and Prune at hand. Select a session to open its inspector
+on the right; the **Session Info** toolbar button shows and hides it. Search,
+New Session, and Session Info sit on the right of the toolbar. The menu-bar
+extra opens a small window with every session, update status, and New Session.
+
+On macOS 26 and later the window uses Liquid Glass; earlier systems get the
+same layout with standard materials.
 
 Use **File → New Session…** to create a session and **Latch → Settings…** (or
 Command-Comma) to choose the default terminal Latch uses for attachments.

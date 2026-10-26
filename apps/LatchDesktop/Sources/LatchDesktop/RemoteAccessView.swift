@@ -254,6 +254,10 @@ private struct RemoteDeviceRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
+                Image(systemName: "iphone")
+                    .font(.title3)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 24)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(device.name)
                     Text(device.permission.detail)
@@ -277,7 +281,8 @@ private struct RemoteDeviceRow: View {
                     }
                 }
                 .labelsHidden()
-                .frame(width: 120)
+                .pickerStyle(.segmented)
+                .frame(width: 150)
 
                 Button("Revoke", role: .destructive) {
                     Task { await controller.revoke(device) }

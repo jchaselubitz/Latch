@@ -26,6 +26,44 @@ final class ModelTests: XCTestCase {
         return fixture
     }
 
+    func testAgentIsDerivedFromCommandLabel() {
+        XCTAssertEqual(SessionAgent(commandLabel: "claude"), .claude)
+        XCTAssertEqual(SessionAgent(commandLabel: "codex"), .codex)
+        XCTAssertEqual(SessionAgent(commandLabel: "/opt/homebrew/bin/codex --full-auto"), .codex)
+        XCTAssertEqual(SessionAgent(commandLabel: "zsh"), .shell)
+        XCTAssertEqual(SessionAgent(commandLabel: ""), .shell)
+    }
+
+    func testSessionFilterMatchesStateAndAgent() {
+        let claude = SessionSummary(
+            id: "a", name: "a", title: nil, state: .running, cwd: "/tmp", commandLabel: "claude",
+            createdAt: "2026-10-26T09:00:00Z", lastActivityAt: nil, idleMs: nil
+        )
+        let shell = SessionSummary(
+            id: "b", name: "b", title: nil, state: .exited, cwd: "/tmp", commandLabel: "zsh",
+            createdAt: "2026-10-26T10:00:00Z", lastActivityAt: nil, idleMs: nil
+        )
+        XCTAssertTrue(SessionFilter.all.includes(shell))
+        XCTAssertTrue(SessionFilter.state(.running).includes(claude))
+        XCTAssertFalse(SessionFilter.state(.running).includes(shell))
+        XCTAssertTrue(SessionFilter.agent(.claude).includes(claude))
+        XCTAssertFalse(SessionFilter.agent(.codex).includes(claude))
+        XCTAssertTrue(SessionFilter.agent(.shell).includes(shell))
+    }
+
+    func testAbbreviatedDirectoryShortensHomeAndDeepPaths() {
+        let home = "/Users/jake"
+        XCTAssertEqual(SessionSummary.abbreviatedDirectory("/Users/jake", home: home), "~")
+        XCTAssertEqual(SessionSummary.abbreviatedDirectory("/Users/jake/Latch", home: home), "~/Latch")
+        XCTAssertEqual(
+            SessionSummary.abbreviatedDirectory("/Users/jake/Development/Cooperativ/Latch", home: home),
+            "~/…/Latch"
+        )
+        XCTAssertEqual(SessionSummary.abbreviatedDirectory("/tmp", home: home), "/tmp")
+        XCTAssertEqual(SessionSummary.abbreviatedDirectory("/var/folders/x", home: home), "/…/x")
+        XCTAssertEqual(SessionSummary.abbreviatedDirectory("/Users/jakeb/src", home: home), "/…/src")
+    }
+
     func testWhereOutputKeepsExecutablePathsInOrderAndRemovesDuplicates() {
         let output = "/bin/sh\n/bin/sh\nlatch: aliased to something\n/usr/bin/false\n"
         XCTAssertEqual(

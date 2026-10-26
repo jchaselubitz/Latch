@@ -24,7 +24,13 @@ fi
 arm64_build_dir="$desktop_dir/.build/arm64-release"
 rm -rf -- "$arm64_build_dir" "$desktop_dir/.build/x86_64-release"
 
-swift build --package-path "$desktop_dir" -c release --arch arm64 --scratch-path "$arm64_build_dir"
+# SwiftPM links with the deployment target as the SDK version too, so the
+# binary would claim it was built against macOS 13 and AppKit would draw it
+# with the pre-Tahoe appearance. Record the SDK it was really built with so
+# macOS 26 and later give the window Liquid Glass.
+sdk_version="$(xcrun --sdk macosx --show-sdk-version)"
+swift build --package-path "$desktop_dir" -c release --arch arm64 --scratch-path "$arm64_build_dir" \
+    -Xlinker -platform_version -Xlinker macos -Xlinker 13.0 -Xlinker "$sdk_version"
 
 arm64_bin_dir="$(swift build --package-path "$desktop_dir" -c release --arch arm64 --scratch-path "$arm64_build_dir" --show-bin-path)"
 app_dir="$desktop_dir/.build/release/Latch.app"

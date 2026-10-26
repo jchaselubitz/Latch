@@ -250,6 +250,61 @@ enum SessionAgent: String, CaseIterable, Identifiable, Sendable {
         case .codex: return "codex"
         }
     }
+
+    /// The agent a listed session runs. The CLI labels a session with the
+    /// basename of its program, so an agent launch reads as its executable
+    /// and anything else is a shell or a custom command.
+    init(commandLabel: String) {
+        let program = commandLabel.split(separator: " ").first.map(String.init) ?? ""
+        let name = (program as NSString).lastPathComponent.lowercased()
+        self = SessionAgent.allCases.first { $0.executable == name } ?? .shell
+    }
+}
+
+extension SessionSummary {
+    var agent: SessionAgent { SessionAgent(commandLabel: commandLabel) }
+
+    /// The working directory as a short chip: home becomes `~`, and anything
+    /// deeper than one folder below it keeps only its last component.
+    var abbreviatedDirectory: String {
+        Self.abbreviatedDirectory(cwd, home: FileManager.default.homeDirectoryForCurrentUser.path)
+    }
+
+    static func abbreviatedDirectory(_ path: String, home: String) -> String {
+        var display = path
+        if path == home {
+            return "~"
+        } else if path.hasPrefix(home + "/") {
+            display = "~" + path.dropFirst(home.count)
+        }
+        let components = display.split(separator: "/", omittingEmptySubsequences: true)
+        guard components.count > 2 else { return display }
+        let root = display.hasPrefix("~") ? "~" : ""
+        return "\(root)/…/\(components.last!)"
+    }
+}
+
+/// What the sidebar narrows the session list to.
+enum SessionFilter: Hashable, Sendable {
+    case all
+    case state(SessionState)
+    case agent(SessionAgent)
+
+    func includes(_ session: SessionSummary) -> Bool {
+        switch self {
+        case .all: return true
+        case .state(let state): return session.state == state
+        case .agent(let agent): return session.agent == agent
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .all: return "All Sessions"
+        case .state(let state): return state.rawValue.capitalized
+        case .agent(let agent): return agent.title
+        }
+    }
 }
 
 struct NewSessionRequest: Sendable {

@@ -14,8 +14,12 @@ struct LatchDesktopApp: App {
 
     var body: some Scene {
         WindowGroup("Latch", id: "sessions") {
-            SessionsView(store: runtime.store, updates: runtime.updates)
-                .frame(minWidth: 760, minHeight: 480)
+            SessionsView(
+                store: runtime.store,
+                updates: runtime.updates,
+                remoteAccess: runtime.remoteAccess
+            )
+                .frame(minWidth: 900, minHeight: 500)
                 .onAppear {
                     // Keep the SwiftUI scene action available after its last
                     // window closes so a Dock click can reopen the main screen.
@@ -37,7 +41,7 @@ struct LatchDesktopApp: App {
                     await remoteAccess.restoreIfEnabled()
                 }
         }
-        .defaultSize(width: 940, height: 620)
+        .defaultSize(width: 1120, height: 700)
         .commands {
             // The App menu is where macOS users look for this, and it is the
             // one command that has to work when no session is selected and the
@@ -74,7 +78,11 @@ struct LatchDesktopApp: App {
         }
 
         MenuBarExtra {
-            MenuBarSessionsView(store: runtime.store, updates: runtime.updates) {
+            MenuBarSessionsView(
+                store: runtime.store,
+                updates: runtime.updates,
+                remoteAccess: runtime.remoteAccess
+            ) {
                 openWindow(id: "sessions")
                 NSApp.activate(ignoringOtherApps: true)
             } openSettings: {
@@ -92,7 +100,7 @@ struct LatchDesktopApp: App {
                     .renderingMode(.template)
             }
         }
-        .menuBarExtraStyle(.menu)
+        .menuBarExtraStyle(.window)
 
         Settings {
             SettingsView(

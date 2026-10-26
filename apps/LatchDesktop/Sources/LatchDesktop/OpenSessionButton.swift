@@ -19,7 +19,7 @@ struct OpenSessionButton: View {
             Task { await store.open(sessionID) }
         }
         .menuStyle(.button)
-        .buttonStyle(.borderedProminent)
+        .latchProminentButtonStyle()
         .controlSize(.large)
         .frame(maxWidth: .infinity)
         .disabled(!isEnabled)

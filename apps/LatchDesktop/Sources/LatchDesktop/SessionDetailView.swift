@@ -17,21 +17,8 @@ struct SessionDetailView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(session.name).font(.title2).fontWeight(.semibold)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Text(session.state.rawValue.capitalized)
-                        .font(.caption)
-                        .padding(.horizontal, 9).padding(.vertical, 4)
-                        .background(.quaternary, in: Capsule())
-                    if let title = session.title {
-                        Text(title)
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
+            VStack(alignment: .leading, spacing: 16) {
+                header
 
                 OpenSessionButton(
                     store: store,
@@ -39,46 +26,55 @@ struct SessionDetailView: View {
                     isEnabled: session.state.isAttachable && store.canAttachSessions
                 )
 
-                VStack(alignment: .leading, spacing: 12) {
-                    DetailRow(label: "Command", value: session.commandLabel)
+                HStack(alignment: .top, spacing: 4) {
+                    CaptionedIconButton(title: "Rename", systemImage: "pencil") {
+                        renameValue = session.name
+                        showingRename = true
+                    }
+                    CaptionedIconButton(title: "Resize", systemImage: "arrow.up.left.and.arrow.down.right") {
+                        showingResize = true
+                    }
+                    .disabled(session.state != .running)
+                    CaptionedIconButton(title: "Copy", systemImage: "doc.on.doc") {
+                        Task { await store.copyAttachCommand(session.id) }
+                    }
+                    .help("Copy Attach Command")
+                    CaptionedIconButton(title: "Stop", systemImage: "stop.circle", role: .destructive) {
+                        destructiveAction = .stop
+                    }
+                    .disabled(!session.state.isLive)
+                }
+
+                VStack(spacing: 0) {
+                    DetailRow(label: "Directory", value: (session.cwd as NSString).abbreviatingWithTildeInPath, monospaced: true)
+                    DetailRow(label: "Command", value: session.commandLabel, monospaced: true)
                     if let kernel = session.kernel {
                         DetailRow(label: "Kernel", value: kernel)
                     }
-                    DetailRow(label: "Directory", value: session.cwd)
-                    DetailRow(label: "Created", value: session.createdAt)
-                    if let summary = store.sessions.first(where: { $0.id == session.id }),
-                       let lastActivity = summary.lastActivityAt {
-                        DetailRow(label: "Last Activity", value: lastActivity)
-                    }
                     DetailRow(label: "Size", value: sizeDescription)
-                    DetailRow(label: "Session ID", value: session.id)
+                    DetailRow(label: "Created", value: Self.displayTime(session.createdAt))
+                    if let lastActivity = summary?.lastActivityAt {
+                        DetailRow(label: "Last Activity", value: Self.displayTime(lastActivity))
+                    }
                     if let exit = session.exit {
                         DetailRow(label: "Exit", value: exitDescription(exit))
                     }
                     if let attached = session.attached {
-                        DetailRow(label: "Attached", value: "\(attached)")
+                        DetailRow(label: "Attached", value: attached == 1 ? "1 client" : "\(attached) clients")
                     }
+                    DetailRow(label: "Session ID", value: session.id, monospaced: true, isLast: true)
                 }
+                .latchCard()
                 .textSelection(.enabled)
 
-                Divider()
-
-                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], alignment: .leading, spacing: 8) {
-                    Button("Rename…") {
-                        renameValue = session.name
-                        showingRename = true
-                    }
-                    if session.state == .running {
-                        Button("Resize…") { showingResize = true }
-                    }
-                    if session.state.isLive {
-                        Button("Stop…") { destructiveAction = .stop }
-                    }
-                    Button("Remove…", role: .destructive) {
-                        destructiveAction = session.state.isLive ? .forceRemove : .remove
-                    }
+                Button(role: .destructive) {
+                    destructiveAction = session.state.isLive ? .forceRemove : .remove
+                } label: {
+                    Label("Remove Session…", systemImage: "trash")
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.borderless)
+                .foregroundStyle(.red)
+                .frame(maxWidth: .infinity)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(16)
@@ -144,30 +140,90 @@ struct SessionDetailView: View {
         }
     }
 
+    private var summary: SessionSummary? {
+        store.sessions.first { $0.id == session.id }
+    }
+
+    private var header: some View {
+        HStack(spacing: 12) {
+            AgentTile(agent: SessionAgent(commandLabel: session.commandLabel), size: 44)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(session.name)
+                    .font(.title3.weight(.bold))
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 6) {
+                    StatePill(state: session.state)
+                    Text(headerCaption)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                if let title = session.title {
+                    Text(SessionSummary.displaySubtitle(fromTitle: title))
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+
+    private var headerCaption: String {
+        let agent = SessionAgent(commandLabel: session.commandLabel).title
+        guard let idle = summary?.displayIdleLabel else { return agent }
+        return "\(agent) · \(idle)"
+    }
+
+    /// CLI timestamps are RFC 3339; anything unparseable is shown as sent.
+    static func displayTime(_ timestamp: String) -> String {
+        let parser = ISO8601DateFormatter()
+        parser.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        guard let date = parser.date(from: timestamp)
+            ?? ISO8601DateFormatter().date(from: timestamp) else { return timestamp }
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        formatter.doesRelativeDateFormatting = true
+        return formatter.string(from: date)
+    }
+
     private var sizeDescription: String {
         let size = session.size ?? session.initialSize
         return "\(size.cols) × \(size.rows)"
     }
 
     private func exitDescription(_ exit: ExitRecord) -> String {
-        if let code = exit.code { return "Code \(code) at \(exit.exitedAt)" }
-        return "\(exit.signal ?? "signal") at \(exit.exitedAt)"
+        if let code = exit.code { return "Code \(code), \(Self.displayTime(exit.exitedAt))" }
+        return "\(exit.signal ?? "signal"), \(Self.displayTime(exit.exitedAt))"
     }
 }
 
 struct DetailRow: View {
     let label: String
     let value: String
+    var monospaced = false
+    var isLast = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(label)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Text(value)
-                .font(.callout)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
+        VStack(spacing: 0) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                Text(label)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 84, alignment: .leading)
+                Text(value)
+                    .font(monospaced ? .caption.monospaced() : .callout)
+                    .multilineTextAlignment(.trailing)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+            }
+            .font(.callout)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            if !isLast {
+                Divider().padding(.leading, 12)
+            }
         }
+        .accessibilityElement(children: .combine)
     }
 }
