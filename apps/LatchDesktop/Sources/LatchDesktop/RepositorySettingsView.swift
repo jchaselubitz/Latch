@@ -13,10 +13,10 @@ struct RepositorySettingsView: View {
         Form {
             Section {
                 LabeledContent("Status", value: status)
-                SecureField("Gemini API key", text: $key)
+                TextField("Gemini API key", text: $key)
                     .disabled(busy)
                 if !key.isEmpty && !validKey {
-                    Text("Enter a 16–512 character key using letters, numbers, hyphens or underscores.")
+                    Text("Enter a 16–512 character key using letters, numbers, periods, hyphens or underscores.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 HStack {
@@ -48,8 +48,12 @@ struct RepositorySettingsView: View {
     }
 
     private var validKey: Bool {
+        Self.isValidKey(key)
+    }
+
+    static func isValidKey(_ key: String) -> Bool {
         (16...512).contains(key.utf8.count) && key.utf8.allSatisfy {
-            (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 45 || $0 == 95
+            (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 45 || $0 == 46 || $0 == 95
         }
     }
 

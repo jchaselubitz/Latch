@@ -72,7 +72,7 @@ fn valid_key(key: &str) -> bool {
     (16..=512).contains(&key.len())
         && key
             .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+            .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
 }
 
 fn valid_model(model: &str) -> bool {
@@ -280,6 +280,7 @@ mod tests {
             assert!(!valid_key(key));
         }
         assert!(valid_key("fixture_only_key_1234"));
+        assert!(valid_key("AQ.fixture_key-123456789"));
         assert!(!valid_key(&"a".repeat(513)));
         // Unit tests must never discover a real Keychain credential.
         assert!(matches!(load_key(), Err(ConfigError::Missing)));

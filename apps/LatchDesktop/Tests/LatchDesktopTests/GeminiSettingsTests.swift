@@ -2,6 +2,13 @@ import XCTest
 @testable import LatchDesktop
 
 final class GeminiSettingsTests: XCTestCase {
+    func testKeyValidationAcceptsPeriodsAndRejectsUnsafeInput() {
+        XCTAssertTrue(RepositorySettingsView.isValidKey("AQ.fixture_key-123456789"))
+        for key in ["short", "abcdefghijklmnop\n", "abcdefghijklmnop:header", String(repeating: "a", count: 513)] {
+            XCTAssertFalse(RepositorySettingsView.isValidKey(key))
+        }
+    }
+
     func testSelectedCLIReceivesKeyOnStdinAndReportsStatus() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
