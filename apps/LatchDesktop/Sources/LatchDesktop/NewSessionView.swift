@@ -158,7 +158,7 @@ private struct AgentChoice: View {
         let shape = RoundedRectangle(cornerRadius: 14, style: .continuous)
         Button(action: select) {
             VStack(alignment: .leading, spacing: 8) {
-                AgentTile(agent: agent, size: 32)
+                AgentLogo(agent: agent, size: 28)
                 Text(agent.title)
                     .fontWeight(.semibold)
                     .foregroundStyle(.primary)

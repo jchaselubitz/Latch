@@ -7,7 +7,7 @@ struct SessionRow: View {
 
     var body: some View {
         HStack(spacing: 11) {
-            AgentTile(agent: session.agent, size: 30)
+            AgentLogo(agent: session.agent, size: 24)
                 .opacity(session.state.isLive ? 1 : 0.65)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {

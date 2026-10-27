@@ -144,7 +144,7 @@ struct MenuBarSessionsView: View {
                 dismissThen { Task { await store.open(session.id) } }
             } label: {
                 HStack(spacing: 9) {
-                    AgentTile(agent: session.agent, size: 20)
+                    AgentLogo(agent: session.agent, size: 16)
                         .opacity(session.state.isLive ? 1 : 0.6)
                     Text(session.name)
                         .fontWeight(.medium)

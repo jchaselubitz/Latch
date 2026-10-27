@@ -18,7 +18,7 @@ struct SessionsSidebar: View {
             }
             Section("Agents") {
                 ForEach([SessionAgent.claude, .codex, .shell]) { agent in
-                    row(.agent(agent), systemImage: agent.symbolName, tint: agent.tint)
+                    row(.agent(agent)) { AgentLogo(agent: agent, size: 16) }
                 }
             }
             if remoteAccess.phase != .off, !remoteAccess.activeDevices.isEmpty {
@@ -46,10 +46,14 @@ struct SessionsSidebar: View {
     }
 
     private func row(_ filter: SessionFilter, systemImage: String, tint: Color) -> some View {
+        row(filter) { Image(systemName: systemImage).foregroundStyle(tint) }
+    }
+
+    private func row(_ filter: SessionFilter, @ViewBuilder icon: () -> some View) -> some View {
         Label {
             Text(filter.title)
         } icon: {
-            Image(systemName: systemImage).foregroundStyle(tint)
+            icon()
         }
         .badge(store.count(for: filter))
         .tag(filter as SessionFilter?)

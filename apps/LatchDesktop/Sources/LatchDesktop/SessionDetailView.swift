@@ -146,7 +146,7 @@ struct SessionDetailView: View {
 
     private var header: some View {
         HStack(spacing: 12) {
-            AgentTile(agent: SessionAgent(commandLabel: session.commandLabel), size: 44)
+            AgentLogo(agent: SessionAgent(commandLabel: session.commandLabel), size: 36)
             VStack(alignment: .leading, spacing: 4) {
                 Text(session.name)
                     .font(.title3.weight(.bold))

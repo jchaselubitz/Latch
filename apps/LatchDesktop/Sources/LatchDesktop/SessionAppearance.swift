@@ -1,34 +1,9 @@
 import SwiftUI
 import AppKit
 
-/// Shared visual vocabulary for sessions: the agent tile, the state pill, and
-/// the Liquid Glass helpers that fall back to materials before macOS 26.
-
-extension SessionAgent {
-    var symbolName: String {
-        switch self {
-        case .claude: return "sparkles"
-        case .codex: return "chevron.left.forwardslash.chevron.right"
-        case .shell: return "apple.terminal"
-        }
-    }
-
-    var tint: Color {
-        switch self {
-        case .claude: return Color(red: 0.85, green: 0.47, blue: 0.31)
-        case .codex: return Color(red: 0.30, green: 0.44, blue: 0.94)
-        case .shell: return Color(white: 0.42)
-        }
-    }
-
-    fileprivate var tileColors: [Color] {
-        switch self {
-        case .claude: return [Color(red: 0.93, green: 0.57, blue: 0.41), Color(red: 0.79, green: 0.37, blue: 0.23)]
-        case .codex: return [Color(red: 0.43, green: 0.58, blue: 1.0), Color(red: 0.23, green: 0.35, blue: 0.84)]
-        case .shell: return [Color(white: 0.36), Color(white: 0.17)]
-        }
-    }
-}
+/// Shared visual vocabulary for sessions: the state pill and the Liquid Glass
+/// helpers that fall back to materials before macOS 26. The agents' logos
+/// live in AgentLogo.swift.
 
 extension SessionState {
     var label: String { rawValue.capitalized }
@@ -47,27 +22,6 @@ extension SessionState {
         case .exited: return "stop.circle"
         case .lost: return "exclamationmark.triangle"
         }
-    }
-}
-
-/// A rounded tile naming what a session runs, in the style of an app icon.
-struct AgentTile: View {
-    let agent: SessionAgent
-    var size: CGFloat = 30
-
-    var body: some View {
-        let shape = RoundedRectangle(cornerRadius: size * 0.27, style: .continuous)
-        Image(systemName: agent.symbolName)
-            .font(.system(size: size * 0.44, weight: .semibold))
-            .foregroundStyle(.white)
-            .frame(width: size, height: size)
-            .background(
-                LinearGradient(colors: agent.tileColors, startPoint: .top, endPoint: .bottom),
-                in: shape
-            )
-            .overlay(shape.strokeBorder(.white.opacity(0.18), lineWidth: 0.5))
-            .shadow(color: .black.opacity(0.15), radius: 1, y: 0.5)
-            .accessibilityHidden(true)
     }
 }
 
