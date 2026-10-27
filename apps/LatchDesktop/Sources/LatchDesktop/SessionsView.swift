@@ -6,6 +6,7 @@ struct SessionsView: View {
     @ObservedObject var store: SessionStore
     @ObservedObject var updates: UpdateController
     @ObservedObject var remoteAccess: RemoteAccessController
+    let openSettings: () -> Void
     @State private var showingCreate = false
     @State private var showingPrune = false
     @State private var pendingStop: PendingStopRequest?
@@ -14,7 +15,12 @@ struct SessionsView: View {
 
     var body: some View {
         NavigationSplitView {
+            // The column width alone bounds the sidebar. Left to its content,
+            // the sidebar's hosting view reports a new minimum size from inside
+            // AppKit's constraint pass while the divider is dragged, and AppKit
+            // aborts the app over the constraints it keeps dirtying.
             SessionsSidebar(store: store, remoteAccess: remoteAccess, prune: startPrune)
+                .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
                 .navigationSplitViewColumnWidth(min: 200, ideal: 224, max: 300)
         } detail: {
             sessionList
@@ -99,11 +105,19 @@ struct SessionsView: View {
         }
         .navigationTitle(store.filter.title)
         .navigationSubtitle(listSubtitle)
-        // No minimum width here: on the macOS 26 SDK a fixed minimum on the
-        // detail column, next to an inspector, sends the split view into an
-        // endless constraint pass that AppKit aborts the app over.
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // No real minimum here: on the macOS 26 SDK any minimum the detail
+        // column reports, whether a fixed one or the list's own, sends the
+        // split view into an endless constraint pass when a neighbouring
+        // column is resized, and AppKit aborts the app over it. Zero keeps
+        // the reported size constant; the window's minimum still applies.
+        .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
         .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button(action: openSettings) {
+                    Label("Settings", systemImage: "gearshape")
+                }
+                .help("Settings")
+            }
             ToolbarItem(placement: .primaryAction) {
                 SessionSearchField(text: $store.search, focusRequest: searchFocusRequest)
                     .frame(width: 200)

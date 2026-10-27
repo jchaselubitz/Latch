@@ -207,6 +207,21 @@ actor LatchClient {
         try request(["remote-access", "audit", "--json"])
     }
 
+    /// Use the selected gateway executable so Keychain sees the same code identity.
+    func setGeminiKey(_ key: String) throws {
+        try run(["commit-message", "set-key", "--stdin"], stdin: Data((key + "\n").utf8))
+    }
+
+    func removeGeminiKey() throws {
+        try run(["commit-message", "remove-key"])
+    }
+
+    func geminiKeyStatus() throws -> String {
+        let data = try ProcessRunner.run(executableURL: executableURL,
+            arguments: ["commit-message", "status"], stdin: nil, timeout: timeout)
+        return String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     /// Pending content-free attention events the gateway spooled.
     func remoteAttentionEvents() throws -> [RemoteAttentionEvent] {
         try request(["remote-access", "attention-events", "--json"])

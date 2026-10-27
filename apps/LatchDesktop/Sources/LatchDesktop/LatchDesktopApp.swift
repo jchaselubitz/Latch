@@ -17,7 +17,8 @@ struct LatchDesktopApp: App {
             SessionsView(
                 store: runtime.store,
                 updates: runtime.updates,
-                remoteAccess: runtime.remoteAccess
+                remoteAccess: runtime.remoteAccess,
+                openSettings: openSettingsWindow
             )
                 .frame(minWidth: 900, minHeight: 500)
                 .onAppear {
@@ -43,6 +44,10 @@ struct LatchDesktopApp: App {
         }
         .defaultSize(width: 1120, height: 700)
         .commands {
+            CommandGroup(replacing: .appSettings) {
+                Button("Settings…", action: openSettingsWindow)
+                    .keyboardShortcut(",", modifiers: .command)
+            }
             // The App menu is where macOS users look for this, and it is the
             // one command that has to work when no session is selected and the
             // CLI is missing entirely.
@@ -106,7 +111,7 @@ struct LatchDesktopApp: App {
         }
         .menuBarExtraStyle(.window)
 
-        Settings {
+        Window("Settings", id: "settings") {
             SettingsView(
                 store: runtime.store,
                 updates: runtime.updates,
@@ -121,8 +126,8 @@ struct LatchDesktopApp: App {
     }
 
     private func openSettingsWindow() {
+        openWindow(id: "settings")
         NSApp.activate(ignoringOtherApps: true)
-        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
     }
 
     private static let menuBarImage: NSImage = {

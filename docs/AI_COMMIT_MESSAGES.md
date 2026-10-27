@@ -21,7 +21,11 @@ with `--gateway-serve --latch-bin <selected-latch>`, and that helper spawns the
 selected executable as `latch serve`. These are processes of the logged-in user,
 not a root daemon. The gateway, rather than the GUI or helper, reads the key.
 
-Run the following with that absolute executable path substituted for `latch`:
+In Latch Desktop, open Settings → Repositories to save, replace, or remove the
+key and check local readiness. Settings uses the selected CLI and sends the key
+to it through standard input. A ready status does not verify Google access.
+
+Alternatively, run the following with that absolute executable path substituted for `latch`:
 
 ```sh
 latch commit-message set-key

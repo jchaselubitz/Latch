@@ -11,6 +11,7 @@ struct SettingsView: View {
         case terminal
         case remoteAccess
         case cli
+        case repositories
         case updates
     }
 
@@ -24,6 +25,10 @@ struct SettingsView: View {
             RemoteAccessSettingsView(controller: remoteAccess)
                 .tabItem { Label("Remote Access", systemImage: "iphone.and.arrow.forward") }
                 .tag(Tab.remoteAccess)
+            RepositorySettingsView(cliPath: store.activeCLIPath)
+                .id(store.activeCLIPath)
+                .tabItem { Label("Repositories", systemImage: "folder") }
+                .tag(Tab.repositories)
             cliTab
                 .tabItem { Label("Latch CLI", systemImage: "wrench.and.screwdriver") }
                 .tag(Tab.cli)
