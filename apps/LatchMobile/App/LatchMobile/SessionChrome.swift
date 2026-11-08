@@ -88,6 +88,9 @@ struct SessionChromeBar<Trailing: View>: View {
                 trailing
             }
         }
+        // In a windowed iPad scene the window controls sit in the top-leading
+        // corner, right where Back is. Narrow the row so it starts after them.
+        .clearingWindowControls()
         .padding(.horizontal, 12)
         .padding(.top, 4)
         .padding(.bottom, 10)
@@ -286,6 +289,20 @@ extension EnvironmentValues {
 }
 
 extension View {
+    /// Moves the view's leading edge past the window's corner controls (the
+    /// close, minimise and resize buttons iPadOS 26 draws in a windowed scene)
+    /// and shrinks it to fit what is left, so a control at the leading edge
+    /// is never covered. Without window controls, and before iOS 26, the
+    /// view is unchanged.
+    @ViewBuilder
+    func clearingWindowControls() -> some View {
+        if #available(iOS 26.0, *) {
+            containerCornerOffset(.leading, sizeToFit: true)
+        } else {
+            self
+        }
+    }
+
     /// Marks a destination that was pushed over the session in the two-column
     /// layout, so its back button returns to that session.
     func pushedOverSessionColumn() -> some View {

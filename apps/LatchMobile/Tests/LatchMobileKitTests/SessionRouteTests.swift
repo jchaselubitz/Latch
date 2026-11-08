@@ -164,6 +164,50 @@ final class SessionRouteTests: XCTestCase {
         XCTAssertEqual(TerminalSize.fixed100x30.fixedGrid?.rows, 30)
     }
 
+    /// While the link is down or recovering, an empty surface means the Mac
+    /// has not been heard from, not that it is too old. Chat must wait on the
+    /// link instead of claiming an update is needed.
+    func testAnUnreadyLinkWaitsInsteadOfDiagnosingAnUpdate() {
+        let nothing = surface(chat: false, terminal: false, terminalAdvertised: false)
+        for connector: SessionConnector in [.named("claude"), .unknown, .none] {
+            XCTAssertEqual(
+                SessionRoute.route(
+                    preference: .chat, connector: connector, surface: nothing,
+                    isRunning: true, linkReady: false
+                ),
+                .chatUnavailable(.awaitingLink)
+            )
+            XCTAssertEqual(
+                SessionRoute.route(
+                    preference: .terminal, connector: connector, surface: nothing,
+                    isRunning: true, linkReady: false
+                ),
+                .unavailable(.awaitingLink)
+            )
+        }
+        // Once the link is ready, the same empty surface is a real answer.
+        XCTAssertEqual(
+            SessionRoute.route(
+                preference: .chat, connector: .named("claude"), surface: nothing,
+                isRunning: true, linkReady: true
+            ),
+            .chatUnavailable(.noConversationEndpoint(.unavailable))
+        )
+    }
+
+    /// What the Mac last offered keeps an open chat in place while the link
+    /// recovers, so the conversation shows its own reconnecting state.
+    func testARecoveringLinkKeepsChatWhenTheMacLastOfferedIt() {
+        XCTAssertEqual(
+            SessionRoute.route(
+                preference: .chat, connector: .named("claude"),
+                surface: surface(chat: true, terminal: false),
+                isRunning: true, linkReady: false
+            ),
+            .chat
+        )
+    }
+
     private func capabilities(terminal: Bool) -> GatewayCapabilities {
         let json = """
         {"protocolVersion":\(LatchContract.protocolVersion),"productVersion":"2.0.0",

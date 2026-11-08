@@ -102,7 +102,9 @@ struct SessionRow: View {
         case .terminal(let autoAttach):
             autoAttach ? "Opens the terminal, taking it from your Mac" : "Opens the terminal"
         case .chat: "Opens the conversation"
+        case .chatUnavailable(.awaitingLink): "Waiting for your Mac to reconnect"
         case .chatUnavailable: "Chat is unavailable; opens recovery options"
+        case .unavailable(.awaitingLink): "Waiting for your Mac to reconnect"
         case .unavailable: "Cannot be opened"
         }
     }

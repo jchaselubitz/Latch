@@ -52,6 +52,10 @@ struct SessionUnavailableView: View {
                     `latch attach` on the Mac for this session.
                     """
                 )
+            case .awaitingLink:
+                LinkPendingView(
+                    possibleCause: "If this session still can't open once your Mac reconnects, Latch on the Mac may need an update."
+                )
             }
         }
         .navigationTitle(session.displayName)

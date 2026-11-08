@@ -46,6 +46,12 @@ struct ChatView: View {
         Group {
             if let store {
                 conversation(store)
+            } else if !appModel.linkState.isUsable {
+                // Opened while the link is recovering: the store needs a live
+                // link, and the task below builds it once the link is back.
+                LinkPendingView(
+                    possibleCause: "If Chat still doesn't open once your Mac reconnects, Latch on the Mac may need an update."
+                )
             } else if appModel.surface.chat {
                 ProgressView("Opening conversation…")
             } else {
@@ -103,7 +109,7 @@ struct ChatView: View {
             confirming: $confirmingStop,
             explainingGrant: $explainingStopGrant
         )
-        .task {
+        .task(id: appModel.linkState.isUsable) {
             guard store == nil else { return }
             store = appModel.conversationStore(for: session)
             store?.start()

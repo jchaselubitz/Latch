@@ -199,6 +199,11 @@ public enum ChatRouteBlock: Equatable, Sendable {
     /// The paired Mac does not offer the Conversation Hub endpoint. This is a
     /// Mac service version/availability problem, not a session diagnosis.
     case noConversationEndpoint(TerminalRecovery)
+    /// The link to the Mac is down or still being restored, and nothing
+    /// discovered on it says Chat can open. The phone cannot tell a Mac
+    /// without the Hub from one it has not heard from yet, so the screen
+    /// leads with the reconnection and only hints at an update.
+    case awaitingLink
 }
 
 /// What, if anything, the Chat-unavailable screen can offer instead.
@@ -220,6 +225,9 @@ public enum SessionRouteBlock: Equatable, Sendable {
     case noTerminalEndpoint
     /// No connector for chat, and no terminal to fall back to either.
     case noConversation
+    /// The link to the Mac is down or still being restored, so what the Mac
+    /// offers is not known yet.
+    case awaitingLink
 }
 
 extension SessionRoute {
@@ -229,11 +237,17 @@ extension SessionRoute {
     /// Preference alone cannot decide, because either screen can be
     /// impossible: chat needs a connector and the `conversation` endpoint,
     /// and a terminal needs the `terminal` endpoint and the `control` grant.
+    ///
+    /// `linkReady` is false while the link is connecting, recovering, or
+    /// down. A surface that permits nothing then means "not heard from the
+    /// Mac yet", never "the Mac is too old", so the route waits on the link
+    /// rather than diagnosing an update.
     public static func route(
         preference: SessionPresentation,
         connector: SessionConnector,
         surface: SessionSurface,
-        isRunning: Bool
+        isRunning: Bool,
+        linkReady: Bool = true
     ) -> SessionRoute {
         // Chat needs both a connector to drive it and a Hub to talk to.
         let chatPossible: Bool = {
@@ -253,6 +267,7 @@ extension SessionRoute {
                 return .terminal(autoAttach: isRunning)
             }
             if chatPossible { return .chat }
+            if !linkReady { return .unavailable(.awaitingLink) }
             return .unavailable(block(surface: surface))
 
         case .chat:
@@ -260,6 +275,7 @@ extension SessionRoute {
             // connector field cannot prove that a session lacks one. The Hub
             // gives the final answer after its initial state arrives.
             if chatPossible { return .chat }
+            if !linkReady { return .chatUnavailable(.awaitingLink) }
             return .chatUnavailable(chatBlock(connector: connector, surface: surface))
         }
     }

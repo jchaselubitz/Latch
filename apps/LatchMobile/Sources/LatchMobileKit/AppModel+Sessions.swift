@@ -12,13 +12,25 @@ extension AppModel {
             .restricted(to: pairedDevice?.permission)
     }
 
+    /// What the Mac offered when it was last heard from. While the link is
+    /// recovering this keeps an open conversation or terminal in place, so
+    /// it shows its own reconnecting state instead of being swapped for an
+    /// "update needed" screen the moment the link drops. Only routing reads
+    /// it; controls that act on the Mac still follow `surface`.
+    var routingSurface: SessionSurface {
+        guard let capabilities = linkState.cachedCapabilities else { return surface }
+        return GatewayCompatibility.sessionSurface(for: capabilities)
+            .restricted(to: pairedDevice?.permission)
+    }
+
     /// Where a tap on this session row goes.
     public func route(for session: SessionSummary) -> SessionRoute {
         SessionRoute.route(
             preference: sessionPresentation,
             connector: session.connector,
-            surface: surface,
-            isRunning: session.isRunning
+            surface: routingSurface,
+            isRunning: session.isRunning,
+            linkReady: linkState.isUsable
         )
     }
 

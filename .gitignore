@@ -26,3 +26,4 @@ apps/LatchMobile/Sources/LatchTransportNative/Generated/LatchTransportFFI.swift
 __pycache__/
 
 .env
+.env.prod
