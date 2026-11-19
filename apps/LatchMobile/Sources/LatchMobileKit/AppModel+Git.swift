@@ -31,10 +31,7 @@ extension AppModel {
     /// (or when the link, not the grant, is what is missing).
     public var gitUnavailableExplanation: String? {
         guard advertisesGit, linkState.isUsable, !canUseGit else { return nil }
-        return """
-        This phone does not currently have control of this Mac. Open Latch on your Mac, find \
-        this phone under Remote Access, and set it to Control.
-        """
+        return Self.controlGrantExplanation
     }
 
     /// The Repositories sheet's model, built only after the device-owner

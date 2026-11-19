@@ -149,14 +149,7 @@ struct SyncSheet: View {
             } message: {
                 Text("This branch doesn't track a remote branch, so choose which remote to fetch.")
             }
-            .alert(
-                "This phone can't do that right now",
-                isPresented: Binding(get: { blockedReason != nil }, set: { if !$0 { blockedReason = nil } })
-            ) {
-                Button("OK", role: .cancel) {}
-            } message: {
-                Text(blockedReason ?? "")
-            }
+            .gitBlockedAlert($blockedReason)
         }
     }
 

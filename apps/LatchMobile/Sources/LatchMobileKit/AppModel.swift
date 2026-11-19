@@ -2,7 +2,7 @@ import Foundation
 import LatchNotificationKit
 import Observation
 
-/// The app's link to one computer, shared by both tabs.
+/// The app's link to one computer, shared by every screen.
 ///
 /// Discovery lives here rather than in each screen: it is the mandatory first
 /// step, its answer decides what the session screen may offer, and repeating it
@@ -14,10 +14,6 @@ import Observation
 @Observable
 public final class AppModel {
     // MARK: - Link types
-
-    public enum LinkSource: Equatable, Sendable {
-        case paired
-    }
 
     public enum LinkState: Equatable {
         case unlinked
@@ -71,11 +67,11 @@ public final class AppModel {
     /// newest last, bounded.
     public internal(set) var recentStages: [LinkStageSample] = []
 
-    public internal(set) var link: GatewayLink?
-
     public internal(set) var gateway: LatchGateway?
 
-    public internal(set) var linkSource: LinkSource?
+    /// Whether a gateway has been built for the paired computer since the
+    /// last unlink. It stays set across a suspension, when `gateway` is nil.
+    var hasPairedLink = false
 
     public internal(set) var sessions: [SessionSummary] = []
 
@@ -89,7 +85,6 @@ public final class AppModel {
 
     public internal(set) var sessionsError: String?
 
-    public internal(set) var isLoadingSessions = false
 
     /// The session most recently created from the folder browser. The view may
     /// highlight it without treating creation as permission to open or attach.
@@ -175,7 +170,7 @@ public final class AppModel {
     let agentModelStore: any AgentModelPreferenceStoring
 
     /// Where the transport writes the path it selected, so Settings can say
-    /// whether this session is on the local network, direct, or relayed.
+    /// whether this session is on the local network or relayed.
     let pathReporter: RemotePathReporter
 
     /// Builds the gateway client over the capability-protected loopback
@@ -192,10 +187,6 @@ public final class AppModel {
     var coordinatorObservation: Task<Void, Never>?
 
     var pairedDevice: PairedDeviceRecord?
-
-    /// The loopback adapter behind the current gateway, stopped on suspend so
-    /// its capability dies with it.
-    var transport: (any GatewayTransport)?
 
     /// Which link generation discovery last ran for. Discovery runs once per
     /// new authenticated link, never per screen.

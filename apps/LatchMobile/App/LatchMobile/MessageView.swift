@@ -25,3 +25,27 @@ struct MessageView: View {
         }
     }
 }
+
+/// A label over its selectable value, read as one element.
+struct StackedLabeledValue: View {
+    private let label: String
+    private let value: String
+    private let monospaced: Bool
+
+    init(_ label: String, _ value: String, monospaced: Bool = false) {
+        self.label = label
+        self.value = value
+        self.monospaced = monospaced
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label)
+            Text(value)
+                .font(monospaced ? .callout.monospaced() : .callout)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+        }
+        .accessibilityElement(children: .combine)
+    }
+}

@@ -53,15 +53,6 @@ public enum GitMutationAction: Equatable, Sendable {
         }
     }
 
-    /// Whether the outcome may have changed which branch is checked out.
-    public var touchesBranches: Bool {
-        switch self {
-        case .createBranch, .switchBranch, .commit, .fetch, .fastForward, .merge, .rebase,
-             .continueOperation, .abortOperation, .push: true
-        case .stage, .unstage: false
-        }
-    }
-
     /// Fetching, updating a branch, and continuing or aborting a merge or
     /// rebase can run for minutes: the Mac answers with a pending receipt
     /// carrying Git's progress, and the phone keeps reading it.

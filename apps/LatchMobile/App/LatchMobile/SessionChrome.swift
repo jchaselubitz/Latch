@@ -182,8 +182,8 @@ struct SessionDetailsSheet: View {
                 Section {
                     // Paths and commands run long; they sit under their label
                     // rather than wrapping against the trailing edge.
-                    stacked("Folder", session.cwd)
-                    stacked("Command", session.commandLabel, monospaced: true)
+                    StackedLabeledValue("Folder", session.cwd)
+                    StackedLabeledValue("Command", session.commandLabel, monospaced: true)
                     LabeledContent("Connector", value: session.connector.detailLabel)
                     if let status {
                         LabeledContent("Status", value: status)
@@ -225,17 +225,6 @@ struct SessionDetailsSheet: View {
             }
         }
         .presentationDetents([.medium, .large])
-    }
-
-    private func stacked(_ label: String, _ value: String, monospaced: Bool = false) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(label)
-            Text(value)
-                .font(monospaced ? .callout.monospaced() : .callout)
-                .foregroundStyle(.secondary)
-                .textSelection(.enabled)
-        }
-        .accessibilityElement(children: .combine)
     }
 
     private func pick(_ action: @escaping () -> Void) {

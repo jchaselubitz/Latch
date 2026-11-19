@@ -63,8 +63,6 @@ public actor LatchGateway {
         return discovered
     }
 
-    public func invalidateDiscovery() { capabilities = nil }
-
     private func require(_ endpoint: GatewayEndpointsName) async throws {
         let discovered = try await discoveredCapabilities()
         guard GatewayCompatibility.supports(endpoint: endpoint, capabilities: discovered) else {

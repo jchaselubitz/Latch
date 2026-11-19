@@ -707,7 +707,7 @@ struct SessionsView: View {
         }
     }
 
-    /// A grant can change while this tab remains on screen. Re-read it when
+    /// A grant can change while this screen stays up. Re-read it when
     /// the list appears and on pull-to-refresh, then update the linked model
     /// synchronously so the next route decision sees the new permission.
     private func refreshPermission() async {

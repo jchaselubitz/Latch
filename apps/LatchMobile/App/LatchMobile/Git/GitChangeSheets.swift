@@ -540,14 +540,7 @@ struct BranchesSheet: View {
                     newName = ""
                 }
             }
-            .alert(
-                "This phone can't do that right now",
-                isPresented: Binding(get: { blockedReason != nil }, set: { if !$0 { blockedReason = nil } })
-            ) {
-                Button("OK", role: .cancel) {}
-            } message: {
-                Text(blockedReason ?? "")
-            }
+            .gitBlockedAlert($blockedReason)
         }
     }
 

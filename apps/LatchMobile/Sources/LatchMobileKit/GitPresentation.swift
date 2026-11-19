@@ -152,8 +152,6 @@ public extension GitStatus {
         return parts.joined(separator: " · ")
     }
 
-    var changeCount: Int { entries.count }
-
     func entries(in section: GitSection) -> [GitStatusEntry] {
         entries.filter { $0.area == section.area }
     }
@@ -947,14 +945,6 @@ public enum GitSyncMode: String, CaseIterable, Sendable, Identifiable {
     public var title: String {
         switch self {
         case .fastForward: "Fast-forward only"
-        case .merge: "Merge"
-        case .rebase: "Rebase"
-        }
-    }
-
-    public var shortTitle: String {
-        switch self {
-        case .fastForward: "Fast-forward"
         case .merge: "Merge"
         case .rebase: "Rebase"
         }

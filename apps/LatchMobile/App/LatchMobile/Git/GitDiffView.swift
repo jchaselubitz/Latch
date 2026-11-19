@@ -75,14 +75,7 @@ struct GitDiffView: View {
             } message: {
                 Text("Staging marks the file resolved. Latch doesn't edit files; resolve them on your Mac or in a terminal session.")
             }
-            .alert(
-                "This phone can't do that right now",
-                isPresented: Binding(get: { blockedReason != nil }, set: { if !$0 { blockedReason = nil } })
-            ) {
-                Button("OK", role: .cancel) {}
-            } message: {
-                Text(blockedReason ?? "")
-            }
+            .gitBlockedAlert($blockedReason)
     }
 
     @ViewBuilder

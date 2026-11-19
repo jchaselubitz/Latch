@@ -8,24 +8,10 @@ struct LinkStatusPill: View {
     let deviceName: String?
 
     var body: some View {
-        HStack(spacing: 6) {
-            Circle()
-                .fill(color)
-                .frame(width: 8, height: 8)
-            Text(status.pillText(deviceName: deviceName))
-                .lineLimit(1)
-        }
-        .font(.footnote.weight(.medium))
-        .foregroundStyle(.secondary)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 5)
-        .overlay(
-            Capsule(style: .continuous)
-                .strokeBorder(.secondary.opacity(0.35), lineWidth: 1)
-        )
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(accessibilityLabel)
-        .accessibilityIdentifier("sessions.linkStatus")
+        OutlinedPill(text: status.pillText(deviceName: deviceName), dot: color)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(accessibilityLabel)
+            .accessibilityIdentifier("sessions.linkStatus")
     }
 
     private var accessibilityLabel: String {

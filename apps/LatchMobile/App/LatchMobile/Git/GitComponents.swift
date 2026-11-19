@@ -31,8 +31,9 @@ struct GitStatusBadge: View {
     }
 }
 
-/// An outlined pill, as the link status pill draws one.
-struct GitOutlinedPill: View {
+/// An outlined pill: an optional dot or symbol and one line of text. The Git
+/// screens and the link status pill both draw this.
+struct OutlinedPill: View {
     let text: String
     var dot: Color?
     var systemImage: String?
@@ -63,7 +64,7 @@ struct GitStalePill: View {
     let text: String
 
     var body: some View {
-        GitOutlinedPill(text: text, dot: .orange)
+        OutlinedPill(text: text, dot: .orange)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(text)
             .accessibilityIdentifier("git.stale")
@@ -97,5 +98,23 @@ struct BottomFade: View {
         )
         .ignoresSafeArea(edges: .bottom)
         .allowsHitTesting(false)
+    }
+}
+
+extension View {
+    /// Explains why a Git action was refused before it was sent, and clears
+    /// the reason when the alert is dismissed.
+    func gitBlockedAlert(_ reason: Binding<String?>) -> some View {
+        alert(
+            "This phone can't do that right now",
+            isPresented: Binding(
+                get: { reason.wrappedValue != nil },
+                set: { if !$0 { reason.wrappedValue = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(reason.wrappedValue ?? "")
+        }
     }
 }

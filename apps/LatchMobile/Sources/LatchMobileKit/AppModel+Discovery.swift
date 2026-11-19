@@ -129,7 +129,7 @@ extension AppModel {
             gatewayInstanceID = capabilities.gatewayInstanceId
             // Permission refreshes can arrive while discovery is in flight.
             // Keep the current record rather than restoring a pre-await grant.
-            linkSource = .paired
+            hasPairedLink = true
             linkState = .linked(capabilities)
             if let timings = linkSnapshot.timings {
                 record(LinkStageSample(

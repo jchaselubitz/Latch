@@ -9,15 +9,11 @@ extension AppModel {
     }
 
     public var canBrowseNewSessionFolders: Bool {
-        guard case .linked(let capabilities) = linkState else { return false }
-        return hasNewSessionControlGrant
-            && GatewayCompatibility.supports(endpoint: .browseDirectories, capabilities: capabilities)
+        hasNewSessionControlGrant && linkedSupports(.browseDirectories)
     }
 
     public var canCreateNewSession: Bool {
-        guard case .linked(let capabilities) = linkState else { return false }
-        return canBrowseNewSessionFolders
-            && GatewayCompatibility.supports(endpoint: .createSession, capabilities: capabilities)
+        canBrowseNewSessionFolders && linkedSupports(.createSession)
     }
 
     /// Agent kinds the linked Mac will launch from the create route, in the
@@ -43,8 +39,7 @@ extension AppModel {
     /// creation. A Mac that predates model choice starts every agent on its
     /// own default, and the picker shows no model row.
     public var offersAgentModelChoice: Bool {
-        guard case .linked(let capabilities) = linkState else { return false }
-        return GatewayCompatibility.supports(endpoint: .agentModels, capabilities: capabilities)
+        linkedSupports(.agentModels)
     }
 
     /// Whether the linked Mac serves both new-session routes, independent of
@@ -52,19 +47,14 @@ extension AppModel {
     /// serve the flow and this phone may not use it, so the reason can be
     /// said rather than left as a missing button.
     public var advertisesNewSessionCreation: Bool {
-        guard case .linked(let capabilities) = linkState else { return false }
-        return GatewayCompatibility.supports(endpoint: .browseDirectories, capabilities: capabilities)
-            && GatewayCompatibility.supports(endpoint: .createSession, capabilities: capabilities)
+        linkedSupports(.browseDirectories) && linkedSupports(.createSession)
     }
 
     /// Why the advertised new-session flow cannot be used right now, or nil
     /// when it can. Only a grant can hold it back once the routes exist.
     public var newSessionUnavailableExplanation: String? {
         guard advertisesNewSessionCreation, !canCreateNewSession else { return nil }
-        return """
-        This phone does not currently have control of this Mac. Open Latch on your Mac, find \
-        this phone under Remote Access, and set it to Control.
-        """
+        return Self.controlGrantExplanation
     }
 
     /// Re-reads the store after the browser saved a selection.

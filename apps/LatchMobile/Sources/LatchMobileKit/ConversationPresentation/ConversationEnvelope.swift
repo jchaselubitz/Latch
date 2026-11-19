@@ -122,11 +122,6 @@ public struct ConversationEnvelope: Equatable, Sendable {
         case .harnessNote: "info.circle"
         }
     }
-
-    /// The text a one-line preview should use instead of the raw markup.
-    public var previewText: String {
-        [eyebrow, title, status].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
-    }
 }
 
 public enum ConversationBackgroundTaskKind: Equatable, Sendable {

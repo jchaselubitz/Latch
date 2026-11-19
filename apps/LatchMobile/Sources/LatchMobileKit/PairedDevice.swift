@@ -13,9 +13,6 @@ public enum DevicePermission: String, Codable, CaseIterable, Equatable, Sendable
     /// Also send terminal bytes and resize.
     case control
 
-    /// What the Mac grants a newly paired phone.
-    public static let `default` = DevicePermission.control
-
     public var label: String {
         switch self {
         case .observe: return "Watch only"

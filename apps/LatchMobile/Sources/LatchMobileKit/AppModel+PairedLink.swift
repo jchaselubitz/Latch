@@ -8,11 +8,8 @@ extension AppModel {
         coordinatorObservation?.cancel()
         coordinatorObservation = nil
         Task { [coordinator] in await coordinator.stop() }
-        transport?.stop()
-        transport = nil
-        link = nil
         gateway = nil
-        linkSource = nil
+        hasPairedLink = false
         pairedDevice = nil
         pairedConnectionGeneration &+= 1
         discoveredGeneration = 0
@@ -34,7 +31,7 @@ extension AppModel {
     /// the owner's snapshots drive discovery and every later state.
     public func connectPairedDevice(_ record: PairedDeviceRecord?) async {
         guard let record, record.isActive else {
-            if linkSource == .paired { unlink() }
+            if hasPairedLink { unlink() }
             return
         }
         // Keep the paired identity even if the current network route cannot
@@ -50,7 +47,6 @@ extension AppModel {
             await self?.probeGateway() ?? false
         }
         do {
-            transport?.stop()
             let provider = CoordinatorChannelProvider(coordinator: coordinator)
             let recorder: LinkStageRecorder = { [weak self] sample in
                 Task { @MainActor in self?.record(sample) }
@@ -58,9 +54,7 @@ extension AppModel {
             let gateway = try await gatewayFactory(record, provider, recorder)
             guard generation == pairedConnectionGeneration else { return }
             self.gateway = gateway
-            self.link = await gateway.gateway
-            self.transport = nil
-            linkSource = .paired
+            hasPairedLink = true
         } catch let error as LatchError {
             linkState = Self.linkFailure(error)
             return
@@ -87,7 +81,7 @@ extension AppModel {
     /// still take the full reconnect path.
     @discardableResult
     public func applyPairedDeviceRecord(_ record: PairedDeviceRecord?) -> Bool {
-        guard linkSource == .paired,
+        guard hasPairedLink,
               let current = pairedDevice,
               let record,
               record.isActive,
@@ -140,13 +134,10 @@ extension AppModel {
             await previous?.value
             await coordinator.suspend()
         }
-        transport?.stop()
-        transport = nil
         if let gateway {
             Task { await gateway.stopTransport() }
         }
         gateway = nil
-        link = nil
         highlightedSessionID = nil
         pathReporter.clear()
         becomeInterrupted(.interrupted(.suspended, linkState.cachedCapabilities))
@@ -167,8 +158,7 @@ extension AppModel {
             let gateway = try await gatewayFactory(pairedDevice, provider, recorder)
             guard generation == pairedConnectionGeneration else { return }
             self.gateway = gateway
-            self.link = await gateway.gateway
-            linkSource = .paired
+            hasPairedLink = true
         } catch {
             linkState = .failed(error.localizedDescription)
             return

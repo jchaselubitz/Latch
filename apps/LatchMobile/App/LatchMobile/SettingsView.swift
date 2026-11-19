@@ -297,7 +297,7 @@ struct SettingsView: View {
             Text("Diagnostics")
         } footer: {
             Text("""
-            Each cycle drops the secure connection the way backgrounding does, reconnects through the             same owner, lists sessions, and reads one preview. Timings are written to Files › Latch ›             latch-diagnostics and contain no session names, prompts, paths, or output. Skipping the             local network attempt measures the relay path from a network where your Mac is also nearby.
+            Each cycle drops the secure connection the way backgrounding does, reconnects through the same owner, lists sessions, and reads one preview. Timings are written to Files › Latch › latch-diagnostics and contain no session names, prompts, paths, or output. Skipping the local network attempt measures the relay path from a network where your Mac is also nearby.
             """)
         }
     }

@@ -102,27 +102,24 @@ public final class RemotePathReporter: @unchecked Sendable {
 /// rather than go back to a desk and export a diagnostics bundle.
 ///
 /// Nothing here names a network, an address, an SSID, a carrier, or a moment.
-/// It is four integers describing this phone's own connections, and it stays
+/// It is three integers describing this phone's own connections, and it stays
 /// on the phone: no call sends it anywhere.
 public struct RemotePathTally: Sendable, Equatable, Codable {
     /// Channels opened over the local network.
     public var local: Int
-    /// Historical baseline channels opened directly before Remote Link v1.
-    public var direct: Int
     /// Channels opened through the relay.
     public var relay: Int
     /// Attempts that produced no channel at all, on any path.
     public var failures: Int
 
-    public init(local: Int = 0, direct: Int = 0, relay: Int = 0, failures: Int = 0) {
+    public init(local: Int = 0, relay: Int = 0, failures: Int = 0) {
         self.local = local
-        self.direct = direct
         self.relay = relay
         self.failures = failures
     }
 
     /// Channels that opened, on any path.
-    public var connections: Int { local + direct + relay }
+    public var connections: Int { local + relay }
 
     /// Attempts made, whether or not they produced a channel.
     public var attempts: Int { connections + failures }
@@ -142,7 +139,6 @@ public struct RemotePathTally: Sendable, Equatable, Codable {
         guard attempts > 0 else { return nil }
         var parts: [String] = []
         if local > 0 { parts.append("Local \(local)") }
-        if direct > 0 { parts.append("Direct \(direct)") }
         if relay > 0 { parts.append("Relay \(relay)") }
         if failures > 0 { parts.append("Failed \(failures)") }
         return parts.joined(separator: " · ")

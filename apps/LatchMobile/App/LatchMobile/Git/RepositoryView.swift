@@ -123,14 +123,7 @@ struct RepositoryView: View {
                     .presentationDetents([.medium, .large])
                 }
             }
-            .alert(
-                "This phone can't do that right now",
-                isPresented: Binding(get: { blockedReason != nil }, set: { if !$0 { blockedReason = nil } })
-            ) {
-                Button("OK", role: .cancel) {}
-            } message: {
-                Text(blockedReason ?? "")
-            }
+            .gitBlockedAlert($blockedReason)
             .confirmationDialog(
                 "Fetch from which remote?",
                 isPresented: Binding(get: { !remoteChoices.isEmpty }, set: { if !$0 { remoteChoices = [] } }),
@@ -778,8 +771,8 @@ struct RepositoryHeaderCard: View {
 
     @ViewBuilder
     private func aheadBehindPills(ahead: Int, behind: Int) -> some View {
-        if ahead > 0 { GitOutlinedPill(text: "\u{2191}\(ahead) to push") }
-        if behind > 0 { GitOutlinedPill(text: "\u{2193}\(behind) incoming") }
+        if ahead > 0 { OutlinedPill(text: "\u{2191}\(ahead) to push") }
+        if behind > 0 { OutlinedPill(text: "\u{2193}\(behind) incoming") }
     }
 }
 
@@ -941,11 +934,11 @@ struct RepositoryDetailsSheet: View {
         NavigationStack {
             List {
                 Section {
-                    stacked("Path", status.root, monospaced: true)
+                    StackedLabeledValue("Path", status.root, monospaced: true)
                     LabeledContent("Kind", value: kind)
                     LabeledContent("Branch", value: status.head.branch ?? "Detached HEAD")
                     if let oid = status.head.oid {
-                        stacked("Commit", oid, monospaced: true)
+                        StackedLabeledValue("Commit", oid, monospaced: true)
                     }
                     LabeledContent("Upstream", value: status.upstream?.name ?? "None")
                     LabeledContent("Last fetched", value: GitPresentation.fetchedPhrase(status.lastFetchedAt))
@@ -973,17 +966,6 @@ struct RepositoryDetailsSheet: View {
         case .linkedWorktree: "Linked worktree"
         case .submodule: "Submodule"
         }
-    }
-
-    private func stacked(_ label: String, _ value: String, monospaced: Bool = false) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(label)
-            Text(value)
-                .font(monospaced ? .callout.monospaced() : .callout)
-                .foregroundStyle(.secondary)
-                .textSelection(.enabled)
-        }
-        .accessibilityElement(children: .combine)
     }
 }
 

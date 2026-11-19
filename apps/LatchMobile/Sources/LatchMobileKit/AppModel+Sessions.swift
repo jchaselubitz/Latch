@@ -60,10 +60,21 @@ extension AppModel {
     /// Whether the linked Mac serves the stop route at all, independent of
     /// this phone's grant. A Mac that predates the route advertises nothing,
     /// and there is then no control to show and nothing to explain.
-    public var advertisesSessionStop: Bool {
+    public var advertisesSessionStop: Bool { linkedSupports(.stopSession) }
+
+    /// Whether a live link's Mac advertises `endpoint`. False while the link
+    /// is anything but linked, whatever was advertised before.
+    func linkedSupports(_ endpoint: GatewayEndpointsName) -> Bool {
         guard case .linked(let capabilities) = linkState else { return false }
-        return GatewayCompatibility.supports(endpoint: .stopSession, capabilities: capabilities)
+        return GatewayCompatibility.supports(endpoint: endpoint, capabilities: capabilities)
     }
+
+    /// What every control-gated surface says when the grant, not the Mac, is
+    /// what holds it back.
+    static let controlGrantExplanation = """
+        This phone does not currently have control of this Mac. Open Latch on your Mac, find \
+        this phone under Remote Access, and set it to Control.
+        """
 
     /// Whether this phone may stop a session right now. Ending what is running
     /// is a control operation, held to the same grant as the terminal.
@@ -75,10 +86,7 @@ extension AppModel {
     /// Only a grant can hold it back once the route exists.
     public var sessionStopUnavailableExplanation: String? {
         guard advertisesSessionStop, !canStopSessions else { return nil }
-        return """
-        This phone does not currently have control of this Mac. Open Latch on your Mac, find \
-        this phone under Remote Access, and set it to Control.
-        """
+        return Self.controlGrantExplanation
     }
 
     /// Asks the Mac to stop one session, then re-reads the list.
@@ -127,8 +135,6 @@ extension AppModel {
     /// Reloads the session list.
     public func refreshSessions() async {
         guard let gateway, linkState.isUsable else { return }
-        isLoadingSessions = true
-        defer { isLoadingSessions = false }
         do {
             let started = Date()
             sessions = try await gateway.listSessions()
