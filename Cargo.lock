@@ -1197,7 +1197,6 @@ dependencies = [
  "httparse",
  "latchd",
  "libc",
- "proptest",
  "reqwest",
  "security-framework",
  "serde",
@@ -1216,13 +1215,11 @@ name = "latch-remote"
 version = "0.2611190925.0"
 dependencies = [
  "anyhow",
- "async-trait",
  "clap",
  "futures",
  "if-addrs",
  "latch",
  "latch-transport",
- "log",
  "mdns-sd",
  "native-tls",
  "openssl",
@@ -1243,7 +1240,6 @@ version = "0.2611190925.0"
 dependencies = [
  "proptest",
  "serde_json",
- "thiserror",
  "vt100",
 ]
 
@@ -1255,14 +1251,12 @@ dependencies = [
  "futures",
  "native-tls",
  "rand 0.9.5",
- "rcgen",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "snow",
  "thiserror",
  "tokio",
- "tokio-native-tls",
  "tokio-tungstenite 0.30.0",
  "tokio-util",
  "yamux",

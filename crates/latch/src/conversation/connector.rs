@@ -17,7 +17,6 @@ pub const ACTION_RESOLVE_REQUEST: &str = "resolve_request";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Detection {
-    Unsupported,
     Pending { reason: String },
     Supported(ConnectorIdentity),
 }
@@ -148,11 +147,6 @@ pub trait Connector: Send {
     }
     fn actions(&self) -> Vec<ActionDescriptor>;
     fn apply(&mut self, action: ConnectorAction, deadline: Duration) -> Result<ApplyResult>;
-    fn reconcile(
-        &self,
-        outstanding: &[ConversationItemId],
-        observed: &[ConversationItemId],
-    ) -> Vec<ConnectorMutation>;
     /// Restores the compact connector checkpoint before journal deltas are
     /// replayed. Agent-owned sources remain authoritative; an incompatible
     /// checkpoint is ignored by the connector and it safely re-observes.

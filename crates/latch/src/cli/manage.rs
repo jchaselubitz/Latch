@@ -105,9 +105,10 @@ pub fn inspect(options: InspectOptions) -> anyhow::Result<InspectReport> {
         name: metadata.name,
         title: metadata.title,
         state: state.as_wire().to_owned(),
-        kernel: engine::session_kernel(&options.home, &id)?
-            .as_str()
-            .to_owned(),
+        kernel: {
+            engine::require_latchd_session(&options.home, &id)?;
+            engine::KERNEL_NAME.to_owned()
+        },
         cwd: metadata.cwd,
         command_label: metadata.command_label,
         created_at: metadata.created_at,
@@ -401,7 +402,7 @@ fn doctor_common(
             message: format!("Latch home {} does not exist yet", root.display()),
         });
         return Ok(DoctorReport {
-            kernel: engine::kernel().as_str().to_owned(),
+            kernel: engine::KERNEL_NAME.to_owned(),
             latchd_version,
             findings,
         });
@@ -438,7 +439,7 @@ fn doctor_common(
         });
     }
     Ok(DoctorReport {
-        kernel: engine::kernel().as_str().to_owned(),
+        kernel: engine::KERNEL_NAME.to_owned(),
         latchd_version,
         findings,
     })

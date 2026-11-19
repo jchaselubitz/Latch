@@ -831,7 +831,7 @@ mod tests {
         let digest = if corrupt_digest {
             "0".repeat(64)
         } else {
-            sha256::hex(&bytes)
+            crate::hex::encode(&<sha2::Sha256 as sha2::Digest>::digest(&bytes))
         };
 
         let archive_url = format!("https://example.invalid/{archive_name}");

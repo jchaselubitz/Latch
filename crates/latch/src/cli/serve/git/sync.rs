@@ -101,7 +101,7 @@ pub(crate) async fn sync(path: &str, cursor: Option<&str>) -> Result<GitSyncPrev
             )),
             GitSyncRelation::Diverged => Some(format!(
                 "{branch} has {} that {upstream_name} doesn't, so it can't simply move forward. Merge or Rebase can combine them.",
-                plural(ahead.unwrap_or(0), "commit")
+                super::plural(ahead.unwrap_or(0), "commit")
             )),
             GitSyncRelation::NoUpstream => Some(format!(
                 "{branch} has no upstream branch, so there is nothing to update from."
@@ -146,14 +146,6 @@ pub(crate) async fn sync(path: &str, cursor: Option<&str>) -> Result<GitSyncPrev
         operation: observed.operation,
         preconditions,
     })
-}
-
-fn plural(count: u64, noun: &str) -> String {
-    if count == 1 {
-        format!("1 {noun}")
-    } else {
-        format!("{count} {noun}s")
-    }
 }
 
 /// Commits on HEAD not on `oid`, and on `oid` not on HEAD.

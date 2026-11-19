@@ -308,9 +308,6 @@ impl Projection {
             state: snapshot.state,
         }
     }
-    pub fn page_before(&self, before: Ordinal, limit: usize) -> (Vec<ConversationItem>, bool) {
-        self.page_before_bounded(before, limit, usize::MAX)
-    }
     pub fn page_before_bounded(
         &self,
         before: Ordinal,

@@ -511,3 +511,12 @@ pub(crate) fn is_relative_path(bytes: &[u8]) -> bool {
         .split(|byte| *byte == b'/')
         .all(|part| !part.is_empty() && part != b"." && part != b"..")
 }
+
+/// "1 commit" or "3 commits": a count with its regularly pluralised noun.
+fn plural(count: u64, noun: &str) -> String {
+    if count == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{count} {noun}s")
+    }
+}

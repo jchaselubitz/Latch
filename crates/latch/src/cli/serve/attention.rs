@@ -25,7 +25,7 @@ use std::fs;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -190,7 +190,7 @@ impl AttentionWatcher {
     /// devices, keeps every watched session subscribed, and spools one event
     /// per new attention transition. Returns the events spooled.
     pub fn tick(&self) -> Result<Vec<AttentionEvent>> {
-        self.tick_at(unix_time())
+        self.tick_at(crate::util::unix_secs())
     }
 
     fn tick_at(&self, now: u64) -> Result<Vec<AttentionEvent>> {
@@ -385,10 +385,7 @@ fn event_id(
         AttentionKind::Approval => b"approval".as_slice(),
     });
     let value = digest.finalize();
-    value[..16]
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    crate::hex::encode(&value[..16])
 }
 
 /// Running agent sessions, most recently active first and bounded, plus a
@@ -535,20 +532,12 @@ pub fn pending_events(home: &LatchHome) -> Result<Vec<AttentionEvent>> {
     Ok(events)
 }
 
-fn unix_time() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::conversation::{
         ActionDescriptor, ApplyResult, CheckpointDelta, Connector, ConnectorAction,
-        ConnectorIdentity, ConnectorMutation, ConversationItemId, ConversationState, Detection,
-        PollBudget, PollResult,
+        ConnectorIdentity, ConnectorMutation, ConversationState, Detection, PollBudget, PollResult,
     };
     use std::time::Duration;
 
@@ -575,13 +564,6 @@ mod tests {
         }
         fn apply(&mut self, _: ConnectorAction, _: Duration) -> anyhow::Result<ApplyResult> {
             Ok(ApplyResult::Accepted { correlation: None })
-        }
-        fn reconcile(
-            &self,
-            _: &[ConversationItemId],
-            _: &[ConversationItemId],
-        ) -> Vec<ConnectorMutation> {
-            vec![]
         }
         fn checkpoint_snapshot(&self) -> anyhow::Result<Vec<u8>> {
             Ok(vec![])
@@ -741,11 +723,7 @@ mod tests {
             .unwrap()
             .device_id;
         let (secret, public) = Kem::gen_keypair();
-        let public_hex: String = public
-            .to_bytes()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect();
+        let public_hex = crate::hex::encode(&public.to_bytes());
         remote_access::set_notification_key(&home, &first, &public_hex).unwrap();
 
         let hub = ConversationHub::with_connector_factory(

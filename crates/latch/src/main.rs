@@ -490,7 +490,6 @@ fn dispatch(command: Option<Command>) -> Result<()> {
             let outcome = create::create_session(CreateOptions {
                 home: LatchHome::from_env()?,
                 manifest,
-                attach: !json,
             })?;
             if json {
                 let meta = latch::session::meta::read(&outcome.paths)?;
@@ -979,7 +978,6 @@ fn shell_options(display: DisplayMetadata) -> Result<CreateOptions> {
             size: terminal_size(),
             display,
         }),
-        attach: true,
     })
 }
 
@@ -994,7 +992,6 @@ fn run_options(argv: Vec<String>, display: DisplayMetadata) -> Result<CreateOpti
                 display,
             },
         ),
-        attach: true,
     })
 }
 

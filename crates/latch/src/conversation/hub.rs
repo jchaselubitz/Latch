@@ -14,8 +14,8 @@ use serde::{Deserialize, Serialize};
 use super::{
     ActionDescriptor, ApplyResult, Connector, ConnectorAction, ConversationCache, ConversationId,
     ConversationItem, ConversationItemId, ConversationSnapshot, ConversationState, Detection,
-    GatewayLock, GenerationId, MutationEffect, OperationEpoch, Ordinal, PendingConnector,
-    PollBudget, Projection, Revision,
+    GatewayLock, GenerationId, MutationEffect, OperationEpoch, Ordinal, PollBudget, Projection,
+    Revision,
 };
 use crate::cli::serve::routes::Grant;
 
@@ -182,11 +182,15 @@ struct HubInner {
 }
 
 impl ConversationHub {
+    /// A Hub whose every session stays pending, for tests of the Hub itself.
+    #[cfg(test)]
     pub fn new(cache_root: impl Into<PathBuf>) -> Result<Self> {
-        Self::with_connector_factory(cache_root, Arc::new(|_| Box::new(PendingConnector::new())))
+        Self::with_connector_factory(
+            cache_root,
+            Arc::new(|_| Box::new(super::PendingConnector::new())),
+        )
     }
-    /// Same Hub with an injected connector builder. Phase 2 and Phase 7 replace
-    /// the default factory; nothing else in the gateway changes.
+    /// A Hub that builds each session's connector with `connector_factory`.
     pub fn with_connector_factory(
         cache_root: impl Into<PathBuf>,
         connector_factory: ConnectorFactory,
@@ -489,20 +493,13 @@ impl ConversationHub {
         Ok(ids)
     }
     /// Applies immutable observation output after its worker finishes.
+    #[cfg(test)]
     pub fn apply_poll(
         &self,
         id: &ConversationId,
         mutations: Vec<super::ConnectorMutation>,
     ) -> Result<()> {
         self.apply_poll_with_checkpoint(id, mutations, None, None)
-    }
-    fn apply_poll_with_delta(
-        &self,
-        id: &ConversationId,
-        mutations: Vec<super::ConnectorMutation>,
-        checkpoint_delta: Option<super::CheckpointDelta>,
-    ) -> Result<()> {
-        self.apply_poll_with_checkpoint(id, mutations, checkpoint_delta, None)
     }
     fn apply_poll_with_checkpoint(
         &self,
@@ -1100,10 +1097,6 @@ fn initial_state(detection: Detection) -> ConversationState {
         // starting, not unavailable. The Hub keeps watching its hook sidecar
         // and transitions when SessionStart arrives.
         Detection::Pending { .. } => ConversationState::starting(None),
-        Detection::Unsupported => ConversationState::unavailable(
-            None,
-            "this session has no supported conversation connector".into(),
-        ),
     }
 }
 
@@ -1328,13 +1321,6 @@ mod tests {
         fn apply(&mut self, _: ConnectorAction, _: Duration) -> Result<ApplyResult> {
             Ok(ApplyResult::Accepted { correlation: None })
         }
-        fn reconcile(
-            &self,
-            _: &[ConversationItemId],
-            _: &[ConversationItemId],
-        ) -> Vec<ConnectorMutation> {
-            vec![]
-        }
         fn checkpoint_snapshot(&self) -> Result<Vec<u8>> {
             Ok(vec![])
         }
@@ -1368,13 +1354,6 @@ mod tests {
         }
         fn apply(&mut self, action: ConnectorAction, deadline: Duration) -> Result<ApplyResult> {
             FakeConnector.apply(action, deadline)
-        }
-        fn reconcile(
-            &self,
-            outstanding: &[ConversationItemId],
-            observed: &[ConversationItemId],
-        ) -> Vec<ConnectorMutation> {
-            FakeConnector.reconcile(outstanding, observed)
         }
         fn checkpoint_snapshot(&self) -> Result<Vec<u8>> {
             FakeConnector.checkpoint_snapshot()
@@ -1414,13 +1393,6 @@ mod tests {
         }
         fn apply(&mut self, _: ConnectorAction, _: Duration) -> Result<ApplyResult> {
             Ok(ApplyResult::Accepted { correlation: None })
-        }
-        fn reconcile(
-            &self,
-            _: &[ConversationItemId],
-            _: &[ConversationItemId],
-        ) -> Vec<ConnectorMutation> {
-            vec![]
         }
         fn checkpoint_snapshot(&self) -> Result<Vec<u8>> {
             Ok(vec![])

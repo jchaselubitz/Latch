@@ -81,7 +81,7 @@ pub struct InspectReport {
     pub title: Option<String>,
     /// Derived state.
     pub state: String,
-    /// Kernel that owns this session, independent of the caller's selector.
+    /// Kernel that owns this session.
     pub kernel: String,
     /// Working directory at spawn.
     pub cwd: PathBuf,

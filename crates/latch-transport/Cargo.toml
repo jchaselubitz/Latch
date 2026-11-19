@@ -30,6 +30,3 @@ tokio-util.workspace = true
 yamux.workspace = true
 zeroize.workspace = true
 
-[dev-dependencies]
-rcgen = "0.13.2"
-tokio-native-tls = "0.3.1"

@@ -98,13 +98,6 @@ impl Connector for ScriptedConnector {
                 .then(|| ConversationItemId::native("submitted-1")),
         })
     }
-    fn reconcile(
-        &self,
-        _outstanding: &[ConversationItemId],
-        _observed: &[ConversationItemId],
-    ) -> Vec<ConnectorMutation> {
-        Vec::new()
-    }
     fn checkpoint_snapshot(&self) -> Result<Vec<u8>> {
         Ok(Vec::new())
     }

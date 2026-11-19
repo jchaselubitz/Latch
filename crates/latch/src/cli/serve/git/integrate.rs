@@ -409,7 +409,7 @@ pub(crate) async fn check(
                         "unresolved_conflicts",
                         format!(
                             "{} still {} conflicts. Resolve {} on your Mac, stage {} here, then Continue.",
-                            plural(conflicted.len(), "file"),
+                            super::plural(conflicted.len() as u64, "file"),
                             if conflicted.len() == 1 { "has" } else { "have" },
                             if conflicted.len() == 1 { "it" } else { "them" },
                             if conflicted.len() == 1 { "it" } else { "them" },
@@ -444,16 +444,8 @@ pub(crate) fn operation_noun(kind: GitOperationKind) -> &'static str {
     }
 }
 
-fn plural(count: usize, noun: &str) -> String {
-    if count == 1 {
-        format!("1 {noun}")
-    } else {
-        format!("{count} {noun}s")
-    }
-}
-
 fn commits(count: u64) -> String {
-    plural(count as usize, "commit")
+    super::plural(count, "commit")
 }
 
 /// Refuses to stage conflicted files that still contain conflict markers,
@@ -687,7 +679,7 @@ fn stopped(operation: &GitOperation, after: &Observed, output: &GitOutput) -> Ou
             "stopped",
             format!(
                 "Git stopped the {noun}{position} on conflicts in {}. Resolve them on your Mac or in a terminal, stage them here, then Continue.",
-                plural(conflicted.len(), "file")
+                super::plural(conflicted.len() as u64, "file")
             ),
         )
     };
@@ -721,7 +713,7 @@ async fn fetched(
         (Some(old), Some(new)) => match count(worktree, old, new).await {
             Some(arrived) => format!(
                 "Fetched {remote} · {} on {}",
-                plural(arrived as usize, "new commit"),
+                super::plural(arrived, "new commit"),
                 upstream.name
             ),
             None => format!("Fetched {remote} · {} moved", upstream.name),

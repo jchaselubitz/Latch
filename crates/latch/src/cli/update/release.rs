@@ -136,13 +136,6 @@ impl Release {
             .iter()
             .find(|asset| asset.name == "checksums.txt")
     }
-
-    /// The macOS desktop application archive.
-    pub fn desktop_archive(&self) -> Option<&Asset> {
-        self.assets
-            .iter()
-            .find(|asset| asset.name.starts_with("Latch-") && asset.name.ends_with("-macos.zip"))
-    }
 }
 
 /// Looks up the expected digest of `asset_name` in a `shasum`-format manifest.
@@ -229,10 +222,6 @@ mod tests {
         );
         assert!(release.cli_archive("aarch64-unknown-linux-gnu").is_none());
         assert!(release.checksums().is_some());
-        assert_eq!(
-            release.desktop_archive().map(|asset| asset.name.as_str()),
-            Some("Latch-0.2608101202.0-macos.zip")
-        );
     }
 
     #[test]

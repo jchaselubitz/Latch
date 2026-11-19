@@ -44,11 +44,6 @@ pub struct CreateOptions {
     /// What to run. Arrives over stdin for `--manifest-file`; built in-process
     /// for `shell` / `run`.
     pub manifest: LaunchManifest,
-    /// Whether the invoking terminal should attach with control after spawn.
-    ///
-    /// `latch` / `shell` / `run` attach. `latch create --json` does not: the
-    /// caller (Overlord) wants the session id and will open a viewer separately.
-    pub attach: bool,
 }
 
 /// What creation produced.
@@ -402,10 +397,9 @@ fn create_remote_session_with(
     };
     let launched = launch(CreateOptions {
         home: request.home.clone(),
-        manifest,
         // A remote creation starts the process and nothing else: no attach
         // client is spawned, and no existing session's surface is touched.
-        attach: false,
+        manifest,
     });
     let outcome = match launched {
         Ok(outcome) => outcome,
@@ -785,7 +779,6 @@ mod tests {
         let recorder = seen.clone();
         let outcome = create_remote_shell_with(request(&home, &cwd), move |options| {
             *recorder.lock().unwrap() = Some((
-                options.attach,
                 options.manifest.launch.clone(),
                 options.manifest.display.clone(),
             ));
@@ -794,10 +787,7 @@ mod tests {
         .unwrap();
 
         assert!(!outcome.reused);
-        let (attach, launch, display) = seen.lock().unwrap().clone().unwrap();
-        // A creation is not an attach: the phone gets a session it can open
-        // later, and nothing takes any session's exclusive surface here.
-        assert!(!attach);
+        let (launch, display) = seen.lock().unwrap().clone().unwrap();
         assert_eq!(launch.cwd, cwd.canonicalize().unwrap());
         assert_eq!(launch.size, REMOTE_INITIAL_SIZE);
         assert_eq!(launch.argv.len(), 2);
@@ -983,7 +973,6 @@ mod tests {
                     ..DisplayMetadata::default()
                 },
             }),
-            attach: false,
         })
         .unwrap();
 
@@ -1000,7 +989,6 @@ mod tests {
         let outcome =
             create_remote_session_with(claude_request(&home, &cwd), fake_claude, move |options| {
                 *recorder.lock().unwrap() = Some((
-                    options.attach,
                     options.manifest.launch.clone(),
                     options.manifest.display.clone(),
                 ));
@@ -1009,8 +997,7 @@ mod tests {
             .unwrap();
 
         assert!(!outcome.reused);
-        let (attach, launch, display) = seen.lock().unwrap().clone().unwrap();
-        assert!(!attach);
+        let (launch, display) = seen.lock().unwrap().clone().unwrap();
         // Identity and observer setup see the agent argv before the engine
         // wraps it in the owner's login shell.
         assert_eq!(launch.argv, vec!["/opt/fake/bin/claude".to_owned()]);

@@ -33,72 +33,6 @@ use crate::Screen;
 /// only thing that makes the memory cost of a session predictable.
 pub const DEFAULT_SCROLLBACK_LINES: usize = 5_000;
 
-/// Default number of scrollback lines sent with a snapshot on attach.
-///
-/// Chosen against measurement rather than roundness; the reasoning, the numbers
-/// it was chosen from, and what would justify changing it are in
-/// `docs/DECISION_SCROLLBACK.md`. Two hundred lines is four screens at a desk
-/// geometry and ten on a phone: enough to see the command that produced what is
-/// on screen, and not enough to be a log-reading surface.
-pub const DEFAULT_ATTACH_HISTORY_LINES: usize = 200;
-
-/// Default ceiling on the bytes of history sent with a snapshot on attach.
-///
-/// The line count is the useful bound and this is the safety net. They are not
-/// interchangeable: a line of ordinary build output serializes to about 70
-/// bytes at 200 columns, but a line that changes color in every cell serializes
-/// to about 2.7 KB, so a line count alone bounds nothing that a link cares
-/// about. Thirty-two kibibytes is roughly one second on a genuinely bad cell
-/// link, which is where a reattach stops reading as instant.
-pub const DEFAULT_ATTACH_HISTORY_BYTES: usize = 32 * 1024;
-
-/// How much scrollback accompanies a snapshot when a client attaches.
-///
-/// Both bounds apply and the tighter one wins. `max_bytes` covers everything
-/// emitted before the screen, including the newlines that scroll the history
-/// above it, so it is a bound a transport can be reasoned about with rather
-/// than an estimate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct HistoryPolicy {
-    /// Most scrollback lines to send. The newest are kept.
-    pub max_lines: usize,
-    /// Most bytes of history to send, before the screen itself.
-    pub max_bytes: usize,
-}
-
-impl HistoryPolicy {
-    /// Send no history: the snapshot restores the visible screen and nothing
-    /// above it.
-    ///
-    /// This is what a backpressure resync uses. A client being resynced already
-    /// received the history when it attached, and a link slow enough to have
-    /// overflowed its queue is the last one that should be sent scrollback
-    /// again.
-    pub const NONE: Self = Self {
-        max_lines: 0,
-        max_bytes: 0,
-    };
-
-    /// The measured default.
-    pub const fn new() -> Self {
-        Self {
-            max_lines: DEFAULT_ATTACH_HISTORY_LINES,
-            max_bytes: DEFAULT_ATTACH_HISTORY_BYTES,
-        }
-    }
-
-    /// Whether this policy can carry anything at all.
-    pub const fn is_none(&self) -> bool {
-        self.max_lines == 0 || self.max_bytes == 0
-    }
-}
-
-impl Default for HistoryPolicy {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// The floor on the backend's own scrollback depth.
 ///
 /// The ring is mirrored out of the backend's buffer, and that buffer has to be
@@ -311,51 +245,6 @@ impl Terminal {
     }
 
     // --- Snapshot -----------------------------------------------------------
-
-    /// Serializes the newest retained lines, oldest first, inside `policy`.
-    ///
-    /// Walked from the newest backwards because that is the end worth keeping:
-    /// what a person scrolls up to see is what just left the screen. A line
-    /// that would cross either bound stops the walk rather than being
-    /// truncated — half a line of build output is worse than one line less of
-    /// it, and a truncated line would also be a lie about what the session
-    /// printed.
-    fn write_history(&self, policy: HistoryPolicy, out: &mut Vec<u8>) {
-        if policy.is_none() || self.ring.is_empty() {
-            return;
-        }
-        let rows = usize::from(self.backend_size().rows);
-        // The newlines that scroll the history above the screen are reserved
-        // up front, so `max_bytes` bounds the whole preamble and not merely the
-        // part of it that happens to be text.
-        let Some(budget) = policy.max_bytes.checked_sub(rows) else {
-            return;
-        };
-
-        let mut lines: Vec<Vec<u8>> = Vec::new();
-        let mut spent = 0usize;
-        for row in self.ring.iter().rev().take(policy.max_lines) {
-            let encoded = encode_row(row);
-            if spent + encoded.len() > budget {
-                break;
-            }
-            spent += encoded.len();
-            lines.push(encoded);
-        }
-        if lines.is_empty() {
-            return;
-        }
-        for line in lines.iter().rev() {
-            out.extend_from_slice(line);
-        }
-        // Exactly enough newlines to push every line just written above the
-        // visible screen, wherever printing them left the cursor. Without this
-        // the newest lines — the ones worth having — would sit in the visible
-        // region and be erased by the screen paint that follows, rather than
-        // landing in the client's own scrollback where a continuously attached
-        // client would have them.
-        out.resize(out.len() + rows, b'\n');
-    }
 
     fn write_extra_modes(&self, out: &mut Vec<u8>) {
         out.extend_from_slice(if self.modes.autowrap {
@@ -586,10 +475,6 @@ impl Screen for Terminal {
     }
 
     fn snapshot(&self) -> Vec<u8> {
-        self.attach_snapshot(HistoryPolicy::NONE)
-    }
-
-    fn attach_snapshot(&self, history: HistoryPolicy) -> Vec<u8> {
         let screen = self.parser.screen();
         let mut out = Vec::new();
 
@@ -598,19 +483,8 @@ impl Screen for Terminal {
         // self-sufficient rather than dependent on what the receiver happened
         // to be showing.
         out.extend_from_slice(b"\x1bc");
-        // History goes after the reset and before everything else. It cannot go
-        // first: a hard reset clears the receiving terminal's saved lines, so
-        // history emitted ahead of it would be erased by it. It cannot go after
-        // the screen either, because it has to scroll *past* the screen to
-        // reach the client's scrollback. This one position is the only one that
-        // works, which is why the composition lives here rather than being
-        // assembled by the worker out of two calls.
-        self.write_history(history, &mut out);
         // Stated in both directions: a client sitting on the alternate screen
         // that receives a snapshot of a primary one has to be taken off it.
-        // This is also the marker that separates history from the screen — no
-        // cell's contents can contain an escape, so nothing above can imitate
-        // it.
         out.extend_from_slice(if screen.alternate_screen() {
             b"\x1b[?1049h"
         } else {
@@ -624,95 +498,6 @@ impl Screen for Terminal {
         self.write_region_and_origin(&mut out);
         out
     }
-}
-
-/// One retained line as bytes a terminal can print, rendition included.
-///
-/// Terminated with `\r\n` rather than `\n`: a line exactly as wide as the
-/// screen leaves the backend's deferred wrap pending, and a carriage return is
-/// what cancels it. A bare newline would wrap the next line by one column.
-fn encode_row(row: &Row) -> Vec<u8> {
-    // Trailing cells are dropped, but only the ones that carry nothing at all.
-    // A blank cell with a rendition is not padding: a diff that paints its
-    // background to the end of the line is exactly that, and trimming it would
-    // change what the line means rather than merely what it costs.
-    let Some(last) = row.cells.iter().rposition(|cell| {
-        cell.width > 0 && (!cell.text.trim().is_empty() || cell.attrs != CellAttrs::default())
-    }) else {
-        return b"\r\n".to_vec();
-    };
-
-    let mut out = Vec::new();
-    let mut pen = CellAttrs::default();
-    for cell in &row.cells[..=last] {
-        // Continuation halves carry no text; the wide character before them
-        // already occupies both columns when printed.
-        if cell.width == 0 {
-            continue;
-        }
-        if cell.attrs != pen {
-            write_sgr(&cell.attrs, &mut out);
-            pen = cell.attrs;
-        }
-        out.extend_from_slice(if cell.text.is_empty() {
-            b" "
-        } else {
-            cell.text.as_bytes()
-        });
-    }
-    // Closed off so a line's rendition cannot bleed into the next one or into
-    // the screen paint that follows the history block.
-    if pen != CellAttrs::default() {
-        out.extend_from_slice(b"\x1b[m");
-    }
-    out.extend_from_slice(b"\r\n");
-    out
-}
-
-/// Writes a complete rendition, reset first, so it depends on no prior state.
-fn write_sgr(attrs: &CellAttrs, out: &mut Vec<u8>) {
-    out.extend_from_slice(b"\x1b[0");
-    for (enabled, code) in [
-        (attrs.bold, "1"),
-        (attrs.dim, "2"),
-        (attrs.italic, "3"),
-        (attrs.underline, "4"),
-        (attrs.blink, "5"),
-        (attrs.reverse, "7"),
-        (attrs.invisible, "8"),
-        (attrs.strikethrough, "9"),
-    ] {
-        if enabled {
-            out.push(b';');
-            out.extend_from_slice(code.as_bytes());
-        }
-    }
-    write_sgr_color(attrs.fg, 3, out);
-    write_sgr_color(attrs.bg, 4, out);
-    out.push(b'm');
-}
-
-/// Appends one color to an SGR sequence already in progress. `plane` is 3 for
-/// foreground and 4 for background.
-fn write_sgr_color(color: Color, plane: u8, out: &mut Vec<u8>) {
-    let mut write = ByteWriter(out);
-    let _ = match color {
-        // The default is the absence of a color, and the leading reset has
-        // already selected it. Emitting a concrete color here would make a
-        // snapshot look right on the recording terminal and wrong on a client
-        // with a different palette.
-        Color::Default => Ok(()),
-        Color::Indexed(index) if index < 8 => {
-            write!(write, ";{}", u16::from(plane) * 10 + u16::from(index))
-        }
-        Color::Indexed(index) if index < 16 => write!(
-            write,
-            ";{}",
-            u16::from(plane) * 10 + 60 + u16::from(index) - 8
-        ),
-        Color::Indexed(index) => write!(write, ";{plane}8;5;{index}"),
-        Color::Rgb(r, g, b) => write!(write, ";{plane}8;2;{r};{g};{b}"),
-    };
 }
 
 /// Adapts a byte vector to `fmt::Write` so short sequences can be formatted

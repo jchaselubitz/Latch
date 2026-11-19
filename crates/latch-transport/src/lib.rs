@@ -8,6 +8,3 @@
 
 /// Remote-link v1 contracts shared by WSS, LAN, the helper, and UniFFI.
 pub mod link;
-
-/// Diagnostic name emitted by the dedicated helper.
-pub const STACK_NAME: &str = "wss-or-lan/noise-xx/yamux/v1";

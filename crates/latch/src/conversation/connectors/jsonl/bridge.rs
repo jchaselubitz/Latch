@@ -112,13 +112,7 @@ impl JsonlConnector {
         let paths = self.home.session(&self.session);
         let sidecar = paths.conversation_source_hooks();
         let results_from = fs::metadata(&sidecar).map(|meta| meta.len()).unwrap_or(0);
-        let id = format!(
-            "{kind}-{:x}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        );
+        let id = format!("{kind}-{:x}", crate::util::unix_nanos());
         let command = crate::observer::queue_claude_bridge_command(&paths, &id, kind, payload)?;
         let started = Instant::now();
         let pause = Duration::from_millis(40);

@@ -19,28 +19,20 @@ use crate::session::{timing, viewer};
 mod latchd_kernel;
 pub use latchd_kernel::{latchd_binary, latchd_version, BUNDLED_LATCHD_NAME};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Kernel {
-    Latchd,
-}
-impl Kernel {
-    pub const fn as_str(self) -> &'static str {
-        "latchd"
-    }
-}
-pub const fn kernel() -> Kernel {
-    Kernel::Latchd
-}
+/// The one session kernel, as reports name it.
+pub const KERNEL_NAME: &str = latchd::paths::KERNEL_NAME;
 
-pub fn session_kernel(home: &LatchHome, id: &SessionId) -> Result<Kernel> {
+/// Refuses a session directory that a retired kernel left behind, before any
+/// verb mistakes it for a latchd session.
+pub fn require_latchd_session(home: &LatchHome, id: &SessionId) -> Result<()> {
     let session_dir = home.session(id);
     if !session_dir.dir().exists() {
-        return Ok(Kernel::Latchd);
+        return Ok(());
     }
     let record = latchd::paths::KernelRecord::read(session_dir.dir())
         .with_context(|| format!("cannot read the kernel identity for {id}"))?;
     match record.as_ref().map(|record| record.kernel.as_str()) {
-        Some(latchd::paths::KERNEL_NAME) => Ok(Kernel::Latchd),
+        Some(KERNEL_NAME) => Ok(()),
         Some(other) => bail!("session {id} names unsupported retired kernel `{other}`"),
         None => bail!("session {id} predates the latchd-only release; use an older Latch release to close or export it"),
     }
@@ -69,14 +61,6 @@ impl SessionState {
             Self::Lost => "lost",
         }
     }
-    pub fn from_wire(raw: &str) -> Option<Self> {
-        match raw {
-            "running" => Some(Self::Running),
-            "exited" => Some(Self::Exited),
-            "lost" => Some(Self::Lost),
-            _ => None,
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -85,7 +69,6 @@ pub struct SessionInfo {
     pub state: SessionState,
     pub size: TerminalSize,
     pub activity: SystemTime,
-    pub attached: usize,
     pub pane_pid: i32,
     pub exit_status: Option<i32>,
     pub exited_at: Option<SystemTime>,
@@ -110,16 +93,6 @@ pub struct StopRequest<'a> {
     pub home: &'a LatchHome,
     pub id: &'a SessionId,
     pub force: bool,
-}
-pub struct PasteMessageRequest<'a> {
-    pub home: &'a LatchHome,
-    pub id: &'a SessionId,
-    pub message: &'a [u8],
-}
-pub struct SendKeysRequest<'a> {
-    pub home: &'a LatchHome,
-    pub id: &'a SessionId,
-    pub keys: &'a [String],
 }
 
 pub fn create(request: CreateRequest) -> Result<CreateResult> {
@@ -194,7 +167,7 @@ impl SurfaceRelease {
 }
 
 pub fn attach_exclusive(home: &LatchHome, id: &SessionId) -> Result<SurfaceRelease> {
-    session_kernel(home, id)?;
+    require_latchd_session(home, id)?;
     latchd_kernel::attach_exclusive(home, id)
 }
 
@@ -223,12 +196,6 @@ fn wait_for_first_viewer(manifest: &LaunchManifest) {
     viewer::clear(&paths);
 }
 
-pub fn attached_clients(home: &LatchHome, id: &SessionId) -> Option<usize> {
-    latchd_kernel::inspect(home, id)
-        .ok()
-        .flatten()
-        .map(|info| info.attached)
-}
 pub fn surface_attached(home: &LatchHome, id: &SessionId) -> bool {
     latchd_kernel::surface_attached(home, id)
 }
@@ -239,7 +206,7 @@ pub fn list(home: &LatchHome) -> Result<Vec<SessionInfo>> {
     latchd_kernel::list(home)
 }
 pub fn inspect(home: &LatchHome, id: &SessionId) -> Result<Option<SessionInfo>> {
-    session_kernel(home, id)?;
+    require_latchd_session(home, id)?;
     latchd_kernel::inspect(home, id)
 }
 
@@ -287,7 +254,7 @@ impl std::fmt::Debug for ConversationControl {
 }
 impl ConversationControl {
     pub fn open(home: &LatchHome, id: &SessionId) -> Result<Self> {
-        session_kernel(home, id)?;
+        require_latchd_session(home, id)?;
         let record = latchd::paths::KernelRecord::read(home.session(id).dir())?
             .ok_or_else(|| anyhow!("session {id} has no latchd kernel record"))?;
         Ok(Self {
@@ -297,14 +264,7 @@ impl ConversationControl {
             events: None,
         })
     }
-    pub const fn is_event_driven(&self) -> bool {
-        true
-    }
-    pub fn wait_for_activity(
-        &mut self,
-        _fallback_poll: Duration,
-        event_timeout: Duration,
-    ) -> Result<ConversationWake> {
+    pub fn wait_for_activity(&mut self, event_timeout: Duration) -> Result<ConversationWake> {
         if self.events.is_none() {
             self.events = Some(
                 latchd::client::Client::connect_with_timeout(&self.socket, event_timeout)?
@@ -448,16 +408,8 @@ pub fn pane_metrics_with_timeout(
     id: &SessionId,
     _timeout: Duration,
 ) -> Result<PaneMetrics> {
-    session_kernel(home, id)?;
+    require_latchd_session(home, id)?;
     latchd_kernel::pane_metrics(home, id)
-}
-pub fn capture_pane(home: &LatchHome, id: &SessionId) -> Result<String> {
-    capture_pane_with_timeout(
-        home,
-        id,
-        Duration::from_secs(30),
-        CapturePaneOptions::default(),
-    )
 }
 pub fn capture_pane_with_timeout(
     home: &LatchHome,
@@ -465,28 +417,11 @@ pub fn capture_pane_with_timeout(
     timeout: Duration,
     options: CapturePaneOptions,
 ) -> Result<String> {
-    session_kernel(home, id)?;
+    require_latchd_session(home, id)?;
     latchd_kernel::capture_pane(home, id, timeout, options)
 }
-pub fn paste_message(request: PasteMessageRequest<'_>) -> Result<()> {
-    paste_message_with_timeout(request, Duration::from_secs(30))
-}
-pub fn paste_message_with_timeout(
-    request: PasteMessageRequest<'_>,
-    timeout: Duration,
-) -> Result<()> {
-    session_kernel(request.home, request.id)?;
-    latchd_kernel::paste_message(request, timeout)
-}
-pub fn send_keys(request: SendKeysRequest<'_>) -> Result<()> {
-    send_keys_with_timeout(request, Duration::from_secs(30))
-}
-pub fn send_keys_with_timeout(request: SendKeysRequest<'_>, timeout: Duration) -> Result<()> {
-    session_kernel(request.home, request.id)?;
-    latchd_kernel::send_keys(request, timeout)
-}
 pub fn resize(request: ResizeRequest<'_>) -> Result<()> {
-    session_kernel(request.home, request.id)?;
+    require_latchd_session(request.home, request.id)?;
     latchd_kernel::resize(request)
 }
 
@@ -545,7 +480,7 @@ fn signal_child(info: &SessionInfo, signal: i32) -> std::io::Result<()> {
     Ok(())
 }
 pub fn kill_session(home: &LatchHome, id: &SessionId) -> Result<()> {
-    session_kernel(home, id)?;
+    require_latchd_session(home, id)?;
     latchd_kernel::kill_session(home, id)
 }
 pub fn exit_record(info: &SessionInfo) -> Option<ExitRecord> {

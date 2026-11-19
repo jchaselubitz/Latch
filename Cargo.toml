@@ -23,7 +23,6 @@ repository = "https://github.com/Cooperativ/Latch"
 anyhow = "1"
 async-trait = "0.1"
 axum = { version = "0.8", features = ["ws"] }
-bytes = "1"
 clap = { version = "4", features = ["derive"] }
 # The process plane is POSIX: `setsid`, PTY allocation, process groups, signals,
 # and `SO_PEERCRED`/`LOCAL_PEERCRED` have no portable std equivalent.

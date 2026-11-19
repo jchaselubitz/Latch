@@ -41,8 +41,6 @@ pub struct SecureLink {
     closed: tokio::sync::watch::Receiver<bool>,
     /// Remote static public key authenticated by Noise.
     pub remote_public_key: Vec<u8>,
-    /// Fresh local/remote nonces identify this generation.
-    pub generation: String,
     /// How long authentication took, for content-free diagnostics.
     pub authenticate_ms: u64,
     handshake_hash: Vec<u8>,
@@ -115,7 +113,6 @@ impl SecureLink {
         send_encrypted_json(&mut records, &mut cipher, &local_hello).await?;
         let remote_hello: LinkHello = recv_encrypted_json(&mut records, &mut cipher).await?;
         validate_hello(&remote_hello)?;
-        let generation = format!("{}:{}", local_hello.nonce, remote_hello.nonce);
         let authenticate_ms = started.elapsed().as_millis() as u64;
 
         let (application, crypt) = tokio::io::duplex(DUPLEX_BUFFER_BYTES);
@@ -158,7 +155,6 @@ impl SecureLink {
             task: Mutex::new(Some(driver)),
             closed,
             remote_public_key,
-            generation,
             authenticate_ms,
             handshake_hash,
         }))

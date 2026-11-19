@@ -15,9 +15,8 @@ use latchd::paths::KernelRecord;
 use latchd::protocol::{ReleaseReason, Request, SnapshotFormat, Stat, State};
 
 use super::{
-    CapturePaneOptions, CreateRequest, CreateResult, PaneMetrics, PasteMessageRequest,
-    ResizeRequest, SendKeysRequest, SessionInfo, SessionState, SurfaceRelease, FIRST_VIEWER_GRACE,
-    FIRST_VIEWER_MAX_WAIT,
+    CapturePaneOptions, CreateRequest, CreateResult, PaneMetrics, ResizeRequest, SessionInfo,
+    SessionState, SurfaceRelease, FIRST_VIEWER_GRACE, FIRST_VIEWER_MAX_WAIT,
 };
 use crate::session::manifest::{self, TerminalSize};
 use crate::session::meta::{self, MetaRequest};
@@ -311,7 +310,6 @@ fn info(stat: Stat) -> SessionInfo {
         },
         size: TerminalSize::new(stat.cols, stat.rows),
         activity: UNIX_EPOCH + Duration::from_secs(stat.activity),
-        attached: usize::from(stat.attached),
         pane_pid: stat.child_pid,
         exit_status: exit.as_ref().and_then(|exit| exit.status),
         exited_at: exit
@@ -361,7 +359,6 @@ pub(super) fn inspect(home: &LatchHome, id: &SessionId) -> Result<Option<Session
         state: SessionState::Exited,
         size: metadata.initial_size,
         activity: UNIX_EPOCH + Duration::from_secs(exit.exited_at),
-        attached: 0,
         pane_pid: 0,
         exit_status: exit.status,
         exited_at: Some(UNIX_EPOCH + Duration::from_secs(exit.exited_at)),
@@ -401,35 +398,6 @@ pub(super) fn capture_pane(
     reply
         .text
         .ok_or_else(|| anyhow!("kernel returned no screen for session {id}"))
-}
-
-pub(super) fn paste_message(request: PasteMessageRequest<'_>, timeout: Duration) -> Result<()> {
-    let socket = socket_or_gone(request.home, request.id)?;
-    client::call_with_timeout(
-        &socket,
-        &Request::Submit {
-            text: String::from_utf8_lossy(request.message).into_owned(),
-        },
-        timeout,
-    )
-    .with_context(|| format!("cannot submit a message to session {}", request.id))?;
-    Ok(())
-}
-
-pub(super) fn send_keys(request: SendKeysRequest<'_>, timeout: Duration) -> Result<()> {
-    if request.keys.is_empty() {
-        bail!("at least one key is required");
-    }
-    let socket = socket_or_gone(request.home, request.id)?;
-    client::call_with_timeout(
-        &socket,
-        &Request::Key {
-            keys: request.keys.to_vec(),
-        },
-        timeout,
-    )
-    .with_context(|| format!("cannot send keys to session {}", request.id))?;
-    Ok(())
 }
 
 pub(super) fn resize(request: ResizeRequest<'_>) -> Result<()> {

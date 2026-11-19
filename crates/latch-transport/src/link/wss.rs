@@ -61,12 +61,6 @@ pub struct WssControl {
 }
 
 impl WssRecordIo {
-    /// Connects using platform trust through `native-tls`/Security.framework.
-    pub async fn connect(url: &str, admission: &str) -> Result<Self, LinkError> {
-        let (records, _control) = Self::connect_with_control(url, admission).await?;
-        Ok(records)
-    }
-
     /// Connects and returns the relay control handle retained by the endpoint
     /// owner for lease renewal.
     pub async fn connect_with_control(
@@ -395,7 +389,7 @@ mod tests {
             "http://relay.invalid/v1/connect",
         ] {
             let started = std::time::Instant::now();
-            let result = WssRecordIo::connect(url, "admission").await;
+            let result = WssRecordIo::connect_with_control(url, "admission").await;
             assert!(
                 matches!(
                     result,

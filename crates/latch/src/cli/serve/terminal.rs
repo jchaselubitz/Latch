@@ -120,7 +120,7 @@ fn random_capability() -> String {
     std::fs::File::open("/dev/urandom")
         .and_then(|mut file| file.read_exact(&mut bytes))
         .expect("system randomness is available");
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    crate::hex::encode(&bytes)
 }
 
 fn constant_time_eq(left: &str, right: &str) -> bool {

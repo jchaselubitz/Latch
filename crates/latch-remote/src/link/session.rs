@@ -80,7 +80,6 @@ pub(super) async fn run_session(
                 let established = EstablishedLink {
                     link: lan.link,
                     carrier: "lan",
-                    control: None,
                     timings: LinkStageTimings {
                         connect_ms: 0,
                         peer_wait_ms: 0,
@@ -129,10 +128,8 @@ pub(super) async fn run_session(
                     "peerWaitMs": established.timings.peer_wait_ms,
                     "authenticateMs": established.timings.authenticate_ms,
                 }));
-                if established.control.is_none() {
-                    // A LAN link owns no relay lease. Keep the waiting relay
-                    // socket where it is: it is the path back if Wi-Fi drops.
-                }
+                // A LAN link owns no relay lease, so the waiting relay socket
+                // stays where it is: it is the path back if Wi-Fi drops.
                 current = Some(established.link);
             }
             accepted = async {

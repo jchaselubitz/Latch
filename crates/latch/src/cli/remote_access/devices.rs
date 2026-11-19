@@ -9,7 +9,6 @@ use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 use x25519_dalek::{PublicKey, StaticSecret};
 const MAX_PAIRED_DEVICES: usize = 32;
 const MAX_AUDIT_EVENTS: usize = 1_024;
@@ -508,8 +507,8 @@ fn identity(paths: &Paths) -> anyhow::Result<Identity> {
     let public = PublicKey::from(&secret);
     let identity = Identity {
         device_id: random_hex(16)?,
-        private_key: hex_encode(secret.as_bytes()),
-        public_key: hex_encode(public.as_bytes()),
+        private_key: crate::hex::encode(secret.as_bytes()),
+        public_key: crate::hex::encode(public.as_bytes()),
         key_generation: initial_key_generation(),
     };
     store_identity_secret(paths, &identity.device_id, &identity.private_key)?;
@@ -609,7 +608,7 @@ pub(super) fn audit(
 ) -> anyhow::Result<()> {
     ensure_root(paths)?;
     let bytes = serde_json::to_vec(&AuditEvent {
-        timestamp: unix_time(),
+        timestamp: crate::util::unix_secs(),
         event,
         device_id,
         result,
@@ -697,7 +696,7 @@ fn fill_random(bytes: &mut [u8]) -> anyhow::Result<()> {
 fn random_hex(bytes: usize) -> anyhow::Result<String> {
     let mut data = vec![0_u8; bytes];
     fill_random(&mut data)?;
-    Ok(hex_encode(&data))
+    Ok(crate::hex::encode(&data))
 }
 
 fn valid_prefixed_id(value: &str, prefix: &str) -> bool {
@@ -719,41 +718,7 @@ fn decode_static_key(value: &str) -> anyhow::Result<Vec<u8>> {
     {
         bail!("device key must be 32-byte lowercase hexadecimal");
     }
-    decode_hex(value)
-}
-
-fn decode_hex(value: &str) -> anyhow::Result<Vec<u8>> {
-    if value.len() % 2 != 0 {
-        bail!("hex value must have an even length");
-    }
-    value
-        .as_bytes()
-        .chunks_exact(2)
-        .map(|pair| {
-            let high = hex_nibble(pair[0]).ok_or_else(|| anyhow!("invalid hex value"))?;
-            let low = hex_nibble(pair[1]).ok_or_else(|| anyhow!("invalid hex value"))?;
-            Ok(high << 4 | low)
-        })
-        .collect()
-}
-
-fn hex_nibble(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        _ => None,
-    }
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
-fn unix_time() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+    crate::hex::decode(value).ok_or_else(|| anyhow!("invalid hex value"))
 }
 
 #[cfg(test)]

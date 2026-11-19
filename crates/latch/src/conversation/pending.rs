@@ -8,9 +8,8 @@
 use anyhow::Result;
 
 use super::{
-    ActionDescriptor, ApplyResult, CheckpointDelta, Connector, ConnectorAction, ConnectorMutation,
-    ConversationItemId, Detection, PollBudget, PollResult, ACTION_RESOLVE_REQUEST,
-    ACTION_SEND_MESSAGE,
+    ActionDescriptor, ApplyResult, CheckpointDelta, Connector, ConnectorAction, Detection,
+    PollBudget, PollResult, ACTION_RESOLVE_REQUEST, ACTION_SEND_MESSAGE,
 };
 use crate::cli::serve::routes::Grant;
 
@@ -62,13 +61,6 @@ impl Connector for PendingConnector {
         Ok(ApplyResult::Refused {
             reason: REASON.to_owned(),
         })
-    }
-    fn reconcile(
-        &self,
-        _outstanding: &[ConversationItemId],
-        _observed: &[ConversationItemId],
-    ) -> Vec<ConnectorMutation> {
-        Vec::new()
     }
     fn checkpoint_snapshot(&self) -> Result<Vec<u8>> {
         Ok(Vec::new())

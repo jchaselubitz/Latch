@@ -16,6 +16,7 @@ use serde_json::Value;
 use crate::engine;
 use crate::session::manifest::LaunchManifest;
 use crate::session::paths::{LatchHome, SessionId, SessionPaths, DIR_MODE, FILE_MODE};
+use crate::util::shell_quote;
 
 const MAX_HOOK_BYTES: usize = 1024 * 1024;
 const CLAUDE_PLUGIN_NAME: &str = "latch-conversation-observer";
@@ -505,10 +506,6 @@ fn ensure_claude_bridge(home: &LatchHome) -> anyhow::Result<PathBuf> {
         })?;
     }
     Ok(root)
-}
-
-fn shell_quote(path: &Path) -> String {
-    format!("'{}'", path.display().to_string().replace('\'', "'\"'\"'"))
 }
 
 fn write_private(request: PrivateWrite<'_>) -> anyhow::Result<()> {

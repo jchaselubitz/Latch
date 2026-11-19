@@ -24,7 +24,6 @@ pub(super) struct Admission {
 pub(super) struct EstablishedLink {
     pub(super) link: Arc<SecureLink>,
     pub(super) carrier: &'static str,
-    pub(super) control: Option<Arc<WssControl>>,
     pub(super) timings: LinkStageTimings,
 }
 
@@ -80,23 +79,19 @@ pub async fn run_lan_acceptor(
                 SecureLink::establish(LanRecordIo::new(stream), config),
             )
             .await;
-            match established {
-                Ok(Ok(link)) => {
-                    let authenticate_ms = started.elapsed().as_millis() as u64;
-                    if let Err(unsent) = links
-                        .send(LanLink {
-                            link,
-                            authenticate_ms,
-                        })
-                        .await
-                    {
-                        unsent.0.link.close().await;
-                    }
+            // An unauthenticated or stalled LAN peer is refused and
+            // forgotten; the listener keeps serving the paired phone.
+            if let Ok(Ok(link)) = established {
+                let authenticate_ms = started.elapsed().as_millis() as u64;
+                if let Err(unsent) = links
+                    .send(LanLink {
+                        link,
+                        authenticate_ms,
+                    })
+                    .await
+                {
+                    unsent.0.link.close().await;
                 }
-                // An unauthenticated LAN peer is refused and forgotten; the
-                // listener keeps serving the paired phone.
-                Ok(Err(error)) => log::debug!("LAN handshake refused: {error}"),
-                Err(_) => log::debug!("LAN handshake timed out"),
             }
         });
     }
@@ -118,12 +113,11 @@ pub(super) async fn run_wss_acceptor(
             WssRecordIo::connect_with_control(&admission.relay_url, &admission.admission).await;
         let (mut records, control) = match connected {
             Ok(value) => value,
-            Err(error) => {
+            Err(_) => {
                 emit_status(
                     HostStatus::Offline,
                     serde_json::json!({ "reason": "connect_failed" }),
                 );
-                let _ = error;
                 request_admission("connect_failed");
                 continue;
             }
@@ -162,7 +156,6 @@ pub(super) async fn run_wss_acceptor(
                     .send(EstablishedLink {
                         link,
                         carrier: "relay",
-                        control: Some(control),
                         timings,
                     })
                     .await

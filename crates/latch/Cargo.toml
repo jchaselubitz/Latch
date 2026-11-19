@@ -52,6 +52,5 @@ security-framework.workspace = true
 # `~/.latch` roots.
 [dev-dependencies]
 libc.workspace = true
-proptest.workspace = true
 tempfile.workspace = true
 tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }

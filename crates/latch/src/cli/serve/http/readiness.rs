@@ -7,14 +7,13 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path as FsPath;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(super) fn gateway_instance_id() -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    format!("gw-{:x}-{:x}", std::process::id(), nanos)
+    format!(
+        "gw-{:x}-{:x}",
+        std::process::id(),
+        crate::util::unix_nanos()
+    )
 }
 
 pub(super) fn write_readiness(path: &FsPath, readiness: &GatewayReadiness) -> anyhow::Result<()> {

@@ -12,7 +12,7 @@ fn enrolled_home(permission: DevicePermission) -> (tempfile::TempDir, LatchHome,
     let home = LatchHome::new(directory.path());
     set_enabled(&home, true).unwrap();
     let secret = StaticSecret::from([7_u8; 32]);
-    let key = hex_encode(PublicKey::from(&secret).as_bytes());
+    let key = crate::hex::encode(PublicKey::from(&secret).as_bytes());
     authorize_enrollment(
         &home,
         &format!("enr_{}", "1".repeat(32)),
@@ -525,7 +525,7 @@ fn shared_gateway_owner_lock_is_exclusive_and_recovers_after_owner_exit() {
 async fn revoking_one_device_does_not_remove_another_devices_shared_gateway_authority() {
     let (_directory, home, first_key) = enrolled_home(DevicePermission::Control);
     let second_secret = StaticSecret::from([8_u8; 32]);
-    let second_key = hex_encode(PublicKey::from(&second_secret).as_bytes());
+    let second_key = crate::hex::encode(PublicKey::from(&second_secret).as_bytes());
     let second = authorize_enrollment(
         &home,
         &format!("enr_{}", "3".repeat(32)),
@@ -658,7 +658,7 @@ fn enrollment_refuses_a_name_outside_the_allowlist_instead_of_storing_it() {
     let directory = tempfile::tempdir().unwrap();
     let home = LatchHome::new(directory.path());
     set_enabled(&home, true).unwrap();
-    let key = hex_encode(PublicKey::from(&StaticSecret::from([7_u8; 32])).as_bytes());
+    let key = crate::hex::encode(PublicKey::from(&StaticSecret::from([7_u8; 32])).as_bytes());
     for name in [
         "Phone\nrequests Observe",
         " Phone",

@@ -7,7 +7,6 @@ use std::fs;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::command::{self, args, Extras};
 use super::{GitError, Worktree};
@@ -33,10 +32,7 @@ pub(crate) async fn prepare(worktree: &Worktree) -> Result<Arc<Review>, GitError
     let directory = worktree.git_dir.join(format!(
         "latch-commit-review-{}-{}",
         std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
+        crate::util::unix_nanos()
     ));
     fs::DirBuilder::new()
         .mode(0o700)

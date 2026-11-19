@@ -29,7 +29,7 @@ pub fn mint_token(path: &Path) -> anyhow::Result<String> {
         .open("/dev/urandom")
         .and_then(|mut file| file.read_exact(&mut bytes))
         .context("cannot read /dev/urandom")?;
-    let token = hex_encode(&bytes);
+    let token = crate::hex::encode(&bytes);
     let mut file = OpenOptions::new()
         .write(true)
         .create(true)
@@ -132,16 +132,6 @@ fn parse_protocols(value: &HeaderValue) -> Vec<String> {
         .map(|part| part.trim().to_owned())
         .filter(|part| !part.is_empty())
         .collect()
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for &byte in bytes {
-        out.push(HEX[(byte >> 4) as usize] as char);
-        out.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    out
 }
 
 #[cfg(test)]

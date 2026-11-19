@@ -15,7 +15,6 @@ repository.workspace = true
 # evaluation against `fixtures/vt/`; see `docs/DECISION_EMULATOR.md`. It stays
 # behind the `Screen` trait and is named only in `src/terminal.rs`.
 [dependencies]
-thiserror.workspace = true
 vt100.workspace = true
 
 [dev-dependencies]

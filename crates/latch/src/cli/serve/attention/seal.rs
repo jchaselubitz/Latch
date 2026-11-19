@@ -78,7 +78,7 @@ pub fn seal(recipient: &[u8; 32], event_id: &str, payload: &Payload) -> Result<S
         .map_err(|_| anyhow!("sealing failed"))?;
     let mut wire = encapped.to_bytes().to_vec();
     wire.extend_from_slice(&ciphertext);
-    Ok(wire.iter().map(|byte| format!("{byte:02x}")).collect())
+    Ok(crate::hex::encode(&wire))
 }
 
 #[cfg(test)]

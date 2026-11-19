@@ -222,14 +222,6 @@ async fn page(
     Ok((commits, next))
 }
 
-fn plural(count: u64, noun: &str) -> String {
-    if count == 1 {
-        format!("1 {noun}")
-    } else {
-        format!("{count} {noun}s")
-    }
-}
-
 /// `GET /v2/git/push/preview`. `chosen` is the remote and destination the
 /// phone named, if any; both or neither.
 pub(crate) async fn preview(
@@ -369,7 +361,7 @@ pub(crate) async fn preview(
             "{}/{} has {} that {branch} doesn't (as last fetched), so the remote will probably refuse a normal push. Fetch and update {branch} first.",
             target.remote,
             target.destination,
-            plural(behind, "commit")
+            super::plural(behind, "commit")
         )),
         _ => None,
     };
@@ -605,7 +597,7 @@ pub(crate) async fn outcome(
                 match sent {
                     Some(sent) => format!(
                         "Pushed {} to {target}. It is now at {short}.",
-                        plural(sent, "commit")
+                        super::plural(sent, "commit")
                     ),
                     None => format!("Pushed {} to {target}.", push.source_branch),
                 },

@@ -886,21 +886,22 @@ fn the_engine_drives_the_pane_through_the_control_plane() {
         std::env::set_var("LATCH_HOME", &h.home);
         let home = latch::session::paths::LatchHome::new(&h.home);
         let session = latch::session::paths::SessionId::parse(&id).unwrap();
-        latch::engine::paste_message(latch::engine::PasteMessageRequest {
-            home: &home,
-            id: &session,
-            message: b"from the hub",
-        })
-        .expect("paste");
+        let timeout = Duration::from_secs(30);
+        let mut control =
+            latch::engine::ConversationControl::open(&home, &session).expect("control");
+        control.submit("from the hub", timeout).expect("submit");
         h.wait_visible(&id, "line=[from the hub]");
-        latch::engine::send_keys(latch::engine::SendKeysRequest {
-            home: &home,
-            id: &session,
-            keys: &["y".to_owned(), "Enter".to_owned()],
-        })
-        .expect("send keys");
+        control
+            .key(&["y".to_owned(), "Enter".to_owned()], timeout)
+            .expect("send keys");
         h.wait_visible(&id, "line=[y]");
-        let screen = latch::engine::capture_pane(&home, &session).expect("capture");
+        let screen = latch::engine::capture_pane_with_timeout(
+            &home,
+            &session,
+            timeout,
+            latch::engine::CapturePaneOptions::default(),
+        )
+        .expect("capture");
         assert!(screen.contains("line=[y]"), "{screen}");
         let metrics =
             latch::engine::pane_metrics_with_timeout(&home, &session, Duration::from_secs(5))
@@ -931,11 +932,8 @@ fn persistent_hub_control_reconnects_and_resynchronizes_from_events() {
         let home = latch::session::paths::LatchHome::new(&h.home);
         let session = latch::session::paths::SessionId::parse(&id).unwrap();
         let mut control = latch::engine::ConversationControl::open(&home, &session).unwrap();
-        assert!(control.is_event_driven());
         assert_eq!(
-            control
-                .wait_for_activity(Duration::from_millis(20), Duration::from_secs(2))
-                .unwrap(),
+            control.wait_for_activity(Duration::from_secs(2)).unwrap(),
             latch::engine::ConversationWake::Resynchronized
         );
 
@@ -951,10 +949,7 @@ fn persistent_hub_control_reconnects_and_resynchronizes_from_events() {
         let mut saw_alt = false;
         let mut saw_quiet = false;
         while Instant::now() < deadline && !(saw_title && saw_alt && saw_quiet) {
-            match control
-                .wait_for_activity(Duration::from_millis(20), Duration::from_secs(1))
-                .unwrap()
-            {
+            match control.wait_for_activity(Duration::from_secs(1)).unwrap() {
                 latch::engine::ConversationWake::TitleChanged { title } => {
                     saw_title |= title.as_deref() == Some("hub-title")
                 }
@@ -973,7 +968,7 @@ fn persistent_hub_control_reconnects_and_resynchronizes_from_events() {
         let mut reconnected = latch::engine::ConversationControl::open(&home, &session).unwrap();
         assert_eq!(
             reconnected
-                .wait_for_activity(Duration::from_millis(20), Duration::from_secs(2))
+                .wait_for_activity(Duration::from_secs(2))
                 .unwrap(),
             latch::engine::ConversationWake::Resynchronized
         );
@@ -993,7 +988,7 @@ fn persistent_hub_control_reconnects_and_resynchronizes_from_events() {
         while Instant::now() < deadline && !exited {
             exited = matches!(
                 reconnected
-                    .wait_for_activity(Duration::from_millis(20), Duration::from_secs(1))
+                    .wait_for_activity(Duration::from_secs(1))
                     .unwrap(),
                 latch::engine::ConversationWake::ChildExited
             );

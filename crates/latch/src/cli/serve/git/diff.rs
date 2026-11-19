@@ -186,10 +186,7 @@ fn diff_line(
 /// arrives after the file changed names hunks that no longer exist.
 pub(crate) fn fingerprint(output: &[u8]) -> String {
     let digest = Sha256::digest(output);
-    digest[..8]
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    crate::hex::encode(&digest[..8])
 }
 
 pub(crate) fn cursor(fingerprint: &str, index: usize) -> String {

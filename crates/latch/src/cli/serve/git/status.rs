@@ -455,27 +455,12 @@ pub(crate) fn display(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
-pub(crate) fn hex(bytes: &[u8]) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut text = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        text.push(DIGITS[(byte >> 4) as usize] as char);
-        text.push(DIGITS[(byte & 0xf) as usize] as char);
-    }
-    text
-}
+pub(crate) use crate::hex::encode as hex;
 
+/// A path key back to its bytes. The empty key names no path.
 pub(crate) fn unhex(text: &str) -> Option<Vec<u8>> {
-    if text.is_empty() || text.len() % 2 != 0 {
+    if text.is_empty() {
         return None;
     }
-    let digit = |byte: u8| match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        _ => None,
-    };
-    text.as_bytes()
-        .chunks(2)
-        .map(|pair| Some(digit(pair[0])? << 4 | digit(pair[1])?))
-        .collect()
+    crate::hex::decode(text)
 }

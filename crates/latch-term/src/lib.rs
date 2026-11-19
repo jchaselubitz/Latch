@@ -36,10 +36,7 @@ pub use model::{
     Cell, CellAttrs, Color, Cursor, CursorShape, Modes, MouseEncoding, MouseTracking, Row,
     ScreenModel, ScrollRegion, Size,
 };
-pub use terminal::{
-    HistoryPolicy, Terminal, TerminalConfig, DEFAULT_ATTACH_HISTORY_BYTES,
-    DEFAULT_ATTACH_HISTORY_LINES, DEFAULT_SCROLLBACK_LINES,
-};
+pub use terminal::{Terminal, TerminalConfig, DEFAULT_SCROLLBACK_LINES};
 
 /// A live headless terminal screen fed by PTY output.
 ///
@@ -120,17 +117,4 @@ pub trait Screen {
     /// The snapshot restores the visible screen, not the scrollback ring: a
     /// reattaching client is owed what a continuously attached one shows.
     fn snapshot(&self) -> Vec<u8>;
-
-    /// The bytes a client is sent when it attaches: bounded scrollback, then
-    /// the screen, as one self-contained sequence.
-    ///
-    /// [`snapshot`](Screen::snapshot) is this with [`HistoryPolicy::NONE`], and
-    /// that is not an accident of implementation. A backpressure resync sends
-    /// the screen alone; only an attach carries history. Composing the two here
-    /// rather than in the caller is what keeps the ordering — reset, history,
-    /// screen — impossible to get wrong from outside, and the ordering is
-    /// load-bearing in both directions: a hard reset clears the receiving
-    /// terminal's saved lines, and history has to scroll past the screen to
-    /// reach them.
-    fn attach_snapshot(&self, history: HistoryPolicy) -> Vec<u8>;
 }

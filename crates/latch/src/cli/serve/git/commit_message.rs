@@ -9,7 +9,6 @@ use std::io::{Read, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -415,10 +414,7 @@ impl CapturedIndex {
         let directory = worktree.git_dir.join(format!(
             "latch-draft-{}-{}-{}",
             std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos(),
+            crate::util::unix_nanos(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         fs::DirBuilder::new()

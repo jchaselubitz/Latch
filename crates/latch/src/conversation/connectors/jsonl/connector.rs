@@ -18,9 +18,7 @@ impl Connector for JsonlConnector {
             std::thread::sleep(fallback_poll);
             return Ok(());
         }
-        let wake = self
-            .control()?
-            .wait_for_activity(fallback_poll, event_timeout)?;
+        let wake = self.control()?.wait_for_activity(event_timeout)?;
         // A timeout still performs bounded source catch-up, covering hooks or
         // transcript writes that did not coincide with terminal output. It
         // does not take a screen snapshot. Every actual event and every event
@@ -84,14 +82,6 @@ impl Connector for JsonlConnector {
         self.apply_action(action, deadline)
     }
 
-    fn reconcile(
-        &self,
-        _outstanding: &[ConversationItemId],
-        _observed: &[ConversationItemId],
-    ) -> Vec<ConnectorMutation> {
-        Vec::new()
-    }
-
     fn restore_checkpoint(&mut self, checkpoint: &[u8]) -> Result<()> {
         self.restore_saved_checkpoint(checkpoint)
     }
@@ -138,10 +128,9 @@ impl JsonlConnector {
         if let Some(source) = self.source.clone() {
             self.read_transcript(source, &mut source_budget, &mut mutations, &mut delta)?;
         }
-        let event_driven = self
-            .control
-            .as_ref()
-            .is_some_and(ConversationControl::is_event_driven);
+        // An open control channel delivers kernel events; before it opens,
+        // the screen is refreshed on source progress or a slow timer.
+        let event_driven = self.control.is_some();
         let refresh_screen = self.live_screen
             && (self.source.is_some() || matches!(self.id, "codex" | "cursor"))
             && if event_driven {

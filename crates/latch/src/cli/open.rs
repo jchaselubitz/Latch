@@ -14,6 +14,8 @@ use crate::cli::json::OpenReport;
 use crate::cli::manage;
 use crate::session::paths::{LatchHome, SessionId, SessionPaths};
 use crate::session::{timing, viewer};
+#[cfg(any(target_os = "macos", test))]
+use crate::util::shell_quote;
 
 /// How long `latch open` waits for proof that the viewer arrived before
 /// returning and leaving it to finish on its own.
@@ -351,21 +353,6 @@ fn host_attach_command(shell: impl AsRef<std::ffi::OsStr>, session_id: &str) -> 
 #[cfg(not(target_os = "macos"))]
 fn open_iterm(_request: ViewerRequest<'_>) -> anyhow::Result<ViewerArrival> {
     bail!("opening iTerm is only supported on macOS")
-}
-
-/// Wraps a value as a single POSIX shell word.
-///
-/// The escape for an embedded single quote is `'"'"'` — close the quoted run,
-/// emit one double-quoted apostrophe, reopen. It has to be exactly that, with
-/// no backslashes: `open` quotes the session id, then quotes the whole attach
-/// command again, so any error here is applied twice and reaches `latch attach`
-/// as extra characters in the session id rather than as a syntax error.
-#[cfg(any(target_os = "macos", test))]
-fn shell_quote(value: impl AsRef<std::ffi::OsStr>) -> String {
-    use std::os::unix::ffi::OsStrExt;
-
-    let text = String::from_utf8_lossy(value.as_ref().as_bytes());
-    format!("'{}'", text.replace('\'', "'\"'\"'"))
 }
 
 #[cfg(test)]

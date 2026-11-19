@@ -201,8 +201,6 @@ struct Parser {
     drained: Condvar,
     backlog_bytes: AtomicU64,
     peak_bytes: AtomicU64,
-    /// Times the reader paused on the cap, for observability.
-    stalls: AtomicU64,
 }
 
 impl Parser {
@@ -242,7 +240,6 @@ impl Parser {
         if self.backlog_bytes.load(Ordering::Relaxed) <= PARSER_BACKLOG_CAP {
             return;
         }
-        self.stalls.fetch_add(1, Ordering::Relaxed);
         let mut queue = self.queue.lock().unwrap();
         while self.backlog_bytes.load(Ordering::Relaxed) > PARSER_BACKLOG_CAP {
             queue = self.drained.wait(queue).unwrap();
@@ -371,7 +368,6 @@ pub fn run(config: Config, ready: impl FnOnce()) -> Result<()> {
             drained: Condvar::new(),
             backlog_bytes: AtomicU64::new(0),
             peak_bytes: AtomicU64::new(0),
-            stalls: AtomicU64::new(0),
         },
         events: Events {
             subscribers: Mutex::new(Vec::new()),
