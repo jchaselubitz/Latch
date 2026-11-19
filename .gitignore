@@ -5,8 +5,13 @@
 /target/
 **/*.rs.bk
 
-# Node (packages/, M3 onward)
+# Node (packages/ and services/). npm is the package manager: package-lock.json
+# is the only lockfile, so Yarn's artefacts stay out of the tree.
 node_modules/
+yarn.lock
+.yarn/
+.yarnrc.yml
+.pnp.*
 dist/
 *.tsbuildinfo
 

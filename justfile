@@ -32,10 +32,11 @@ check:
     cargo test --workspace
     just check-web
 
-# The SDK packages. `npm ci` needs a lockfile, so `npm install` is the
-# first-run path; both are cheap next to the Rust build.
+# The SDK packages, installed exactly as package-lock.json pins them. The
+# build runs first: terminal-react typechecks against @latch/client's emitted
+# declarations.
 check-web:
-    npm install --no-audit --no-fund
-    npm run typecheck
+    npm ci --no-audit --no-fund
     npm run build
+    npm run typecheck
     npm test
