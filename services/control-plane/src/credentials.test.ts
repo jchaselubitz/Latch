@@ -26,7 +26,7 @@ describe('credentials', () => {
   it('separates digest domains so a digest cannot cross credential kinds', () => {
     const token = `${newId('dev')}.${newSecret()}`;
     assert.notEqual(digestOf('device', token), digestOf('account', token));
-    assert.notEqual(digestOf('device', token), digestOf('relay-ticket', token));
+    assert.notEqual(digestOf('device', token), digestOf('enrollment', token));
   });
 
   it('rejects malformed tokens and headers', () => {

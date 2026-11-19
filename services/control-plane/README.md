@@ -45,9 +45,8 @@ returned once and only their digests are stored.
 | `POST /v1/enrollments/:id/complete` | host | Atomically commit the exact approved controller key and grant. |
 | `GET /v1/remote-links` | device | Read current pinned peer key and grant revision. |
 | `POST /v1/relay-admissions` | device | Mint a fresh single-use room admission. |
-| `POST /v1/relay-admissions/redeem` | relay | Redeem once and begin the room lease. |
+| `POST /private/v1/relay/redemptions` | relay | Redeem once and begin the room lease. |
 | `POST /v1/relay-leases/:id/renew` | device | Issue a signed lease-extension claim. |
-| `GET/POST /v1/relay-revocations` | relay | Pull and acknowledge durable invalidations. |
 | `PUT/DELETE /v1/push-registrations` | controller | Register or remove the phone's opaque APNs token. |
 | `POST /v1/attention` | host | Ask for one attention alert to a paired phone, deduplicated by opaque event id, optionally carrying an opaque `sealed` blob forwarded (never stored) for the phone's notification extension. |
 

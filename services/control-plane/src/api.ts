@@ -21,7 +21,7 @@ import { randomBytes } from 'node:crypto';
 
 import { REMOTE_LINK_LIMITS, signAdmission } from './admission.ts';
 import type { ApnsSender } from './apns.ts';
-import { bearerToken, digestOf, digestsMatch, issueCredential, newId, newSecret, subjectOf } from './credentials.ts';
+import { bearerToken, digestOf, digestsMatch, issueCredential, newId, subjectOf } from './credentials.ts';
 import { HttpError, Router } from './http/router.ts';
 import type { Handler, RequestContext } from './http/router.ts';
 import { RateLimiter } from './rate-limit.ts';

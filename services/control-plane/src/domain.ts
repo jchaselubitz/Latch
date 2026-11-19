@@ -137,8 +137,3 @@ export interface AccessEvent {
   readonly result: 'allowed' | 'denied';
   readonly createdAt: string;
 }
-
-/** Highest-permission-last ordering used for permission comparisons. */
-export function permits(granted: Permission, required: Permission): boolean {
-  return PERMISSIONS.indexOf(granted) >= PERMISSIONS.indexOf(required);
-}

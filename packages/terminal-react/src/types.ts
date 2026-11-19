@@ -1,9 +1,6 @@
-import type { LatchClient, TerminalCloseInfo, TerminalState } from '@latch/client';
+import type { LatchClient, TerminalCloseInfo, TerminalSize, TerminalState } from '@latch/client';
 
-export type TerminalSize = {
-  cols: number;
-  rows: number;
-};
+export type { TerminalSize };
 
 export type LatchTerminalRenderer = {
   write(bytes: Uint8Array): void;

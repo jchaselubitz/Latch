@@ -2,7 +2,7 @@
 
 import { useEffect, useRef } from 'react';
 
-import type { TerminalHandle } from '@latch/client';
+import type { TerminalHandle, TerminalSize } from '@latch/client';
 
 import type { LatchTerminalProps } from './types.ts';
 import { createXtermRenderer } from './xterm.ts';
@@ -31,7 +31,7 @@ export function LatchTerminal({
     }
     const renderer = (createRendererRef.current ?? createXtermRenderer)({ element });
     let terminal: TerminalHandle | undefined;
-    let initialSize: { cols: number; rows: number } | undefined;
+    let initialSize: TerminalSize | undefined;
     const stopResize = renderer.onResize(size => {
       initialSize = size;
       terminal?.resize(size);

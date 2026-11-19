@@ -13,6 +13,7 @@ export type {
   TerminalCloseInfo,
   TerminalCloseReason,
   TerminalHandle,
+  TerminalSize,
   TerminalState
 } from './types.ts';
 export { TERMINAL_CLOSE_CODES, terminalCloseReason } from './types.ts';

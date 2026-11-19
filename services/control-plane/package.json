@@ -16,7 +16,7 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json",
     "start": "node dist/control-plane/src/main.js",
-    "migrate": "node dist/migrate-cli.js",
+    "migrate": "node dist/control-plane/src/migrate-cli.js",
     "test": "node --experimental-strip-types --test \"src/**/*.test.ts\""
   },
   "dependencies": {
