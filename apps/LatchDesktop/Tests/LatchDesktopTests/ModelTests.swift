@@ -191,7 +191,7 @@ final class ModelTests: XCTestCase {
         let report = try JSONDecoder().decode(
             CapabilitiesReport.self,
             from: Data("""
-            {"protocolVersion":2,"productVersion":"0.2608161432.0","capabilities":{
+            {"protocolVersion":2,"productVersion":"\(LatchClient.minimumProductVersion)","capabilities":{
               "create":true,"openViewer":true,"localAttach":true,"cloudAttach":false,
               "selfUpdate":true,"extensions":["harness-events-v1","harness-interaction-v1"]}}
             """.utf8)
@@ -284,7 +284,7 @@ final class ModelTests: XCTestCase {
 
     func testClientAcceptsProtocolTwo() async throws {
         let fixture = try makeCLI(response: """
-        {"protocolVersion":2,"productVersion":"0.2608161432.0","capabilities":{
+        {"protocolVersion":2,"productVersion":"\(LatchClient.minimumProductVersion)","capabilities":{
           "create":true,"openViewer":true,"localAttach":true,"cloudAttach":false,
           "selfUpdate":true,"extensions":[]}}
         """)
@@ -296,7 +296,7 @@ final class ModelTests: XCTestCase {
 
     func testClientRejectsProtocolOne() async throws {
         let fixture = try makeCLI(response: """
-        {"protocolVersion":1,"productVersion":"0.2608161432.0","capabilities":{
+        {"protocolVersion":1,"productVersion":"\(LatchClient.minimumProductVersion)","capabilities":{
           "create":true,"openViewer":true,"localAttach":true,"cloudAttach":false,
           "selfUpdate":true,"extensions":[]}}
         """)
@@ -312,15 +312,15 @@ final class ModelTests: XCTestCase {
                 .incompatibleProtocol(
                     expected: LatchClient.supportedProtocolVersion,
                     actual: 1,
-                    productVersion: "0.2608161432.0"
+                    productVersion: LatchClient.minimumProductVersion
                 )
             )
         }
     }
 
-    func testClientRejectsAReleaseBeforeStopAllSupport() async throws {
+    func testClientRejectsAReleaseBelowTheMinimum() async throws {
         let fixture = try makeCLI(response: """
-        {"protocolVersion":2,"productVersion":"0.2608161004.0","capabilities":{
+        {"protocolVersion":2,"productVersion":"0.2611190852.0","capabilities":{
           "create":true,"openViewer":true,"localAttach":true,"cloudAttach":false,
           "selfUpdate":true,"extensions":[]}}
         """)
@@ -335,7 +335,7 @@ final class ModelTests: XCTestCase {
                 error,
                 .incompatibleProduct(
                     minimum: LatchClient.minimumProductVersion,
-                    actual: "0.2608161004.0"
+                    actual: "0.2611190852.0"
                 )
             )
         }

@@ -3,8 +3,9 @@ import Darwin
 
 actor LatchClient {
     static let supportedProtocolVersion: UInt32 = 2
-    /// The first CLI release that supports the desktop stop-all action.
-    static let minimumProductVersion = "0.2608161432.0"
+    /// The first CLI release with provider-aware commit-message settings.
+    /// Every release from here on also launches declared agents.
+    static let minimumProductVersion = "0.2611190925.0"
     static let preferences = UserDefaults(suiteName: "co.cooperativ.latch.desktop") ?? .standard
     static let installCommand = "curl -fsSL https://raw.githubusercontent.com/jchaselubitz/Latch/main/scripts/install-cli.sh | bash"
 
@@ -119,9 +120,6 @@ actor LatchClient {
         try request(["update", "--json"], timeout: 120)
     }
 
-    /// Capability extension a CLI reports when it accepts `launch.agent`.
-    static let agentLaunchExtension = "agent-launch"
-
     func create(_ request: NewSessionRequest) throws -> CreateReport {
         try self.request(
             ["create", "--manifest-file", "-", "--json"],
@@ -219,25 +217,8 @@ actor LatchClient {
         try run(["commit-message", "remove-key", "--provider", provider.rawValue])
     }
 
-    /// Structured configuration. Older CLIs without `--json` throw, and the
-    /// caller falls back to `commitMessageStatusText()`.
     func commitMessageStatus() throws -> CommitMessageStatus {
         try request(["commit-message", "status", "--json"])
-    }
-
-    func commitMessageStatusText() throws -> String {
-        let data = try ProcessRunner.run(executableURL: executableURL,
-            arguments: ["commit-message", "status"], stdin: nil, timeout: timeout)
-        return String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    /// CLIs released before provider selection accept only a Gemini key.
-    func setGeminiKeyLegacy(_ key: String) throws {
-        try run(["commit-message", "set-key", "--stdin"], stdin: Data((key + "\n").utf8))
-    }
-
-    func removeGeminiKeyLegacy() throws {
-        try run(["commit-message", "remove-key"])
     }
 
     func setCommitMessageProvider(_ provider: CommitMessageProvider) throws {

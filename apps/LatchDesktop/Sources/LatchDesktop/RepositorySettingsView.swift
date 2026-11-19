@@ -68,19 +68,15 @@ struct RepositorySettingsView: View {
     @State private var busy = false
     @State private var message: String?
     @State private var confirmRemoval = false
-    /// Older CLIs support only the Gemini key.
-    @State private var legacyCLI = false
 
     var body: some View {
         Form {
             Section {
                 LabeledContent("Status", value: status)
-                if !legacyCLI {
-                    Picker("Provider", selection: providerBinding) {
-                        ForEach(CommitMessageProvider.allCases) { Text($0.label).tag($0) }
-                    }
-                    .disabled(busy)
+                Picker("Provider", selection: providerBinding) {
+                    ForEach(CommitMessageProvider.allCases) { Text($0.label).tag($0) }
                 }
+                .disabled(busy)
             } header: {
                 SettingsSectionHeader("AI Commit Messages")
             } footer: {
@@ -114,27 +110,25 @@ struct RepositorySettingsView: View {
                 SettingsFootnote("The key is stored in this Mac’s Keychain using the selected Latch CLI. Each provider keeps its own key. Status checks local access only; it does not verify the key with the provider.")
             }
 
-            if !legacyCLI {
-                Section {
-                    TextField("Model", text: $model, prompt: Text(provider.defaultModel))
-                        .disabled(busy)
-                    if !model.isEmpty && !validModel {
-                        Text(modelHint).font(.caption).foregroundStyle(.secondary)
-                    }
-                    HStack {
-                        Button("Save Model") { saveModel() }
-                            .disabled(busy || !validModel || model == savedModel)
-                        Button("Use Default") { resetModel() }
-                            .disabled(busy || configuration?.state(for: provider)?.customModel != true)
-                    }
-                } header: {
-                    SettingsSectionHeader("Model")
-                } footer: {
-                    SettingsFootnote("Leave empty to use the default, \(provider.defaultModel). \(modelHint)")
+            Section {
+                TextField("Model", text: $model, prompt: Text(provider.defaultModel))
+                    .disabled(busy)
+                if !model.isEmpty && !validModel {
+                    Text(modelHint).font(.caption).foregroundStyle(.secondary)
                 }
+                HStack {
+                    Button("Save Model") { saveModel() }
+                        .disabled(busy || !validModel || model == savedModel)
+                    Button("Use Default") { resetModel() }
+                        .disabled(busy || configuration?.state(for: provider)?.customModel != true)
+                }
+            } header: {
+                SettingsSectionHeader("Model")
+            } footer: {
+                SettingsFootnote("Leave empty to use the default, \(provider.defaultModel). \(modelHint)")
             }
 
-            if !legacyCLI && provider == .openrouter {
+            if provider == .openrouter {
                 Section {
                     TextField("Providers", text: $routingOrder, prompt: Text("Automatic"))
                         .disabled(busy)
@@ -165,9 +159,6 @@ struct RepositorySettingsView: View {
     }
 
     private var providerFootnote: String {
-        if legacyCLI {
-            return "Generating a draft sends selected staged changes to Google. Update the selected Latch CLI to choose OpenRouter or a custom model."
-        }
         switch provider {
         case .gemini:
             return "Generating a draft sends selected staged changes to Google."
@@ -276,27 +267,17 @@ struct RepositorySettingsView: View {
     private func save() {
         let value = key
         let target = provider
-        let legacy = legacyCLI
         key = ""
         perform(success: "Key saved.", failure: keyFailure) { client in
-            if legacy {
-                try await client.setGeminiKeyLegacy(value)
-            } else {
-                try await client.setCommitMessageKey(value, provider: target)
-            }
+            try await client.setCommitMessageKey(value, provider: target)
         }
     }
 
     private func remove() {
         let target = provider
-        let legacy = legacyCLI
         key = ""
         perform(success: "Key removed.", failure: keyFailure) { client in
-            if legacy {
-                try await client.removeGeminiKeyLegacy()
-            } else {
-                try await client.removeCommitMessageKey(provider: target)
-            }
+            try await client.removeCommitMessageKey(provider: target)
         }
     }
 
@@ -343,38 +324,22 @@ struct RepositorySettingsView: View {
         }
     }
 
-    private enum Fetched: Sendable {
-        case structured(CommitMessageStatus)
-        case legacy(String)
-        case failed
-    }
-
     private func refresh() {
         let path = cliPath
         busy = true
         Task {
-            let fetched = await Task.detached { () -> Fetched in
-                let client = LatchClient(executableURL: URL(fileURLWithPath: path))
-                if let value = try? await client.commitMessageStatus() { return .structured(value) }
-                if let value = try? await client.commitMessageStatusText() { return .legacy(value) }
-                return .failed
+            let fetched = await Task.detached { () -> CommitMessageStatus? in
+                try? await LatchClient(executableURL: URL(fileURLWithPath: path)).commitMessageStatus()
             }.value
             guard path == cliPath else { return }
             let state: String
-            switch fetched {
-            case .structured(let value):
+            if let fetched {
                 let firstLoad = configuration == nil
-                configuration = value
-                legacyCLI = false
-                if let saved = value.provider { provider = saved }
+                configuration = fetched
+                if let saved = fetched.provider { provider = saved }
                 if firstLoad || !busyEditing { loadFields(for: provider) }
-                state = value.state
-            case .legacy(let value):
-                configuration = nil
-                legacyCLI = true
-                provider = .gemini
-                state = value
-            case .failed:
+                state = fetched.state
+            } else {
                 state = ""
             }
             switch state {

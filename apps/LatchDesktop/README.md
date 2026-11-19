@@ -151,9 +151,10 @@ Without that attachment the in-app updater has nothing to find; if the upload
 does not happen the script prints the recovery commands.
 
 A complete release contains exactly the Apple Silicon desktop ZIP, the Apple
-Silicon CLI ZIP, and `checksums.txt`. The CLI is installed independently. The app validates protocol version 2 and requires CLI version
-`0.2608161432.0` or newer before its first refresh; this is the first release
-whose list/inspect contracts match the desktop models. A self-update
+Silicon CLI ZIP, and `checksums.txt`. The CLI is installed independently. The
+app validates protocol version 2 and requires CLI version `0.2611190925.0` or
+newer before its first refresh; this is the first release with the
+provider-aware commit-message settings the app manages. A self-update
 initiated in Settings delegates to `latch update`, which atomically replaces
 the CLI, the remote-access helper, and its pinned latchd payload.
 

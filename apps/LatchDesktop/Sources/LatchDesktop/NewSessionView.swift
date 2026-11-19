@@ -21,17 +21,11 @@ struct NewSessionView: View {
                     ForEach(SessionAgent.displayOrder) { agent in
                         AgentChoice(
                             agent: agent,
-                            isSelected: request.agent == agent,
-                            isAvailable: availableAgents.contains(agent)
+                            isSelected: request.agent == agent
                         ) {
                             request.agent = agent
                         }
                     }
-                }
-                if !store.canLaunchAgents {
-                    Text("Update the Latch CLI to start Claude Code or Codex so the session can open in Chat.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
                 }
             }
 
@@ -127,12 +121,6 @@ struct NewSessionView: View {
         }
     }
 
-    /// Agents are offered only when the selected CLI can launch them with
-    /// their identity; a shell is always available.
-    private var availableAgents: [SessionAgent] {
-        store.canLaunchAgents ? SessionAgent.allCases : [.shell]
-    }
-
     private func submit(open: Bool) {
         var submitted = request
         if submitted.agent != .shell { submitted.command = "" }
@@ -145,7 +133,6 @@ struct NewSessionView: View {
 private struct AgentChoice: View {
     let agent: SessionAgent
     let isSelected: Bool
-    let isAvailable: Bool
     let select: () -> Void
 
     var body: some View {
@@ -178,8 +165,6 @@ private struct AgentChoice: View {
             .contentShape(shape)
         }
         .buttonStyle(.plain)
-        .disabled(!isAvailable)
-        .opacity(isAvailable ? 1 : 0.45)
         .accessibilityLabel(agent.title)
         .accessibilityAddTraits(isSelected ? .isSelected : [])
     }

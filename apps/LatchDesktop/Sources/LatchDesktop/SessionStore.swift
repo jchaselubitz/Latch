@@ -156,11 +156,6 @@ final class SessionStore: ObservableObject {
 
     /// Whether a session in `state` can be opened in a terminal right now.
     func canOpen(_ state: SessionState) -> Bool { state.isAttachable && canAttachSessions }
-    /// The selected CLI understands a declared agent launch. An older one
-    /// would ignore the declaration and run the agent without its login shell.
-    var canLaunchAgents: Bool {
-        cliCapabilities?.capabilities.extensions.contains(LatchClient.agentLaunchExtension) == true
-    }
 
     /// Live sessions in the current sidebar selection, in list order.
     var selectedLiveSessionIDs: [String] {
