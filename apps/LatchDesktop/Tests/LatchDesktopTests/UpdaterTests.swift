@@ -299,7 +299,10 @@ final class UpdateControllerTests: XCTestCase {
         return UpdateController(
             feed: StubFeed(document: document),
             bundleURL: URL(fileURLWithPath: "/Applications/Latch.app"),
-            installedVersion: installed
+            installedVersion: installed,
+            download: { _ in
+                FileManager.default.temporaryDirectory.appendingPathComponent("latch-test-\(UUID()).zip")
+            }
         )
     }
 
@@ -311,15 +314,19 @@ final class UpdateControllerTests: XCTestCase {
         XCTAssertNil(updates.pendingUpdate)
     }
 
-    func testABackgroundCheckSurfacesOnlyWhenSomethingIsAvailable() async {
+    func testABackgroundCheckMakesADownloadedUpdateAvailableWithoutPresentingAWindow() async {
         let quiet = controller(installed: "0.2608101202.0", tag: "v0.2608101202.0")
         await quiet.check(userInitiated: false)
         XCTAssertFalse(quiet.isPresented, "a background check must not interrupt for no reason")
 
         let available = controller(installed: "0.2608100841.0", tag: "v0.2608101202.0")
         await available.check(userInitiated: false)
-        XCTAssertTrue(available.isPresented)
-        XCTAssertEqual(available.pendingUpdate?.version, ReleaseVersion("0.2608101202.0"))
+        XCTAssertFalse(available.isPresented, "background checks leave the update waiting in the UI")
+        guard let pending = available.pendingUpdate else {
+            return XCTFail("expected a pending update after the download")
+        }
+        XCTAssertEqual(pending.version, ReleaseVersion("0.2608101202.0"))
+        XCTAssertEqual(available.phase, .available(pending))
     }
 
     func testABuildWithNoVersionSaysSoRatherThanOfferingAnUpdate() async {

@@ -492,15 +492,18 @@ final class UpdateController: ObservableObject {
     private static let checkInterval: TimeInterval = 24 * 60 * 60
 
     private let feed: ReleaseFeed
+    private let download: (AvailableUpdate) async throws -> URL
     private let bundleURL: URL
     private var checkTask: Task<Void, Never>?
 
     init(
         feed: ReleaseFeed = GitHubReleaseFeed(),
         bundleURL: URL = Bundle.main.bundleURL,
-        installedVersion: String? = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
+        installedVersion: String? = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String,
+        download: @escaping (AvailableUpdate) async throws -> URL = { try await UpdateInstaller.download($0) }
     ) {
         self.feed = feed
+        self.download = download
         self.bundleURL = bundleURL
         self.installedVersionLabel = installedVersion ?? "unknown"
         self.installedVersion = installedVersion.flatMap(ReleaseVersion.init)
@@ -550,7 +553,7 @@ final class UpdateController: ObservableObject {
             LatchClient.preferences.set(Date(), forKey: Self.lastCheckKey)
             if let update = try UpdateResolution.newerRelease(in: release, thanInstalled: installed) {
                 phase = .downloading
-                let archive = try await UpdateInstaller.download(update)
+                let archive = try await download(update)
                 downloadedUpdate = update
                 downloadedArchive = archive
                 phase = .available(update)
