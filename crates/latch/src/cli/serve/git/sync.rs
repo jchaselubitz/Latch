@@ -187,7 +187,19 @@ async fn page(
     oid: &str,
     skip: usize,
 ) -> Result<(Vec<GitCommitSummary>, Option<String>), GitError> {
-    let words = vec![
+    let (commits, more) = log_page(worktree, vec![format!("{head}..{oid}").into()], skip).await?;
+    let next = more.then(|| cursor(head, oid, skip + commits.len()));
+    Ok((commits, next))
+}
+
+/// One page of `git log` over `range`, newest first, starting `skip` commits
+/// in, and whether more follow. The sync and push previews page the same way.
+pub(crate) async fn log_page(
+    worktree: &worktree::Worktree,
+    range: Vec<OsString>,
+    skip: usize,
+) -> Result<(Vec<GitCommitSummary>, bool), GitError> {
+    let mut words = vec![
         OsString::from("log"),
         "--no-show-signature".into(),
         "--no-color".into(),
@@ -195,9 +207,9 @@ async fn page(
         "--format=%H%x00%an%x00%cI%x00%s".into(),
         format!("--skip={skip}").into(),
         format!("--max-count={}", PAGE + 1).into(),
-        format!("{head}..{oid}").into(),
-        "--".into(),
     ];
+    words.extend(range);
+    words.push("--".into());
     let output = command::run(&worktree.root, &words, LOG_LIMIT).await?;
     if !output.succeeded() && !output.truncated {
         return Err(GitError::Failed);
@@ -208,8 +220,7 @@ async fn page(
     if more && commits.is_empty() {
         return Err(GitError::Failed);
     }
-    let next = more.then(|| cursor(head, oid, skip + commits.len()));
-    Ok((commits, next))
+    Ok((commits, more))
 }
 
 pub(crate) fn parse_log(bytes: &[u8]) -> Vec<GitCommitSummary> {

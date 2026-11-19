@@ -35,10 +35,6 @@ const LS_REMOTE_TIMEOUT: Duration = Duration::from_secs(if cfg!(test) { 6 } else
 /// How long after Git stopped the remote is left to finish a push it had
 /// already received, before "unchanged" counts as evidence.
 const SETTLE_DELAY: Duration = Duration::from_secs(if cfg!(test) { 0 } else { 10 });
-/// Outgoing commits per page.
-pub(crate) const PAGE: usize = 50;
-/// Stdout bound for one page of `git log`.
-const LOG_LIMIT: usize = 256 * 1024;
 const CURSOR_PREFIX: &str = "p1";
 
 /// A destination branch name as the phone may send one.
@@ -197,27 +193,8 @@ async fn page(
     remote: &str,
     skip: usize,
 ) -> Result<(Vec<GitCommitSummary>, Option<String>), GitError> {
-    let mut words = vec![
-        OsString::from("log"),
-        "--no-show-signature".into(),
-        "--no-color".into(),
-        "-z".into(),
-        "--format=%H%x00%an%x00%cI%x00%s".into(),
-        format!("--skip={skip}").into(),
-        format!("--max-count={}", PAGE + 1).into(),
-    ];
-    words.extend(outgoing_range(source, destination_oid, remote));
-    words.push("--".into());
-    let output = command::run(&worktree.root, &words, LOG_LIMIT).await?;
-    if !output.succeeded() && !output.truncated {
-        return Err(GitError::Failed);
-    }
-    let mut commits = super::sync::parse_log(&output.stdout);
-    let more = commits.len() > PAGE || output.truncated;
-    commits.truncate(PAGE);
-    if more && commits.is_empty() {
-        return Err(GitError::Failed);
-    }
+    let range = outgoing_range(source, destination_oid, remote);
+    let (commits, more) = super::sync::log_page(worktree, range, skip).await?;
     let next = more.then(|| cursor(source, destination_oid, skip + commits.len()));
     Ok((commits, next))
 }

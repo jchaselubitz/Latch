@@ -493,19 +493,15 @@ fn dispatch(command: Option<Command>) -> Result<()> {
             })?;
             if json {
                 let meta = latch::session::meta::read(&outcome.paths)?;
-                println!(
-                    "{}",
-                    serde_json::to_string(&CreateReport {
-                        protocol_version: PROTOCOL_VERSION,
-                        session: CreatedSession {
-                            id: outcome.id.to_string(),
-                            name: outcome.name,
-                            state: "running".to_owned(),
-                            created_at: meta.created_at,
-                        },
-                    })?
-                );
-                Ok(())
+                print_json(&CreateReport {
+                    protocol_version: PROTOCOL_VERSION,
+                    session: CreatedSession {
+                        id: outcome.id.to_string(),
+                        name: outcome.name,
+                        state: "running".to_owned(),
+                        created_at: meta.created_at,
+                    },
+                })
             } else {
                 attach_created_session(outcome.id.as_str())
             }
@@ -532,7 +528,7 @@ fn dispatch(command: Option<Command>) -> Result<()> {
                 background,
             })?;
             if json {
-                println!("{}", serde_json::to_string(&report)?);
+                print_json(&report)?;
             } else if report.pending {
                 println!(
                     "opening {} in {} as a {} (the viewer is still starting)",
@@ -568,7 +564,7 @@ fn dispatch(command: Option<Command>) -> Result<()> {
                 home: LatchHome::from_env()?,
             })?;
             if json {
-                println!("{}", serde_json::to_string(&report)?);
+                print_json(&report)?;
             } else {
                 print_list_human(&report);
             }
@@ -580,7 +576,7 @@ fn dispatch(command: Option<Command>) -> Result<()> {
                 session,
             })?;
             if json {
-                println!("{}", serde_json::to_string(&report)?);
+                print_json(&report)?;
             } else {
                 print_inspect_human(&report);
             }
@@ -597,7 +593,7 @@ fn dispatch(command: Option<Command>) -> Result<()> {
             if all {
                 let report = manage::stop_all(home, force)?;
                 if json {
-                    println!("{}", serde_json::to_string(&report)?);
+                    print_json(&report)?;
                 } else {
                     println!("stopped {} session(s)", report.sessions.len());
                 }
@@ -611,7 +607,7 @@ fn dispatch(command: Option<Command>) -> Result<()> {
                     force,
                 })?;
                 if json {
-                    println!("{}", serde_json::to_string(&report)?);
+                    print_json(&report)?;
                 } else {
                     println!("{} {}", report.id, report.state);
                 }
@@ -632,7 +628,7 @@ fn dispatch(command: Option<Command>) -> Result<()> {
                 force,
             })?;
             if json {
-                println!("{}", serde_json::to_string(&report)?);
+                print_json(&report)?;
             } else {
                 println!("removed {}", report.id);
             }
@@ -649,7 +645,7 @@ fn dispatch(command: Option<Command>) -> Result<()> {
                 name,
             })?;
             if json {
-                println!("{}", serde_json::to_string(&report)?);
+                print_json(&report)?;
             } else {
                 println!("{} renamed to {}", report.id, report.name);
             }
@@ -670,7 +666,7 @@ fn dispatch(command: Option<Command>) -> Result<()> {
                 pin,
             })?;
             if json {
-                println!("{}", serde_json::to_string(&report)?);
+                print_json(&report)?;
             } else {
                 println!(
                     "{} {}x{}{}",
@@ -693,7 +689,7 @@ fn dispatch(command: Option<Command>) -> Result<()> {
                 ..PruneOptions::new(LatchHome::from_env()?)
             })?;
             if json {
-                println!("{}", serde_json::to_string(&report)?);
+                print_json(&report)?;
                 return Ok(());
             }
             if report.reclaimed.is_empty() {
@@ -724,7 +720,7 @@ fn dispatch(command: Option<Command>) -> Result<()> {
                 home: LatchHome::from_env()?,
             })?;
             if json {
-                println!("{}", serde_json::to_string(&report)?);
+                print_json(&report)?;
             } else {
                 println!("selected kernel: {}", report.kernel);
                 if let Some(version) = &report.latchd_version {
@@ -746,7 +742,7 @@ fn dispatch(command: Option<Command>) -> Result<()> {
                 value,
             })?;
             if json {
-                println!("{}", serde_json::to_string(&report)?);
+                print_json(&report)?;
             } else if let Some(config) = &report.config {
                 println!("{config}");
             } else if let (Some(key), Some(value)) = (&report.key, &report.value) {
@@ -763,7 +759,7 @@ fn dispatch(command: Option<Command>) -> Result<()> {
                 ..UpdateOptions::new(env!("CARGO_PKG_VERSION"))
             })?;
             if json {
-                println!("{}", serde_json::to_string(&report)?);
+                print_json(&report)?;
             } else {
                 print_update_human(&report);
             }
@@ -837,7 +833,7 @@ fn dispatch(command: Option<Command>) -> Result<()> {
                 RemoteAccessCommand::Status { json } => {
                     let status = remote_access::status(&home)?;
                     if json {
-                        println!("{}", serde_json::to_string(&status)?);
+                        print_json(&status)?;
                     } else {
                         println!(
                             "remote access {}\ndevice {}\npaired {} ({} revoked)",
@@ -861,7 +857,7 @@ fn dispatch(command: Option<Command>) -> Result<()> {
                 RemoteAccessCommand::Devices { json } => {
                     let devices = remote_access::list_devices(&home)?;
                     if json {
-                        println!("{}", serde_json::to_string(&devices)?);
+                        print_json(&devices)?;
                     } else {
                         for device in devices {
                             println!(
@@ -891,7 +887,7 @@ fn dispatch(command: Option<Command>) -> Result<()> {
                 RemoteAccessCommand::AttentionEvents { json } => {
                     let events = latch::cli::serve::pending_attention_events(&home)?;
                     if json {
-                        println!("{}", serde_json::to_string(&events)?);
+                        print_json(&events)?;
                     } else {
                         for event in events {
                             println!("{} {} {:?}", event.event_id, event.device_id, event.kind);
@@ -914,7 +910,7 @@ fn dispatch(command: Option<Command>) -> Result<()> {
                 RemoteAccessCommand::Audit { json } => {
                     let events = remote_access::read_audit(&home)?;
                     if json {
-                        println!("{}", serde_json::to_string(&events)?);
+                        print_json(&events)?;
                     } else {
                         for event in events {
                             println!("{event}");
@@ -927,7 +923,7 @@ fn dispatch(command: Option<Command>) -> Result<()> {
         Some(Command::Capabilities { json }) => {
             let report = manage::capabilities();
             if json {
-                println!("{}", serde_json::to_string(&report)?);
+                print_json(&report)?;
             } else {
                 println!(
                     "protocol {} product {} create={} localAttach={} cloudAttach={}",
@@ -1066,6 +1062,12 @@ fn finish_attach(release: SurfaceRelease) -> ! {
 fn terminal_size() -> TerminalSize {
     let size = latch::cli::term::terminal_size(libc::STDOUT_FILENO);
     TerminalSize::new(size.cols, size.rows)
+}
+
+/// Prints one report as the single line of JSON every `--json` verb emits.
+fn print_json(report: &impl serde::Serialize) -> Result<()> {
+    println!("{}", serde_json::to_string(report)?);
+    Ok(())
 }
 
 fn print_list_human(report: &latch::cli::json::ListReport) {
