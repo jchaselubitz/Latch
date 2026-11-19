@@ -24,10 +24,7 @@ struct LatchDesktopApp: App {
                 .onAppear {
                     // Keep the SwiftUI scene action available after its last
                     // window closes so a Dock click can reopen the main screen.
-                    appDelegate.openMainWindow = {
-                        openWindow(id: "sessions")
-                        NSApp.activate(ignoringOtherApps: true)
-                    }
+                    appDelegate.openMainWindow = { openSessionsWindow() }
                 }
                 .task {
                     let store = runtime.store
@@ -88,16 +85,14 @@ struct LatchDesktopApp: App {
                 updates: runtime.updates,
                 remoteAccess: runtime.remoteAccess
             ) {
-                openWindow(id: "sessions")
-                NSApp.activate(ignoringOtherApps: true)
+                openSessionsWindow()
             } openSettings: {
                 openSettingsWindow()
             } checkForUpdates: {
                 if let update = runtime.updates.pendingUpdate {
                     Task { await runtime.updates.install(update) }
                 } else {
-                    openWindow(id: "sessions")
-                    NSApp.activate(ignoringOtherApps: true)
+                    openSessionsWindow()
                     Task { await runtime.updates.check(userInitiated: true) }
                 }
             }

@@ -167,12 +167,7 @@ struct SettingsView: View {
             }
         } else {
             Section {
-                Text(store.cliInstallCommand)
-                    .font(.system(.caption, design: .monospaced))
-                    .textSelection(.enabled)
-                    .padding(8)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
+                CopyableCodeBlock(store.cliInstallCommand)
                 Button("Run Install Command in Terminal…") { store.runCLIInstaller() }
             } header: {
                 SettingsSectionHeader("Install the CLI")
@@ -293,12 +288,7 @@ struct SettingsView: View {
                     }
                     if store.cliCapabilities?.capabilities.selfUpdate != true {
                         Text("This CLI cannot replace itself. Use its package manager or run:")
-                        Text(store.cliInstallCommand)
-                            .font(.system(.caption, design: .monospaced))
-                            .textSelection(.enabled)
-                            .padding(8)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
+                        CopyableCodeBlock(store.cliInstallCommand)
                         Button("Run Installer in Terminal…") { store.runCLIInstaller() }
                     }
                 }

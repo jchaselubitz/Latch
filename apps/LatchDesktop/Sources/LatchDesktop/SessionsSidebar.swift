@@ -17,7 +17,7 @@ struct SessionsSidebar: View {
                 }
             }
             Section("Agents") {
-                ForEach([SessionAgent.claude, .codex, .shell]) { agent in
+                ForEach(SessionAgent.displayOrder) { agent in
                     row(.agent(agent)) { AgentLogo(agent: agent, size: 16) }
                 }
             }
@@ -60,8 +60,8 @@ struct SessionsSidebar: View {
     }
 
     private func deviceRow(_ device: RemoteDevice) -> some View {
-        let link = device.controlPlaneDeviceID.flatMap { remoteAccess.linkStatuses[$0] }
-        let connected = link == .ready
+        let link = remoteAccess.linkStatus(for: device)
+        let connected = link?.isConnected == true
         return HStack {
             Label(device.name, systemImage: "iphone")
             Spacer(minLength: 4)
@@ -69,9 +69,9 @@ struct SessionsSidebar: View {
                 .fill(connected ? Color.green : Color.secondary.opacity(0.5))
                 .frame(width: 7, height: 7)
         }
-        .help(link.map(RemoteAccessSettingsView.label) ?? "Not connected")
+        .help(link?.label ?? HelperLinkStatus.notConnectedLabel)
         .accessibilityElement(children: .combine)
-        .accessibilityValue(connected ? "Connected" : "Not connected")
+        .accessibilityValue(connected ? "Connected" : HelperLinkStatus.notConnectedLabel)
     }
 }
 

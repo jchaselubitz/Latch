@@ -1,6 +1,5 @@
 import SwiftUI
 import AppKit
-import UniformTypeIdentifiers
 
 struct MultiSessionSelectionView: View {
     @ObservedObject var store: SessionStore
@@ -59,7 +58,7 @@ struct MultiSessionSelectionView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Stopping ends each child process but retains its final screen for later inspection.")
+            Text(SessionStore.stopExplanation(count: liveCount))
         }
     }
 

@@ -1,6 +1,5 @@
 import SwiftUI
 import AppKit
-import UniformTypeIdentifiers
 
 /// A split button: clicking it opens the session the way Settings says, while the
 /// attached menu offers every launch shape the preferred terminal understands.

@@ -1,6 +1,5 @@
 import SwiftUI
 import AppKit
-import UniformTypeIdentifiers
 
 struct SessionRow: View {
     let session: SessionSummary

@@ -1,6 +1,5 @@
 import SwiftUI
 import AppKit
-import UniformTypeIdentifiers
 
 struct PruneView: View {
     @ObservedObject var store: SessionStore

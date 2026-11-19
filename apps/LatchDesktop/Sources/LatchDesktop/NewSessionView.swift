@@ -1,6 +1,5 @@
 import SwiftUI
 import AppKit
-import UniformTypeIdentifiers
 
 struct NewSessionView: View {
     @ObservedObject var store: SessionStore
@@ -140,11 +139,6 @@ struct NewSessionView: View {
         isPresented = false
         Task { await store.create(submitted, openAfterCreation: open) }
     }
-}
-
-private extension SessionAgent {
-    /// Agents first, so the common choice sits under the pointer.
-    static let displayOrder: [SessionAgent] = [.claude, .codex, .shell]
 }
 
 /// One selectable card in the New Session agent picker.

@@ -1,6 +1,5 @@
 import SwiftUI
 import AppKit
-import UniformTypeIdentifiers
 
 struct ResizeSessionView: View {
     @ObservedObject var store: SessionStore

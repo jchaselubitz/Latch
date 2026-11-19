@@ -253,7 +253,6 @@ protocol ControlPlaneHostAPI: Sendable {
     func remoteLinks(deviceToken: String) async throws -> [ControlPlaneRemoteLink]
     func relayAdmission(deviceToken: String, peerDeviceID: String) async throws -> ControlPlaneRelayAdmission
     func renewRelayLease(deviceToken: String, leaseID: String) async throws -> ControlPlaneLeaseExtension
-    func setRelayEnabled(accountToken: String, enabled: Bool) async throws
     /// Asks for one attention alert, optionally carrying a payload sealed to
     /// the phone. Returns whether it was delivered.
     func notifyAttention(deviceToken: String, clientDeviceID: String, eventID: String, sealed: String?) async throws -> Bool
@@ -349,12 +348,6 @@ actor HTTPControlPlaneHostAPI: ControlPlaneHostAPI {
     func renewRelayLease(deviceToken: String, leaseID: String) async throws -> ControlPlaneLeaseExtension {
         try await send(
             path: "/v1/relay-leases/\(escape(leaseID))/renew", method: "POST", token: deviceToken, body: [:]
-        )
-    }
-
-    func setRelayEnabled(accountToken: String, enabled: Bool) async throws {
-        let _: Empty = try await send(
-            path: "/v1/account", method: "PATCH", token: accountToken, body: ["relayEnabled": enabled]
         )
     }
 
@@ -595,10 +588,6 @@ final class ControlPlaneHost {
         )
     }
 
-    func remoteLinkConfigurations(publicKey: String, macName: String) async throws -> [RemoteLinkHostConfiguration] {
-        try await remoteLinkAssignments(publicKey: publicKey, macName: macName).map(\.configuration)
-    }
-
     /// One helper launch per current pairing, with the peer's directory id so
     /// the helper can be re-admitted after its relay socket closes.
     func remoteLinkAssignments(
@@ -622,12 +611,9 @@ final class ControlPlaneHost {
                 assignments.append(existing)
                 continue
             }
-            let admission = try await api.relayAdmission(
-                deviceToken: credentials.deviceToken, peerDeviceID: link.peerDeviceId
+            let admission = try await validatedAdmission(
+                api: api, deviceToken: credentials.deviceToken, peerDeviceID: link.peerDeviceId
             )
-            guard admission.version == 1, admission.relayUrl.hasPrefix("wss://") else {
-                throw ControlPlaneHostError.malformedResponse("unsupported or insecure Remote Link admission")
-            }
             assignments.append(RemoteLinkAssignment(
                 peerDeviceID: link.peerDeviceId,
                 configuration: RemoteLinkHostConfiguration(
@@ -642,13 +628,22 @@ final class ControlPlaneHost {
     /// A fresh single-use admission for a helper whose relay socket ended.
     func freshRelayAdmission(peerDeviceID: String) async throws -> RemoteLinkAdmission {
         let (address, credentials) = try await configuredCredentials()
-        let admission = try await apiFactory(address).relayAdmission(
-            deviceToken: credentials.deviceToken, peerDeviceID: peerDeviceID
+        let admission = try await validatedAdmission(
+            api: apiFactory(address), deviceToken: credentials.deviceToken, peerDeviceID: peerDeviceID
         )
+        return RemoteLinkAdmission(relayURL: admission.relayUrl, admission: admission.admission)
+    }
+
+    /// Mints one relay admission and refuses any that is not the current
+    /// version over WSS, so no caller can launch a helper on an unchecked one.
+    private func validatedAdmission(
+        api: ControlPlaneHostAPI, deviceToken: String, peerDeviceID: String
+    ) async throws -> ControlPlaneRelayAdmission {
+        let admission = try await api.relayAdmission(deviceToken: deviceToken, peerDeviceID: peerDeviceID)
         guard admission.version == 1, admission.relayUrl.hasPrefix("wss://") else {
             throw ControlPlaneHostError.malformedResponse("unsupported or insecure Remote Link admission")
         }
-        return RemoteLinkAdmission(relayURL: admission.relayUrl, admission: admission.admission)
+        return admission
     }
 
     func notifyAttention(clientDeviceID: String, eventID: String, sealed: String? = nil) async throws -> Bool {
@@ -663,11 +658,6 @@ final class ControlPlaneHost {
         return try await apiFactory(address).renewRelayLease(
             deviceToken: credentials.deviceToken, leaseID: leaseID
         )
-    }
-
-    func setRelayEnabled(_ enabled: Bool) async throws {
-        let (address, credentials) = try await configuredCredentials()
-        try await apiFactory(address).setRelayEnabled(accountToken: credentials.accountToken, enabled: enabled)
     }
 
     func forgetEnrollment() async throws { try await store.clear() }

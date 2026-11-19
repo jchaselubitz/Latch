@@ -146,6 +146,16 @@ final class SessionStore: ObservableObject {
     }
     var canCreateSessions: Bool { cliCapabilities?.capabilities.create == true }
     var canAttachSessions: Bool { cliCapabilities?.capabilities.localAttach == true }
+
+    /// What a stop confirmation tells the user about the sessions it will end.
+    nonisolated static func stopExplanation(count: Int) -> String {
+        count == 1
+            ? "Stopping ends the child process but retains its final screen for later inspection."
+            : "Stopping ends each child process but retains its final screen for later inspection."
+    }
+
+    /// Whether a session in `state` can be opened in a terminal right now.
+    func canOpen(_ state: SessionState) -> Bool { state.isAttachable && canAttachSessions }
     /// The selected CLI understands a declared agent launch. An older one
     /// would ignore the declaration and run the agent without its login shell.
     var canLaunchAgents: Bool {
@@ -158,8 +168,6 @@ final class SessionStore: ObservableObject {
             .filter { selection.contains($0.id) && $0.state.isLive }
             .map(\.id)
     }
-
-    var hasSelectedLiveSessions: Bool { !selectedLiveSessionIDs.isEmpty }
 
     func start() {
         guard pollingTask == nil else { return }
@@ -182,10 +190,7 @@ final class SessionStore: ObservableObject {
                 return
             }
             do {
-                let capabilities = try await client.validateCompatibility()
-                if cliCapabilities != capabilities {
-                    cliCapabilities = capabilities
-                }
+                try await refreshCapabilities()
             } catch {
                 report(error)
                 shouldPresentCLISetup = true
@@ -264,9 +269,7 @@ final class SessionStore: ObservableObject {
                 let report = try await client.list()
                 applySessionList(report.sessions)
                 consecutiveRefreshFailures = 0
-                if errorMessage != nil {
-                    errorMessage = nil
-                }
+                clearError()
                 await loadDetails()
                 for companion in companionRefreshers {
                     await companion()
@@ -396,16 +399,26 @@ final class SessionStore: ObservableObject {
         }
     }
 
+    /// Re-validates the selected CLI, publishing only when its report changed.
+    private func refreshCapabilities() async throws {
+        let capabilities = try await client.validateCompatibility()
+        if cliCapabilities != capabilities {
+            cliCapabilities = capabilities
+        }
+    }
+
+    /// Clears a shown error without publishing when there is none.
+    private func clearError() {
+        if errorMessage != nil {
+            errorMessage = nil
+        }
+    }
+
     func refreshCLIDiagnostics() async {
         do {
-            let capabilities = try await client.validateCompatibility()
-            if cliCapabilities != capabilities {
-                cliCapabilities = capabilities
-            }
+            try await refreshCapabilities()
             cliDoctorReport = try await client.doctor()
-            if errorMessage != nil {
-                errorMessage = nil
-            }
+            clearError()
             syncChrome()
         } catch {
             report(error)
@@ -418,9 +431,7 @@ final class SessionStore: ObservableObject {
         defer { isCheckingCLIUpdate = false }
         do {
             cliUpdateReport = try await client.checkForUpdate()
-            if errorMessage != nil {
-                errorMessage = nil
-            }
+            clearError()
         } catch {
             report(error)
         }
@@ -434,14 +445,9 @@ final class SessionStore: ObservableObject {
         defer { isUpdatingCLI = false }
         do {
             cliUpdateReport = try await client.update()
-            let capabilities = try await client.validateCompatibility()
-            if cliCapabilities != capabilities {
-                cliCapabilities = capabilities
-            }
+            try await refreshCapabilities()
             cliDoctorReport = try await client.doctor()
-            if errorMessage != nil {
-                errorMessage = nil
-            }
+            clearError()
             syncChrome()
             await refresh()
         } catch {

@@ -1,6 +1,5 @@
 import SwiftUI
 import AppKit
-import UniformTypeIdentifiers
 
 /// The menu-bar extra's window: sessions at a glance, with the actions people
 /// reach for without opening the main window.
@@ -137,7 +136,7 @@ struct MenuBarSessionsView: View {
     }
 
     private func sessionRow(_ session: SessionSummary) -> some View {
-        let canOpen = session.state.isAttachable && store.canAttachSessions
+        let canOpen = store.canOpen(session.state)
         let hovered = hoveredID == session.id
         return HStack(spacing: 9) {
             Button {
@@ -200,8 +199,8 @@ struct MenuBarSessionsView: View {
     }
 
     private func deviceRow(_ device: RemoteDevice) -> some View {
-        let link = device.controlPlaneDeviceID.flatMap { remoteAccess.linkStatuses[$0] }
-        let connected = link == .ready
+        let link = remoteAccess.linkStatus(for: device)
+        let connected = link?.isConnected == true
         return HStack(spacing: 9) {
             Image(systemName: "iphone")
                 .frame(width: 20)
@@ -209,7 +208,7 @@ struct MenuBarSessionsView: View {
             Spacer()
             HStack(spacing: 5) {
                 Circle().frame(width: 6, height: 6)
-                Text(link.map(RemoteAccessSettingsView.label) ?? "Not connected")
+                Text(link?.label ?? HelperLinkStatus.notConnectedLabel)
             }
             .font(.caption)
             .foregroundStyle(connected ? Color.green : Color.secondary)

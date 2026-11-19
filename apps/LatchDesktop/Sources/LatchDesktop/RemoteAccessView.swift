@@ -112,9 +112,8 @@ struct RemoteAccessSettingsView: View {
                 LabeledContent("Internet path") { Text("Encrypted WSS relay") }
                 LabeledContent("Local path") { Text("Authenticated Remote Link") }
                 ForEach(controller.activeDevices) { device in
-                    if let directoryID = device.controlPlaneDeviceID,
-                       let link = controller.linkStatuses[directoryID] {
-                        LabeledContent(device.name) { Text(Self.label(link)) }
+                    if let link = controller.linkStatus(for: device) {
+                        LabeledContent(device.name) { Text(link.label) }
                     }
                 }
             } header: {
@@ -179,10 +178,7 @@ struct RemoteAccessSettingsView: View {
         // the fold in a window this size.
         .alert(
             "Latch could not create a pairing code",
-            isPresented: Binding(
-                get: { controller.pairingFailure != nil },
-                set: { presented in if !presented { controller.pairingFailure = nil } }
-            ),
+            isPresented: $controller.pairingFailure.isPresent(),
             presenting: controller.pairingFailure
         ) { _ in
             Button("OK", role: .cancel) { controller.pairingFailure = nil }
@@ -198,17 +194,6 @@ struct RemoteAccessSettingsView: View {
         case .onlineRelay(let peers):
             return peers == 0 ? "Waiting for a phone" : "Connected (\(peers) device\(peers == 1 ? "" : "s"))"
         case .failed(let message): return "Stopped — \(message)"
-        }
-    }
-
-    static func label(_ status: HelperLinkStatus) -> String {
-        switch status {
-        case .lanReady, .connecting: return "Connecting to relay"
-        case .waitingForPeer: return "Waiting for phone"
-        case .authenticating: return "Authenticating"
-        case .ready: return "Connected"
-        case .linkClosed: return "Disconnected"
-        case .offline: return "Relay unavailable"
         }
     }
 
@@ -374,12 +359,7 @@ private struct RemotePairingSheet: View {
             Text("Or enter this manually:")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            Text(document)
-                .font(.system(.caption, design: .monospaced))
-                .textSelection(.enabled)
-                .padding(10)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+            CopyableCodeBlock(document, padding: 10, cornerRadius: 8)
             progressLabel
             Text("New devices start with Control and terminal access allowed. Change either setting, or revoke the device, at any time in Remote Access settings.")
                 .font(.caption)

@@ -16,7 +16,6 @@ private final class StubControlPlaneHostAPI: ControlPlaneHostAPI, @unchecked Sen
     var mirrored: [(String, DevicePermission)] = []
     var revoked: [String] = []
     var relayPeers: [String] = []
-    var relayEnabled: [Bool] = []
     var opened = ControlPlaneEnrollment(
         version: 1,
         enrollmentId: "enr_\(String(repeating: "1", count: 32))",
@@ -93,8 +92,6 @@ private final class StubControlPlaneHostAPI: ControlPlaneHostAPI, @unchecked Sen
     func renewRelayLease(deviceToken: String, leaseID: String) async throws -> ControlPlaneLeaseExtension {
         ControlPlaneLeaseExtension(leaseId: leaseID, expiresAt: 1_900_000_100, claim: "signed-extension")
     }
-
-    func setRelayEnabled(accountToken: String, enabled: Bool) async throws { relayEnabled.append(enabled) }
 
     var attention: [(String, String)] = []
     var sealedAttention: [String?] = []
@@ -253,9 +250,9 @@ final class ControlPlaneHostTests: XCTestCase {
             version: 1, linkId: "link_1", peerDeviceId: "dev_phone",
             peerPublicKey: phoneKey, permission: .control, grantRevision: 8
         )]
-        let configurations = try await host(api: api).remoteLinkConfigurations(
+        let configurations = try await host(api: api).remoteLinkAssignments(
             publicKey: macKey, macName: "Mac"
-        )
+        ).map(\.configuration)
         XCTAssertEqual(configurations.count, 1)
         XCTAssertEqual(configurations[0].peerPublicKey, phoneKey)
         XCTAssertEqual(configurations[0].grantRevision, 8)

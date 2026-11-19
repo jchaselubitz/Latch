@@ -2,8 +2,8 @@ import SwiftUI
 import AppKit
 
 /// Shared visual vocabulary for sessions: the state pill and the Liquid Glass
-/// helpers that fall back to materials before macOS 26. The agents' logos
-/// live in AgentLogo.swift.
+/// button and card styles, with their pre-macOS 26 equivalents. The agents'
+/// logos live in AgentLogo.swift.
 
 extension SessionState {
     var label: String { rawValue.capitalized }
@@ -72,15 +72,6 @@ struct CaptionedIconButton: View {
 }
 
 extension View {
-    /// Liquid Glass on macOS 26, a material on earlier systems.
-    @ViewBuilder func latchGlass<S: Shape>(in shape: S) -> some View {
-        if #available(macOS 26.0, *) {
-            glassEffect(.regular, in: shape)
-        } else {
-            background(.regularMaterial, in: shape)
-        }
-    }
-
     @ViewBuilder func latchGlassButtonStyle() -> some View {
         if #available(macOS 26.0, *) {
             buttonStyle(.glass)

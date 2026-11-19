@@ -215,6 +215,20 @@ enum HelperLinkStatus: String, Equatable, Sendable {
     case offline
 
     var isConnected: Bool { self == .ready }
+
+    var label: String {
+        switch self {
+        case .lanReady, .connecting: return "Connecting to relay"
+        case .waitingForPeer: return "Waiting for phone"
+        case .authenticating: return "Authenticating"
+        case .ready: return "Connected"
+        case .linkClosed: return "Disconnected"
+        case .offline: return "Relay unavailable"
+        }
+    }
+
+    /// What a device row shows before its helper has reported any status.
+    static let notConnectedLabel = "Not connected"
 }
 
 enum RemoteAccessPhase: Equatable, Sendable {
@@ -222,18 +236,4 @@ enum RemoteAccessPhase: Equatable, Sendable {
     case starting
     case onlineRelay(peers: Int)
     case failed(String)
-
-    var isRunning: Bool {
-        if case .onlineRelay = self { return true }
-        return false
-    }
-
-    var label: String {
-        switch self {
-        case .off: return "Off"
-        case .starting: return "Starting…"
-        case .onlineRelay: return "Online"
-        case .failed: return "Stopped"
-        }
-    }
 }

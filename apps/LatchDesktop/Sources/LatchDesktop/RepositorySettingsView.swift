@@ -227,26 +227,29 @@ struct RepositorySettingsView: View {
         }
     }
 
+    /// ASCII letters and digits plus `-`, `.` and `_`: the alphabet shared by
+    /// keys, model names and routing slugs.
+    private static func isIdentifierByte(_ byte: UInt8) -> Bool {
+        (48...57).contains(byte) || (65...90).contains(byte) || (97...122).contains(byte)
+            || byte == 45 || byte == 46 || byte == 95
+    }
+
     static func isValidKey(_ key: String) -> Bool {
-        (16...512).contains(key.utf8.count) && key.utf8.allSatisfy {
-            (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 45 || $0 == 46 || $0 == 95
-        }
+        (16...512).contains(key.utf8.count) && key.utf8.allSatisfy(isIdentifierByte)
     }
 
     /// A front-line check; the CLI applies the authoritative validation.
     static func isValidModel(_ model: String, provider: CommitMessageProvider) -> Bool {
-        let allowed: (UInt8) -> Bool = {
-            (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 45 || $0 == 46 || $0 == 95
-        }
         switch provider {
         case .gemini:
-            return (1...96).contains(model.utf8.count) && model.hasPrefix("gemini-") && model.utf8.allSatisfy(allowed)
+            return (1...96).contains(model.utf8.count) && model.hasPrefix("gemini-")
+                && model.utf8.allSatisfy(isIdentifierByte)
         case .openrouter:
             let parts = model.split(separator: "/", omittingEmptySubsequences: false)
             return (3...128).contains(model.utf8.count)
                 && parts.count >= 2 && parts.allSatisfy { !$0.isEmpty }
                 && !model.contains("..")
-                && model.utf8.allSatisfy { allowed($0) || $0 == 47 || $0 == 58 || $0 == 126 }
+                && model.utf8.allSatisfy { isIdentifierByte($0) || $0 == 47 || $0 == 58 || $0 == 126 }
         }
     }
 
@@ -258,9 +261,7 @@ struct RepositorySettingsView: View {
         order.count <= 8 && order.allSatisfy { slug in
             (1...64).contains(slug.utf8.count) && !slug.contains("..") && !slug.hasPrefix("/") && !slug.hasPrefix(".")
                 && !slug.hasPrefix("-") && !slug.hasPrefix("_")
-                && slug.utf8.allSatisfy {
-                    (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 45 || $0 == 46 || $0 == 95 || $0 == 47
-                }
+                && slug.utf8.allSatisfy { isIdentifierByte($0) || $0 == 47 }
         }
     }
 

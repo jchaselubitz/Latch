@@ -1,6 +1,5 @@
 import SwiftUI
 import AppKit
-import UniformTypeIdentifiers
 
 struct SessionsView: View {
     @ObservedObject var store: SessionStore
@@ -47,7 +46,7 @@ struct SessionsView: View {
         }
         .confirmationDialog(
             pendingStopTitle,
-            isPresented: pendingStopBinding,
+            isPresented: $pendingStop.isPresent(),
             titleVisibility: .visible
         ) {
             if pendingStop != nil {
@@ -64,7 +63,7 @@ struct SessionsView: View {
         .sheet(isPresented: $store.shouldPresentCLISetup) {
             CLISetupView(store: store)
         }
-        .alert("Latch", isPresented: errorBinding) {
+        .alert("Latch", isPresented: $store.errorMessage.isPresent()) {
             Button("OK") { store.errorMessage = nil }
         } message: {
             Text(store.errorMessage ?? "")
@@ -152,11 +151,11 @@ struct SessionsView: View {
             .tag(session.id)
             .contentShape(Rectangle())
             .simultaneousGesture(TapGesture(count: 2).onEnded {
-                guard session.state.isAttachable && store.canAttachSessions else { return }
+                guard store.canOpen(session.state) else { return }
                 Task { await store.open(session.id) }
             })
             .contextMenu {
-                let canOpen = session.state.isAttachable && store.canAttachSessions
+                let canOpen = store.canOpen(session.state)
                 let otherLiveIDs = store.otherLiveSessionIDs(keeping: session.id)
                 Button("Open in \(store.preferredTerminal.rawValue)") {
                     Task { await store.open(session.id) }
@@ -222,20 +221,6 @@ struct SessionsView: View {
         }
     }
 
-    private var errorBinding: Binding<Bool> {
-        Binding(
-            get: { store.errorMessage != nil },
-            set: { if !$0 { store.errorMessage = nil } }
-        )
-    }
-
-    private var pendingStopBinding: Binding<Bool> {
-        Binding(
-            get: { pendingStop != nil },
-            set: { if !$0 { pendingStop = nil } }
-        )
-    }
-
     private var pendingStopTitle: String {
         guard let pendingStop else { return "Stop Session" }
         if pendingStop.keepingName != nil {
@@ -253,10 +238,7 @@ struct SessionsView: View {
         if let keepingName = pendingStop?.keepingName {
             return "Stopping ends every live session except \(keepingName). Each final screen is retained for later inspection."
         }
-        if pendingStop?.sessionIDs.count == 1 {
-            return "Stopping ends the child process but retains its final screen for later inspection."
-        }
-        return "Stopping ends each child process but retains its final screen for later inspection."
+        return SessionStore.stopExplanation(count: pendingStop?.sessionIDs.count ?? 0)
     }
 
     private func stopTargets(for session: SessionSummary) -> PendingStopRequest {

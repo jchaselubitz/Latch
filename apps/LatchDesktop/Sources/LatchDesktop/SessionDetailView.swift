@@ -1,6 +1,5 @@
 import SwiftUI
 import AppKit
-import UniformTypeIdentifiers
 
 struct SessionDetailView: View {
     @ObservedObject var store: SessionStore
@@ -23,7 +22,7 @@ struct SessionDetailView: View {
                 OpenSessionButton(
                     store: store,
                     sessionID: session.id,
-                    isEnabled: session.state.isAttachable && store.canAttachSessions
+                    isEnabled: store.canOpen(session.state)
                 )
 
                 HStack(alignment: .top, spacing: 4) {
@@ -93,10 +92,7 @@ struct SessionDetailView: View {
         }
         .confirmationDialog(
             destructiveTitle,
-            isPresented: Binding(
-                get: { destructiveAction != nil },
-                set: { if !$0 { destructiveAction = nil } }
-            ),
+            isPresented: $destructiveAction.isPresent(),
             titleVisibility: .visible
         ) {
             destructiveButtons
@@ -131,7 +127,7 @@ struct SessionDetailView: View {
     private var destructiveMessage: String {
         switch destructiveAction {
         case .stop:
-            return "Stopping ends the child process but retains its final screen for later inspection."
+            return SessionStore.stopExplanation(count: 1)
         case .remove:
             return "This permanently deletes the retained screen and session metadata."
         case .forceRemove:

@@ -1,6 +1,5 @@
 import SwiftUI
 import AppKit
-import UniformTypeIdentifiers
 
 struct CLISetupView: View {
     @ObservedObject var store: SessionStore
@@ -14,11 +13,9 @@ struct CLISetupView: View {
                 ProgressView("Running `where latch`…")
             } else if store.discoveredLatchExecutables.isEmpty {
                 Text("Latch Desktop does not bundle the CLI, and `where latch` returned no paths. Run this verified-release installer in Terminal:")
-                Text(store.cliInstallCommand)
-                    .font(.system(.callout, design: .monospaced))
-                    .textSelection(.enabled)
-                    .padding(10)
-                    .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+                CopyableCodeBlock(
+                    store.cliInstallCommand, style: .callout, padding: 10, cornerRadius: 8, fillsWidth: false
+                )
                 HStack {
                     Button("Run in Terminal…") { store.runCLIInstaller() }
                         .buttonStyle(.borderedProminent)

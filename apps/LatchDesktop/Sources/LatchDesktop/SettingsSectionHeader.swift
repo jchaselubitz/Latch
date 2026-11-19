@@ -1,6 +1,5 @@
 import SwiftUI
 import AppKit
-import UniformTypeIdentifiers
 
 /// Section headers and footnotes are repeated across every settings tab, so they
 /// live here to keep one typographic voice instead of ad-hoc `.font(.caption)`

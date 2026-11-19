@@ -233,6 +233,9 @@ enum SessionAgent: String, CaseIterable, Identifiable, Sendable {
 
     var id: String { rawValue }
 
+    /// Agents first, so the common choice sits under the pointer.
+    static let displayOrder: [SessionAgent] = [.claude, .codex, .shell]
+
     var title: String {
         switch self {
         case .shell: return "Shell"

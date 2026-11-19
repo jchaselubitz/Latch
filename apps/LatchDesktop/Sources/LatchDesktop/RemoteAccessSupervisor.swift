@@ -268,10 +268,6 @@ final class RemoteAccessSupervisor: RemoteAccessProcess, @unchecked Sendable {
         return arguments
     }
 
-    var isRunning: Bool {
-        lock.withLock { process?.isRunning == true }
-    }
-
     /// Starts the helper and resolves when it exits. Throws immediately if the
     /// launch itself is unsafe or fails.
     func run() async throws {

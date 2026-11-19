@@ -79,6 +79,11 @@ final class RemoteAccessController: ObservableObject {
     /// Helpers whose link is authenticated and serving right now.
     var connectedPeers: Int { linkStatuses.values.filter(\.isConnected).count }
     var activeDevices: [RemoteDevice] { devices.filter { !$0.revoked } }
+
+    /// The device's helper link status, once its helper has reported one.
+    func linkStatus(for device: RemoteDevice) -> HelperLinkStatus? {
+        device.controlPlaneDeviceID.flatMap { linkStatuses[$0] }
+    }
     var revokedDevices: [RemoteDevice] { devices.filter(\.revoked) }
     var isControlPlaneConfigured: Bool { controlPlane.isConfigured }
 
@@ -580,10 +585,6 @@ final class RemoteAccessController: ObservableObject {
         } catch {
             errorMessage = error.localizedDescription
         }
-    }
-
-    func setTerminalAllowed(_ allowed: Bool, for device: RemoteDevice) async {
-        await grant(device, permission: allowed ? .control : device.permissionWithoutTerminal)
     }
 
     func revoke(_ device: RemoteDevice) async {
