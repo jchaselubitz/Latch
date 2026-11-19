@@ -337,6 +337,39 @@ pub struct CreateReport {
     pub protocol_version: u32,
     /// The new session.
     pub session: CreatedSession,
+    /// Present only for `latch create --request-id`: `false` when this call
+    /// started the session, `true` when an earlier call with the same id had
+    /// already started it and nothing new was launched. Omitted otherwise, so
+    /// reports without a request id are byte-for-byte what they were.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reused: Option<bool>,
+}
+
+/// `latch create --request-id … --json` when the id refused the launch.
+///
+/// Written to standard output instead of a [`CreateReport`], with a non-zero
+/// exit status, so a caller can tell an id conflict from any other failure
+/// without parsing prose.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateErrorReport {
+    /// Wire protocol version.
+    #[serde(rename = "protocolVersion")]
+    pub protocol_version: u32,
+    /// What went wrong.
+    pub error: CreateError,
+}
+
+/// The error inside [`CreateErrorReport`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateError {
+    /// `invalid_request_id`, `request_id_conflict`,
+    /// `request_id_session_removed`, or `create_failed`.
+    pub code: String,
+    /// Human-readable detail.
+    pub message: String,
+    /// The session the id created, for `request_id_session_removed`.
+    #[serde(rename = "sessionId", default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 /// The session object inside [`CreateReport`].

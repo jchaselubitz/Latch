@@ -731,6 +731,7 @@ mod tests {
                 source: SourceInfo {
                     kind: "test".into(),
                     external_run_id: None,
+                    request_id: None,
                 },
             },
         )

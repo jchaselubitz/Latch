@@ -103,6 +103,43 @@ PATH, declare it and let Latch build the shell wrapper:
   `capabilities.extensions` before sending these fields. Older builds ignore
   them and would run the agent argv directly, with no identity.
 
+### Create at most once: `--request-id`
+
+A caller that retries after a crash, or after losing the report, can pass an
+idempotency key so the retry never starts a second session:
+
+```bash
+latch create --manifest-file - --json --request-id 2f1c8a0e-6a1b-4f7e-9d2c-5b8e7a6c4d31 < manifest.json
+```
+
+- The id must be a hyphenated UUID; use a new one for each thing you mean to
+  start, and the same one for every retry of it.
+- Latch durably accepts the id before it launches anything, and the session's
+  metadata records it (`source.request_id`) before the process starts. A repeat
+  call with the same id and the same launch returns that session and launches
+  nothing; the report is the usual one plus `"reused": true`. A call that
+  started the session reports `"reused": false`. Without `--request-id` the
+  report has no `reused` field and `create` behaves exactly as before.
+- The id is bound to the launch: its directory, its program (by name, so an
+  agent reinstalled at another path is still the same request) and everything
+  else that changes what the program does (its arguments, which include the
+  model and prompt, its `env`, `inherit_env`, `agent`, and `login_shell.prelude`).
+  Terminal size and display fields do not bind it.
+- When the id refuses the launch, nothing is started, the exit status is 65,
+  and with `--json` standard output carries
+  `{"protocolVersion": 1, "error": {"code": "...", "message": "..."}}`:
+  - `request_id_conflict`: the id already names a different launch.
+  - `request_id_session_removed`: the id already started a session
+    (`error.sessionId`) that has since been removed; it is never started again.
+  - `invalid_request_id`: the id is not a hyphenated UUID.
+- Any other failure exits 1 (with `create_failed` under `--json`) and started
+  nothing; the same id may be retried.
+- `source.request_id` cannot be set from the manifest; only the flag sets it.
+  Local ids and the phone's request ids are kept apart and never answer each
+  other.
+- Require the `create-request-id` entry in `latch capabilities --json`
+  `capabilities.extensions` before passing the flag. An older build rejects it.
+
 ### Cursor chat
 
 Launch Cursor with `latch run -- agent`, or use `"agent": "cursor"` and

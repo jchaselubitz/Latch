@@ -586,6 +586,7 @@ fn record_attachment_session(harness: &Harness) {
             source: SourceInfo {
                 kind: "test".into(),
                 external_run_id: None,
+                request_id: None,
             },
         },
     )

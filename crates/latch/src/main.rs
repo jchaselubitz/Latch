@@ -17,7 +17,7 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use latch::cli::attach::{self, AttachOptions, RetryPolicy};
 use latch::cli::create::{self, CreateOptions, ManifestOptions};
-use latch::cli::json::{CreateReport, CreatedSession};
+use latch::cli::json::{CreateError, CreateErrorReport, CreateReport, CreatedSession};
 use latch::cli::manage::{
     self, ConfigRequest, DoctorOptions, InspectOptions, ListOptions, PruneOptions, RemoveRequest,
     RenameRequest, ResizeRequest, StopRequest,
@@ -93,6 +93,17 @@ enum Command {
         /// (`planning/OVERLORD_INTEGRATION.md`).
         #[arg(long)]
         json: bool,
+        /// Idempotency key (a hyphenated UUID): create at most one session
+        /// for it.
+        ///
+        /// A repeat call with the same id and the same launch returns the
+        /// session the first call started, launching nothing; with `--json`
+        /// the report then carries `"reused": true`. The same id with a
+        /// different directory, program, or arguments starts nothing and
+        /// fails with code `request_id_conflict` (exit status 65). Without
+        /// this flag `create` behaves exactly as before.
+        #[arg(long, value_name = "UUID")]
+        request_id: Option<String>,
     },
     /// Open an existing session in a terminal viewer.
     ///
@@ -484,13 +495,23 @@ fn dispatch(command: Option<Command>) -> Result<()> {
         Some(Command::Create {
             manifest_file,
             json,
+            request_id,
         }) => {
             refuse_nested_create()?;
             let manifest = create::read_manifest_file(&manifest_file)?;
-            let outcome = create::create_session(CreateOptions {
-                home: LatchHome::from_env()?,
-                manifest,
-            })?;
+            let home = LatchHome::from_env()?;
+            let (outcome, reused) = match request_id {
+                None => (
+                    create::create_session(CreateOptions { home, manifest })?,
+                    None,
+                ),
+                Some(request_id) => {
+                    match create::create_local_session(home, manifest, &request_id) {
+                        Ok(local) => (local.outcome, Some(local.reused)),
+                        Err(error) => return exit_create_refused(&error, json),
+                    }
+                }
+            };
             if json {
                 let meta = latch::session::meta::read(&outcome.paths)?;
                 print_json(&CreateReport {
@@ -501,6 +522,7 @@ fn dispatch(command: Option<Command>) -> Result<()> {
                         state: "running".to_owned(),
                         created_at: meta.created_at,
                     },
+                    reused,
                 })
             } else {
                 attach_created_session(outcome.id.as_str())
@@ -1062,6 +1084,39 @@ fn finish_attach(release: SurfaceRelease) -> ! {
 fn terminal_size() -> TerminalSize {
     let size = latch::cli::term::terminal_size(libc::STDOUT_FILENO);
     TerminalSize::new(size.cols, size.rows)
+}
+
+/// Exit status of `latch create --request-id` when the id itself refused the
+/// launch (invalid, conflicting, or already spent on a removed session).
+/// Nothing was started and retrying the same id will not change that.
+const CREATE_REQUEST_ID_REFUSED_EXIT: i32 = 65;
+
+/// Reports a `latch create --request-id` that started nothing, then exits.
+///
+/// Under `--json` the error goes to standard output as a
+/// [`CreateErrorReport`], so the caller reads a stable code instead of prose.
+/// A plain creation failure exits 1, after which the same id may be retried.
+fn exit_create_refused(error: &create::LocalCreateError, json: bool) -> Result<()> {
+    if json {
+        let session_id = match error {
+            create::LocalCreateError::SessionRemoved { session_id } => session_id.clone(),
+            _ => None,
+        };
+        print_json(&CreateErrorReport {
+            protocol_version: PROTOCOL_VERSION,
+            error: CreateError {
+                code: error.code().to_owned(),
+                message: error.to_string(),
+                session_id,
+            },
+        })?;
+    }
+    eprintln!("latch: {error}");
+    let _ = std::io::stdout().flush();
+    std::process::exit(match error {
+        create::LocalCreateError::Failed(_) => 1,
+        _ => CREATE_REQUEST_ID_REFUSED_EXIT,
+    })
 }
 
 /// Prints one report as the single line of JSON every `--json` verb emits.

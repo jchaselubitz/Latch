@@ -147,6 +147,7 @@ async fn harness(connector_enabled: bool) -> Harness {
             source: SourceInfo {
                 kind: "test".into(),
                 external_run_id: None,
+                request_id: None,
             },
         },
     )

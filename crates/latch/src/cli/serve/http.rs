@@ -579,6 +579,7 @@ async fn create_session(
             state: "running".to_owned(),
             created_at: outcome.created_at,
         },
+        reused: None,
     })
     .into_response())
 }
@@ -586,17 +587,7 @@ async fn create_session(
 /// Accepts only a canonical hyphenated UUID, the one shape the contract
 /// promises and the only shape the phone generates.
 pub(super) fn is_request_id(value: &str) -> bool {
-    let groups = [8, 4, 4, 4, 12];
-    let mut parts = value.split('-');
-    for expected in groups {
-        let Some(part) = parts.next() else {
-            return false;
-        };
-        if part.len() != expected || !part.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return false;
-        }
-    }
-    parts.next().is_none()
+    crate::cli::create::is_request_id(value)
 }
 
 fn map_remote_session_error(error: RemoteSessionError) -> ApiError {

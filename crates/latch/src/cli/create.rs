@@ -173,6 +173,11 @@ pub struct CreationReceipt {
     /// receipts written before a model could be chosen, which named none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Digest of the rest of a local launch (arguments after the program,
+    /// environment, agent declaration). Only local `latch create
+    /// --request-id` receipts carry it; phone receipts never do.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_digest: Option<String>,
     /// Where the launch got to.
     pub status: CreationReceiptStatus,
     /// The session it produced, once it did.
@@ -197,17 +202,46 @@ pub enum CreationReceiptStatus {
 /// has long since given up automatic retry of the id.
 const MAX_CREATION_RECEIPTS: usize = 512;
 
-fn receipts_dir(home: &LatchHome) -> PathBuf {
-    home.root().join("remote-shell-receipts")
+/// Which caller's receipts a request id is looked up among. The phone and
+/// local `latch create --request-id` keep separate stores, so one path's ids
+/// can never answer, or conflict with, the other's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReceiptStore {
+    /// Phone requests through `latch serve`.
+    Remote,
+    /// `latch create --manifest-file … --request-id …` on this Mac.
+    Local,
 }
 
+impl ReceiptStore {
+    fn dir(self, home: &LatchHome) -> PathBuf {
+        home.root().join(match self {
+            Self::Remote => "remote-shell-receipts",
+            Self::Local => "local-create-receipts",
+        })
+    }
+}
+
+#[cfg(test)]
 fn receipt_path(home: &LatchHome, request_id: &str) -> PathBuf {
-    receipts_dir(home).join(format!("{request_id}.json"))
+    store_receipt_path(ReceiptStore::Remote, home, request_id)
+}
+
+fn store_receipt_path(store: ReceiptStore, home: &LatchHome, request_id: &str) -> PathBuf {
+    store.dir(home).join(format!("{request_id}.json"))
 }
 
 /// Reads the receipt for a request id, if one was ever accepted.
 pub fn read_receipt(home: &LatchHome, request_id: &str) -> anyhow::Result<Option<CreationReceipt>> {
-    let path = receipt_path(home, request_id);
+    read_store_receipt(ReceiptStore::Remote, home, request_id)
+}
+
+fn read_store_receipt(
+    store: ReceiptStore,
+    home: &LatchHome,
+    request_id: &str,
+) -> anyhow::Result<Option<CreationReceipt>> {
+    let path = store_receipt_path(store, home, request_id);
     if !path.is_file() {
         return Ok(None);
     }
@@ -216,13 +250,21 @@ pub fn read_receipt(home: &LatchHome, request_id: &str) -> anyhow::Result<Option
 }
 
 fn write_receipt(home: &LatchHome, receipt: &CreationReceipt) -> anyhow::Result<()> {
-    let dir = receipts_dir(home);
+    write_store_receipt(ReceiptStore::Remote, home, receipt)
+}
+
+fn write_store_receipt(
+    store: ReceiptStore,
+    home: &LatchHome,
+    receipt: &CreationReceipt,
+) -> anyhow::Result<()> {
+    let dir = store.dir(home);
     std::fs::create_dir_all(&dir)?;
     std::fs::set_permissions(
         &dir,
         std::fs::Permissions::from_mode(crate::session::paths::DIR_MODE),
     )?;
-    let path = receipt_path(home, &receipt.request_id);
+    let path = store_receipt_path(store, home, &receipt.request_id);
     let temporary = dir.join(format!(".{}.tmp", receipt.request_id));
     let mut file = OpenOptions::new()
         .write(true)
@@ -354,6 +396,7 @@ fn create_remote_session_with(
         cwd: cwd.clone(),
         agent: harness,
         model: request.model.clone(),
+        launch_digest: None,
         status: CreationReceiptStatus::Accepted,
         session_id: None,
         accepted_at: crate::engine::format_rfc3339(std::time::SystemTime::now()),
@@ -367,6 +410,7 @@ fn create_remote_session_with(
             source: crate::session::manifest::SourceInfo {
                 kind: MOBILE_SOURCE_KIND.to_owned(),
                 external_run_id: Some(request.request_id),
+                request_id: None,
             },
             ..DisplayMetadata::default()
         },
@@ -555,6 +599,280 @@ fn last_plain_word(output: &str) -> String {
         .to_owned()
 }
 
+/// Accepts only a canonical hyphenated UUID, the same shape the phone's
+/// request ids take, so an id is always a safe file name.
+pub fn is_request_id(value: &str) -> bool {
+    let groups = [8, 4, 4, 4, 12];
+    let mut parts = value.split('-');
+    for expected in groups {
+        let Some(part) = parts.next() else {
+            return false;
+        };
+        if part.len() != expected || !part.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return false;
+        }
+    }
+    parts.next().is_none()
+}
+
+/// What an idempotent local creation resolved to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalCreateOutcome {
+    /// The session, created now or by an earlier call with the same id.
+    pub outcome: CreateOutcome,
+    /// True when an earlier call with this request id had already created it.
+    pub reused: bool,
+}
+
+/// Why `latch create --request-id` produced no session.
+#[derive(Debug)]
+pub enum LocalCreateError {
+    /// The id is not a canonical hyphenated UUID.
+    InvalidRequestId,
+    /// The id already names a launch with a different directory, program, or
+    /// arguments (which include the model). Nothing was started.
+    RequestIdConflict,
+    /// The id already started a session that has since been removed. Nothing
+    /// was started again; starting it twice is what the id exists to prevent.
+    SessionRemoved {
+        /// The session the id created.
+        session_id: Option<String>,
+    },
+    /// Creation itself failed; the id may be retried.
+    Failed(anyhow::Error),
+}
+
+impl LocalCreateError {
+    /// Stable machine-readable code reported under `--json`.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::InvalidRequestId => "invalid_request_id",
+            Self::RequestIdConflict => "request_id_conflict",
+            Self::SessionRemoved { .. } => "request_id_session_removed",
+            Self::Failed(_) => "create_failed",
+        }
+    }
+}
+
+impl std::fmt::Display for LocalCreateError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidRequestId => {
+                formatter.write_str("the request id must be a hyphenated UUID")
+            }
+            Self::RequestIdConflict => formatter.write_str(
+                "this request id already started a session with a different directory, \
+                 program, or arguments; nothing was started",
+            ),
+            Self::SessionRemoved { session_id } => match session_id {
+                Some(id) => write!(
+                    formatter,
+                    "this request id already started session {id}, which has since been \
+                     removed; nothing was started again"
+                ),
+                None => formatter.write_str(
+                    "this request id already started a session that has since been removed; \
+                     nothing was started again",
+                ),
+            },
+            Self::Failed(error) => write!(formatter, "{error:#}"),
+        }
+    }
+}
+
+impl std::error::Error for LocalCreateError {}
+
+/// What a local request id is bound to: where the launch runs, which program
+/// it runs, and everything else that changes what that program does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LocalLaunchBinding {
+    cwd: PathBuf,
+    program: String,
+    digest: String,
+}
+
+impl LocalLaunchBinding {
+    /// The program is compared by name, not path: an agent reinstalled
+    /// between a crash and its retry is still the same request. Terminal size,
+    /// display fields and the login shell's location are presentation and do
+    /// not bind the id.
+    fn of(launch: &crate::session::manifest::LaunchSpec) -> Self {
+        use sha2::{Digest, Sha256};
+        let program = meta::launch_harness(launch)
+            .map(str::to_owned)
+            .unwrap_or_else(|| meta::redact_command(&launch.argv));
+        let material = serde_json::json!({
+            "args": launch.argv.iter().skip(1).collect::<Vec<_>>(),
+            "env": launch.env,
+            "inherit_env": launch.inherit_env,
+            "agent": launch.agent,
+            "prelude": launch.login_shell.as_ref().and_then(|shell| shell.prelude.clone()),
+        });
+        let digest = Sha256::digest(material.to_string().as_bytes());
+        Self {
+            cwd: comparable_directory(&launch.cwd),
+            program,
+            digest: digest.iter().map(|byte| format!("{byte:02x}")).collect(),
+        }
+    }
+}
+
+/// A directory in the form two launches can be compared in: canonical when it
+/// still exists, as given otherwise.
+fn comparable_directory(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_owned())
+}
+
+/// Creates exactly one session for a local `latch create --request-id`, or
+/// returns the one an earlier call with the same id already created.
+///
+/// The caller (Scribe's queued agent handoff, for one) may crash or lose the
+/// report after Latch started the session; its retry carries the same id and
+/// gets the same session back instead of a second agent. Without a request id
+/// use [`create_session`], which is unchanged.
+pub fn create_local_session(
+    home: LatchHome,
+    manifest: LaunchManifest,
+    request_id: &str,
+) -> Result<LocalCreateOutcome, LocalCreateError> {
+    match nesting::nesting_decision(enclosing_session_id().as_deref()) {
+        NestingDecision::Allow => {}
+        NestingDecision::AttachToEnclosing { session_id } => {
+            return Err(LocalCreateError::Failed(anyhow::anyhow!(
+                "refusing to create a nested Latch session (already inside {session_id}); \
+                 run `latch attach` or exit the enclosing session first"
+            )));
+        }
+    }
+    create_local_session_with(home, manifest, request_id, create_session_detached)
+}
+
+fn create_local_session_with(
+    home: LatchHome,
+    mut manifest: LaunchManifest,
+    request_id: &str,
+    launch: impl FnOnce(CreateOptions) -> anyhow::Result<CreateOutcome>,
+) -> Result<LocalCreateOutcome, LocalCreateError> {
+    if !is_request_id(request_id) {
+        return Err(LocalCreateError::InvalidRequestId);
+    }
+    // Ids are compared as stored: one spelling per id.
+    let request_id = request_id.to_ascii_lowercase();
+    home.ensure()
+        .map_err(|error| LocalCreateError::Failed(error.into()))?;
+    // The same lock the phone path holds, from the lookup through durable
+    // metadata, so concurrent calls with one id cannot both launch.
+    let _lock = CreationLock::acquire(&home).map_err(LocalCreateError::Failed)?;
+    let binding = LocalLaunchBinding::of(&manifest.launch);
+    let store = ReceiptStore::Local;
+
+    let receipt =
+        read_store_receipt(store, &home, &request_id).map_err(LocalCreateError::Failed)?;
+    if let Some(receipt) = &receipt {
+        if receipt.cwd != binding.cwd
+            || receipt.agent.as_deref() != Some(binding.program.as_str())
+            || receipt.launch_digest.as_deref() != Some(binding.digest.as_str())
+        {
+            return Err(LocalCreateError::RequestIdConflict);
+        }
+    }
+
+    if let Some(existing) =
+        find_local_session(&home, &request_id).map_err(LocalCreateError::Failed)?
+    {
+        // A receipt may have been evicted; the session's own record still
+        // binds the directory and, for a hosted agent, the program. (Its
+        // command label is caller-supplied display text, so it binds nothing.)
+        let program_differs = receipt.is_none()
+            && matches!(&existing.meta.harness, Some(harness) if *harness != binding.program);
+        if comparable_directory(&existing.meta.cwd) != binding.cwd || program_differs {
+            return Err(LocalCreateError::RequestIdConflict);
+        }
+        // Repair a receipt a crash left at `accepted`.
+        if let Some(mut receipt) = receipt {
+            if receipt.status != CreationReceiptStatus::Created {
+                receipt.status = CreationReceiptStatus::Created;
+                receipt.session_id = Some(existing.meta.id.clone());
+                let _ = write_store_receipt(store, &home, &receipt);
+            }
+        }
+        return Ok(LocalCreateOutcome {
+            outcome: CreateOutcome {
+                id: existing.id,
+                paths: existing.paths,
+                name: existing.meta.name,
+            },
+            reused: true,
+        });
+    }
+
+    if let Some(receipt) = &receipt {
+        if receipt.status == CreationReceiptStatus::Created {
+            return Err(LocalCreateError::SessionRemoved {
+                session_id: receipt.session_id.clone(),
+            });
+        }
+    }
+
+    // Durable acceptance precedes dispatch. The kernel writes the session's
+    // metadata, carrying this id, before it spawns anything, so after a crash
+    // "accepted and no session" means nothing ran and "a session carries the
+    // id" is answered by the lookup above.
+    let mut receipt = CreationReceipt {
+        request_id: request_id.clone(),
+        device: None,
+        cwd: binding.cwd.clone(),
+        agent: Some(binding.program.clone()),
+        model: None,
+        launch_digest: Some(binding.digest.clone()),
+        status: CreationReceiptStatus::Accepted,
+        session_id: None,
+        accepted_at: crate::engine::format_rfc3339(std::time::SystemTime::now()),
+    };
+    write_store_receipt(store, &home, &receipt).map_err(LocalCreateError::Failed)?;
+
+    manifest.display.source.request_id = Some(request_id.clone());
+    let outcome = match launch(CreateOptions {
+        home: home.clone(),
+        manifest,
+    }) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            receipt.status = CreationReceiptStatus::Failed;
+            let _ = write_store_receipt(store, &home, &receipt);
+            return Err(LocalCreateError::Failed(error));
+        }
+    };
+    receipt.status = CreationReceiptStatus::Created;
+    receipt.session_id = Some(outcome.id.to_string());
+    let _ = write_store_receipt(store, &home, &receipt);
+    Ok(LocalCreateOutcome {
+        outcome,
+        reused: false,
+    })
+}
+
+struct LocalSession {
+    id: SessionId,
+    paths: SessionPaths,
+    meta: meta::SessionMeta,
+}
+
+/// Finds the session a local call with this request id created, if any.
+fn find_local_session(home: &LatchHome, request_id: &str) -> anyhow::Result<Option<LocalSession>> {
+    for id in home.session_ids()? {
+        let paths = home.session(&id);
+        let Ok(meta) = meta::read(&paths) else {
+            continue;
+        };
+        if meta.source.request_id.as_deref() != Some(request_id) {
+            continue;
+        }
+        return Ok(Some(LocalSession { id, paths, meta }));
+    }
+    Ok(None)
+}
+
 struct RemoteSession {
     id: String,
     name: String,
@@ -658,11 +976,17 @@ pub fn run_manifest(argv: Vec<String>, options: ManifestOptions) -> LaunchManife
 /// may be stored is a redacted command label derived from the manifest's
 /// display metadata.
 pub fn read_manifest_file(path: &str) -> anyhow::Result<LaunchManifest> {
-    if path == "-" {
-        return crate::session::manifest::read(io::stdin()).map_err(Into::into);
-    }
-    let file = File::open(path).with_context(|| format!("cannot open launch manifest {path}"))?;
-    crate::session::manifest::read(file).map_err(Into::into)
+    let mut manifest = if path == "-" {
+        crate::session::manifest::read(io::stdin())?
+    } else {
+        let file =
+            File::open(path).with_context(|| format!("cannot open launch manifest {path}"))?;
+        crate::session::manifest::read(file)?
+    };
+    // The request id is `--request-id`'s alone; a manifest cannot mark a
+    // session as the answer to some other caller's id.
+    manifest.display.source.request_id = None;
+    Ok(manifest)
 }
 
 fn sanitize_display_metadata(display: &mut DisplayMetadata) {
@@ -969,6 +1293,7 @@ mod tests {
                     source: crate::session::manifest::SourceInfo {
                         kind: "overlord".to_owned(),
                         external_run_id: Some(REQUEST_ID.to_owned()),
+                        request_id: None,
                     },
                     ..DisplayMetadata::default()
                 },
@@ -1268,5 +1593,398 @@ mod tests {
             ),
             None
         );
+    }
+
+    // Local `latch create --request-id`.
+
+    fn agent_manifest(cwd: &Path, program: &str, args: &[&str]) -> LaunchManifest {
+        let mut argv = vec![program.to_owned()];
+        argv.extend(args.iter().map(|arg| (*arg).to_owned()));
+        let mut manifest = run_manifest(
+            argv,
+            ManifestOptions {
+                cwd: cwd.to_owned(),
+                size: TerminalSize::new(120, 40),
+                display: DisplayMetadata {
+                    source: crate::session::manifest::SourceInfo {
+                        kind: "scribe".to_owned(),
+                        external_run_id: Some("transcript-1".to_owned()),
+                        request_id: None,
+                    },
+                    ..DisplayMetadata::default()
+                },
+            },
+        );
+        manifest
+            .launch
+            .env
+            .insert("SCRIBE_TRANSCRIPT_FILE".to_owned(), "/t.md".to_owned());
+        manifest
+    }
+
+    fn scribe_manifest(cwd: &Path) -> LaunchManifest {
+        agent_manifest(
+            cwd,
+            "/opt/fake/bin/claude",
+            &["--model", "opus", "Summarize the meeting"],
+        )
+    }
+
+    fn local_receipt(home: &LatchHome) -> Option<CreationReceipt> {
+        read_store_receipt(ReceiptStore::Local, home, REQUEST_ID).unwrap()
+    }
+
+    fn counting_launch(
+        counter: &Arc<AtomicUsize>,
+    ) -> impl FnOnce(CreateOptions) -> anyhow::Result<CreateOutcome> {
+        let counter = counter.clone();
+        move |options| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            stub_launch(options)
+        }
+    }
+
+    #[test]
+    fn a_local_create_with_a_request_id_launches_once_and_records_the_id() {
+        let (_temp, home, cwd) = home();
+        let created =
+            create_local_session_with(home.clone(), scribe_manifest(&cwd), REQUEST_ID, stub_launch)
+                .unwrap();
+        assert!(!created.reused);
+        let meta = meta::read(&created.outcome.paths).unwrap();
+        assert_eq!(meta.source.request_id.as_deref(), Some(REQUEST_ID));
+        // The caller's own provenance is untouched.
+        assert_eq!(meta.source.kind, "scribe");
+        assert_eq!(meta.source.external_run_id.as_deref(), Some("transcript-1"));
+        let receipt = local_receipt(&home).unwrap();
+        assert_eq!(receipt.status, CreationReceiptStatus::Created);
+        assert_eq!(
+            receipt.session_id.as_deref(),
+            Some(created.outcome.id.as_str())
+        );
+        assert_eq!(receipt.agent.as_deref(), Some("claude"));
+        assert!(receipt.launch_digest.is_some());
+        // Phone receipts live elsewhere and are not written by this path.
+        assert!(read_receipt(&home, REQUEST_ID).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_repeated_local_create_returns_the_first_session_and_launches_nothing() {
+        let (_temp, home, cwd) = home();
+        let first =
+            create_local_session_with(home.clone(), scribe_manifest(&cwd), REQUEST_ID, stub_launch)
+                .unwrap();
+        let launches = Arc::new(AtomicUsize::new(0));
+        let again = create_local_session_with(
+            home.clone(),
+            scribe_manifest(&cwd),
+            REQUEST_ID,
+            counting_launch(&launches),
+        )
+        .unwrap();
+        assert_eq!(launches.load(Ordering::SeqCst), 0);
+        assert!(again.reused);
+        assert_eq!(again.outcome.id, first.outcome.id);
+        assert_eq!(again.outcome.name, first.outcome.name);
+        assert_eq!(home.session_ids().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn an_uppercase_spelling_of_the_same_id_is_the_same_request() {
+        let (_temp, home, cwd) = home();
+        let first =
+            create_local_session_with(home.clone(), scribe_manifest(&cwd), REQUEST_ID, stub_launch)
+                .unwrap();
+        let again = create_local_session_with(
+            home.clone(),
+            scribe_manifest(&cwd),
+            &REQUEST_ID.to_ascii_uppercase(),
+            |_| panic!("the same id must not launch twice"),
+        )
+        .unwrap();
+        assert!(again.reused);
+        assert_eq!(again.outcome.id, first.outcome.id);
+    }
+
+    #[test]
+    fn a_crash_after_acceptance_and_before_launch_lets_the_retry_start_one_session() {
+        let (_temp, home, cwd) = home();
+        let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            create_local_session_with(home.clone(), scribe_manifest(&cwd), REQUEST_ID, |_| {
+                panic!("the process dies before the kernel is asked for anything")
+            })
+        }));
+        assert!(crashed.is_err());
+        assert_eq!(
+            local_receipt(&home).unwrap().status,
+            CreationReceiptStatus::Accepted
+        );
+        assert!(home.session_ids().unwrap().is_empty());
+
+        let launches = Arc::new(AtomicUsize::new(0));
+        let retry = create_local_session_with(
+            home.clone(),
+            scribe_manifest(&cwd),
+            REQUEST_ID,
+            counting_launch(&launches),
+        )
+        .unwrap();
+        assert_eq!(launches.load(Ordering::SeqCst), 1);
+        assert!(!retry.reused);
+        assert_eq!(home.session_ids().unwrap().len(), 1);
+        assert_eq!(
+            local_receipt(&home).unwrap().status,
+            CreationReceiptStatus::Created
+        );
+    }
+
+    #[test]
+    fn a_crash_after_launch_and_before_the_report_returns_that_session_on_retry() {
+        let (_temp, home, cwd) = home();
+        let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            create_local_session_with(home.clone(), scribe_manifest(&cwd), REQUEST_ID, |options| {
+                // The session exists — metadata carries the id — and then the
+                // process dies before the receipt or the report is written.
+                stub_launch(options).unwrap();
+                panic!("killed after launch")
+            })
+        }));
+        assert!(crashed.is_err());
+        assert_eq!(
+            local_receipt(&home).unwrap().status,
+            CreationReceiptStatus::Accepted
+        );
+        assert_eq!(home.session_ids().unwrap().len(), 1);
+
+        let retry =
+            create_local_session_with(home.clone(), scribe_manifest(&cwd), REQUEST_ID, |_| {
+                panic!("a session already carries this id; nothing may launch")
+            })
+            .unwrap();
+        assert!(retry.reused);
+        assert_eq!(home.session_ids().unwrap().len(), 1);
+        // The receipt a crash left behind is repaired to name the session.
+        let receipt = local_receipt(&home).unwrap();
+        assert_eq!(receipt.status, CreationReceiptStatus::Created);
+        assert_eq!(
+            receipt.session_id.as_deref(),
+            Some(retry.outcome.id.as_str())
+        );
+    }
+
+    #[test]
+    fn the_same_id_with_another_directory_program_or_model_is_a_conflict() {
+        let (temp, home, cwd) = home();
+        create_local_session_with(home.clone(), scribe_manifest(&cwd), REQUEST_ID, stub_launch)
+            .unwrap();
+        let elsewhere = temp.path().join("elsewhere");
+        std::fs::create_dir(&elsewhere).unwrap();
+        let conflicting = [
+            scribe_manifest(&elsewhere),
+            agent_manifest(
+                &cwd,
+                "/opt/fake/bin/codex",
+                &["--model", "opus", "Summarize the meeting"],
+            ),
+            agent_manifest(
+                &cwd,
+                "/opt/fake/bin/claude",
+                &["--model", "sonnet", "Summarize the meeting"],
+            ),
+            agent_manifest(
+                &cwd,
+                "/opt/fake/bin/claude",
+                &["--model", "opus", "Another prompt"],
+            ),
+        ];
+        for manifest in conflicting {
+            let result = create_local_session_with(home.clone(), manifest, REQUEST_ID, |_| {
+                panic!("a conflicting request id must never launch a session")
+            });
+            assert!(
+                matches!(result, Err(LocalCreateError::RequestIdConflict)),
+                "{result:?}"
+            );
+        }
+        assert_eq!(home.session_ids().unwrap().len(), 1);
+        assert_eq!(
+            LocalCreateError::RequestIdConflict.code(),
+            "request_id_conflict"
+        );
+    }
+
+    #[test]
+    fn a_reinstalled_agent_at_another_path_is_still_the_same_request() {
+        let (_temp, home, cwd) = home();
+        let first =
+            create_local_session_with(home.clone(), scribe_manifest(&cwd), REQUEST_ID, stub_launch)
+                .unwrap();
+        let moved = agent_manifest(
+            &cwd,
+            "/Users/p/.local/bin/claude",
+            &["--model", "opus", "Summarize the meeting"],
+        );
+        let again = create_local_session_with(home.clone(), moved, REQUEST_ID, |_| {
+            panic!("the same request must not launch twice")
+        })
+        .unwrap();
+        assert!(again.reused);
+        assert_eq!(again.outcome.id, first.outcome.id);
+    }
+
+    #[test]
+    fn an_id_whose_session_was_removed_never_launches_again() {
+        let (_temp, home, cwd) = home();
+        let first =
+            create_local_session_with(home.clone(), scribe_manifest(&cwd), REQUEST_ID, stub_launch)
+                .unwrap();
+        std::fs::remove_dir_all(first.outcome.paths.dir()).unwrap();
+        let result =
+            create_local_session_with(home.clone(), scribe_manifest(&cwd), REQUEST_ID, |_| {
+                panic!("a spent id must not start a second session")
+            });
+        match result {
+            Err(LocalCreateError::SessionRemoved { session_id }) => {
+                assert_eq!(session_id.as_deref(), Some(first.outcome.id.as_str()));
+            }
+            other => panic!("expected SessionRemoved, got {other:?}"),
+        }
+        assert!(home.session_ids().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_failed_local_launch_can_be_retried_with_the_same_id() {
+        let (_temp, home, cwd) = home();
+        let failure =
+            create_local_session_with(home.clone(), scribe_manifest(&cwd), REQUEST_ID, |_| {
+                anyhow::bail!("kernel is unavailable")
+            });
+        assert!(matches!(failure, Err(LocalCreateError::Failed(_))));
+        assert_eq!(
+            local_receipt(&home).unwrap().status,
+            CreationReceiptStatus::Failed
+        );
+        let retry =
+            create_local_session_with(home.clone(), scribe_manifest(&cwd), REQUEST_ID, stub_launch)
+                .unwrap();
+        assert!(!retry.reused);
+        assert_eq!(home.session_ids().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn concurrent_local_creates_with_one_id_start_exactly_one_session() {
+        let (_temp, home, cwd) = home();
+        home.ensure().unwrap();
+        let launches = Arc::new(AtomicUsize::new(0));
+        let outcomes = std::thread::scope(|scope| {
+            let handles = (0..8)
+                .map(|_| {
+                    let home = home.clone();
+                    let cwd = cwd.clone();
+                    let launches = launches.clone();
+                    scope.spawn(move || {
+                        create_local_session_with(
+                            home,
+                            scribe_manifest(&cwd),
+                            REQUEST_ID,
+                            counting_launch(&launches),
+                        )
+                        .unwrap()
+                    })
+                })
+                .collect::<Vec<_>>();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(launches.load(Ordering::SeqCst), 1);
+        assert_eq!(home.session_ids().unwrap().len(), 1);
+        let id = &outcomes[0].outcome.id;
+        assert!(outcomes.iter().all(|outcome| &outcome.outcome.id == id));
+        assert_eq!(outcomes.iter().filter(|outcome| !outcome.reused).count(), 1);
+    }
+
+    #[test]
+    fn a_malformed_request_id_is_refused_before_anything_is_written() {
+        let (_temp, home, cwd) = home();
+        for id in [
+            "",
+            "not-a-uuid",
+            "../../escape",
+            "8cba5d78-79a0-4a55-9047-f77e57e463c7x",
+        ] {
+            let result = create_local_session_with(home.clone(), scribe_manifest(&cwd), id, |_| {
+                panic!("an invalid id must never launch")
+            });
+            assert!(matches!(result, Err(LocalCreateError::InvalidRequestId)));
+        }
+        assert!(!ReceiptStore::Local.dir(&home).exists());
+    }
+
+    #[test]
+    fn phone_and_local_request_ids_never_answer_each_other() {
+        let (_temp, home, cwd) = home();
+        let phone = create_remote_shell_with(request(&home, &cwd), stub_launch).unwrap();
+        let local =
+            create_local_session_with(home.clone(), scribe_manifest(&cwd), REQUEST_ID, stub_launch)
+                .unwrap();
+        assert!(!local.reused);
+        assert_ne!(local.outcome.id.to_string(), phone.id);
+        // And the phone's retry still finds only its own shell.
+        let retry = create_remote_shell_with(request(&home, &cwd), |_| {
+            panic!("the phone's retry must not launch")
+        })
+        .unwrap();
+        assert!(retry.reused);
+        assert_eq!(retry.id, phone.id);
+        // Phone receipts keep their shape: no launch digest.
+        let text = std::fs::read_to_string(receipt_path(&home, REQUEST_ID)).unwrap();
+        assert!(!text.contains("launch_digest") && !text.contains("launchDigest"));
+    }
+
+    #[test]
+    fn a_manifest_cannot_supply_the_request_id_itself() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("manifest.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "format_version": 1,
+                "launch": {"argv": ["claude"], "cwd": "/tmp", "size": {"cols": 80, "rows": 24}},
+                "display": {"source": {"kind": "x", "request_id": REQUEST_ID}}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let manifest = read_manifest_file(path.to_str().unwrap()).unwrap();
+        assert_eq!(manifest.display.source.request_id, None);
+        assert_eq!(manifest.display.source.kind, "x");
+    }
+
+    #[test]
+    fn a_create_report_without_a_request_id_is_unchanged() {
+        let report = crate::cli::json::CreateReport {
+            protocol_version: 1,
+            session: crate::cli::json::CreatedSession {
+                id: "s".to_owned(),
+                name: "n".to_owned(),
+                state: "running".to_owned(),
+                created_at: "t".to_owned(),
+            },
+            reused: None,
+        };
+        let text = serde_json::to_string(&report).unwrap();
+        assert!(!text.contains("reused"));
+        let reused = crate::cli::json::CreateReport {
+            reused: Some(true),
+            ..report
+        };
+        assert!(serde_json::to_string(&reused)
+            .unwrap()
+            .contains("\"reused\":true"));
+        // An older report without the field still decodes.
+        let decoded: crate::cli::json::CreateReport = serde_json::from_str(&text).unwrap();
+        assert_eq!(decoded.reused, None);
     }
 }

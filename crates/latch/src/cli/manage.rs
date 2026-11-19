@@ -498,6 +498,11 @@ pub fn config_value(home: &LatchHome, key: &str) -> anyhow::Result<Option<String
 /// the agent argv without the shell setup and without an identity.
 pub const AGENT_LAUNCH_EXTENSION: &str = "agent-launch";
 
+/// `latch create` accepts `--request-id` and creates at most one session per
+/// id. An older build rejects the flag, so a caller that must never launch
+/// twice checks for this before sending it.
+pub const CREATE_REQUEST_ID_EXTENSION: &str = "create-request-id";
+
 /// Reports the engine discovery contract.
 pub fn capabilities() -> CapabilitiesReport {
     CapabilitiesReport {
@@ -509,7 +514,10 @@ pub fn capabilities() -> CapabilitiesReport {
             local_attach: true,
             cloud_attach: false,
             self_update: crate::cli::update::can_self_update(),
-            extensions: vec![AGENT_LAUNCH_EXTENSION.to_owned()],
+            extensions: vec![
+                AGENT_LAUNCH_EXTENSION.to_owned(),
+                CREATE_REQUEST_ID_EXTENSION.to_owned(),
+            ],
         },
     }
 }

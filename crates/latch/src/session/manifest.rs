@@ -168,6 +168,12 @@ pub struct SourceInfo {
     /// Opaque external correlation id.
     #[serde(default)]
     pub external_run_id: Option<String>,
+    /// Idempotency key of the local `latch create --request-id` call that
+    /// started the session. Set only by that path, never taken from a
+    /// manifest; it is how a retry finds a session whose creation outlived
+    /// the caller. Absent on every other session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
 }
 
 impl Default for SourceInfo {
@@ -175,6 +181,7 @@ impl Default for SourceInfo {
         Self {
             kind: "cli".to_owned(),
             external_run_id: None,
+            request_id: None,
         }
     }
 }

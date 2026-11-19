@@ -148,6 +148,13 @@ pub fn derive(request: MetaRequest<'_>) -> SessionMeta {
                 .as_deref()
                 .map(sanitize_display)
                 .filter(|value| !value.is_empty()),
+            request_id: request
+                .display
+                .source
+                .request_id
+                .as_deref()
+                .map(sanitize_display)
+                .filter(|value| !value.is_empty()),
         },
     }
 }

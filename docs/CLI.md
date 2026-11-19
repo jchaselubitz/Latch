@@ -79,7 +79,9 @@ latch doctor --json
 ```
 
 `latch capabilities --json` reports the product version, protocol version,
-and flags such as `create`, `openViewer`, `localAttach`, and `selfUpdate`.
+and flags such as `create`, `openViewer`, `localAttach`, and `selfUpdate`,
+plus `extensions` such as `agent-launch` and `create-request-id` (`latch create
+--request-id`, which starts at most one session per id).
 An integration should check it before relying on a feature. The session
 creation document and integration flow are in [Integrations](INTEGRATIONS.md).
 
