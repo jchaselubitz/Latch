@@ -1,5 +1,5 @@
 //! Generated from `schemas/remote-access/v2/*.schema.json`; do not edit by hand.
-//! Canonical schema set SHA-256: 9dd8707da286f9e25088b8895b680f697bef1cfb65cee42fe9136cb93485d760
+//! Canonical schema set SHA-256: 120635f39f6016f65516f950bd58074e19c887e5ce0483bb7631b690d853ed24
 
 use serde::{Deserialize, Serialize};
 
