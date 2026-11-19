@@ -202,7 +202,7 @@ struct CommitSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var draft: GitCommitDraftModel
-    @AppStorage("git.commitDraft.googleDisclosureAccepted") private var disclosureAccepted = false
+    @AppStorage("git.commitDraft.providerDisclosureAccepted") private var disclosureAccepted = false
     @State private var showingDisclosure = false
     @State private var sent = false
     @FocusState private var summaryFocused: Bool
@@ -309,14 +309,14 @@ struct CommitSheet: View {
                 draft.dismiss()
                 draft = repository.commitDraftModel()
             }
-            .alert("Send staged changes to Google?", isPresented: $showingDisclosure) {
+            .alert("Send staged changes to an AI provider?", isPresented: $showingDisclosure) {
                 Button("Cancel", role: .cancel) {}
                 Button("Send and Generate") {
                     disclosureAccepted = true
                     draft.startGeneration()
                 }
             } message: {
-                Text("Your Mac sends selected staged source changes to Google Gemini to draft a message. Context is filtered and bounded, so some changes may be omitted. The Gemini key stays on your Mac. Review the editable result before committing.")
+                Text("Your Mac sends selected staged source changes to the AI provider set in Latch on your Mac (Google Gemini or OpenRouter, which forwards them to a model provider) to draft a message. Context is filtered and bounded, so some changes may be omitted. The provider key stays on your Mac. Review the editable result before committing.")
             }
             .onChange(of: repository.mutations.phase) { _, phase in
                 // Done: the repository shows the toast and the new state.
@@ -344,7 +344,7 @@ struct CommitSheet: View {
                     Label(draft.result == nil ? "Generate Message" : "Regenerate Message", systemImage: "sparkles")
                 }
                 .disabled(!draft.canGenerate)
-                .accessibilityHint("Sends selected staged source changes from your Mac to Google Gemini.")
+                .accessibilityHint("Sends selected staged source changes from your Mac to its configured AI provider.")
                 .accessibilityIdentifier("commit.generate")
             }
             if let note = draft.availabilityNote {
@@ -368,7 +368,7 @@ struct CommitSheet: View {
         } header: {
             Text("AI Draft")
         } footer: {
-            Text("Generate sends selected staged changes to Google. Review for accuracy; generation does not commit or push.")
+            Text("Generate sends selected staged changes to the AI provider set on your Mac. Review for accuracy; generation does not commit or push.")
         }
     }
 

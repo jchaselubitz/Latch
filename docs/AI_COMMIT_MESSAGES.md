@@ -1,7 +1,7 @@
 # AI commit-message drafts on the Mac
 
 The Mac gateway can send a bounded, filtered snapshot of **staged** changes to
-Google Gemini and return an editable summary and optional body. It never stages,
+Google Gemini (the default) or [OpenRouter](https://openrouter.ai) and return an editable summary and optional body. It never stages,
 commits, pushes or runs hooks. Manual commit messages remain available without
 provider configuration. The mobile Commit sheet offers explicit Generate/Regenerate actions.
 
@@ -21,25 +21,33 @@ with `--gateway-serve --latch-bin <selected-latch>`, and that helper spawns the
 selected executable as `latch serve`. These are processes of the logged-in user,
 not a root daemon. The gateway, rather than the GUI or helper, reads the key.
 
-In Latch Desktop, open Settings → Repositories to save, replace, or remove the
-key and check local readiness. Settings uses the selected CLI and sends the key
-to it through standard input. A ready status does not verify Google access.
+In Latch Desktop, open Settings → Repositories to choose the provider (Google
+Gemini or OpenRouter), save, replace, or remove its key, set a custom model, and
+check local readiness. For OpenRouter, Settings also lets you pin provider
+routing. Settings uses the selected CLI and sends the key to it through standard
+input. A ready status does not verify provider access.
 
 Alternatively, run the following with that absolute executable path substituted for `latch`:
 
 ```sh
+latch commit-message provider            # gemini (default) or openrouter
 latch commit-message set-key
 latch commit-message status
 latch commit-message model
 ```
 
+`set-key`, `remove-key` and `model` act on the active provider unless
+`--provider gemini|openrouter` is given. Each provider has its own Keychain item
+and model, so switching provider never sends one provider's key to the other.
+
 `set-key` reads a hidden terminal prompt. Run it again to replace the credential.
 For a password-manager pipeline, use `latch commit-message set-key --stdin`; this
 reads one line. Do not put a key in shell arguments, command history, environment
 variables, model files, or a checked-in file. No key is printed. The dedicated
-generic-password Keychain item has service
-`dev.cooperativ.latch.commit-message.gemini` and account `api-key` in the user's
-default Keychain. There is no plaintext fallback or Overlord configuration.
+generic-password Keychain items have service
+`dev.cooperativ.latch.commit-message.gemini` or
+`dev.cooperativ.latch.commit-message.openrouter` and account `api-key` in the
+user's default Keychain. There is no plaintext fallback or Overlord configuration.
 
 Remove the saved credential with:
 
@@ -54,7 +62,31 @@ latch commit-message model gemini-3.5-flash-lite
 ```
 
 This writes only the non-secret identifier to `$LATCH_HOME/commit-message-model`
-(normally `~/.latch/commit-message-model`). The gateway rereads the model and
+(normally `~/.latch/commit-message-model`). `latch commit-message model --reset`
+returns to the default.
+
+### OpenRouter
+
+```sh
+latch commit-message provider openrouter
+latch commit-message set-key                         # OpenRouter API key
+latch commit-message model                           # google/gemini-3.5-flash-lite
+latch commit-message model anthropic/claude-haiku-5.5
+latch commit-message routing                         # automatic by default
+latch commit-message routing --order google-vertex,google-ai-studio --allow-fallbacks false
+latch commit-message routing --reset
+```
+
+The default OpenRouter model is `google/gemini-3.5-flash-lite`; any OpenRouter
+model slug (`vendor/model[:variant]`) may be set. By default OpenRouter selects
+the upstream provider. `routing --order` sends OpenRouter's
+[provider routing](https://openrouter.ai/docs/guides/routing/provider-selection)
+`order`, and `--allow-fallbacks false` restricts requests to the listed
+providers. The provider choice, OpenRouter model and routing are stored as
+non-secret JSON in `$LATCH_HOME/commit-message-settings.json`; an invalid file
+fails closed as unavailable. OpenRouter forwards source to the upstream model
+provider; the OpenRouter account's own privacy and data-retention settings
+apply. The gateway rereads the model and
 Keychain credential on every generation request, so changes need neither a
 mobile release nor a gateway restart. Use the same `LATCH_HOME` as the desktop
 when changing the model; shell environment inheritance is not required.
@@ -64,7 +96,7 @@ session. Configure with that same executable, while the login Keychain is
 unlocked. A different build/signature or a locked Keychain may prevent access.
 The gateway and `status` command disable Keychain interaction process-wide: they
 fail closed instead of opening a permission dialog. `status` checks local access
-only and never contacts Google. If the gateway reports unavailable, check its
+only and never contacts a provider. If the gateway reports unavailable, check its
 capabilities using the existing authenticated connection, compare its selected
 CLI path and user with the setup process, then run `set-key` interactively with
 that exact executable. Do not broaden Keychain access to all applications.
@@ -73,7 +105,7 @@ that exact executable. Do not broaden Keychain access to all applications.
 
 Discover `endpoints.gitCommitMessage == true` separately from
 `features.gitCommitMessage.state` (`unconfigured`, `ready`, `unavailable`). Ready
-means the local model/key can be read; it does not prove Google accepts the key
+means the local model/key can be read; it does not prove the provider accepts the key
 or that the project has access to the model. Missing/false support means manual
 messages. No model substitution or automatic retry occurs.
 
@@ -82,13 +114,13 @@ Control grant. Its canonical request/response definitions live in
 `schemas/remote-access/v2/git-commit-message.schema.json`. The body contains
 `requestId`, an absolute repository `path`, and the reviewed `expected` branch,
 HEAD and index from status. The request body is bounded to 8 KiB. Only an explicit
-Generate/Regenerate action after a Google source-disclosure explanation may call
+Generate/Regenerate action after a provider source-disclosure explanation may call
 this endpoint; do not generate on sheet open, polling or commit submission.
 
 The collector captures a private staged index, excludes unstaged and untracked
 content, and filters sensitive paths and detectable credentials. Filtering is
 conservative and incomplete; the user must still understand that selected source
-is sent to Google. Context is bounded to 64 KiB and includes safe metadata and
+is sent to the configured provider. Context is bounded to 64 KiB and includes safe metadata and
 distributed patch coverage. Branch names, local roots and request identity are
 not sent. Original source identity and omission/coverage metadata accompany the
 editable draft. Source is revalidated immediately before sending and after
@@ -102,6 +134,15 @@ Redirects and environment proxies are disabled. Platform TLS verification stays
 enabled. The API format follows Google's [generateContent reference](https://ai.google.dev/api/generate-content).
 Prompts/source and raw provider failures are never persisted or logged by Latch.
 Google still receives the explicitly requested source disclosure.
+
+With OpenRouter the fixed destination is
+`https://openrouter.ai/api/v1/chat/completions`, with the key in a sensitive
+`Authorization: Bearer` header and an `X-Title: Latch` attribution header. The
+request asks for strict JSON-schema output; a reply wrapped in a single JSON
+code fence is accepted, and the result passes the same validation as Gemini
+drafts. `content_filter` finishes and model refusals map to provider refusal;
+402/other statuses to provider error; 429 to rate limited; 408/504/524 to
+timed out. The same proxy, redirect, size and timeout limits apply.
 
 The request has a 65-second overall generation deadline; context capture has its
 existing 30-second limit and the provider has a 5-second connect/30-second total
@@ -123,7 +164,7 @@ Cancel an admitted request using Control-authorized
 bounded to 256 bytes. Cancellation is scoped to the authenticated device and
 returns 204 even if the request already finished or is unknown. The original
 pending request returns typed `cancelled`; its provider future is dropped. This
-cannot recall data already transmitted to Google. Clients should cancel before
+cannot recall data already transmitted to the provider. Clients should cancel before
 discarding an in-flight draft and must also reject late responses using their
 sheet/repository/text-edit identity. Cancellation is transient and carries no
 durable receipt. The client must never apply a result to a newer source snapshot
@@ -133,8 +174,8 @@ separate explicit action through the existing reviewed-index flow.
 ## Mobile Commit sheet
 
 Generate Message asks for first-use confirmation that selected staged source is
-sent to Google. Acceptance is stored on the phone; later Generate/Regenerate
-still requires a tap and keeps the Google disclosure visible. No generation
+sent to the provider set on the Mac. Acceptance is stored on the phone; later Generate/Regenerate
+still requires a tap and keeps the provider disclosure visible. No generation
 runs when opening the sheet, refreshing status, typing or submitting a commit.
 Keys and model settings stay on the Mac. Old gateways and gateways without
 usable configuration retain manual Summary/Description entry and commits.

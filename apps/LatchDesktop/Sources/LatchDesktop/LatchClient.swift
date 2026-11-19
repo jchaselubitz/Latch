@@ -207,19 +207,56 @@ actor LatchClient {
         try request(["remote-access", "audit", "--json"])
     }
 
+    // MARK: - AI commit messages
+
     /// Use the selected gateway executable so Keychain sees the same code identity.
-    func setGeminiKey(_ key: String) throws {
-        try run(["commit-message", "set-key", "--stdin"], stdin: Data((key + "\n").utf8))
+    func setCommitMessageKey(_ key: String, provider: CommitMessageProvider) throws {
+        try run(["commit-message", "set-key", "--stdin", "--provider", provider.rawValue],
+                stdin: Data((key + "\n").utf8))
     }
 
-    func removeGeminiKey() throws {
-        try run(["commit-message", "remove-key"])
+    func removeCommitMessageKey(provider: CommitMessageProvider) throws {
+        try run(["commit-message", "remove-key", "--provider", provider.rawValue])
     }
 
-    func geminiKeyStatus() throws -> String {
+    /// Structured configuration. Older CLIs without `--json` throw, and the
+    /// caller falls back to `commitMessageStatusText()`.
+    func commitMessageStatus() throws -> CommitMessageStatus {
+        try request(["commit-message", "status", "--json"])
+    }
+
+    func commitMessageStatusText() throws -> String {
         let data = try ProcessRunner.run(executableURL: executableURL,
             arguments: ["commit-message", "status"], stdin: nil, timeout: timeout)
         return String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// CLIs released before provider selection accept only a Gemini key.
+    func setGeminiKeyLegacy(_ key: String) throws {
+        try run(["commit-message", "set-key", "--stdin"], stdin: Data((key + "\n").utf8))
+    }
+
+    func removeGeminiKeyLegacy() throws {
+        try run(["commit-message", "remove-key"])
+    }
+
+    func setCommitMessageProvider(_ provider: CommitMessageProvider) throws {
+        try run(["commit-message", "provider", provider.rawValue])
+    }
+
+    /// A nil model returns the provider to its default model.
+    func setCommitMessageModel(_ model: String?, provider: CommitMessageProvider) throws {
+        if let model {
+            try run(["commit-message", "model", "--provider", provider.rawValue, "--", model])
+        } else {
+            try run(["commit-message", "model", "--provider", provider.rawValue, "--reset"])
+        }
+    }
+
+    /// An empty order lets OpenRouter select the provider.
+    func setOpenRouterRouting(order: [String], allowFallbacks: Bool) throws {
+        try run(["commit-message", "routing", "--order", order.joined(separator: ","),
+                 "--allow-fallbacks", allowFallbacks ? "true" : "false"])
     }
 
     /// Pending content-free attention events the gateway spooled.

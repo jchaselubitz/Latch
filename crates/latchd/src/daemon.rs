@@ -390,7 +390,7 @@ pub fn run(config: Config, ready: impl FnOnce()) -> Result<()> {
         parser_resets: AtomicU64::new(0),
         config,
     });
-    install_signal_handlers(&shared);
+    install_signal_handlers();
 
     {
         let shared = Arc::clone(&shared);
@@ -504,45 +504,16 @@ fn accept_error_is_transient(error: &io::Error) -> bool {
     ) || error.kind() == ErrorKind::WouldBlock
 }
 
-static SOCKET_TO_UNLINK: Mutex<Option<std::ffi::CString>> = Mutex::new(None);
-static RECORD_TO_UNLINK: Mutex<Option<std::ffi::CString>> = Mutex::new(None);
-/// The child's pid while it is alive and unreaped; zero afterwards, so a
-/// late signal handler never sends `SIGHUP` to whatever process the kernel
-/// reissued that pid to.
-static CHILD_TO_HUP: AtomicU64 = AtomicU64::new(0);
+// Signal handlers only request termination. The lifecycle thread owns cleanup.
+static TERMINATE_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 extern "C" fn on_terminate(_signal: libc::c_int) {
-    // Async-signal-safe only: kill, unlink, _exit.
-    let pid = CHILD_TO_HUP.load(Ordering::Relaxed) as i32;
-    if pid > 0 {
-        // SAFETY: signalling the child group and unlinking our own socket.
-        unsafe {
-            libc::kill(-pid, libc::SIGHUP);
-        }
-    }
-    for path in [&SOCKET_TO_UNLINK, &RECORD_TO_UNLINK] {
-        if let Ok(guard) = path.try_lock() {
-            if let Some(path) = guard.as_ref() {
-                unsafe {
-                    libc::unlink(path.as_ptr());
-                }
-            }
-        }
-    }
-    unsafe { libc::_exit(0) }
+    // Let the lifecycle thread signal and wait for the child outside signal
+    // context, so a clean daemon exit retains confirmed child termination.
+    TERMINATE_REQUESTED.store(true, Ordering::Relaxed);
 }
 
-fn install_signal_handlers(shared: &Shared) {
-    CHILD_TO_HUP.store(shared.child_pid as u64, Ordering::Relaxed);
-    if let Ok(path) = std::ffi::CString::new(shared.config.socket.as_os_str().as_encoded_bytes()) {
-        *SOCKET_TO_UNLINK.lock().unwrap() = Some(path);
-    }
-    if let Some(dir) = &shared.config.session_dir {
-        let record = dir.join(KERNEL_RECORD);
-        if let Ok(path) = std::ffi::CString::new(record.as_os_str().as_encoded_bytes()) {
-            *RECORD_TO_UNLINK.lock().unwrap() = Some(path);
-        }
-    }
+fn install_signal_handlers() {
     // SAFETY: installing handlers with plain function pointers.
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_IGN);
@@ -565,6 +536,9 @@ fn lifecycle_loop(shared: &Shared) {
         let deadline =
             Instant::now() + Duration::from_millis(shared.config.launch_timeout_ms.max(1));
         while marker.exists() {
+            if TERMINATE_REQUESTED.load(Ordering::Relaxed) {
+                shutdown(shared);
+            }
             if shared
                 .config
                 .session_dir
@@ -579,9 +553,17 @@ fn lifecycle_loop(shared: &Shared) {
     }
 
     let Some(dir) = &shared.config.session_dir else {
-        return;
+        loop {
+            if TERMINATE_REQUESTED.load(Ordering::Relaxed) {
+                shutdown(shared);
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
     };
     loop {
+        if TERMINATE_REQUESTED.load(Ordering::Relaxed) {
+            shutdown(shared);
+        }
         if !dir.exists() {
             shutdown(shared);
         }
@@ -644,7 +626,6 @@ fn reader_loop(shared: &Arc<Shared>, mut output: File) {
         let mut session = shared.session.lock().unwrap();
         session.exit = Some(exit.clone());
         session.activity = exit.exited_at;
-        CHILD_TO_HUP.store(0, Ordering::Relaxed);
         let _ = pty::reap(shared.child_pid);
         session.surface.as_ref().map(|surface| surface.id)
     };
@@ -986,9 +967,31 @@ fn shutdown(shared: &Shared) -> ! {
             let _ = pty::signal_group(shared.child_pid, libc::SIGHUP);
         }
     }
+    // The reader writes exit.json only after waitid confirms termination.
+    // Keep the kernel identity for later inspection; absence is never an exit.
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        let retained = match &shared.config.session_dir {
+            Some(dir) => dir.join(EXIT_RECORD).is_file(),
+            None => shared.session.lock().unwrap().exit.is_some(),
+        };
+        if retained {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
     let _ = fs::remove_file(&shared.config.socket);
-    if let Some(dir) = &shared.config.session_dir {
-        let _ = fs::remove_file(dir.join(KERNEL_RECORD));
+    // An abandoned create never published a usable session identity. Preserve
+    // its cleanup behavior rather than turning it into retained history.
+    if shared
+        .config
+        .launch_marker
+        .as_ref()
+        .is_some_and(|marker| marker.exists())
+    {
+        if let Some(dir) = &shared.config.session_dir {
+            let _ = fs::remove_file(dir.join(KERNEL_RECORD));
+        }
     }
     std::process::exit(0)
 }

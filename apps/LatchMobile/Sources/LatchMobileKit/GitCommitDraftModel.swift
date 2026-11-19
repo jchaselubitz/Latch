@@ -9,16 +9,16 @@ public struct GitCommitDraftError: Error, Sendable {
     public var message: String {
         switch failure.code {
         case .unsupported: return "Update Latch on your Mac to generate drafts. You can still write a message."
-        case .unconfigured: return "Set a Gemini key on your Mac with latch commit-message set-key, then try again."
+        case .unconfigured: return "Set an AI provider key on your Mac in Latch Settings or with latch commit-message set-key, then try again."
         case .unauthorized: return "This phone needs a current Control grant on your Mac."
         case .noStagedChanges: return "Stage changes before generating a draft."
         case .staleSource: return "The branch, HEAD or staged changes changed. Refresh, review the staged files and generate again."
         case .unusableContext, .contextTooLarge: return "These staged changes cannot be safely included in a draft. Write a message manually."
-        case .providerRefusal: return "Google declined to generate a draft. Try again or write a message."
+        case .providerRefusal: return "The AI provider declined to generate a draft. Try again or write a message."
         case .rateLimited: return "Drafting is busy or rate limited. Try again in \(failure.retryAfterSeconds ?? 60) seconds."
         case .timedOut: return "Draft generation timed out. Try again or write a message."
-        case .cancelled: return "Generation cancelled. Source already sent to Google cannot be recalled."
-        case .providerError: return "Google could not generate a draft. Check the Gemini key and model on your Mac, or write a message."
+        case .cancelled: return "Generation cancelled. Source already sent to the AI provider cannot be recalled."
+        case .providerError: return "The AI provider could not generate a draft. Check the provider key and model on your Mac, or write a message."
         case .gitUnavailable, .invalidRequest: return "Your Mac could not read these staged changes for a draft. Refresh or write a message."
         }
     }
@@ -83,8 +83,8 @@ public final class GitCommitDraftModel {
         guard repository.isOnline() else { return "Reconnect to your Mac to generate a draft." }
         guard repository.hasAccess() else { return GitAccessError.unavailable.message }
         switch readiness() {
-        case .unconfigured: return "Set a Gemini key on your Mac with latch commit-message set-key, then reconnect to refresh readiness."
-        case .unavailable: return "Your Mac cannot access its Gemini configuration. Check the selected Latch CLI and Keychain on your Mac."
+        case .unconfigured: return "Set an AI provider key on your Mac in Latch Settings or with latch commit-message set-key, then reconnect to refresh readiness."
+        case .unavailable: return "Your Mac cannot access its AI provider configuration. Check the selected Latch CLI and Keychain on your Mac."
         case nil: return "Your Mac has not reported draft readiness. Reconnect or write a message manually."
         case .ready: return repository.commitBlockReason
         }
@@ -99,7 +99,7 @@ public final class GitCommitDraftModel {
         guard let coverage = result?.coverage,
               !coverage.omissions.isEmpty || coverage.patchFiles < coverage.totalFiles
         else { return nil }
-        return "Partial context: Google received patches for \(coverage.patchFiles) of \(coverage.totalFiles) staged files. Some content was omitted or represented only by metadata. Review the message against all staged changes."
+        return "Partial context: the AI provider received patches for \(coverage.patchFiles) of \(coverage.totalFiles) staged files. Some content was omitted or represented only by metadata. Review the message against all staged changes."
     }
 
     public func editSummary(_ text: String) { summary = text; revision &+= 1 }
@@ -157,7 +157,7 @@ public final class GitCommitDraftModel {
                 }
                 guard !response.summary.isEmpty, response.summary.count <= 72,
                       !response.summary.contains("\n"), !response.summary.contains("\r") else {
-                    notice = "Google returned an invalid summary. Write a message or generate again."
+                    notice = "The AI provider returned an invalid summary. Write a message or generate again."
                     finish(id)
                     return
                 }
@@ -192,7 +192,7 @@ public final class GitCommitDraftModel {
         task?.cancel()
         task = nil
         isGenerating = false
-        notice = "Generation cancelled. Source already sent to Google cannot be recalled."
+        notice = "Generation cancelled. Source already sent to the AI provider cannot be recalled."
         let cancel = cancel
         Task { await cancel(id) }
     }

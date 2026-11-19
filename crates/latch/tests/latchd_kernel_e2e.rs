@@ -1048,3 +1048,45 @@ fn abrupt_daemon_failure_is_reported_lost_and_remains_removable() {
         assert!(!h.home.join("sessions").join(&id).exists());
     });
 }
+
+#[test]
+fn clean_daemon_shutdown_retains_confirmed_exit() {
+    with_kernel("clean-daemon-exit", |h| {
+        let id = h.create("printf 'ready for shutdown\\n'; sleep 30");
+        h.wait_visible(&id, "ready for shutdown");
+        let stat = latchd::client::stat(&h.socket(&id)).unwrap();
+        assert_eq!(unsafe { libc::kill(stat.daemon_pid, libc::SIGTERM) }, 0);
+        wait_until(
+            || !h.socket(&id).exists(),
+            "daemon did not stop",
+            Duration::from_secs(5),
+        );
+        let report = h.inspect(&id);
+        assert_eq!(report["state"], "exited", "{report}");
+        assert!(report["exit"]["exited_at"].is_string(), "{report}");
+        h.remove(&id);
+    });
+}
+
+#[test]
+fn daemon_shutdown_without_confirmed_child_exit_stays_lost() {
+    with_kernel("unconfirmed-daemon-exit", |h| {
+        let id = h.create("trap '' HUP; printf 'ignoring hangup\\n'; sleep 30");
+        h.wait_visible(&id, "ignoring hangup");
+        let stat = latchd::client::stat(&h.socket(&id)).unwrap();
+        assert_eq!(unsafe { libc::kill(stat.daemon_pid, libc::SIGTERM) }, 0);
+        wait_until(
+            || !h.socket(&id).exists(),
+            "daemon did not stop",
+            Duration::from_secs(6),
+        );
+        let report = h.inspect(&id);
+        assert_eq!(report["state"], "lost", "{report}");
+        assert!(report["exit"].is_null(), "{report}");
+        // The child was intentionally uncooperative; clean up only this test's group.
+        unsafe {
+            libc::kill(-stat.child_pid, libc::SIGKILL);
+        }
+        h.remove(&id);
+    });
+}

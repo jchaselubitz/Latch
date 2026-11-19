@@ -267,7 +267,7 @@
         }
       },
       "additionalProperties": false,
-      "description": "features.gitCommitMessage readiness, present only when endpoints.gitCommitMessage is true. Ready means local configuration accessible, not verified provider/model availability; unconfigured means no credential, unavailable means local configuration cannot be used. No credential details. Default model gemini-3.5-flash-lite, configured independently on Mac."
+      "description": "features.gitCommitMessage readiness, present only when endpoints.gitCommitMessage is true. Ready means local configuration accessible, not verified provider/model availability; unconfigured means no credential, unavailable means local configuration cannot be used. No credential or provider details. The Mac chooses the provider (Gemini by default, or OpenRouter) and model (default gemini-3.5-flash-lite) independently."
     },
     "GitCommitMessageCancelRequest": {
       "type": "object",

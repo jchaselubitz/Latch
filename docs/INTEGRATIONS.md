@@ -204,6 +204,18 @@ would take the session back from the person who just claimed it.
 the terminal, so a remote client can end a session it can see without a shell
 on the Mac; see the stop section above.
 
+A client on the same Mac finds the gateway in one of two places. A standalone
+`latch serve` binds `127.0.0.1:4610` and keeps its token in
+`$LATCH_HOME/serve.token`. With Remote Access enabled, the Remote Link
+supervisor runs the gateway instead, on an ephemeral loopback port: its address
+is the `url` in
+`$LATCH_HOME/remote-access/runtime/remote-link-gateway-ready.json` (schema
+[`gateway-readiness.schema.json`](../schemas/remote-access/v2/gateway-readiness.schema.json))
+and its token is in `remote-link-gateway.token` beside it. Only one gateway
+holds the Conversation Hub at a time, so a client should try both and use the
+one that serves the conversation endpoint. Overlord's runner depends on these
+two file names to deliver answers; renaming them is a breaking change for it.
+
 The private workspace packages `@latch/client` and `@latch/terminal-react`
 provide the gateway and React terminal seams for repository development. Their
 scope, limits, and v2 protocol details are in [REMOTE_SDK.md](REMOTE_SDK.md).

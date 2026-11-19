@@ -343,7 +343,30 @@ pub(super) fn list(home: &LatchHome) -> Result<Vec<SessionInfo>> {
 }
 
 pub(super) fn inspect(home: &LatchHome, id: &SessionId) -> Result<Option<SessionInfo>> {
-    Ok(stat(home, id)?.map(info))
+    if let Some(stat) = stat(home, id)? {
+        return Ok(Some(info(stat)));
+    }
+    // A cleanly stopped daemon cannot serve stat, but its reader may have
+    // retained a verified exit. Never infer exit from a missing socket.
+    let paths = home.session(id);
+    let exit_path = paths.dir().join(latchd::paths::EXIT_RECORD);
+    let exit: latchd::protocol::Exit = match fs::read(exit_path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).context("cannot read retained exit")?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let metadata = meta::read(&paths)?;
+    Ok(Some(SessionInfo {
+        id: id.to_string(),
+        state: SessionState::Exited,
+        size: metadata.initial_size,
+        activity: UNIX_EPOCH + Duration::from_secs(exit.exited_at),
+        attached: 0,
+        pane_pid: 0,
+        exit_status: exit.status,
+        exited_at: Some(UNIX_EPOCH + Duration::from_secs(exit.exited_at)),
+        signal: exit.signal,
+    }))
 }
 
 pub(super) fn pane_metrics(home: &LatchHome, id: &SessionId) -> Result<PaneMetrics> {

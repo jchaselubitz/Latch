@@ -285,7 +285,7 @@ enum Command {
         #[command(subcommand)]
         command: Option<ServeCommand>,
     },
-    /// Configure Mac-held Gemini credentials and commit-message model.
+    /// Configure Mac-held commit-message provider (Gemini or OpenRouter), key and model.
     CommitMessage {
         #[command(subcommand)]
         command: CommitMessageCommand,
@@ -327,18 +327,53 @@ enum Command {
 
 #[derive(Subcommand)]
 enum CommitMessageCommand {
-    /// Set or replace the Gemini key in macOS Keychain (hidden terminal prompt).
+    /// Set or replace a provider key in macOS Keychain (hidden terminal prompt).
     SetKey {
         /// Read one line from stdin instead of the hidden terminal prompt.
         #[arg(long)]
         stdin: bool,
+        /// `gemini` or `openrouter`; defaults to the active provider.
+        #[arg(long)]
+        provider: Option<String>,
     },
-    /// Remove the dedicated Gemini credential from Keychain.
-    RemoveKey,
-    /// Show noninteractive local configuration readiness; never contacts Google.
-    Status,
-    /// Show or set a non-secret Gemini model, picked up on the next request.
-    Model { value: Option<String> },
+    /// Remove a provider's dedicated credential from Keychain.
+    RemoveKey {
+        /// `gemini` or `openrouter`; defaults to the active provider.
+        #[arg(long)]
+        provider: Option<String>,
+    },
+    /// Show noninteractive local configuration readiness; never contacts a provider.
+    Status {
+        /// Emit machine-readable JSON (no key material).
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show or switch the active provider (`gemini` or `openrouter`).
+    Provider { value: Option<String> },
+    /// Show or set a non-secret model, picked up on the next request.
+    Model {
+        value: Option<String>,
+        /// `gemini` or `openrouter`; defaults to the active provider.
+        #[arg(long)]
+        provider: Option<String>,
+        /// Return to the provider's default model.
+        #[arg(long, conflicts_with = "value")]
+        reset: bool,
+    },
+    /// Show or set OpenRouter provider routing. Without an order, OpenRouter
+    /// selects the provider.
+    Routing {
+        /// Comma-separated OpenRouter provider slugs to try in order;
+        /// an empty string clears the order.
+        #[arg(long, value_name = "SLUGS")]
+        order: Option<String>,
+        /// Whether OpenRouter may use other providers when the listed ones fail.
+        #[arg(long, value_name = "BOOL")]
+        allow_fallbacks: Option<bool>,
+        /// Return to automatic provider selection.
+        #[arg(long)]
+        reset: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -763,20 +798,35 @@ fn dispatch(command: Option<Command>) -> Result<()> {
                 }),
             }
         }
-        Some(Command::CommitMessage { command }) => match command {
-            CommitMessageCommand::SetKey { stdin } => {
-                latch::cli::commit_message::configure("set-key", None, stdin)
-            }
-            CommitMessageCommand::RemoveKey => {
-                latch::cli::commit_message::configure("remove-key", None, false)
-            }
-            CommitMessageCommand::Status => {
-                latch::cli::commit_message::configure("status", None, false)
-            }
-            CommitMessageCommand::Model { value } => {
-                latch::cli::commit_message::configure("model", value.as_deref(), false)
-            }
-        },
+        Some(Command::CommitMessage { command }) => {
+            use latch::cli::commit_message::{configure, Action};
+            configure(match command {
+                CommitMessageCommand::SetKey { stdin, provider } => {
+                    Action::SetKey { provider, stdin }
+                }
+                CommitMessageCommand::RemoveKey { provider } => Action::RemoveKey { provider },
+                CommitMessageCommand::Status { json } => Action::Status { json },
+                CommitMessageCommand::Provider { value } => Action::Provider { value },
+                CommitMessageCommand::Model {
+                    value,
+                    provider,
+                    reset,
+                } => Action::Model {
+                    value,
+                    provider,
+                    reset,
+                },
+                CommitMessageCommand::Routing {
+                    order,
+                    allow_fallbacks,
+                    reset,
+                } => Action::Routing {
+                    order,
+                    allow_fallbacks,
+                    reset,
+                },
+            })
+        }
         Some(Command::RemoteAccess { command }) => {
             let home = LatchHome::from_env()?;
             match command {
