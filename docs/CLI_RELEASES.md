@@ -10,7 +10,7 @@ lifecycle and uses the selected CLI installation.
 curl -fsSL https://raw.githubusercontent.com/jchaselubitz/Latch/main/scripts/install-cli.sh | bash
 ```
 
-The installer selects the native Apple Silicon or Intel archive, verifies its
+The installer downloads the Apple Silicon archive, verifies its
 entry in `checksums.txt`, validates the payload manifest and all three code
 signatures, checks the three component versions, and installs them in
 `~/.local/bin`.
@@ -55,7 +55,7 @@ refused and must be updated by their owner.
    all three binaries, notarizes the archive, verifies its member manifest,
    publishes checksums, and attaches provenance.
 
-For a local same-architecture archive:
+For a local archive, on an Apple Silicon Mac:
 
 ```bash
 just release-cli

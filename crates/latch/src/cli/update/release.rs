@@ -156,9 +156,8 @@ pub fn expected_digest(manifest: &str, asset_name: &str) -> Option<String> {
 pub fn host_target() -> Result<&'static str> {
     match (std::env::consts::OS, std::env::consts::ARCH) {
         ("macos", "aarch64") => Ok("aarch64-apple-darwin"),
-        ("macos", "x86_64") => Ok("x86_64-apple-darwin"),
         (os, arch) => bail!(
-            "Latch publishes macOS builds only; there is no released binary for {arch}-{os}. \
+            "Latch publishes Apple Silicon macOS builds only; there is no released binary for {arch}-{os}. \
              Build from source with `cargo build --release --package latch`."
         ),
     }
@@ -177,8 +176,6 @@ mod tests {
              "browser_download_url": "https://example.invalid/checksums.txt"},
             {"name": "latch-0.2608101202.0-aarch64-apple-darwin.zip",
              "browser_download_url": "https://example.invalid/arm.zip"},
-            {"name": "latch-0.2608101202.0-x86_64-apple-darwin.zip",
-             "browser_download_url": "https://example.invalid/intel.zip"},
             {"name": "Latch-0.2608101202.0-macos.zip",
              "browser_download_url": "https://example.invalid/app.zip"}
         ]
@@ -214,12 +211,7 @@ mod tests {
                 .map(|asset| asset.url.as_str()),
             Some("https://example.invalid/arm.zip")
         );
-        assert_eq!(
-            release
-                .cli_archive("x86_64-apple-darwin")
-                .map(|asset| asset.url.as_str()),
-            Some("https://example.invalid/intel.zip")
-        );
+        assert!(release.cli_archive("x86_64-apple-darwin").is_none());
         assert!(release.cli_archive("aarch64-unknown-linux-gnu").is_none());
         assert!(release.checksums().is_some());
     }
@@ -252,11 +244,11 @@ mod tests {
     #[test]
     fn digests_are_matched_by_file_name_and_not_by_recorded_path() {
         let manifest = "\
-fc9950aeea35633a058d5cf4cea3ce1e0dadd9f64f75fd768eed3dd3bf283a94  dist/latch-1.0.0-aarch64-apple-darwin.zip
-beb1f7660ead14276a14733391ad369f4dc2f8b6642890d5a96b19539832256b  dist/latch-1.0.0-x86_64-apple-darwin.zip
+fc9950aeea35633a058d5cf4cea3ce1e0dadd9f64f75fd768eed3dd3bf283a94  dist/Latch-1.0.0-macos.zip
+beb1f7660ead14276a14733391ad369f4dc2f8b6642890d5a96b19539832256b  dist/latch-1.0.0-aarch64-apple-darwin.zip
 ";
         assert_eq!(
-            expected_digest(manifest, "latch-1.0.0-x86_64-apple-darwin.zip").as_deref(),
+            expected_digest(manifest, "latch-1.0.0-aarch64-apple-darwin.zip").as_deref(),
             Some("beb1f7660ead14276a14733391ad369f4dc2f8b6642890d5a96b19539832256b")
         );
         assert_eq!(expected_digest(manifest, "checksums.txt"), None);

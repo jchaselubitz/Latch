@@ -7,7 +7,7 @@ another terminal moves that surface there.
 
 ## Install Latch
 
-Latch currently supports macOS on Apple Silicon and Intel. Install the CLI
+Latch currently supports macOS on Apple Silicon. Install the CLI
 payload with:
 
 ```bash

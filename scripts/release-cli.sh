@@ -8,19 +8,12 @@
 # after importing the Developer ID certificate into a temporary keychain.
 set -euo pipefail
 
-target="${1:-}"
-if [[ -z "$target" ]]; then
-  case "$(uname -m)" in
-    arm64) target="aarch64-apple-darwin" ;;
-    x86_64) target="x86_64-apple-darwin" ;;
-    *) echo "Unsupported host architecture: $(uname -m)" >&2; exit 1 ;;
-  esac
+# Apple Silicon is the only released target.
+target="${1:-aarch64-apple-darwin}"
+if [[ "$target" != "aarch64-apple-darwin" ]]; then
+  echo "Unsupported release target: $target" >&2
+  exit 1
 fi
-
-case "$target" in
-  aarch64-apple-darwin|x86_64-apple-darwin) ;;
-  *) echo "Unsupported release target: $target" >&2; exit 1 ;;
-esac
 
 version="$(sed -nE 's/^version = "([0-9]+\.[0-9]+\.[0-9]+)"$/\1/p' Cargo.toml)"
 if [[ -z "$version" ]]; then

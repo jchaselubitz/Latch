@@ -42,11 +42,11 @@ if [[ "${1:-}" == "--verify-payload" ]]; then
     exit
 fi
 
-case "$(uname -m)" in
-    arm64) target="aarch64-apple-darwin" ;;
-    x86_64) target="x86_64-apple-darwin" ;;
-    *) echo "Latch supports Apple Silicon and Intel Macs." >&2; exit 1 ;;
-esac
+if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "arm64" ]]; then
+    echo "Latch is released for Apple Silicon Macs only." >&2
+    exit 1
+fi
+target="aarch64-apple-darwin"
 
 tag="$(curl -fsSL "https://api.github.com/repos/$repository/releases/latest" |
     sed -nE 's/^[[:space:]]*"tag_name":[[:space:]]*"([^"]+)",?$/\1/p' | head -n 1)"

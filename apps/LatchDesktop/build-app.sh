@@ -22,7 +22,7 @@ fi
 # into the application bundle. Keep a dedicated scratch path so SwiftPM does
 # not wipe the assembled .app.
 arm64_build_dir="$desktop_dir/.build/arm64-release"
-rm -rf -- "$arm64_build_dir" "$desktop_dir/.build/x86_64-release"
+rm -rf -- "$arm64_build_dir"
 
 # SwiftPM links with the deployment target as the SDK version too, so the
 # binary would claim it was built against macOS 13 and AppKit would draw it

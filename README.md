@@ -31,7 +31,7 @@ install the CLI independently with:
 curl -fsSL https://raw.githubusercontent.com/jchaselubitz/Latch/main/scripts/install-cli.sh | bash
 ```
 
-The installer chooses the Apple Silicon or Intel archive, verifies it against
+The installer downloads the Apple Silicon archive, verifies it against
 the release's `checksums.txt`, verifies all three Developer ID signatures and
 the payload manifest, and installs `latch`, `latch-remote`, and `latchd` in
 `~/.local/bin`. See the [getting-started guide](docs/GETTING_STARTED.md)

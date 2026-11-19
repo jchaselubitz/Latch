@@ -150,10 +150,8 @@ to the release's `checksums.txt` instead of publishing a fifth sidecar asset.
 Without that attachment the in-app updater has nothing to find; if the upload
 does not happen the script prints the recovery commands.
 
-A complete release contains exactly the Apple Silicon desktop ZIP, the two
-architecture-specific CLI ZIPs, and `checksums.txt`. The CLI still ships Intel
-and Apple Silicon archives; the desktop app does not. The CLI is installed
-independently. The app validates protocol version 2 and requires CLI version
+A complete release contains exactly the Apple Silicon desktop ZIP, the Apple
+Silicon CLI ZIP, and `checksums.txt`. The CLI is installed independently. The app validates protocol version 2 and requires CLI version
 `0.2608161432.0` or newer before its first refresh; this is the first release
 whose list/inspect contracts match the desktop models. A self-update
 initiated in Settings delegates to `latch update`, which atomically replaces
