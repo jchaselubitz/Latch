@@ -150,6 +150,11 @@ struct SessionsView: View {
     private func sessionRow(_ session: SessionSummary) -> some View {
         SessionRow(session: session)
             .tag(session.id)
+            .contentShape(Rectangle())
+            .simultaneousGesture(TapGesture(count: 2).onEnded {
+                guard session.state.isAttachable && store.canAttachSessions else { return }
+                Task { await store.open(session.id) }
+            })
             .contextMenu {
                 let canOpen = session.state.isAttachable && store.canAttachSessions
                 let otherLiveIDs = store.otherLiveSessionIDs(keeping: session.id)
