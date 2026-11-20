@@ -127,7 +127,7 @@ latch create --manifest-file - --json --request-id 2f1c8a0e-6a1b-4f7e-9d2c-5b8e7
   Terminal size and display fields do not bind it.
 - When the id refuses the launch, nothing is started, the exit status is 65,
   and with `--json` standard output carries
-  `{"protocolVersion": 1, "error": {"code": "...", "message": "..."}}`:
+  `{"protocolVersion": 2, "error": {"code": "...", "message": "..."}}`:
   - `request_id_conflict`: the id already names a different launch.
   - `request_id_session_removed`: the id already started a session
     (`error.sessionId`) that has since been removed; it is never started again.

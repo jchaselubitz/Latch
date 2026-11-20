@@ -86,10 +86,18 @@ public final class GitCommitDraftModel {
         case .unconfigured: return "Set an AI provider key on your Mac in Latch Settings or with latch commit-message set-key, then reconnect to refresh readiness."
         case .unavailable: return "Your Mac cannot access its AI provider configuration. Check the selected Latch CLI and Keychain on your Mac."
         case nil: return "Your Mac has not reported draft readiness. Reconnect or write a message manually."
-        case .ready: return repository.commitBlockReason
+        case .ready:
+            if repository.isLoading {
+                return "Wait for the repository refresh, then try Generate Message again."
+            }
+            if let reason = repository.commitBlockReason { return reason }
+            guard repository.canCommit, let identity, !identity.expected.index.isEmpty else {
+                return "Refresh and review the staged files before generating a draft."
+            }
+            return nil
         }
     }
-    public var canGenerate: Bool { active && !isGenerating && availabilityNote == nil && repository.canCommit }
+    public var canGenerate: Bool { active && !isGenerating && availabilityNote == nil }
     public var requiresReview: Bool {
         guard result != nil else { return false }
         return isStale || reviewedIdentity != identity
@@ -119,7 +127,13 @@ public final class GitCommitDraftModel {
 
     /// Called only by the explicit Generate action, after the UI's disclosure.
     public func startGeneration() {
-        guard canGenerate, let identity, !identity.expected.index.isEmpty else { return }
+        guard active, !isGenerating else { return }
+        // The disclosure can stay open while the link or staged status changes.
+        if let reason = availabilityNote {
+            notice = reason
+            return
+        }
+        guard let identity else { return }
         let id = UUID().uuidString.lowercased()
         let textRevision = revision
         requestID = id

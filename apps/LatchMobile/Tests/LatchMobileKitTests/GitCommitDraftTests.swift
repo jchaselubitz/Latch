@@ -150,6 +150,29 @@ final class GitCommitDraftTests: XCTestCase {
         XCTAssertEqual(model.summary, "Manual fallback")
     }
 
+    func testAvailabilityChangeWhileConfirmingExplainsWhyGenerationDidNotStart() async throws {
+        let fixture = try Fixture()
+        let model = await fixture.model()
+        model.editSummary("Manual fallback")
+        XCTAssertTrue(model.canGenerate)
+
+        fixture.online = false
+        model.startGeneration()
+
+        XCTAssertFalse(model.isGenerating)
+        XCTAssertTrue(fixture.requests.isEmpty)
+        XCTAssertEqual(model.summary, "Manual fallback")
+        XCTAssertEqual(model.notice, "Reconnect to your Mac to generate a draft.")
+
+        fixture.online = true
+        model.startGeneration()
+        XCTAssertNil(model.notice)
+        await fixture.waitForRequests(1)
+        fixture.pending[0].resume(returning: Self.response(fixture.requests[0]))
+        try await settled(model)
+        XCTAssertEqual(model.summary, "Improve the picker")
+    }
+
     func testTypedFailuresLeaveTextEditableAndAllowAnotherAttempt() async throws {
         for code in [GitDraftFailureCode.unconfigured, .unauthorized, .rateLimited, .timedOut, .providerRefusal, .providerError, .staleSource, .cancelled, .noStagedChanges, .unusableContext] {
             let fixture = try Fixture()

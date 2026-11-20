@@ -245,6 +245,11 @@ struct CommitSheet: View {
                     TextField("Description (optional)", text: Binding(get: { draft.details }, set: { draft.editDetails($0) }), axis: .vertical)
                         .lineLimit(3...8)
                         .accessibilityIdentifier("commit.description")
+                    if let notice = draft.notice {
+                        Text(notice)
+                            .font(.footnote)
+                            .accessibilityIdentifier("commit.draftNotice")
+                    }
                 } header: {
                     Text("Message")
                 } footer: {
@@ -347,12 +352,8 @@ struct CommitSheet: View {
                 .accessibilityHint("Sends selected staged source changes from your Mac to its configured AI provider.")
                 .accessibilityIdentifier("commit.generate")
             }
-            if let note = draft.availabilityNote {
+            if let note = draft.availabilityNote, note != draft.notice {
                 Text(note).font(.footnote).foregroundStyle(.secondary)
-            }
-            if let notice = draft.notice {
-                Text(notice).font(.footnote)
-                    .accessibilityIdentifier("commit.draftNotice")
             }
             if let coverage = draft.coverageNote {
                 Label(coverage, systemImage: "exclamationmark.triangle")
