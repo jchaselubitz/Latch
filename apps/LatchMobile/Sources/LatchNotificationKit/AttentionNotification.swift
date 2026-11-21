@@ -22,7 +22,17 @@ public struct AttentionNotification: Equatable, Sendable {
         let title = payload.title?.trimmingCharacters(in: .whitespacesAndNewlines)
         self.title = (title?.isEmpty == false ? title : nil) ?? payload.name
         switch payload.kind {
-        case .approval: body = "Needs your input"
+        case .approval:
+            body = switch payload.requestKind {
+            case "app_access": payload.appName.map { "Wants to use \($0)" } ?? "App access requested"
+            case "plan_approval": "Plan ready for approval"
+            case "command": "Command approval requested"
+            case "file_change": "File change approval requested"
+            case "network", "browser": "Network access requested"
+            case "mcp_tool": "Tool approval requested"
+            case "sign_in": "Sign-in requested"
+            default: "Needs your input"
+            }
         case .completion: body = "Finished working"
         }
         threadIdentifier = "latch-session-\(payload.sessionID)"

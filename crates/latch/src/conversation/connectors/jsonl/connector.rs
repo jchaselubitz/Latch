@@ -209,6 +209,7 @@ impl JsonlConnector {
                 reason: "this request requires one answer per question".into(),
             });
         }
+        let semantic_choice;
         let text = match action.id.as_str() {
             ACTION_SEND_MESSAGE
                 if (self.source.is_some() || matches!(self.id, "codex" | "cursor"))
@@ -230,7 +231,33 @@ impl JsonlConnector {
                             .or_else(|| action.payload.get("request_id"))
                             .and_then(Value::as_str) =>
             {
-                action.payload.get("choice").and_then(Value::as_str)
+                if let Some(option_id) = action.payload.get("optionId").and_then(Value::as_str) {
+                    if self.id != "claude"
+                        || action.payload.get("text").is_some()
+                        || action.payload.get("form").is_some()
+                    {
+                        return Ok(ApplyResult::Refused {
+                            reason: "this connector cannot apply the selected request option"
+                                .into(),
+                        });
+                    }
+                    semantic_choice = self
+                        .pending_request
+                        .as_ref()
+                        .filter(|request| {
+                            request.bridge_call && request.request_type == RequestType::Permission
+                        })
+                        .and_then(|request| {
+                            request
+                                .choices
+                                .iter()
+                                .find(|label| permission_option_id(label) == Some(option_id))
+                        })
+                        .cloned();
+                    semantic_choice.as_deref()
+                } else {
+                    action.payload.get("choice").and_then(Value::as_str)
+                }
             }
             _ => {
                 return Ok(ApplyResult::Refused {

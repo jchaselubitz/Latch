@@ -407,8 +407,27 @@ async fn handle(
             request_id,
             choice,
             answers,
+            option_id,
+            text,
+            form,
         } => {
-            if choice.is_some() == answers.is_some()
+            let answer_count = [choice.is_some(), answers.is_some(), option_id.is_some()]
+                .into_iter()
+                .filter(|present| *present)
+                .count();
+            if answer_count != 1
+                || (option_id.is_none() && (text.is_some() || form.is_some()))
+                || option_id
+                    .as_ref()
+                    .is_some_and(|id| id.trim().is_empty() || id.len() > 128)
+                || text
+                    .as_ref()
+                    .is_some_and(|text| text.trim().is_empty() || text.len() > MAX_CHOICE)
+                || form.as_ref().is_some_and(|form| {
+                    form.len() > 32
+                        || form.keys().any(|key| key.is_empty() || key.len() > MAX_ID)
+                        || serde_json::to_vec(form).map_or(true, |bytes| bytes.len() > 16 * 1024)
+                })
                 || choice
                     .as_ref()
                     .is_some_and(|v| v.is_empty() || v.len() > MAX_CHOICE)
@@ -447,6 +466,15 @@ async fn handle(
                         }
                         if let Some(answers) = answers {
                             payload["answers"] = serde_json::to_value(answers).expect("answer map");
+                        }
+                        if let Some(option_id) = option_id {
+                            payload["optionId"] = option_id.into();
+                        }
+                        if let Some(text) = text {
+                            payload["text"] = text.into();
+                        }
+                        if let Some(form) = form {
+                            payload["form"] = form.into();
                         }
                         payload
                     },

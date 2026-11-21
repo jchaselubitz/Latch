@@ -10,6 +10,7 @@ struct ConversationScreenContent {
     var canUseSlashCommands = false
     var canCancelTurn = false
     var cancelStatus: String? = nil
+    var backgroundTaskCount: UInt32 = 0
     var viewState: ConversationViewState
     var transcript: ConversationTranscriptPresentation
     /// Hub phase plus the newest live tool, when the phase is working.
@@ -46,6 +47,7 @@ struct ConversationScreenActions {
     var edit: (String) -> Void = { _ in }
     var dismiss: (String) -> Void = { _ in }
     var resolve: (_ requestID: String, _ choice: String) -> Void = { _, _ in }
+    var resolveOption: (String, String, String?, [String: ConversationJSONValue]?) -> Void = { _, _, _, _ in }
     var resolveQuestions: (_ requestID: String, _ answers: [String: String]) -> Void = { _, _ in }
 }
 
@@ -85,6 +87,7 @@ extension ConversationScreenContent {
             connectionError: store.connectionError,
             skippedUpdates: diagnostics.droppedItems + diagnostics.undecodableFrames
         )
+        backgroundTaskCount = store.state?.backgroundWork?.count ?? 0
         canCancelTurn = store.canCancelTurn
         commands = store.commands
         canUseSlashCommands = ConversationComposerChrome.canUseSlashCommands(
@@ -126,6 +129,7 @@ extension ConversationScreenActions {
             edit: { store.editOperation($0) },
             dismiss: { store.dismissOperation($0) },
             resolve: { store.resolve(requestID: $0, choice: $1) },
+            resolveOption: { store.resolve(requestID: $0, optionID: $1, text: $2, form: $3) },
             resolveQuestions: { store.resolve(requestID: $0, answers: $1) }
         )
     }
@@ -175,6 +179,13 @@ struct ConversationScreen: View {
 
     private var inputSurface: some View {
         VStack(spacing: 0) {
+            if content.backgroundTaskCount > 0 {
+                let count = content.backgroundTaskCount
+                Label(count == 1 ? "1 background task running" : "\(count) background tasks running", systemImage: "square.stack")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.vertical, 4)
+            }
             if content.canCancelTurn || content.cancelStatus != nil {
                 HStack {
                     if let status = content.cancelStatus { Text(status).font(.caption).foregroundStyle(.secondary) }
@@ -199,7 +210,8 @@ struct ConversationScreen: View {
                     canResolve: content.canResolve,
                     reason: content.resolveReason,
                     resolve: actions.resolve,
-                    resolveQuestions: actions.resolveQuestions
+                    resolveQuestions: actions.resolveQuestions,
+                    resolveOption: actions.resolveOption
                 )
                 .id(request.requestId)
                 .frame(maxWidth: ConversationTranscript.maxColumnWidth)

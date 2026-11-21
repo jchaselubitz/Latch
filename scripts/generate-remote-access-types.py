@@ -809,7 +809,11 @@ pub enum ConversationItemKind {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         questions: Vec<RequestQuestion>,
         status: RequestStatus,
+        #[serde(default, flatten)]
+        metadata: Box<crate::conversation::RequestMetadata>,
     },
+    #[serde(untagged)]
+    Activity(crate::conversation::ConversationActivity),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -821,6 +825,8 @@ pub struct ConversationItem {
     /// Display metadata only.
     pub created_at: String,
     pub kind: ConversationItemKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_subagent_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -871,6 +877,14 @@ pub struct ConversationState {
     /// Absent means unknown, not none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commands: Option<Vec<AdvertisedCommand>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_work: Option<crate::conversation::BackgroundWork>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<String>,
     /// Derived from the newest request item whose status is pending.
     pub pending_request: Option<String>,
     pub connector: Option<ConnectorIdentity>,
@@ -959,6 +973,12 @@ pub enum ConversationClientMessage {
         choice: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         answers: Option<std::collections::BTreeMap<String, String>>,
+        #[serde(rename = "optionId", default, skip_serializing_if = "Option::is_none")]
+        option_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        form: Option<serde_json::Map<String, serde_json::Value>>,
     },
     HistoryRequest {
         #[serde(rename = "requestId")]
@@ -1341,6 +1361,8 @@ export type GatewayReadiness = {
 def typescript_conversation() -> str:
     """Derive conversation payloads and both frame directions from the schemas."""
     def render(node: dict, document: dict) -> str:
+        if node is True:
+            return "unknown"
         if "$ref" in node:
             ref = node["$ref"]
             if ref.startswith("#/"):
@@ -1362,7 +1384,10 @@ def typescript_conversation() -> str:
         if kind == "object" and "oneOf" in node:
             variants = []
             for branch in node["oneOf"]:
-                excluded = branch.get("not", {}).get("required", [])
+                exclusion = branch.get("not", {})
+                excluded = exclusion.get("required", []) + [
+                    key for clause in exclusion.get("anyOf", []) for key in clause.get("required", [])
+                ]
                 variant = {**node, "required": node.get("required", []) + branch.get("required", [])}
                 del variant["oneOf"]
                 variant["properties"] = {k: v for k, v in node["properties"].items() if k not in excluded}

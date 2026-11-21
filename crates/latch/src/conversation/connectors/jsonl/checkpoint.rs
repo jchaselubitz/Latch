@@ -57,6 +57,9 @@ pub(super) struct RuntimeCheckpoint {
     /// the Hub. Absent in older checkpoints.
     #[serde(default)]
     pub(super) displaced_requests: Vec<PendingRequest>,
+    /// Recently hidden bridge dialogs whose close records may still arrive.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) screen_dismissed_requests: Vec<PendingRequest>,
     pub(super) tools: HashMap<String, (String, String)>,
     /// Sanitized input summary per open call, so the result can say what the
     /// call was as well as how it ended. Absent in older checkpoints.
@@ -99,6 +102,7 @@ impl JsonlConnector {
             pending_request: self.pending_request.clone(),
             queued_requests: self.queued_requests.clone(),
             displaced_requests: self.displaced_requests.clone(),
+            screen_dismissed_requests: self.screen_dismissed_requests.clone(),
             tools: self.tools.clone(),
             tool_summaries: self.tool_summaries.clone(),
             tool_running: self.tool_running,
@@ -122,6 +126,7 @@ impl JsonlConnector {
         self.pending_request = runtime.pending_request;
         self.queued_requests = runtime.queued_requests;
         self.displaced_requests = runtime.displaced_requests;
+        self.screen_dismissed_requests = runtime.screen_dismissed_requests;
         self.tools = runtime.tools;
         self.tool_summaries = runtime.tool_summaries;
         self.tool_running = runtime.tool_running;

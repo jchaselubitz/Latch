@@ -457,6 +457,7 @@ export const register: Register = on => {
     })
     const atTerminal = next(e).then(result => ({ result }))
     let answeredBy = 'nobody'
+    let decision: Decision | undefined
 
     try {
       const first = await Promise.race([
@@ -471,6 +472,7 @@ export const register: Register = on => {
       }
 
       answeredBy = 'latch'
+      decision = first.decision
       // The dialog beneath is abandoned when this hook returns.
       atTerminal.catch(() => undefined)
 
@@ -484,7 +486,7 @@ export const register: Register = on => {
       bridge.permissions.delete(id)
 
       if (open?.isAnnounced === true) {
-        await report($, bridge, 'permission.closed', { tool_use_id: id, answered_by: answeredBy })
+        await report($, bridge, 'permission.closed', { tool_use_id: id, answered_by: answeredBy, decision })
       }
     }
   }).catch(($, e, next) => next(e))
@@ -507,6 +509,7 @@ export const register: Register = on => {
       await report($, bridge, 'permission.open', {
         tool_use_id: id,
         tool: open.tool,
+        cwd: 'cwd' in e && typeof e.cwd === 'string' ? e.cwd.slice(0, 1024) : undefined,
         input: describeInput(open.input),
       })
     }
@@ -577,7 +580,11 @@ export const register: Register = on => {
       return { result: { questions: e.questions, answers: first.answers } }
     } finally {
       bridge.questions.delete(id)
-      await report($, bridge, 'question.closed', { tool_use_id: id, answered_by: answeredBy })
+      await report($, bridge, 'question.closed', {
+        tool_use_id: id,
+        answered_by: answeredBy,
+        decision: answeredBy === 'nobody' ? undefined : 'submitted',
+      })
     }
   })
 

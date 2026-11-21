@@ -40,6 +40,12 @@ pub struct Payload {
     pub t: Option<String>,
     /// `"approval"` or `"completion"`.
     pub k: &'static str,
+    /// Request classification, if the connector supplied one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub r: Option<String>,
+    /// Display name for a requested app, if known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub a: Option<String>,
 }
 
 impl Payload {
@@ -50,11 +56,21 @@ impl Payload {
             s: session.to_owned(),
             n: truncate(name),
             t: title.map(truncate).filter(|value| !value.is_empty()),
+            r: None,
+            a: None,
             k: match kind {
                 AttentionKind::Approval => "approval",
                 AttentionKind::Completion => "completion",
             },
         }
+    }
+    /// Adds the bounded request label to the sealed payload.
+    pub fn with_request(mut self, kind: Option<&str>, app_name: Option<&str>) -> Self {
+        self.r = kind.map(truncate);
+        // Keep the expanded sealed payload within the phone's hex limit,
+        // even when every character in the session labels takes four bytes.
+        self.a = app_name.map(|name| name.chars().take(40).collect());
+        self
     }
 }
 

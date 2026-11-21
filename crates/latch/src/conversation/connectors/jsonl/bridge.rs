@@ -27,6 +27,7 @@ impl JsonlConnector {
                     screen_seen: false,
                     announced_at: string(object, "timestamp"),
                     bridge_call: true,
+                    metadata: claude_question_metadata(),
                 });
             }
             // The engine's permission hook carries no call id. The bridge
@@ -56,13 +57,30 @@ impl JsonlConnector {
                     screen_seen: false,
                     announced_at: string(object, "timestamp"),
                     bridge_call: true,
+                    metadata: claude_permission_metadata(
+                        &tool,
+                        object.get("input"),
+                        object.get("cwd").and_then(Value::as_str),
+                    ),
                 });
             }
             // Answered at the terminal, from Latch, or by nobody: the next
             // dialog of a parallel batch is shown once the shown one closes.
             Some("question.closed") | Some("permission.closed") => {
                 if let Some(closed) = string(object, "tool_use_id") {
-                    return self.close_request(&closed);
+                    use crate::conversation::ResolutionSource;
+                    let source = match object.get("answered_by").and_then(Value::as_str) {
+                        Some("latch") => Some(ResolutionSource::Phone),
+                        Some("terminal") => Some(ResolutionSource::Terminal),
+                        _ => None,
+                    };
+                    let decision = match object.get("decision").and_then(Value::as_str) {
+                        Some("allow") => Some("allow_once"),
+                        Some("deny") => Some("deny"),
+                        Some("submitted") => Some("submitted"),
+                        _ => None,
+                    };
+                    return self.settle_request(&closed, source, decision);
                 }
             }
             Some("hello") => {
@@ -95,6 +113,7 @@ impl JsonlConnector {
                 self.bridge_version = None;
                 self.turn_open = false;
                 self.commands = None;
+                self.screen_dismissed_requests.clear();
                 return self.drop_waiting_requests();
             }
             _ => {}

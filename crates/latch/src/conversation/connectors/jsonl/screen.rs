@@ -37,8 +37,8 @@ impl JsonlConnector {
                     }
                 }
             } else if request.screen_seen {
-                let id = request.id.clone();
-                mutations.extend(self.close_request(&id));
+                let request = request.clone();
+                mutations.extend(self.dismiss_screen_request(request));
             }
         }
         self.screen_can_send = Some(

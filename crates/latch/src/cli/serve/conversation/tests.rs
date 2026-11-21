@@ -105,6 +105,7 @@ impl Connector for ScriptedConnector {
 
 fn message(id: &str) -> ConnectorMutation {
     ConnectorMutation::Upsert(ObservedItem {
+        parent_subagent_id: None,
         id: ConversationItemId::native(id),
         created_at: "2026-08-20T00:00:00Z".into(),
         kind: ConversationItemKind::Message {
@@ -367,6 +368,7 @@ async fn structured_answers_use_interact_and_deduplicated_receipts() {
         .lock()
         .expect("script")
         .push_back(ConnectorMutation::Upsert(ObservedItem {
+            parent_subagent_id: None,
             id: ConversationItemId::native("rich-request"),
             created_at: "2026-08-20T00:00:00Z".into(),
             kind: ConversationItemKind::Request {
@@ -375,6 +377,7 @@ async fn structured_answers_use_interact_and_deduplicated_receipts() {
                 prompt: "Question?\nWhy?".into(),
                 choices: vec!["Red".into()],
                 status: crate::conversation::RequestStatus::Pending,
+                metadata: Default::default(),
                 questions: vec![
                     crate::conversation::RequestQuestion {
                         question: "Question?".into(),
@@ -696,4 +699,60 @@ async fn an_unknown_session_closes_with_the_not_found_code() {
     })
     .await
     .expect("client");
+}
+
+#[test]
+fn request_wire_decodes_legacy_semantic_and_future_kinds() {
+    use super::super::contract as wire;
+    use crate::conversation::{ConversationActivity, ResolutionSource};
+
+    let mut raw = serde_json::json!({
+        "id":"r", "ordinal":1, "createdAt":"now",
+        "kind": {"type":"request", "requestId":"r", "requestType":"permission",
+                 "prompt":"Run this?", "choices":["Yes", "No"], "status":"pending"}
+    });
+    let old: wire::ConversationItem = serde_json::from_value(raw.clone()).unwrap();
+    assert_eq!(serde_json::to_value(old).unwrap(), raw);
+
+    raw["kind"]["requestKind"] = "future_request".into();
+    raw["kind"]["details"] = serde_json::json!({"hint":"a future detail"});
+    raw["kind"]["options"] = serde_json::json!([{"id":"allow_once","label":"Yes"}]);
+    raw["kind"]["answerable"] = false.into();
+    raw["kind"]["resolvedBy"] = "terminal".into();
+    raw["kind"]["decision"] = "allow_once".into();
+    let full: wire::ConversationItem = serde_json::from_value(raw.clone()).unwrap();
+    assert!(
+        matches!(&full.kind, wire::ConversationItemKind::Request { metadata, .. }
+        if metadata.request_kind.as_deref() == Some("future_request")
+            && metadata.answerable == Some(false)
+            && metadata.resolved_by == Some(ResolutionSource::Terminal))
+    );
+    assert_eq!(serde_json::to_value(full).unwrap(), raw);
+
+    let activity = serde_json::json!({
+        "id":"notice", "ordinal":2, "createdAt":"now", "parentSubagentId":"agent-item",
+        "kind":{"type":"notice","noticeKind":"model_switch","text":"Model changed"}
+    });
+    let decoded: wire::ConversationItem = serde_json::from_value(activity.clone()).unwrap();
+    assert!(
+        matches!(&decoded.kind, wire::ConversationItemKind::Activity(ConversationActivity::Notice { notice_kind, .. })
+        if notice_kind == "model_switch")
+    );
+    assert_eq!(serde_json::to_value(decoded).unwrap(), activity);
+
+    let mut action = serde_json::json!({
+        "type":"resolve_request", "operationId":"op", "operationEpoch":"epoch", "requestId":"r", "choice":"Yes"
+    });
+    let decoded: wire::ConversationClientMessage = serde_json::from_value(action.clone()).unwrap();
+    assert_eq!(serde_json::to_value(decoded).unwrap(), action);
+    let fields = action.as_object_mut().unwrap();
+    fields.remove("choice");
+    fields.insert("optionId".into(), "submit_form".into());
+    fields.insert("text".into(), "feedback".into());
+    fields.insert(
+        "form".into(),
+        serde_json::json!({"selection": ["a"], "enabled":true}),
+    );
+    let decoded: wire::ConversationClientMessage = serde_json::from_value(action.clone()).unwrap();
+    assert_eq!(serde_json::to_value(decoded).unwrap(), action);
 }

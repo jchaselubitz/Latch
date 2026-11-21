@@ -50,7 +50,9 @@ use checkpoint::SourceIdentity;
 use claude::claude_text;
 use questions::{bridge_questions, claude_question_choices, claude_question_prompt};
 use redaction::{sanitize_part, sanitize_summary};
-use requests::request_mutation;
+use requests::{
+    claude_permission_metadata, claude_question_metadata, permission_option_id, request_mutation,
+};
 use screen::{is_empty_composer, painted_request, visible_choices};
 use source::read_bounded;
 use tool_outcome::{claude_tool_outcome, safe_tool_summary};
@@ -110,6 +112,8 @@ struct PendingRequest {
     /// answer it through the bridge by that id.
     #[serde(default)]
     bridge_call: bool,
+    #[serde(default)]
+    metadata: crate::conversation::RequestMetadata,
 }
 
 #[derive(Debug)]
@@ -135,6 +139,7 @@ pub struct JsonlConnector {
     /// Bridge requests waiting behind the shown one; see `RuntimeCheckpoint`.
     queued_requests: Vec<PendingRequest>,
     displaced_requests: Vec<PendingRequest>,
+    screen_dismissed_requests: Vec<PendingRequest>,
     tools: HashMap<String, (String, String)>,
     tool_summaries: HashMap<String, String>,
     tool_running: bool,
@@ -184,6 +189,7 @@ impl JsonlConnector {
             pending_request: None,
             queued_requests: Vec::new(),
             displaced_requests: Vec::new(),
+            screen_dismissed_requests: Vec::new(),
             tools: HashMap::new(),
             tool_summaries: HashMap::new(),
             tool_running: false,
@@ -271,6 +277,7 @@ impl JsonlConnector {
         self.pending_request = None;
         self.queued_requests.clear();
         self.displaced_requests.clear();
+        self.screen_dismissed_requests.clear();
         self.tools.clear();
         self.tool_summaries.clear();
         self.tool_running = false;
@@ -379,6 +386,10 @@ impl JsonlConnector {
             } else {
                 self.turn_outcome
             },
+            background_work: None,
+            model: None,
+            effort: None,
+            permission_mode: None,
             commands: if self.bridge_version.is_some() {
                 self.commands.clone()
             } else {
@@ -390,6 +401,7 @@ impl JsonlConnector {
 
 fn upsert(id: &str, created_at: String, kind: ConversationItemKind) -> ConnectorMutation {
     ConnectorMutation::Upsert(ObservedItem {
+        parent_subagent_id: None,
         id: ConversationItemId::native(id),
         created_at,
         kind,

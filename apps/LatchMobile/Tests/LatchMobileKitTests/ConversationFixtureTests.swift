@@ -86,7 +86,7 @@ final class ConversationFixtureTests: XCTestCase {
             XCTAssertEqual(store.state, expected.snapshot.state, directory.lastPathComponent)
             XCTAssertEqual(store.state?.pendingRequest, expected.snapshot.state.pendingRequest)
             if let pendingID = expected.snapshot.state.pendingRequest {
-                guard case .request(let requestID, _, _, _, _, _) = store.pendingRequest?.kind else {
+                guard case .request(let requestID, _, _, _, _, _, _) = store.pendingRequest?.kind else {
                     XCTFail("\(directory.lastPathComponent) pending request missing")
                     continue
                 }
@@ -98,6 +98,7 @@ final class ConversationFixtureTests: XCTestCase {
                 case .message: sawMessage = true
                 case .tool: sawTool = true
                 case .request: sawRequest = true
+                case .subagent, .taskList, .planUpdate, .reasoningSummary, .notice, .fileChange: break
                 case .unrecognized: XCTFail("\(directory.lastPathComponent) projected an unrecognized item")
                 }
             }
@@ -237,7 +238,7 @@ final class ConversationFixtureTests: XCTestCase {
     /// Mirrors ChatView.ConversationRow: every kind the store can publish has a row.
     private func assertPresentable(_ item: ConversationItem, caseName: String) {
         switch item.kind {
-        case .message, .tool, .request, .unrecognized:
+        case .message, .tool, .request, .subagent, .taskList, .planUpdate, .reasoningSummary, .notice, .fileChange, .unrecognized:
             break
         }
         _ = caseName

@@ -412,6 +412,7 @@ fn wire_item(item: &super::super::super::ConversationItem) -> Value {
                 choices,
                 questions,
                 status,
+                ..
             } => {
                 let mut kind = serde_json::json!({
                 "type": "request",
@@ -431,6 +432,7 @@ fn wire_item(item: &super::super::super::ConversationItem) -> Value {
                 if !questions.is_empty() { kind["questions"] = serde_json::to_value(questions).unwrap(); }
                 kind
             },
+            ConversationItemKind::Activity(activity) => serde_json::to_value(activity).unwrap(),
         },
     })
 }
@@ -1029,6 +1031,7 @@ fn idle_screen_refresh_dismisses_a_prompt_answered_at_the_computer() {
         screen_seen: true,
         announced_at: None,
         bridge_call: false,
+        metadata: Default::default(),
     });
 
     let mutations = connector.observe_screen("finished\n› \n");
@@ -1058,6 +1061,7 @@ fn permission_choices_are_replaced_by_the_visible_numbered_decisions() {
         screen_seen: false,
         announced_at: None,
         bridge_call: false,
+        metadata: Default::default(),
     });
 
     let mutations = connector.observe_screen(
@@ -1090,6 +1094,7 @@ fn transcript_records_before_a_permission_hook_do_not_dismiss_it() {
         screen_seen: false,
         announced_at: Some("2026-09-22T07:03:52Z".to_owned()),
         bridge_call: false,
+        metadata: Default::default(),
     });
     let record = serde_json::json!({
         "type": "user",
@@ -2110,6 +2115,7 @@ fn a_question_is_answered_through_the_bridge_by_its_call_id_with_free_text() {
         screen_seen: false,
         announced_at: None,
         bridge_call: false,
+        metadata: Default::default(),
     });
     let module = answer_next_bridge_command(&connector, "accepted");
     let result = connector
@@ -2155,6 +2161,7 @@ fn a_slash_command_and_a_permission_stay_on_the_terminal_path() {
         screen_seen: true,
         announced_at: None,
         bridge_call: false,
+        metadata: Default::default(),
     });
     assert!(connector
         .apply(
@@ -2190,6 +2197,7 @@ fn bridge_permission() -> PendingRequest {
         screen_seen: true,
         announced_at: None,
         bridge_call: true,
+        metadata: Default::default(),
     }
 }
 
@@ -2205,7 +2213,13 @@ fn a_bridge_permission_is_answered_by_its_call_id_and_rule_labels_stay_on_the_te
     connector.pending_request = Some(bridge_permission());
     let module = answer_next_bridge_command(&connector, "accepted");
     let result = connector
-        .apply(resolve("toolu_bash", "Yes"), Duration::from_secs(5))
+        .apply(
+            ConnectorAction {
+                id: ACTION_RESOLVE_REQUEST.to_owned(),
+                payload: serde_json::json!({"requestId":"toolu_bash","optionId":"allow_once"}),
+            },
+            Duration::from_secs(5),
+        )
         .unwrap();
     assert_eq!(result, ApplyResult::Accepted { correlation: None });
     assert!(connector.pending_request.is_none());
@@ -2239,6 +2253,7 @@ fn a_bridge_permission_is_answered_by_its_call_id_and_rule_labels_stay_on_the_te
     // A permission the hook announced has no call id the bridge knows.
     connector.pending_request = Some(PendingRequest {
         bridge_call: false,
+        metadata: Default::default(),
         id: "permission-1".to_owned(),
         ..bridge_permission()
     });
@@ -2425,6 +2440,7 @@ fn the_bridge_announces_an_open_question_under_its_call_id() {
                 choices,
                 questions,
                 status: RequestStatus::Pending,
+                ..
             },
             ..
         })] if request_id == "toolu_q" && prompt == "Which color?" && choices == &["Red", "Blue"] && questions.len() == 1 && !questions[0].multi_select
@@ -2746,7 +2762,7 @@ fn a_batch_of_three_permission_dialogs_is_answered_in_mixed_order() {
     assert_eq!(
         surfaced(&mutations),
         [
-            ("toolu_a".to_owned(), RequestStatus::Dismissed),
+            ("toolu_a".to_owned(), RequestStatus::Resolved),
             ("toolu_b".to_owned(), RequestStatus::Pending),
         ]
     );
@@ -2784,7 +2800,7 @@ fn a_batch_of_three_permission_dialogs_is_answered_in_mixed_order() {
     ));
     assert_eq!(
         surfaced(&mutations),
-        [("toolu_c".to_owned(), RequestStatus::Dismissed)],
+        [("toolu_c".to_owned(), RequestStatus::Resolved)],
         "B is pending at the Hub already"
     );
     assert_eq!(batch.shown().as_deref(), Some("toolu_b"));
@@ -2812,7 +2828,7 @@ fn a_batch_of_three_permission_dialogs_is_answered_in_mixed_order() {
     ));
     assert_eq!(
         surfaced(&mutations),
-        [("toolu_b".to_owned(), RequestStatus::Dismissed)]
+        [("toolu_b".to_owned(), RequestStatus::Resolved)]
     );
     assert_eq!(batch.shown(), None);
     assert!(!batch.observer.has_waiting_requests());
@@ -2858,7 +2874,7 @@ fn a_waiting_dialog_answered_at_the_terminal_never_reaches_clients() {
     assert_eq!(
         surfaced(&mutations),
         [
-            ("toolu_a".to_owned(), RequestStatus::Dismissed),
+            ("toolu_a".to_owned(), RequestStatus::Resolved),
             ("toolu_b".to_owned(), RequestStatus::Pending),
         ]
     );
@@ -2892,7 +2908,7 @@ fn a_waiting_dialog_answered_at_the_terminal_never_reaches_clients() {
     ));
     assert_eq!(
         surfaced(&mutations),
-        [("toolu_b".to_owned(), RequestStatus::Dismissed)]
+        [("toolu_b".to_owned(), RequestStatus::Resolved)]
     );
     assert_eq!(batch.shown(), None);
 }
@@ -2989,5 +3005,65 @@ fn a_hook_permission_replaced_by_another_is_dismissed() {
             ("first".to_owned(), RequestStatus::Dismissed),
             ("second".to_owned(), RequestStatus::Pending),
         ]
+    );
+}
+
+#[test]
+fn claude_permission_metadata_bounds_and_redacts_source_details() {
+    let input = serde_json::json!({
+        "command": format!("TOKEN=sample echo {}", "a".repeat(6000)),
+        "cwd": "/Users/sample/project",
+        "description": "Run a command",
+    });
+    let command = claude_permission_metadata("Bash", Some(&input), None);
+    assert_eq!(command.request_kind.as_deref(), Some("command"));
+    assert_eq!(command.details["cwd"], "~/project");
+    let preview = command.details["command"].as_str().unwrap();
+    assert!(preview.starts_with("TOKEN=[redacted]"));
+    assert!(preview.chars().count() <= 4096);
+
+    let edit = serde_json::json!({"file_path":"/Users/sample/project/a.rs","old_string":"private content"});
+    let edit = claude_permission_metadata("Edit", Some(&edit), None);
+    assert_eq!(edit.request_kind.as_deref(), Some("file_change"));
+    assert_eq!(edit.details["changes"][0]["path"], "~/project/a.rs");
+
+    let mcp = claude_permission_metadata("mcp__calendar__list", None, None);
+    assert_eq!(mcp.request_kind.as_deref(), Some("mcp_tool"));
+    assert_eq!(mcp.details["server"], "calendar");
+    assert_eq!(mcp.details["tool"], "list");
+}
+
+#[test]
+fn a_late_bridge_close_enriches_the_already_dismissed_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut connector = JsonlConnector::fixture("claude", dir.path().join("source.jsonl"));
+    observe_bridge(&mut connector, "hello", "2026-09-22T09:00:00.000Z");
+    let open = serde_json::json!({
+        "hook_event_name": crate::observer::CLAUDE_BRIDGE_EVENT,
+        "bridge_event":"permission.open", "tool_use_id":"req", "tool":"Bash",
+        "input":{"command":"ls","description":"List files"}
+    });
+    let opened = connector.claude_record(open.as_object().unwrap(), "hook", 1);
+    assert!(
+        matches!(opened.as_slice(), [ConnectorMutation::Upsert(ObservedItem {
+        kind: ConversationItemKind::Request { metadata, .. }, ..
+    })] if metadata.options.iter().map(|option| option.id.as_str()).eq(["allow_once", "deny"]))
+    );
+    let request = connector.pending_request.clone().unwrap();
+    assert_eq!(
+        surfaced(&connector.dismiss_screen_request(request)),
+        [("req".into(), RequestStatus::Dismissed)]
+    );
+
+    let closed = serde_json::json!({
+        "hook_event_name": crate::observer::CLAUDE_BRIDGE_EVENT,
+        "bridge_event":"permission.closed", "tool_use_id":"req", "answered_by":"terminal", "decision":"deny"
+    });
+    let settled = connector.claude_record(closed.as_object().unwrap(), "hook", 2);
+    assert!(
+        matches!(settled.as_slice(), [ConnectorMutation::Upsert(ObservedItem {
+        kind: ConversationItemKind::Request { metadata, status: RequestStatus::Resolved, .. }, ..
+    })] if metadata.resolved_by == Some(crate::conversation::ResolutionSource::Terminal)
+        && metadata.decision.as_deref() == Some("deny"))
     );
 }

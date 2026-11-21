@@ -424,6 +424,17 @@ impl ConversationHub {
                 .snapshot_bounded(limit, MAX_CONVERSATION_SNAPSHOT_BYTES),
         )
     }
+    pub(crate) fn attention_snapshot(
+        &self,
+        id: &ConversationId,
+    ) -> Option<(ConversationSnapshot, Option<super::RequestMetadata>)> {
+        let hub = self.inner.lock().ok()?;
+        let projection = &hub.sessions.get(id)?.projection;
+        Some((
+            projection.snapshot(0),
+            projection.pending_request_metadata().cloned(),
+        ))
+    }
     /// Grants exactly one caller the right to run this session's observation
     /// loop. Later subscribers share its output instead of polling the source.
     pub fn claim_observation(&self, id: &ConversationId) -> bool {
@@ -826,6 +837,52 @@ impl ConversationHub {
                     .unwrap_or_else(|| "action unavailable".into()),
             });
         }
+        if action.id == super::ACTION_RESOLVE_REQUEST {
+            let pending = actor.projection.state().pending_request;
+            let requested = action
+                .payload
+                .get("requestId")
+                .and_then(serde_json::Value::as_str);
+            let metadata = actor
+                .projection
+                .pending_request_metadata()
+                .filter(|_| requested == pending.as_deref());
+            if let Some(metadata) = metadata.filter(|metadata| metadata.answerable == Some(false)) {
+                return Ok(OperationOutcome::Refused {
+                    reason: metadata
+                        .reason
+                        .clone()
+                        .unwrap_or_else(|| "answer this request at the terminal".into()),
+                });
+            }
+            if let Some(option_id) = action
+                .payload
+                .get("optionId")
+                .and_then(serde_json::Value::as_str)
+            {
+                let Some(option) = metadata.and_then(|metadata| {
+                    metadata
+                        .options
+                        .iter()
+                        .find(|option| option.id == option_id)
+                }) else {
+                    return Ok(OperationOutcome::Refused {
+                        reason: "this option is not offered by the current request".into(),
+                    });
+                };
+                if option.requires_text
+                    && !action
+                        .payload
+                        .get("text")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|text| !text.trim().is_empty())
+                {
+                    return Ok(OperationOutcome::Refused {
+                        reason: "this option requires feedback".into(),
+                    });
+                }
+            }
+        }
         if actor
             .operations
             .iter()
@@ -915,6 +972,7 @@ impl ConversationHub {
                             .to_owned();
                         let change = actor.projection.apply_connector(
                             super::ConnectorMutation::Upsert(super::ObservedItem {
+                                parent_subagent_id: None,
                                 id: item_id.clone(),
                                 created_at: crate::engine::format_rfc3339(SystemTime::now()),
                                 kind: super::ConversationItemKind::Message {
@@ -1334,6 +1392,7 @@ mod tests {
         fn poll(&mut self, _: PollBudget) -> Result<PollResult> {
             Ok(PollResult {
                 mutations: vec![ConnectorMutation::Upsert(ObservedItem {
+                    parent_subagent_id: None,
                     id: ConversationItemId::native("large"),
                     created_at: "2026-09-25T08:38:00Z".into(),
                     kind: super::super::ConversationItemKind::Message {
@@ -1400,6 +1459,7 @@ mod tests {
     }
     fn item(id: &str) -> ConnectorMutation {
         ConnectorMutation::Upsert(ObservedItem {
+            parent_subagent_id: None,
             id: ConversationItemId::native(id),
             created_at: "now".into(),
             kind: super::super::ConversationItemKind::Message {
@@ -1516,6 +1576,7 @@ mod tests {
             connector_state: Some(vec![42; MAX_CONVERSATION_BATCH_BYTES]),
         };
         let observed = ConnectorMutation::Upsert(ObservedItem {
+            parent_subagent_id: None,
             id: ConversationItemId::native("observed"),
             created_at: "now".into(),
             kind: super::super::ConversationItemKind::Message {
@@ -1549,6 +1610,7 @@ mod tests {
         )
         .unwrap();
         let oversized = ConnectorMutation::Upsert(ObservedItem {
+            parent_subagent_id: None,
             id: ConversationItemId::native("oversized"),
             created_at: "now".into(),
             kind: super::super::ConversationItemKind::Message {
@@ -1564,6 +1626,7 @@ mod tests {
             hub.apply_poll(
                 &id,
                 vec![ConnectorMutation::Upsert(ObservedItem {
+                    parent_subagent_id: None,
                     id: ConversationItemId::native(format!("bounded-{n}")),
                     created_at: "now".into(),
                     kind: super::super::ConversationItemKind::Message {
@@ -1898,6 +1961,7 @@ mod tests {
         hub.apply_poll(
             &id,
             vec![ConnectorMutation::Upsert(ObservedItem {
+                parent_subagent_id: None,
                 id: ConversationItemId::native("agent-native-id"),
                 created_at: "now".into(),
                 kind: super::super::ConversationItemKind::Message {
@@ -1974,6 +2038,7 @@ mod tests {
         hub.apply_poll(
             &id,
             vec![ConnectorMutation::Upsert(ObservedItem {
+                parent_subagent_id: None,
                 id: ConversationItemId::native("agent-native-id"),
                 created_at: "now".into(),
                 kind: super::super::ConversationItemKind::Message {

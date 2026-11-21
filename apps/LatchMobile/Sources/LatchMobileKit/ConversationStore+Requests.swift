@@ -30,14 +30,26 @@ extension ConversationStore {
         }
     }
 
-    public var canResolve: Bool { state?.resolveRequest.enabled == true && operationEpoch != nil }
+    public var canResolve: Bool {
+        state?.resolveRequest.enabled == true && operationEpoch != nil && requestMetadata?.answerable != false
+    }
 
-    public var resolveReason: String? { state?.resolveRequest.reason }
+    private var requestMetadata: ConversationRequestMetadata? {
+        if case .request(_, _, _, _, _, _, let metadata) = pendingRequest?.kind { return metadata }
+        return nil
+    }
+
+    public var resolveReason: String? {
+        if requestMetadata?.answerable == false {
+            return requestMetadata?.reason ?? "This request can only be answered at the terminal."
+        }
+        return state?.resolveRequest.reason
+    }
 
     public var pendingRequest: ConversationItem? {
         guard let requestID = state?.pendingRequest else { return nil }
         return transcript.items.last { item in
-            if case .request(let id, _, _, _, _, _) = item.kind { return id == requestID }
+            if case .request(let id, _, _, _, _, _, _) = item.kind { return id == requestID }
             return false
         }
     }
@@ -55,7 +67,7 @@ extension ConversationStore {
     }
 
     public func resolve(requestID: String, answers: [String: String]) {
-        guard case .request(_, _, _, _, _, let questions) = pendingRequest?.kind,
+        guard case .request(_, _, _, _, _, let questions, _) = pendingRequest?.kind,
               !questions.isEmpty,
               Set(questions.map(\.question)).count == questions.count,
               Set(answers.keys) == Set(questions.map(\.question)),
@@ -65,7 +77,22 @@ extension ConversationStore {
         resolve(requestID: requestID, choice: summary, answers: answers)
     }
 
-    private func resolve(requestID: String, choice: String, answers: [String: String]?) {
+    public func resolve(requestID: String, optionID: String, text: String?, form: [String: ConversationJSONValue]?) {
+        guard let option = requestMetadata?.options?.first(where: { $0.id == optionID }) else { return }
+        let text = text?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard option.requiresText != true || text?.isEmpty == false,
+              (text?.utf8.count ?? 0) <= 4096 else { return }
+        resolve(requestID: requestID, choice: option.label, answers: nil, optionID: optionID, text: text, form: form)
+    }
+
+    private func resolve(
+        requestID: String,
+        choice: String,
+        answers: [String: String]?,
+        optionID: String? = nil,
+        text: String? = nil,
+        form: [String: ConversationJSONValue]? = nil
+    ) {
         guard canResolve,
               let operationEpoch,
               state?.pendingRequest == requestID,
@@ -88,8 +115,11 @@ extension ConversationStore {
                     operationEpoch: operationEpoch,
                     operationId: attempt.id,
                     requestId: requestID,
-                    choice: answers == nil ? choice : nil,
-                    answers: answers
+                    choice: answers == nil && optionID == nil ? choice : nil,
+                    answers: answers,
+                    optionId: optionID,
+                    text: text,
+                    form: form
                 ))
             } catch let error as ConversationSocketError where error == .notConnected {
                 sendFailed(attempt.id, status: .notSent, reason: "The conversation is not connected.")

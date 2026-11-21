@@ -4,22 +4,59 @@
   "title": "LatchConversationItemV2",
   "description": "One stable item in a Conversation Hub projection. Clients order items only by ordinal; createdAt is display metadata. Ordinals are assigned by the Hub in observation order and are never renumbered.",
   "type": "object",
-  "required": ["id", "ordinal", "createdAt", "kind"],
+  "required": [
+    "id",
+    "ordinal",
+    "createdAt",
+    "kind"
+  ],
   "properties": {
-    "id": { "type": "string", "minLength": 1, "maxLength": 256 },
-    "ordinal": { "type": "integer", "minimum": 1 },
-    "createdAt": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "ordinal": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "createdAt": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
     "kind": {
       "oneOf": [
         {
           "type": "object",
-          "required": ["type", "role", "text", "status"],
+          "required": [
+            "type",
+            "role",
+            "text",
+            "status"
+          ],
           "properties": {
-            "type": { "const": "message" },
-            "role": { "enum": ["user", "assistant"] },
-            "text": { "type": "string" },
+            "type": {
+              "const": "message"
+            },
+            "role": {
+              "enum": [
+                "user",
+                "assistant"
+              ]
+            },
+            "text": {
+              "type": "string"
+            },
             "status": {
-              "enum": ["submitted", "queued", "observed", "partial", "complete", "failed"],
+              "enum": [
+                "submitted",
+                "queued",
+                "observed",
+                "partial",
+                "complete",
+                "failed"
+              ],
               "description": "partial is reserved in v2 and is not emitted initially. Clients render an unknown future status as complete."
             }
           },
@@ -27,28 +64,78 @@
         },
         {
           "type": "object",
-          "required": ["type", "name", "summary", "status"],
+          "required": [
+            "type",
+            "name",
+            "summary",
+            "status"
+          ],
           "properties": {
-            "type": { "const": "tool" },
-            "name": { "type": "string", "minLength": 1, "maxLength": 256 },
-            "summary": { "type": "string", "maxLength": 16384 },
-            "status": { "enum": ["running", "succeeded", "failed"] },
-            "parentMessageId": { "type": ["string", "null"], "maxLength": 256 }
+            "type": {
+              "const": "tool"
+            },
+            "name": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "summary": {
+              "type": "string",
+              "maxLength": 16384
+            },
+            "status": {
+              "enum": [
+                "running",
+                "succeeded",
+                "failed"
+              ]
+            },
+            "parentMessageId": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 256
+            }
           },
           "additionalProperties": false
         },
         {
           "type": "object",
-          "required": ["type", "requestId", "requestType", "prompt", "choices", "status"],
+          "required": [
+            "type",
+            "requestId",
+            "requestType",
+            "prompt",
+            "choices",
+            "status"
+          ],
           "properties": {
-            "type": { "const": "request" },
-            "requestId": { "type": "string", "minLength": 1, "maxLength": 256 },
-            "requestType": { "enum": ["permission", "question"] },
-            "prompt": { "type": "string", "maxLength": 16384 },
+            "type": {
+              "const": "request"
+            },
+            "requestId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "requestType": {
+              "enum": [
+                "permission",
+                "question"
+              ]
+            },
+            "prompt": {
+              "type": "string",
+              "maxLength": 16384
+            },
             "choices": {
               "type": "array",
               "maxItems": 128,
-              "items": { "type": "string", "maxLength": 4096 }
+              "items": {
+                "type": "string",
+                "maxLength": 4096
+              }
             },
             "questions": {
               "type": "array",
@@ -100,11 +187,407 @@
                 "additionalProperties": false
               }
             },
-            "status": { "enum": ["pending", "resolved", "dismissed"] }
+            "status": {
+              "enum": [
+                "pending",
+                "resolved",
+                "dismissed"
+              ]
+            },
+            "requestKind": {
+              "type": "string",
+              "maxLength": 64,
+              "minLength": 1,
+              "description": "Known kinds are command, file_change, network, sandbox_escalation, permissions, mcp_tool, app_access, browser, question, plan_approval, elicitation_form, elicitation_url, sign_in, and other. Clients use prompt and choices for an unknown kind."
+            },
+            "details": {
+              "type": "object",
+              "required": [],
+              "properties": {
+                "command": {
+                  "type": "string",
+                  "maxLength": 4096
+                },
+                "cwd": {
+                  "type": "string",
+                  "maxLength": 1024
+                },
+                "sandbox": {
+                  "type": "string",
+                  "maxLength": 1024
+                },
+                "reason": {
+                  "type": "string",
+                  "maxLength": 1024
+                },
+                "paths": {
+                  "type": "array",
+                  "maxItems": 16,
+                  "items": {
+                    "type": "string",
+                    "maxLength": 1024,
+                    "minLength": 1
+                  }
+                },
+                "diff": {
+                  "type": "string",
+                  "maxLength": 8192
+                },
+                "changes": {
+                  "type": "array",
+                  "maxItems": 16,
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "path"
+                    ],
+                    "properties": {
+                      "path": {
+                        "type": "string",
+                        "maxLength": 1024,
+                        "minLength": 1
+                      },
+                      "diff": {
+                        "type": "string",
+                        "maxLength": 4096
+                      },
+                      "summary": {
+                        "type": "string",
+                        "maxLength": 1024
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                },
+                "host": {
+                  "type": "string",
+                  "maxLength": 256
+                },
+                "fileSystemScope": {
+                  "type": "array",
+                  "maxItems": 16,
+                  "items": {
+                    "type": "string",
+                    "maxLength": 1024,
+                    "minLength": 1
+                  }
+                },
+                "networkScope": {
+                  "type": "array",
+                  "maxItems": 16,
+                  "items": {
+                    "type": "string",
+                    "maxLength": 256
+                  }
+                },
+                "server": {
+                  "type": "string",
+                  "maxLength": 256
+                },
+                "tool": {
+                  "type": "string",
+                  "maxLength": 256
+                },
+                "argumentsSummary": {
+                  "type": "string",
+                  "maxLength": 1024
+                },
+                "appName": {
+                  "type": "string",
+                  "maxLength": 256
+                },
+                "scope": {
+                  "type": "string",
+                  "maxLength": 256
+                },
+                "origin": {
+                  "type": "string",
+                  "maxLength": 1024
+                },
+                "url": {
+                  "type": "string",
+                  "maxLength": 2048
+                },
+                "action": {
+                  "type": "string",
+                  "maxLength": 256
+                },
+                "planMarkdown": {
+                  "type": "string",
+                  "maxLength": 8192
+                },
+                "planPath": {
+                  "type": "string",
+                  "maxLength": 1024
+                },
+                "message": {
+                  "type": "string",
+                  "maxLength": 4096
+                },
+                "schema": {
+                  "type": "object",
+                  "maxProperties": 32,
+                  "additionalProperties": true
+                },
+                "service": {
+                  "type": "string",
+                  "maxLength": 256
+                }
+              },
+              "additionalProperties": false,
+              "description": "Kind-specific display details. The Hub caps the full item at 32 KiB. Connectors bound and redact source fields before publication. Elicitation schemas are inline JSON Schema objects."
+            },
+            "options": {
+              "type": "array",
+              "maxItems": 128,
+              "items": {
+                "type": "object",
+                "required": [
+                  "id",
+                  "label"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "maxLength": 128,
+                    "minLength": 1,
+                    "description": "Stable option such as allow_once, allow_session, allow_always, deny, deny_with_feedback, cancel, submit_form, open_url, approve_plan, reject_plan_with_feedback, or a connector-defined option."
+                  },
+                  "label": {
+                    "type": "string",
+                    "maxLength": 4096,
+                    "minLength": 1
+                  },
+                  "requiresText": {
+                    "type": "boolean"
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "answerable": {
+              "type": "boolean"
+            },
+            "reason": {
+              "type": "string",
+              "maxLength": 4096
+            },
+            "resolvedBy": {
+              "enum": [
+                "phone",
+                "terminal",
+                "policy",
+                "hook",
+                "timeout"
+              ]
+            },
+            "decision": {
+              "type": "string",
+              "maxLength": 128,
+              "minLength": 1,
+              "description": "Final decision or option ID, when observed."
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "subagentId",
+            "agentType",
+            "status",
+            "summary"
+          ],
+          "properties": {
+            "type": {
+              "const": "subagent"
+            },
+            "subagentId": {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            },
+            "agentType": {
+              "type": "string",
+              "maxLength": 128
+            },
+            "status": {
+              "type": "string",
+              "maxLength": 64,
+              "minLength": 1
+            },
+            "summary": {
+              "type": "string",
+              "maxLength": 4096
+            },
+            "parentToolId": {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "tasks"
+          ],
+          "properties": {
+            "type": {
+              "const": "task_list"
+            },
+            "tasks": {
+              "type": "array",
+              "maxItems": 64,
+              "items": {
+                "type": "object",
+                "required": [
+                  "id",
+                  "title",
+                  "status"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "maxLength": 256,
+                    "minLength": 1
+                  },
+                  "title": {
+                    "type": "string",
+                    "maxLength": 1024
+                  },
+                  "status": {
+                    "type": "string",
+                    "maxLength": 64,
+                    "minLength": 1
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "steps"
+          ],
+          "properties": {
+            "type": {
+              "const": "plan_update"
+            },
+            "steps": {
+              "type": "array",
+              "maxItems": 64,
+              "items": {
+                "type": "object",
+                "required": [
+                  "id",
+                  "title",
+                  "status"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "maxLength": 256,
+                    "minLength": 1
+                  },
+                  "title": {
+                    "type": "string",
+                    "maxLength": 1024
+                  },
+                  "status": {
+                    "type": "string",
+                    "maxLength": 64,
+                    "minLength": 1
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "text"
+          ],
+          "properties": {
+            "type": {
+              "const": "reasoning_summary"
+            },
+            "text": {
+              "type": "string",
+              "maxLength": 4096
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "noticeKind",
+            "text"
+          ],
+          "properties": {
+            "type": {
+              "const": "notice"
+            },
+            "noticeKind": {
+              "type": "string",
+              "maxLength": 64,
+              "minLength": 1,
+              "description": "Examples include compaction, rate_limit, billing_error, api_error, and model_switch."
+            },
+            "text": {
+              "type": "string",
+              "maxLength": 4096
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "path",
+            "diffSummary"
+          ],
+          "properties": {
+            "type": {
+              "const": "file_change"
+            },
+            "path": {
+              "type": "string",
+              "maxLength": 1024,
+              "minLength": 1
+            },
+            "diffSummary": {
+              "type": "string",
+              "maxLength": 8192
+            },
+            "toolItemId": {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            }
           },
           "additionalProperties": false
         }
       ]
+    },
+    "parentSubagentId": {
+      "type": "string",
+      "maxLength": 256,
+      "minLength": 1
     }
   },
   "additionalProperties": false

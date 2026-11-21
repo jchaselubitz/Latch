@@ -184,12 +184,14 @@ pub(super) fn wire_item(
             choices,
             questions,
             status,
+            metadata,
         } => wire::ConversationItemKind::Request {
             request_id: request_id.clone(),
             request_type: match request_type {
                 domain::RequestType::Permission => wire::RequestType::Permission,
                 domain::RequestType::Question => wire::RequestType::Question,
             },
+            metadata: metadata.clone(),
             prompt: prompt.clone(),
             choices: choices.clone(),
             questions: questions
@@ -214,12 +216,19 @@ pub(super) fn wire_item(
                 domain::RequestStatus::Dismissed => wire::RequestStatus::Dismissed,
             },
         },
+        domain::ConversationItemKind::Activity(activity) => {
+            wire::ConversationItemKind::Activity(activity.clone())
+        }
     };
     wire::ConversationItem {
         id: item.id.as_str().to_owned(),
         ordinal: item.ordinal.get(),
         created_at: item.created_at.clone(),
         kind,
+        parent_subagent_id: item
+            .parent_subagent_id
+            .as_ref()
+            .map(|id| id.as_str().to_owned()),
     }
 }
 
@@ -260,6 +269,10 @@ pub(super) fn wire_state(
             domain::TurnOutcome::Refusal => wire::TurnOutcome::Refusal,
             domain::TurnOutcome::Error => wire::TurnOutcome::Error,
         }),
+        background_work: state.background_work.clone(),
+        model: state.model.clone(),
+        effort: state.effort.clone(),
+        permission_mode: state.permission_mode.clone(),
         commands: state.commands.as_ref().map(|commands| {
             commands
                 .iter()

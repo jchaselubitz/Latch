@@ -32,6 +32,7 @@ public struct ConversationTranscriptPresentation: Equatable, Sendable {
             if turn.prompt?.id == itemID { return itemID }
             for entry in turn.entries {
                 if entry.id == itemID { return itemID }
+                if case .agentActivity(let node) = entry, node.contains(itemID) { return node.id }
                 if case .activity(let group) = entry, group.tools.contains(where: { $0.id == itemID }) {
                     return group.id
                 }
@@ -81,6 +82,7 @@ public struct ConversationTurnPresentation: Identifiable, Equatable, Sendable {
 public enum ConversationTurnEntry: Identifiable, Equatable, Sendable {
     case message(ConversationMessagePresentation)
     case activity(ConversationActivityGroup)
+    case agentActivity(ConversationActivityNode)
     case request(ConversationRequestPresentation)
     /// A kind this build cannot present. Shown, not hidden: a gap in the
     /// transcript would be worse than an honest placeholder.
@@ -90,9 +92,20 @@ public enum ConversationTurnEntry: Identifiable, Equatable, Sendable {
         switch self {
         case .message(let message): message.id
         case .activity(let group): group.id
+        case .agentActivity(let node): node.id
         case .request(let request): request.id
         case .unrecognized(let id, _): id
         }
+    }
+}
+
+public struct ConversationActivityNode: Identifiable, Equatable, Sendable {
+    public let item: ConversationItem
+    public let children: [Self]
+    public var id: String { item.id }
+
+    func contains(_ itemID: String) -> Bool {
+        id == itemID || children.contains { $0.contains(itemID) }
     }
 }
 
@@ -257,6 +270,7 @@ public struct ConversationRequestPresentation: Identifiable, Equatable, Sendable
     public let prompt: String
     public let choices: [String]
     public let questions: [RequestQuestion]
+    public let metadata: ConversationRequestMetadata?
     public let status: ConversationRequestStatus
     /// True only for the request the host's state names as pending: an older
     /// row still marked pending is history, not something to answer.
@@ -272,6 +286,7 @@ public struct ConversationRequestPresentation: Identifiable, Equatable, Sendable
         prompt: String,
         choices: [String],
         questions: [RequestQuestion] = [],
+        metadata: ConversationRequestMetadata? = nil,
         status: ConversationRequestStatus,
         isAwaitingAnswer: Bool,
         answer: ConversationRequestAnswerPresentation? = nil
@@ -283,6 +298,7 @@ public struct ConversationRequestPresentation: Identifiable, Equatable, Sendable
         self.prompt = prompt
         self.choices = choices
         self.questions = questions
+        self.metadata = metadata
         self.status = status
         self.isAwaitingAnswer = isAwaitingAnswer
         self.answer = answer

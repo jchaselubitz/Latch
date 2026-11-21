@@ -132,6 +132,7 @@ impl JsonlConnector {
                     screen_seen: false,
                     announced_at: None,
                     bridge_call: false,
+                    metadata: Default::default(),
                 });
                 Some(ConversationItemKind::Request {
                     request_id,
@@ -139,6 +140,7 @@ impl JsonlConnector {
                     prompt: self.pending_request.as_ref().unwrap().prompt.clone(),
                     choices: self.pending_request.as_ref().unwrap().choices.clone(),
                     questions: Vec::new(),
+                    metadata: Default::default(),
                     status: RequestStatus::Pending,
                 })
             }
@@ -158,6 +160,7 @@ impl JsonlConnector {
                     prompt: string(object, "prompt").unwrap_or_default(),
                     choices: Vec::new(),
                     questions: Vec::new(),
+                    metadata: Default::default(),
                     status: RequestStatus::Resolved,
                 })
             }
@@ -168,6 +171,7 @@ impl JsonlConnector {
         };
         self.active_chain.push(native);
         vec![ConnectorMutation::Upsert(ObservedItem {
+            parent_subagent_id: None,
             id,
             created_at,
             kind,

@@ -4,166 +4,522 @@
   "title": "LatchConversationProtocolV2",
   "description": "Bidirectional JSON messages for WS /v2/sessions/{id}/conversation. The server speaks first with a snapshot or retained mutation batch. Resume position may be supplied on the upgrade URL as generation, afterRevision, and operationEpoch.",
   "$defs": {
-    "generation": { "type": "string", "minLength": 1, "maxLength": 128 },
-    "operationEpoch": { "type": "string", "minLength": 1, "maxLength": 128 },
-    "revision": { "type": "integer", "minimum": 0 },
-    "operationId": { "type": "string", "minLength": 1, "maxLength": 256 },
-    "requestId": { "type": "string", "minLength": 1, "maxLength": 256 },
-    "item": { "$ref": "conversation-item.schema.json" },
-    "state": { "$ref": "conversation-state.schema.json" }
+    "generation": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "operationEpoch": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "operationId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "requestId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "item": {
+      "$ref": "conversation-item.schema.json"
+    },
+    "state": {
+      "$ref": "conversation-state.schema.json"
+    }
   },
   "oneOf": [
     {
       "type": "object",
-      "required": ["type", "generation", "revision", "operationEpoch", "items", "state", "hasMoreBefore"],
-      "properties": {
-        "type": { "const": "snapshot" },
-        "generation": { "$ref": "#/$defs/generation" },
-        "revision": { "$ref": "#/$defs/revision" },
-        "operationEpoch": { "$ref": "#/$defs/operationEpoch" },
-        "items": { "type": "array", "maxItems": 100, "items": { "$ref": "#/$defs/item" } },
-        "state": { "$ref": "#/$defs/state" },
-        "hasMoreBefore": { "type": "boolean" },
-        "reason": { "enum": ["initial", "generation", "operation_epoch", "overflow"] }
-      },
-      "additionalProperties": false
-    },
-    {
-      "type": "object",
-      "required": ["type", "generation", "revision", "items"],
-      "properties": {
-        "type": { "const": "items_upserted" },
-        "generation": { "$ref": "#/$defs/generation" },
-        "revision": { "$ref": "#/$defs/revision" },
-        "items": { "type": "array", "minItems": 1, "maxItems": 100, "items": { "$ref": "#/$defs/item" } }
-      },
-      "additionalProperties": false
-    },
-    {
-      "type": "object",
-      "required": ["type", "generation", "revision", "itemIds"],
-      "properties": {
-        "type": { "const": "items_removed" },
-        "generation": { "$ref": "#/$defs/generation" },
-        "revision": { "$ref": "#/$defs/revision" },
-        "itemIds": { "type": "array", "minItems": 1, "maxItems": 1000, "items": { "type": "string", "minLength": 1, "maxLength": 256 } }
-      },
-      "additionalProperties": false
-    },
-    {
-      "type": "object",
-      "required": ["type", "generation", "revision", "state"],
-      "properties": {
-        "type": { "const": "state_changed" },
-        "generation": { "$ref": "#/$defs/generation" },
-        "revision": { "$ref": "#/$defs/revision" },
-        "state": { "$ref": "#/$defs/state" }
-      },
-      "additionalProperties": false
-    },
-    {
-      "type": "object",
-      "required": ["type", "operationId", "status"],
-      "properties": {
-        "type": { "const": "operation_result" },
-        "operationId": { "$ref": "#/$defs/operationId" },
-        "status": { "enum": ["accepted", "queued", "refused", "ambiguous", "unknown"] },
-        "itemId": { "type": ["string", "null"], "maxLength": 256 },
-        "reason": { "type": ["string", "null"], "maxLength": 4096 }
-      },
-      "additionalProperties": false
-    },
-    {
-      "type": "object",
-      "required": ["type", "requestId", "items", "hasMoreBefore"],
-      "properties": {
-        "type": { "const": "history_page" },
-        "requestId": { "$ref": "#/$defs/requestId" },
-        "items": { "type": "array", "maxItems": 100, "items": { "$ref": "#/$defs/item" } },
-        "hasMoreBefore": { "type": "boolean" }
-      },
-      "additionalProperties": false
-    },
-    {
-      "type": "object",
-      "required": ["type", "code", "message"],
-      "properties": {
-        "type": { "const": "error" },
-        "code": { "type": "string", "minLength": 1, "maxLength": 128 },
-        "message": { "type": "string", "maxLength": 4096 }
-      },
-      "additionalProperties": false
-    },
-    {
-      "type": "object",
-      "required": ["type"],
-      "properties": {
-        "type": { "const": "resume" },
-        "generation": { "anyOf": [{ "$ref": "#/$defs/generation" }, { "type": "null" }] },
-        "afterRevision": { "anyOf": [{ "$ref": "#/$defs/revision" }, { "type": "null" }] }
-      },
-      "additionalProperties": false
-    },
-    {
-      "type": "object",
-      "required": ["type", "operationEpoch", "operationId", "text"],
-      "properties": {
-        "type": { "const": "send_message" },
-        "operationEpoch": { "$ref": "#/$defs/operationEpoch" },
-        "operationId": { "$ref": "#/$defs/operationId" },
-        "text": { "type": "string", "minLength": 1, "maxLength": 16384 }
-      },
-      "additionalProperties": false
-    },
-    {
-      "type": "object",
-      "required": ["type", "operationEpoch", "operationId", "requestId"],
-      "oneOf": [
-        { "required": ["choice"], "not": { "required": ["answers"] } },
-        { "required": ["answers"], "not": { "required": ["choice"] } }
+      "required": [
+        "type",
+        "generation",
+        "revision",
+        "operationEpoch",
+        "items",
+        "state",
+        "hasMoreBefore"
       ],
       "properties": {
-        "type": { "const": "resolve_request" },
-        "operationEpoch": { "$ref": "#/$defs/operationEpoch" },
-        "operationId": { "$ref": "#/$defs/operationId" },
-        "requestId": { "$ref": "#/$defs/requestId" },
-        "choice": { "type": "string", "minLength": 1, "maxLength": 4096 },
-        "answers": {
-          "type": "object", "minProperties": 1, "maxProperties": 16,
-          "propertyNames": { "minLength": 1, "maxLength": 4096 },
-          "additionalProperties": { "type": "string", "minLength": 1, "maxLength": 4096 }
+        "type": {
+          "const": "snapshot"
+        },
+        "generation": {
+          "$ref": "#/$defs/generation"
+        },
+        "revision": {
+          "$ref": "#/$defs/revision"
+        },
+        "operationEpoch": {
+          "$ref": "#/$defs/operationEpoch"
+        },
+        "items": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "$ref": "#/$defs/item"
+          }
+        },
+        "state": {
+          "$ref": "#/$defs/state"
+        },
+        "hasMoreBefore": {
+          "type": "boolean"
+        },
+        "reason": {
+          "enum": [
+            "initial",
+            "generation",
+            "operation_epoch",
+            "overflow"
+          ]
         }
       },
       "additionalProperties": false
     },
     {
       "type": "object",
-      "required": ["type", "operationEpoch", "operationId"],
+      "required": [
+        "type",
+        "generation",
+        "revision",
+        "items"
+      ],
       "properties": {
-        "type": { "const": "cancel_turn" },
-        "operationEpoch": { "$ref": "#/$defs/operationEpoch" },
-        "operationId": { "$ref": "#/$defs/operationId" }
+        "type": {
+          "const": "items_upserted"
+        },
+        "generation": {
+          "$ref": "#/$defs/generation"
+        },
+        "revision": {
+          "$ref": "#/$defs/revision"
+        },
+        "items": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 100,
+          "items": {
+            "$ref": "#/$defs/item"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "type",
+        "generation",
+        "revision",
+        "itemIds"
+      ],
+      "properties": {
+        "type": {
+          "const": "items_removed"
+        },
+        "generation": {
+          "$ref": "#/$defs/generation"
+        },
+        "revision": {
+          "$ref": "#/$defs/revision"
+        },
+        "itemIds": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1000,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "type",
+        "generation",
+        "revision",
+        "state"
+      ],
+      "properties": {
+        "type": {
+          "const": "state_changed"
+        },
+        "generation": {
+          "$ref": "#/$defs/generation"
+        },
+        "revision": {
+          "$ref": "#/$defs/revision"
+        },
+        "state": {
+          "$ref": "#/$defs/state"
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "type",
+        "operationId",
+        "status"
+      ],
+      "properties": {
+        "type": {
+          "const": "operation_result"
+        },
+        "operationId": {
+          "$ref": "#/$defs/operationId"
+        },
+        "status": {
+          "enum": [
+            "accepted",
+            "queued",
+            "refused",
+            "ambiguous",
+            "unknown"
+          ]
+        },
+        "itemId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 256
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 4096
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "type",
+        "requestId",
+        "items",
+        "hasMoreBefore"
+      ],
+      "properties": {
+        "type": {
+          "const": "history_page"
+        },
+        "requestId": {
+          "$ref": "#/$defs/requestId"
+        },
+        "items": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "$ref": "#/$defs/item"
+          }
+        },
+        "hasMoreBefore": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "type",
+        "code",
+        "message"
+      ],
+      "properties": {
+        "type": {
+          "const": "error"
+        },
+        "code": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 4096
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "const": "resume"
+        },
+        "generation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/generation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "afterRevision": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/revision"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "type",
+        "operationEpoch",
+        "operationId",
+        "text"
+      ],
+      "properties": {
+        "type": {
+          "const": "send_message"
+        },
+        "operationEpoch": {
+          "$ref": "#/$defs/operationEpoch"
+        },
+        "operationId": {
+          "$ref": "#/$defs/operationId"
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16384
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "type",
+        "operationEpoch",
+        "operationId",
+        "requestId"
+      ],
+      "oneOf": [
+        {
+          "required": [
+            "choice"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "answers"
+                ]
+              },
+              {
+                "required": [
+                  "optionId"
+                ]
+              },
+              {
+                "required": [
+                  "text"
+                ]
+              },
+              {
+                "required": [
+                  "form"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "required": [
+            "answers"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "choice"
+                ]
+              },
+              {
+                "required": [
+                  "optionId"
+                ]
+              },
+              {
+                "required": [
+                  "text"
+                ]
+              },
+              {
+                "required": [
+                  "form"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "required": [
+            "optionId"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "choice"
+                ]
+              },
+              {
+                "required": [
+                  "answers"
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "properties": {
+        "type": {
+          "const": "resolve_request"
+        },
+        "operationEpoch": {
+          "$ref": "#/$defs/operationEpoch"
+        },
+        "operationId": {
+          "$ref": "#/$defs/operationId"
+        },
+        "requestId": {
+          "$ref": "#/$defs/requestId"
+        },
+        "choice": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "answers": {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 16,
+          "propertyNames": {
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          }
+        },
+        "optionId": {
+          "type": "string",
+          "maxLength": 128,
+          "minLength": 1
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 4096,
+          "minLength": 1
+        },
+        "form": {
+          "type": "object",
+          "maxProperties": 32,
+          "propertyNames": {
+            "type": "string",
+            "maxLength": 256,
+            "minLength": 1
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "type",
+        "operationEpoch",
+        "operationId"
+      ],
+      "properties": {
+        "type": {
+          "const": "cancel_turn"
+        },
+        "operationEpoch": {
+          "$ref": "#/$defs/operationEpoch"
+        },
+        "operationId": {
+          "$ref": "#/$defs/operationId"
+        }
       },
       "additionalProperties": false
     },
     {
       "type": "object",
       "description": "Asks for the retained outcome of an operation this device submitted earlier, without resubmitting it. The gateway answers with operation_result; `unknown` means the receipt is no longer retained (or belongs to another device) and the client must treat the operation as needing review, never as new.",
-      "required": ["type", "operationId"],
+      "required": [
+        "type",
+        "operationId"
+      ],
       "properties": {
-        "type": { "const": "operation_status" },
-        "operationId": { "$ref": "#/$defs/operationId" }
+        "type": {
+          "const": "operation_status"
+        },
+        "operationId": {
+          "$ref": "#/$defs/operationId"
+        }
       },
       "additionalProperties": false
     },
     {
       "type": "object",
-      "required": ["type", "requestId", "beforeOrdinal", "limit"],
+      "required": [
+        "type",
+        "requestId",
+        "beforeOrdinal",
+        "limit"
+      ],
       "properties": {
-        "type": { "const": "history_request" },
-        "requestId": { "$ref": "#/$defs/requestId" },
-        "beforeOrdinal": { "type": "integer", "minimum": 1 },
-        "limit": { "type": "integer", "minimum": 1, "maximum": 100 }
+        "type": {
+          "const": "history_request"
+        },
+        "requestId": {
+          "$ref": "#/$defs/requestId"
+        },
+        "beforeOrdinal": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        }
       },
       "additionalProperties": false
     }

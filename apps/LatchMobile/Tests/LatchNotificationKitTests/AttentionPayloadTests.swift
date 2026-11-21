@@ -14,6 +14,15 @@ final class AttentionPayloadTests: XCTestCase {
         try! Curve25519.KeyAgreement.PrivateKey(rawRepresentation: Data(hex: secret)!)
     }
 
+    func testRichRequestNotificationUsesSealedClassification() throws {
+        let raw = Data(#"{"v":1,"s":"session","n":"Agent session","k":"approval","r":"app_access","a":"Safari"}"#.utf8)
+        let payload = try JSONDecoder().decode(AttentionPayload.self, from: raw)
+        XCTAssertEqual(AttentionNotification(payload).body, "Wants to use Safari")
+        let plan = AttentionPayload(sessionID: "session", name: "Agent session", title: nil,
+                                    kind: .approval, requestKind: "plan_approval")
+        XCTAssertEqual(AttentionNotification(plan).body, "Plan ready for approval")
+    }
+
     func testOpensWhatTheMacSealed() throws {
         let payload = try AttentionPayload.open(sealedHex: wire, eventID: event, privateKey: key)
         XCTAssertEqual(payload, AttentionPayload(sessionID: "ses_vector", name: "auth-refactor", title: "Refactor auth", kind: .approval))

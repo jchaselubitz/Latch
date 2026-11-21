@@ -77,6 +77,9 @@ pub struct AttentionEvent {
     pub device_id: String,
     /// Which Hub transition produced the event.
     pub kind: AttentionKind,
+    /// Request classification carried in approval alerts when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_kind: Option<String>,
     /// Unix seconds.
     pub created_at: u64,
     /// Session the transition happened in. Mac-local; never sent in the clear.
@@ -110,7 +113,7 @@ struct Persisted {
 #[derive(Clone, PartialEq, Eq)]
 struct Observed {
     phase: ConversationPhase,
-    pending: bool,
+    pending: Option<String>,
 }
 
 struct State {
@@ -266,12 +269,12 @@ impl AttentionWatcher {
                 // watcher never renders.
                 let _ = self.hub.drain(&id, *subscriber);
             }
-            let Some(snapshot) = self.hub.snapshot(&id, 0) else {
+            let Some((snapshot, request)) = self.hub.attention_snapshot(&id) else {
                 continue;
             };
             let current = Observed {
                 phase: snapshot.state.phase,
-                pending: snapshot.state.pending_request.is_some(),
+                pending: snapshot.state.pending_request,
             };
             // One observation per session per tick, shared by every device:
             // observing per device would let the first device consume the
@@ -285,6 +288,16 @@ impl AttentionWatcher {
             let Some(kind) = transition(previous, current) else {
                 continue;
             };
+            let request = request.filter(|_| kind == AttentionKind::Approval);
+            let request_kind = request
+                .as_ref()
+                .and_then(|request| request.request_kind.as_deref())
+                .map(|kind| kind.chars().take(64).collect::<String>());
+            let app_name = request
+                .as_ref()
+                .filter(|_| request_kind.as_deref() == Some("app_access"))
+                .and_then(|request| request.details.get("appName"))
+                .and_then(serde_json::Value::as_str);
             let label = state.labels.get(&session).cloned().unwrap_or_default();
             for device in devices {
                 let event_id = event_id(
@@ -299,13 +312,15 @@ impl AttentionWatcher {
                 }
                 let sealed = remote_access::notification_key(&self.home, &device).and_then(|key| {
                     let payload =
-                        seal::Payload::new(&session, &label.name, label.title.as_deref(), kind);
+                        seal::Payload::new(&session, &label.name, label.title.as_deref(), kind)
+                            .with_request(request_kind.as_deref(), app_name);
                     seal::seal(&key, &event_id, &payload).ok()
                 });
                 let event = AttentionEvent {
                     event_id: event_id.clone(),
                     device_id: device,
                     kind,
+                    request_kind: request_kind.clone(),
                     created_at: now,
                     session_id: Some(session.clone()),
                     sealed,
@@ -348,7 +363,7 @@ impl AttentionWatcher {
 
 fn transition(previous: Observed, current: Observed) -> Option<AttentionKind> {
     let (previous, current) = (&previous, &current);
-    if !previous.pending && current.pending {
+    if current.pending.is_some() && previous.pending != current.pending {
         return Some(AttentionKind::Approval);
     }
     match (&previous.phase, &current.phase) {
@@ -742,7 +757,33 @@ mod tests {
         watcher.watch("ses_shared", &first);
         watcher.watch("ses_shared", &second);
         assert!(watcher.tick_at(2_000).unwrap().is_empty());
-        set(ConversationPhase::AwaitingInput);
+        use crate::conversation::{
+            ConversationItemId, ConversationItemKind, ObservedItem, RequestMetadata, RequestStatus,
+            RequestType,
+        };
+        hub.apply_poll(
+            &id,
+            vec![ConnectorMutation::Upsert(ObservedItem {
+                id: ConversationItemId::native("request"),
+                parent_subagent_id: None,
+                created_at: "now".into(),
+                kind: ConversationItemKind::Request {
+                    request_id: "request".into(),
+                    request_type: RequestType::Permission,
+                    prompt: "App access?".into(),
+                    choices: vec![],
+                    questions: vec![],
+                    status: RequestStatus::Pending,
+                    metadata: Box::new(RequestMetadata {
+                        request_kind: Some("app_access".into()),
+                        answerable: Some(false),
+                        details: serde_json::Map::from_iter([("appName".into(), "Safari".into())]),
+                        ..Default::default()
+                    }),
+                },
+            })],
+        )
+        .unwrap();
         let mut events = watcher.tick_at(2_001).unwrap();
         events.sort_by(|a, b| a.device_id.cmp(&b.device_id));
         assert_eq!(events.len(), 2, "one transition, one event per device");
@@ -777,6 +818,9 @@ mod tests {
         let payload: serde_json::Value = serde_json::from_slice(&opened).unwrap();
         assert_eq!(payload["s"], "ses_shared");
         assert_eq!(payload["k"], "approval");
+        assert_eq!(payload["r"], "app_access");
+        assert_eq!(payload["a"], "Safari");
+        assert_eq!(keyed.request_kind.as_deref(), Some("app_access"));
         // Nothing readable about the session sits in the clear on the wire.
         let spooled = serde_json::to_string(keyed).unwrap();
         assert!(!wire.contains("ses_shared"));

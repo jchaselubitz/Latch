@@ -148,6 +148,94 @@ pub struct QuestionOption {
     pub description: String,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub details: serde_json::Map<String, serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<RequestOption>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answerable: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_by: Option<ResolutionSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestOption {
+    pub id: String,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub requires_text: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResolutionSource {
+    Phone,
+    Terminal,
+    Policy,
+    Hook,
+    Timeout,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackgroundWork {
+    pub count: u32,
+    pub kinds: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ActivityStep {
+    pub id: String,
+    pub title: String,
+    pub status: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum ConversationActivity {
+    Subagent {
+        subagent_id: String,
+        agent_type: String,
+        status: String,
+        summary: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_tool_id: Option<ConversationItemId>,
+    },
+    TaskList {
+        tasks: Vec<ActivityStep>,
+    },
+    PlanUpdate {
+        steps: Vec<ActivityStep>,
+    },
+    ReasoningSummary {
+        text: String,
+    },
+    Notice {
+        notice_kind: String,
+        text: String,
+    },
+    FileChange {
+        path: String,
+        diff_summary: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_item_id: Option<ConversationItemId>,
+    },
+}
+
 /// Renderable agent-neutral item payload.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum ConversationItemKind {
@@ -170,7 +258,10 @@ pub enum ConversationItemKind {
         #[serde(default)]
         questions: Vec<RequestQuestion>,
         status: RequestStatus,
+        #[serde(default, flatten)]
+        metadata: Box<RequestMetadata>,
     },
+    Activity(ConversationActivity),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -179,6 +270,8 @@ pub struct ConversationItem {
     pub ordinal: Ordinal,
     pub created_at: String,
     pub kind: ConversationItemKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_subagent_id: Option<ConversationItemId>,
 }
 
 /// Connector-provided item. It deliberately has no ordinal, revision, or generation.
@@ -187,6 +280,8 @@ pub struct ObservedItem {
     pub id: ConversationItemId,
     pub created_at: String,
     pub kind: ConversationItemKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_subagent_id: Option<ConversationItemId>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -240,6 +335,14 @@ pub struct ConversationState {
     /// The catalog a live bridge advertised; `None` means unknown, not empty.
     #[serde(default)]
     pub commands: Option<Vec<AdvertisedCommand>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_work: Option<BackgroundWork>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<String>,
 }
 impl ConversationState {
     pub fn starting(connector: Option<ConnectorIdentity>) -> Self {
@@ -258,6 +361,10 @@ impl ConversationState {
             connector,
             turn_outcome: None,
             commands: None,
+            background_work: None,
+            model: None,
+            effort: None,
+            permission_mode: None,
         }
     }
     /// No connector can observe or act on this session yet. Terminal attach
@@ -278,6 +385,10 @@ impl ConversationState {
             connector,
             turn_outcome: None,
             commands: None,
+            background_work: None,
+            model: None,
+            effort: None,
+            permission_mode: None,
         }
     }
 }

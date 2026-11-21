@@ -208,7 +208,7 @@ final class ConversationInputTests: XCTestCase {
         XCTAssertEqual(json["answers"] as? [String: String], ["Colors?": "Red, Blue", "Why?": "Free text"])
         let old = Data(#"{"type":"request","requestId":"r","requestType":"question","prompt":"Choose","choices":["Yes"],"status":"pending"}"#.utf8)
         let kind = try JSONDecoder().decode(ConversationItemKind.self, from: old)
-        guard case .request(_, _, _, _, _, let questions) = kind else { return XCTFail("old request must decode") }
+        guard case .request(_, _, _, _, _, let questions, _) = kind else { return XCTFail("old request must decode") }
         XCTAssertTrue(questions.isEmpty)
     }
 

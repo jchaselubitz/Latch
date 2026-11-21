@@ -175,6 +175,8 @@ struct ConversationEntryRow: View, Equatable {
             ConversationMessageRow(message: message)
         case .activity(let group):
             ConversationActivityDisclosure(group: group)
+        case .agentActivity(let activity):
+            ConversationAgentActivityRow(node: activity)
         case .request(let request):
             ConversationRequestCard(request: request)
         case .unrecognized:
@@ -229,4 +231,90 @@ struct LatchMark: Shape {
         path.addRoundedRect(in: foot, cornerSize: CGSize(width: footHeight / 2, height: footHeight / 2))
         return path
     }
+}
+
+private struct ConversationAgentActivityRow: View {
+    let node: ConversationActivityNode
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            switch node.item.kind {
+            case .subagent(_, let type, let status, let summary, _):
+                DisclosureGroup {
+                    if !summary.isEmpty { Text(summary).textSelection(.enabled) }
+                    ForEach(node.children) { child in
+                        ConversationAgentActivityRow(node: child)
+                    }
+                } label: {
+                    Label(type.isEmpty ? "Subagent" : type, systemImage: "person.2")
+                    Text(status.activityLabel).foregroundStyle(.secondary)
+                }
+            case .taskList(let tasks):
+                checklist("Tasks", tasks)
+            case .planUpdate(let steps):
+                checklist("Plan", steps)
+            case .reasoningSummary(let summary):
+                DisclosureGroup("Reasoning summary") {
+                    Text(summary).textSelection(.enabled)
+                }
+            case .notice(let kind, let text):
+                Label(text, systemImage: noticeSymbol(kind))
+                    .accessibilityLabel("\(kind.activityLabel). \(text)")
+            case .fileChange(let path, let diff, _):
+                Label(path, systemImage: "doc.badge.ellipsis").font(.caption.monospaced())
+                if !diff.isEmpty { ConversationDiffDisclosure(diff: diff) }
+            case .message(_, let text, _):
+                ConversationMarkdownView(text: text, textStyle: .footnote)
+            case .tool(let name, let summary, let status, _):
+                Label(summary.isEmpty ? name : summary, systemImage: stepSymbol(status))
+            case .request(_, _, let prompt, _, let status, _, let metadata):
+                Label(prompt, systemImage: "questionmark.bubble")
+                Text(metadata?.decision?.activityLabel ?? status.activityLabel)
+                    .foregroundStyle(.secondary)
+            case .unrecognized:
+                ConversationUnrecognizedRow()
+            }
+        }
+        .font(.caption)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(8)
+        .background(.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    private func checklist(_ title: String, _ steps: [ConversationActivityStep]) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(title).fontWeight(.semibold)
+            ForEach(steps) { step in
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Image(systemName: stepSymbol(step.status))
+                    Text(step.title)
+                    Spacer(minLength: 4)
+                    Text(step.status.activityLabel).foregroundStyle(.secondary)
+                }
+                .accessibilityElement(children: .combine)
+            }
+        }
+    }
+
+    private func stepSymbol(_ status: String) -> String {
+        switch status {
+        case "completed", "complete", "succeeded", "done": "checkmark.circle"
+        case "running", "in_progress": "clock"
+        case "failed", "cancelled": "xmark.circle"
+        default: "circle"
+        }
+    }
+
+    private func noticeSymbol(_ kind: String) -> String {
+        switch kind {
+        case "rate_limit", "billing_error", "api_error": "exclamationmark.circle"
+        case "model_switch": "arrow.triangle.2.circlepath"
+        case "compaction": "arrow.down.right.and.arrow.up.left"
+        default: "info.circle"
+        }
+    }
+}
+
+private extension String {
+    var activityLabel: String { replacingOccurrences(of: "_", with: " ").capitalized }
 }

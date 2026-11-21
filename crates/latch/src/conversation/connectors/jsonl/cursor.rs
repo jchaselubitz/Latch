@@ -29,6 +29,7 @@ impl JsonlConnector {
                         .drain()
                         .map(|(call_id, (name, _))| {
                             ConnectorMutation::Upsert(ObservedItem {
+                                parent_subagent_id: None,
                                 id: ConversationItemId::derived("cursor", "tool", &call_id),
                                 created_at: string(object, "timestamp")
                                     .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_owned()),
@@ -65,6 +66,7 @@ impl JsonlConnector {
                         .unwrap_or(&name);
                     let summary = sanitize_summary(summary);
                     return vec![ConnectorMutation::Upsert(ObservedItem {
+                        parent_subagent_id: None,
                         id: ConversationItemId::derived("cursor", "tool", &call_id),
                         created_at: string(object, "timestamp")
                             .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_owned()),
@@ -103,6 +105,7 @@ impl JsonlConnector {
         // stable across append/restart; source replacement resets the Hub.
         let id = ConversationItemId::derived("cursor", "message", &ordinal.to_string());
         vec![ConnectorMutation::Upsert(ObservedItem {
+            parent_subagent_id: None,
             id,
             created_at: string(object, "timestamp")
                 .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_owned()),

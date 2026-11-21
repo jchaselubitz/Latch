@@ -23,6 +23,8 @@ public struct AttentionPayload: Decodable, Equatable, Sendable {
     /// Session title, when it has one.
     public let title: String?
     public let kind: Kind
+    public let requestKind: String?
+    public let appName: String?
 
     enum CodingKeys: String, CodingKey {
         case version = "v"
@@ -30,13 +32,17 @@ public struct AttentionPayload: Decodable, Equatable, Sendable {
         case name = "n"
         case title = "t"
         case kind = "k"
+        case requestKind = "r"
+        case appName = "a"
     }
 
-    public init(sessionID: String, name: String, title: String?, kind: Kind) {
+    public init(sessionID: String, name: String, title: String?, kind: Kind, requestKind: String? = nil, appName: String? = nil) {
         self.sessionID = sessionID
         self.name = name
         self.title = title
         self.kind = kind
+        self.requestKind = requestKind
+        self.appName = appName
     }
 
     public init(from decoder: Decoder) throws {
@@ -48,6 +54,8 @@ public struct AttentionPayload: Decodable, Equatable, Sendable {
         name = try container.decode(String.self, forKey: .name)
         title = try container.decodeIfPresent(String.self, forKey: .title)
         kind = try container.decode(Kind.self, forKey: .kind)
+        requestKind = try container.decodeIfPresent(String.self, forKey: .requestKind)
+        appName = try container.decodeIfPresent(String.self, forKey: .appName)
     }
 
     /// HPKE `info`, identical to the Mac's.

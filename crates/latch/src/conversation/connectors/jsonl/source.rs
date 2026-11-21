@@ -101,6 +101,7 @@ impl JsonlConnector {
             self.pending_request = None;
             self.queued_requests.clear();
             self.displaced_requests.clear();
+            self.screen_dismissed_requests.clear();
             self.tools.clear();
             self.tool_summaries.clear();
             self.tool_running = false;

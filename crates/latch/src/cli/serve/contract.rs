@@ -1,5 +1,5 @@
 //! Generated from `schemas/remote-access/v2/*.schema.json`; do not edit by hand.
-//! Canonical schema set SHA-256: 120635f39f6016f65516f950bd58074e19c887e5ce0483bb7631b690d853ed24
+//! Canonical schema set SHA-256: ece2fa12b1384d4491cb1e9b3bd2697f2b3a20c5b0b14aad2d3b077c9c5e6e71
 
 use serde::{Deserialize, Serialize};
 
@@ -775,7 +775,11 @@ pub enum ConversationItemKind {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         questions: Vec<RequestQuestion>,
         status: RequestStatus,
+        #[serde(default, flatten)]
+        metadata: Box<crate::conversation::RequestMetadata>,
     },
+    #[serde(untagged)]
+    Activity(crate::conversation::ConversationActivity),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -787,6 +791,8 @@ pub struct ConversationItem {
     /// Display metadata only.
     pub created_at: String,
     pub kind: ConversationItemKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_subagent_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -857,6 +863,14 @@ pub struct ConversationState {
     /// Absent means unknown, not none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commands: Option<Vec<AdvertisedCommand>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_work: Option<crate::conversation::BackgroundWork>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<String>,
     /// Derived from the newest request item whose status is pending.
     pub pending_request: Option<String>,
     pub connector: Option<ConnectorIdentity>,
@@ -967,6 +981,12 @@ pub enum ConversationClientMessage {
         choice: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         answers: Option<std::collections::BTreeMap<String, String>>,
+        #[serde(rename = "optionId", default, skip_serializing_if = "Option::is_none")]
+        option_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        form: Option<serde_json::Map<String, serde_json::Value>>,
     },
     HistoryRequest {
         #[serde(rename = "requestId")]

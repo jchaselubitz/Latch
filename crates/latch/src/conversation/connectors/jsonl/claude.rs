@@ -264,6 +264,7 @@ impl JsonlConnector {
                                     screen_seen: false,
                                     announced_at: None,
                                     bridge_call: false,
+                                    metadata: claude_question_metadata(),
                                 };
                                 self.pending_request = Some(request.clone());
                                 mutations.push(request_mutation(&request, RequestStatus::Pending));
@@ -321,6 +322,14 @@ impl JsonlConnector {
             screen_seen: false,
             announced_at: string(object, "timestamp"),
             bridge_call: false,
+            metadata: claude_permission_metadata(
+                object
+                    .get("tool_name")
+                    .and_then(Value::as_str)
+                    .unwrap_or(""),
+                object.get("tool_input").or_else(|| object.get("toolInput")),
+                object.get("cwd").and_then(Value::as_str),
+            ),
         };
         let mut mutations = Vec::new();
         // The hook names no call, so a later dialog cannot wait behind this

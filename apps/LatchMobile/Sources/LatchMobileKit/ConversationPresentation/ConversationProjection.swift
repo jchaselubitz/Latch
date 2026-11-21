@@ -34,11 +34,36 @@ public enum ConversationProjection {
             uniquingKeysWith: { _, newest in newest }
         )
 
+        let subagentIDs = Set(ordered.compactMap { item -> String? in
+            if case .subagent = item.kind { return item.id }
+            return nil
+        })
+        var depths: [String: Int] = [:]
+        var children: [String: [ConversationItem]] = [:]
+        var nested: Set<String> = []
+        if !subagentIDs.isEmpty {
+            for item in ordered {
+                let depth = item.parentSubagentId.flatMap { depths[$0] }
+                if subagentIDs.contains(item.id) {
+                    // A thread is announced before its child threads. This
+                    // also prevents a bad parent reference from making a cycle.
+                    depths[item.id] = depth.map { $0 + 1 } ?? 0
+                }
+                guard let parent = item.parentSubagentId, let depth, depth < 12 else { continue }
+                if case .request(let id, _, _, _, "pending", _, _) = item.kind, id == pendingRequestID { continue }
+                children[parent, default: []].append(item)
+                nested.insert(item.id)
+            }
+        }
+        func node(for item: ConversationItem) -> ConversationActivityNode {
+            ConversationActivityNode(item: item, children: (children[item.id] ?? []).map(node(for:)))
+        }
+
         var turns: [ConversationTurnPresentation] = []
         var builder: TurnBuilder?
         var pending: ConversationRequestPresentation?
 
-        for item in ordered {
+        for item in ordered where !nested.contains(item.id) {
             switch item.kind {
             case .message(let role, let text, let status):
                 let message = ConversationMessagePresentation(
@@ -68,7 +93,7 @@ public enum ConversationProjection {
                     ),
                     parentMessageId: parentMessageId
                 )
-            case .request(let requestId, let requestType, let prompt, let choices, let status, let questions):
+            case .request(let requestId, let requestType, let prompt, let choices, let status, let questions, let metadata):
                 let request = ConversationRequestPresentation(
                     id: item.id,
                     ordinal: item.ordinal,
@@ -77,6 +102,7 @@ public enum ConversationProjection {
                     prompt: prompt,
                     choices: choices,
                     questions: questions,
+                    metadata: metadata,
                     status: requestStatus(status),
                     isAwaitingAnswer: status == "pending" && requestId == pendingRequestID,
                     answer: answers[requestId].map(ConversationRequestAnswerPresentation.init(attempt:))
@@ -84,6 +110,9 @@ public enum ConversationProjection {
                 if request.isAwaitingAnswer { pending = request }
                 builder = builder ?? TurnBuilder(prompt: nil, firstID: item.id)
                 builder?.append(entry: .request(request))
+            case .subagent, .taskList, .planUpdate, .reasoningSummary, .notice, .fileChange:
+                builder = builder ?? TurnBuilder(prompt: nil, firstID: item.id)
+                builder?.append(entry: .agentActivity(node(for: item)))
             case .unrecognized(let type):
                 builder = builder ?? TurnBuilder(prompt: nil, firstID: item.id)
                 builder?.append(entry: .unrecognized(id: item.id, type: type))

@@ -75,6 +75,7 @@ pub struct Projection {
     ids: BTreeMap<ConversationItemId, Ordinal>,
     next_ordinal: Ordinal,
     state: ConversationState,
+    pending_ordinal: Option<Ordinal>,
 }
 
 impl Projection {
@@ -86,6 +87,7 @@ impl Projection {
             items: BTreeMap::new(),
             ids: BTreeMap::new(),
             next_ordinal: Ordinal::first(),
+            pending_ordinal: None,
             state,
         }
     }
@@ -212,6 +214,7 @@ impl Projection {
                 ordinal,
                 created_at: observed.created_at,
                 kind: observed.kind,
+                parent_subagent_id: observed.parent_subagent_id,
             },
         );
         ordinal
@@ -235,14 +238,25 @@ impl Projection {
         removed
     }
     fn derive_pending_request(&mut self) {
-        self.state.pending_request = self.items.values().rev().find_map(|item| match &item.kind {
+        self.pending_ordinal = self.items.values().rev().find_map(|item| match &item.kind {
             ConversationItemKind::Request {
-                request_id,
                 status: RequestStatus::Pending,
                 ..
-            } => Some(request_id.clone()),
+            } => Some(item.ordinal),
             _ => None,
         });
+        self.state.pending_request =
+            self.pending_ordinal
+                .and_then(|ordinal| match &self.items[&ordinal].kind {
+                    ConversationItemKind::Request { request_id, .. } => Some(request_id.clone()),
+                    _ => None,
+                });
+    }
+    pub(crate) fn pending_request_metadata(&self) -> Option<&RequestMetadata> {
+        match &self.items.get(&self.pending_ordinal?)?.kind {
+            ConversationItemKind::Request { metadata, .. } => Some(metadata),
+            _ => None,
+        }
     }
     pub fn snapshot(&self, limit: usize) -> ConversationSnapshot {
         self.snapshot_bounded(limit, usize::MAX)
@@ -294,7 +308,7 @@ impl Projection {
                 next = item.ordinal.next();
             }
         }
-        Self {
+        let mut projection = Self {
             generation: snapshot.generation,
             revision: snapshot.revision,
             operation_epoch: snapshot.operation_epoch,
@@ -306,7 +320,10 @@ impl Projection {
             ids,
             next_ordinal: next,
             state: snapshot.state,
-        }
+            pending_ordinal: None,
+        };
+        projection.derive_pending_request();
+        projection
     }
     pub fn page_before_bounded(
         &self,
@@ -348,6 +365,7 @@ mod tests {
     }
     fn message(id: &str, created_at: &str, status: MessageStatus) -> ConnectorMutation {
         ConnectorMutation::Upsert(ObservedItem {
+            parent_subagent_id: None,
             id: ConversationItemId::native(id),
             created_at: created_at.into(),
             kind: ConversationItemKind::Message {
@@ -359,6 +377,7 @@ mod tests {
     }
     fn request(id: &str, status: RequestStatus) -> ConnectorMutation {
         ConnectorMutation::Upsert(ObservedItem {
+            parent_subagent_id: None,
             id: ConversationItemId::native(id),
             created_at: "2026-01-01T00:00:00Z".into(),
             kind: ConversationItemKind::Request {
@@ -368,6 +387,7 @@ mod tests {
                 choices: vec!["yes".into()],
                 questions: Vec::new(),
                 status,
+                metadata: Default::default(),
             },
         })
     }
@@ -388,6 +408,7 @@ mod tests {
         ))
         .unwrap();
         p.apply_connector(ConnectorMutation::Upsert(ObservedItem {
+            parent_subagent_id: None,
             id: ConversationItemId::native("tool-a"),
             created_at: "x".into(),
             kind: ConversationItemKind::Tool {
@@ -399,6 +420,7 @@ mod tests {
         }))
         .unwrap();
         p.apply_connector(ConnectorMutation::Upsert(ObservedItem {
+            parent_subagent_id: None,
             id: ConversationItemId::native("tool-b"),
             created_at: "x".into(),
             kind: ConversationItemKind::Tool {
@@ -410,6 +432,7 @@ mod tests {
         }))
         .unwrap();
         p.apply_connector(ConnectorMutation::Upsert(ObservedItem {
+            parent_subagent_id: None,
             id: ConversationItemId::native("tool-a"),
             created_at: "x".into(),
             kind: ConversationItemKind::Tool {

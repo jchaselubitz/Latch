@@ -41,6 +41,7 @@ impl JsonlConnector {
             return Vec::new();
         }
         vec![ConnectorMutation::Upsert(ObservedItem {
+            parent_subagent_id: None,
             id: item
                 .get("id")
                 .and_then(Value::as_str)

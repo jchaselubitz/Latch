@@ -313,6 +313,7 @@ test('a permission the person allows in Latch is re-run and the dialog is abando
       bridge_event: 'permission.closed',
       tool_use_id: 'toolu_bash',
       answered_by: 'latch',
+      decision: 'allow',
     }),
   ])
 })
@@ -344,7 +345,7 @@ test('a deny from Latch ends the call while the dialog is still open', async ($,
   expect(latch.events().slice(1)).toEqual([
     expect.objectContaining({ bridge_event: 'permission.open', tool_use_id: 'toolu_bash' }),
     expect.objectContaining({ command_id: 'cmd-1', outcome: 'accepted' }),
-    expect.objectContaining({ bridge_event: 'permission.closed', answered_by: 'latch' }),
+    expect.objectContaining({ bridge_event: 'permission.closed', answered_by: 'latch', decision: 'deny' }),
   ])
 })
 
