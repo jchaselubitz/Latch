@@ -112,7 +112,7 @@ settings show sleeping; check both after any settings change.
 ## 3. Runbook: deploy
 
 1. Control plane: push `main`. `.github/workflows/control-plane.yml` runs
-   typecheck, tests (in-memory and PostgreSQL 16 service container), build,
+   typecheck, tests (in-memory and PostgreSQL 19 service container), build,
    and `railway up`; Railway's GitHub integration deploys the same commit.
    Migrations apply at boot (`MIGRATE_ON_BOOT=true`), forward only, under an
    advisory lock, refusing a changed already-applied file.
