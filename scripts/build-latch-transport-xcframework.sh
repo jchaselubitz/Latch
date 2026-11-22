@@ -7,7 +7,7 @@ cd "$repo_root"
 
 framework_dir="${LATCH_TRANSPORT_FRAMEWORK_DIR:-apps/LatchMobile/Native/LatchTransportFFI.xcframework}"
 generated_dir="${LATCH_TRANSPORT_GENERATED_DIR:-apps/LatchMobile/Sources/LatchTransportNative/Generated}"
-scratch_dir="${TMPDIR:-/tmp}/latch-transport-xcframework"
+scratch_dir="${LATCH_TRANSPORT_BUILD_DIR:-${TMPDIR:-/tmp}/latch-transport-xcframework}"
 deployment_target="${LATCH_TRANSPORT_IOS_DEPLOYMENT_TARGET:-17.0}"
 
 required_targets=(
@@ -27,11 +27,15 @@ done
 rm -rf "$scratch_dir/generated" "$scratch_dir/headers" "$scratch_dir/simulator" "$scratch_dir/macos"
 mkdir -p "$scratch_dir/generated" "$scratch_dir/headers" "$scratch_dir/simulator" "$scratch_dir/macos"
 
-cargo build --locked --release --package latch-transport-ffi
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$repo_root/target}"
+macos_sdk="$(xcrun --sdk macosx --show-sdk-path)"
+ios_sdk="$(xcrun --sdk iphoneos --show-sdk-path)"
+simulator_sdk="$(xcrun --sdk iphonesimulator --show-sdk-path)"
+SDKROOT="$macos_sdk" cargo build --locked --release --package latch-transport-ffi
 # Bindgen is a host-only build tool; optimizing it adds minutes to a cold CI
 # build without changing a byte of generated Swift or C headers.
-cargo run --locked --package latch-transport-bindgen -- \
-  generate --library target/release/liblatch_transport_ffi.dylib \
+SDKROOT="$macos_sdk" cargo run --locked --package latch-transport-bindgen -- \
+  generate --library "$CARGO_TARGET_DIR/release/liblatch_transport_ffi.dylib" \
   --language swift --out-dir "$scratch_dir/generated"
 
 # `xcodebuild -create-xcframework` copies a headers directory verbatim, while
@@ -56,14 +60,14 @@ fi
 
 build_pids=()
 for target in "${required_targets[@]}"; do
-  if [[ "$target" == *-apple-ios* ]]; then
-    IPHONEOS_DEPLOYMENT_TARGET="$deployment_target" \
-      CARGO_TARGET_DIR="$scratch_dir/cargo-$target" \
-      cargo build --locked --release --package latch-transport-ffi --target "$target" &
-  else
+  case "$target" in
+    aarch64-apple-ios) sdk="$ios_sdk" ;;
+    aarch64-apple-ios-sim|x86_64-apple-ios) sdk="$simulator_sdk" ;;
+    *) sdk="$macos_sdk" ;;
+  esac
+  SDKROOT="$sdk" IPHONEOS_DEPLOYMENT_TARGET="$deployment_target" \
     CARGO_TARGET_DIR="$scratch_dir/cargo-$target" \
-      cargo build --locked --release --package latch-transport-ffi --target "$target" &
-  fi
+    cargo build --locked --release --package latch-transport-ffi --target "$target" &
   build_pids+=("$!")
 done
 for build_pid in "${build_pids[@]}"; do

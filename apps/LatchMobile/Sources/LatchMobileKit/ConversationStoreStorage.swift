@@ -23,6 +23,31 @@ extension ConversationStoreStorage {
     }
 }
 
+/// A process-local cache. Give each account and paired host a separate instance
+/// when their session IDs may overlap.
+public final class MemoryConversationStoreStorage: ConversationStoreStorage, @unchecked Sendable {
+    private let lock = NSLock()
+    private var caches: [String: ConversationStoreCache] = [:]
+
+    public init() {}
+
+    public func load(sessionID: String) -> ConversationStoreCache? {
+        lock.withLock { caches[sessionID] }
+    }
+
+    public func save(_ cache: ConversationStoreCache, sessionID: String) {
+        lock.withLock { caches[sessionID] = cache }
+    }
+
+    public func append(_ entry: ConversationJournalEntry, sessionID: String) -> Int {
+        lock.withLock {
+            let cache = caches[sessionID] ?? ConversationStoreCache()
+            caches[sessionID] = cache.applying([entry])
+        }
+        return 0
+    }
+}
+
 public struct ConversationStoreCache: Codable, Equatable, Sendable {
     public var generation: String?
     public var revision: UInt64

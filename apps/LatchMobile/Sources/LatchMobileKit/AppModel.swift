@@ -168,6 +168,7 @@ public final class AppModel {
     let newSessionFolderStore: any NewSessionFolderStoring
 
     let agentModelStore: any AgentModelPreferenceStoring
+    let conversationStorage: @MainActor (PairedDeviceRecord, String) -> any ConversationStoreStorage
 
     /// Where the transport writes the path it selected, so Settings can say
     /// whether this session is on the local network or relayed.
@@ -231,7 +232,10 @@ public final class AppModel {
         terminalConnector: TerminalConnecting? = nil,
         terminalUnlock: TerminalUnlock? = nil,
         notificationKeys: NotificationKeyStore? = nil,
-        coldOpen: ColdOpenRecorder? = nil
+        coldOpen: ColdOpenRecorder? = nil,
+        conversationStorage: @escaping @MainActor (PairedDeviceRecord, String) -> any ConversationStoreStorage = { _, _ in
+            FileConversationStoreStorage()
+        }
     ) {
         self.coldOpen = coldOpen ?? ColdOpenRecorder()
         self.notificationKeys = notificationKeys
@@ -242,6 +246,7 @@ public final class AppModel {
         self.terminalSizeStore = terminalSizeStore
         self.newSessionFolderStore = newSessionFolderStore
         self.agentModelStore = agentModelStore
+        self.conversationStorage = conversationStorage
         self.defaultNewSessionFolder = newSessionFolderStore.load()
         self.sessionPresentation = presentationStore.load()
         self.terminalSize = terminalSizeStore.load()

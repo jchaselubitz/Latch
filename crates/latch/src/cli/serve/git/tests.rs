@@ -897,6 +897,7 @@ fn session(
         last_activity_at: None,
         idle_ms,
         connector: phase.map(|_| "claude".to_owned()),
+        source: None,
         agent_phase: phase.map(str::to_owned),
     }
 }

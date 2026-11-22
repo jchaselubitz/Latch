@@ -40,6 +40,8 @@ public struct SessionSummary: Decodable, Equatable, Identifiable, Sendable {
     public let createdAt: String
     public let lastActivityAt: String?
     public let idleMs: Int?
+    /// Nil for older gateways and rows without recorded provenance.
+    public let source: SessionSource?
     public let connector: SessionConnector
     /// The agent's conversation phase as the Mac's Hub last saw it
     /// (`working`, `awaiting_input`, `idle`, ...). Nil for a shell, a stopped
@@ -56,6 +58,7 @@ public struct SessionSummary: Decodable, Equatable, Identifiable, Sendable {
         case createdAt = "created_at"
         case lastActivityAt = "last_activity_at"
         case idleMs = "idle_ms"
+        case source
         case connector
         case agentPhase = "agent_phase"
     }
@@ -71,7 +74,8 @@ public struct SessionSummary: Decodable, Equatable, Identifiable, Sendable {
         lastActivityAt: String? = nil,
         idleMs: Int? = nil,
         connector: SessionConnector = .unknown,
-        agentPhase: String? = nil
+        agentPhase: String? = nil,
+        source: SessionSource? = nil
     ) {
         self.id = id
         self.name = name
@@ -82,6 +86,7 @@ public struct SessionSummary: Decodable, Equatable, Identifiable, Sendable {
         self.createdAt = createdAt
         self.lastActivityAt = lastActivityAt
         self.idleMs = idleMs
+        self.source = source
         self.connector = connector
         self.agentPhase = agentPhase
     }
@@ -101,6 +106,7 @@ public struct SessionSummary: Decodable, Equatable, Identifiable, Sendable {
         createdAt = try container.decode(String.self, forKey: .createdAt)
         lastActivityAt = try container.decodeIfPresent(String.self, forKey: .lastActivityAt)
         idleMs = try container.decodeIfPresent(Int.self, forKey: .idleMs)
+        source = try container.decodeIfPresent(SessionSource.self, forKey: .source)
         agentPhase = try container.decodeIfPresent(String.self, forKey: .agentPhase)
         if !container.contains(.connector) {
             connector = .unknown

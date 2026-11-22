@@ -1,0 +1,51 @@
+{
+  "sessions": [
+    {
+      "id": "ses_overlord",
+      "name": "overlord",
+      "state": "running",
+      "cwd": "/workspace",
+      "command_label": "codex",
+      "created_at": "2026-11-22T00:00:00Z",
+      "connector": "codex",
+      "source": {
+        "kind": "overlord",
+        "externalRunId": "shared-run"
+      }
+    },
+    {
+      "id": "ses_mobile",
+      "name": "mobile",
+      "state": "running",
+      "cwd": "/workspace",
+      "command_label": "codex",
+      "created_at": "2026-11-22T00:00:00Z",
+      "connector": "codex",
+      "source": {
+        "kind": "mobile",
+        "externalRunId": "shared-run"
+      }
+    },
+    {
+      "id": "ses_cli",
+      "name": "cli",
+      "state": "running",
+      "cwd": "/workspace",
+      "command_label": "zsh",
+      "created_at": "2026-11-22T00:00:00Z",
+      "connector": null,
+      "source": {
+        "kind": "cli",
+        "externalRunId": null
+      }
+    },
+    {
+      "id": "ses_legacy",
+      "name": "legacy",
+      "state": "running",
+      "cwd": "/workspace",
+      "command_label": "zsh",
+      "created_at": "2026-11-22T00:00:00Z"
+    }
+  ]
+}

@@ -123,6 +123,8 @@ fn current_capabilities_advertise_supported_session_agents() {
         exclusive_terminal: true,
         session_agents: SESSION_AGENTS.to_vec(),
         attachment_max_bytes: None,
+        session_instructions: None,
+        overlord: None,
     })
     .unwrap();
     assert_eq!(
@@ -136,10 +138,55 @@ fn current_capabilities_advertise_supported_session_agents() {
         exclusive_terminal: true,
         session_agents: Vec::new(),
         attachment_max_bytes: None,
+        session_instructions: None,
+        overlord: None,
     })
     .unwrap();
     assert!(none.get("sessionAgents").is_none());
     assert!(none.get("attachmentMaxBytes").is_none());
+}
+
+/// Orientation and Overlord readiness are optional keys: a gateway without
+/// them omits both, which a client reads as "create without instructions" and
+/// "unknown", and an older client decoding a closed object never sees them.
+#[test]
+fn instruction_and_overlord_features_are_absent_unless_served() {
+    use super::super::contract::{OverlordReadiness, SessionInstructionsSupport};
+    let none = serde_json::to_value(GatewayFeatures {
+        git_commit_message: None,
+        exclusive_terminal: true,
+        session_agents: SESSION_AGENTS.to_vec(),
+        attachment_max_bytes: None,
+        session_instructions: None,
+        overlord: None,
+    })
+    .unwrap();
+    assert!(none.get("sessionInstructions").is_none());
+    assert!(none.get("overlord").is_none());
+    let served = serde_json::to_value(GatewayFeatures {
+        git_commit_message: None,
+        exclusive_terminal: true,
+        session_agents: SESSION_AGENTS.to_vec(),
+        attachment_max_bytes: None,
+        session_instructions: Some(SessionInstructionsSupport {
+            agents: vec![SessionAgent::Claude],
+            max_bytes: 8192,
+        }),
+        overlord: Some(OverlordReadiness {
+            signed_in: false,
+            backend_origin: None,
+            connector_agents: vec![SessionAgent::Codex],
+        }),
+    })
+    .unwrap();
+    assert_eq!(
+        served["sessionInstructions"],
+        serde_json::json!({"agents": ["claude"], "maxBytes": 8192})
+    );
+    assert_eq!(
+        served["overlord"],
+        serde_json::json!({"signedIn": false, "connectorAgents": ["codex"]})
+    );
 }
 
 #[test]
@@ -194,6 +241,70 @@ async fn post_create(
     body: &str,
 ) -> (u16, serde_json::Value) {
     send(harness, "POST", "/v2/sessions", grant, body).await
+}
+
+#[tokio::test]
+async fn session_list_exposes_only_public_provenance_at_each_read_grant() {
+    use crate::session::paths::SessionId;
+    use serde_json::json;
+
+    let harness = harness().await;
+    let cases = [
+        (
+            "overlord",
+            Some(
+                json!({"kind":"overlord", "external_run_id":"shared-run", "request_id":"private-retry"}),
+            ),
+            Some(json!({"kind":"overlord", "externalRunId":"shared-run"})),
+        ),
+        (
+            "mobile",
+            Some(json!({"kind":"mobile", "external_run_id":"shared-run"})),
+            Some(json!({"kind":"mobile", "externalRunId":"shared-run"})),
+        ),
+        (
+            "shell",
+            Some(json!({"kind":"cli"})),
+            Some(json!({"kind":"cli", "externalRunId":null})),
+        ),
+        ("legacy", None, None),
+        (
+            "incomplete",
+            Some(json!({"external_run_id":"orphan"})),
+            None,
+        ),
+    ];
+    for (name, source, _) in &cases {
+        let id = SessionId::parse(&format!("ses_{name}")).unwrap();
+        let paths = harness.home.session(&id);
+        paths.ensure().unwrap();
+        let mut meta = json!({
+            "format_version":1, "id":id.as_str(), "name":name, "cwd":harness.work,
+            "command_label":"test", "created_at":"2026-11-22T00:00:00Z",
+            "initial_size":{"cols":80,"rows":24}
+        });
+        if let Some(source) = source {
+            meta["source"] = source.clone();
+        }
+        std::fs::write(paths.meta(), serde_json::to_vec(&meta).unwrap()).unwrap();
+    }
+    for grant in ["observe", "interact", "control"] {
+        let (status, report) = send(&harness, "GET", "/v2/sessions", Some(grant), "").await;
+        assert_eq!(status, 200, "{report}");
+        let rows = report["sessions"].as_array().unwrap();
+        assert_eq!(rows.len(), cases.len());
+        for (name, _, expected) in &cases {
+            let row = rows.iter().find(|row| row["name"] == *name).unwrap();
+            assert_eq!(row.get("source"), expected.as_ref());
+        }
+    }
+    let (status, body) = send_raw(
+        &harness,
+        b"GET /v2/sessions HTTP/1.1\r\nHost: gateway\r\nConnection: close\r\n\r\n".to_vec(),
+    )
+    .await;
+    assert_eq!(status, 401);
+    assert!(body.get("sessions").is_none());
 }
 
 #[tokio::test]
@@ -498,6 +609,76 @@ async fn creation_is_refused_below_control_and_oversized_bodies_are_bounded() {
     let (status, payload) = post_create(&harness, Some("control"), &oversized).await;
     assert_eq!(status, 413);
     assert_eq!(payload["error"], "invalid_request");
+    assert!(harness.home.session_ids().unwrap().is_empty());
+}
+
+/// Discovery is how a phone learns it may send `instructions`: every agent
+/// the create route launches is listed with the byte limit, and the Mac's
+/// Overlord readiness is always present (its values depend on the Mac).
+#[tokio::test]
+async fn capabilities_advertise_instructions_and_overlord_readiness() {
+    let harness = harness().await;
+    let (status, value) = send(&harness, "GET", "/v2/capabilities", Some("observe"), "").await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        value["features"]["sessionInstructions"],
+        serde_json::json!({
+            "agents": ["claude", "codex"],
+            "maxBytes": create::INSTRUCTIONS_MAX_BYTES,
+        })
+    );
+    let overlord = &value["features"]["overlord"];
+    assert!(overlord["signedIn"].is_boolean(), "{overlord}");
+    assert!(overlord["connectorAgents"].is_array(), "{overlord}");
+    assert!(!overlord.to_string().contains("token"));
+}
+
+/// Instructions are refused before anything is accepted when there is no
+/// agent to give them to or the text is outside the advertised bounds, and a
+/// largest-allowed orientation still fits the create body.
+#[tokio::test]
+async fn creation_refuses_instructions_it_cannot_deliver_as_system_text() {
+    let harness = harness().await;
+    let work = harness.work.to_str().unwrap();
+    let body = |agent: Option<&str>, instructions: serde_json::Value| {
+        let mut body = serde_json::json!({
+            "requestId": "8cba5d78-79a0-4a55-9047-f77e57e463c7",
+            "cwd": work,
+            "instructions": instructions,
+        });
+        if let Some(agent) = agent {
+            body["agent"] = agent.into();
+        }
+        body.to_string()
+    };
+    let too_long = "x".repeat(create::INSTRUCTIONS_MAX_BYTES + 1);
+    for refused in [
+        body(None, "Orient the shell".into()),
+        body(Some("claude"), "".into()),
+        body(Some("claude"), "  \n\t ".into()),
+        body(Some("codex"), "bell\u{7}".into()),
+        body(Some("claude"), "nul\u{0}byte".into()),
+        body(Some("claude"), too_long.into()),
+        body(Some("claude"), serde_json::json!(42)),
+    ] {
+        let (status, payload) = post_create(&harness, Some("control"), &refused).await;
+        assert_eq!(status, 400, "{refused}");
+        assert_eq!(payload["error"], "invalid_request", "{refused}");
+    }
+    // The largest orientation, escaped at worst case, stays under the bound:
+    // the refusal it meets is the request validation, not the body limit.
+    let largest = "\"".repeat(create::INSTRUCTIONS_MAX_BYTES);
+    let largest = serde_json::json!({
+        "requestId": "8cba5d78-79a0-4a55-9047-f77e57e463c7",
+        "cwd": "/".to_owned() + &"a".repeat(4095),
+        "agent": "claude",
+        "model": "m".repeat(128),
+        "instructions": largest,
+    })
+    .to_string();
+    assert!(largest.len() < MAX_CREATE_BODY_BYTES);
+    let (status, _) = post_create(&harness, Some("control"), &largest).await;
+    assert_ne!(status, 413);
     assert!(harness.home.session_ids().unwrap().is_empty());
 }
 
@@ -811,6 +992,8 @@ fn current_capabilities_advertise_attachments_with_their_limit() {
         exclusive_terminal: true,
         session_agents: Vec::new(),
         attachment_max_bytes: Some(ATTACHMENT_MAX_BYTES),
+        session_instructions: None,
+        overlord: None,
     })
     .unwrap();
     assert_eq!(value["attachmentMaxBytes"], ATTACHMENT_MAX_BYTES);

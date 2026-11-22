@@ -16,6 +16,21 @@ final class SessionConnectorTests: XCTestCase {
         return try JSONDecoder().decode(SessionSummary.self, from: Data(json.utf8))
     }
 
+    func testSessionListProvenance() throws {
+        var root = URL(fileURLWithPath: #filePath)
+        for _ in 0..<5 { root.deleteLastPathComponent() }
+        let fixture = root.appendingPathComponent("fixtures/remote-access/v2/session-list.json")
+        let report = try JSONDecoder().decode(ListReport.self, from: Data(contentsOf: fixture))
+        XCTAssertEqual(report.sessions.map(\.source), [
+            SessionSource(kind: "overlord", externalRunId: "shared-run"),
+            SessionSource(kind: "mobile", externalRunId: "shared-run"),
+            SessionSource(kind: "cli"), nil
+        ])
+        XCTAssertEqual(report.sessions.map(\.connector), [.named("codex"), .named("codex"), .none, .unknown])
+        XCTAssertNil(try decode(#","source":null"#).source)
+        XCTAssertEqual(try decode(#","source":{"kind":"overlord"}"#).source, SessionSource(kind: "overlord"))
+    }
+
     func testAnOmittedFieldIsNotAClaimThatThereIsNoConnector() throws {
         XCTAssertEqual(try decode("").connector, .unknown)
     }

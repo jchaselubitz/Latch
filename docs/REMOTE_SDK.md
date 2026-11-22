@@ -113,13 +113,14 @@ path failure — missing, unreadable, not a directory, outside what the gateway
 will serve — is one stable error, so the route cannot be used to probe the
 filesystem.
 
-Creation takes two fields, and optionally an agent and its model:
+Creation takes two fields, and optionally an agent, its model and an orientation:
 
 ```json
 { "requestId": "8cba5d78-79a0-4a55-9047-f77e57e463c7", "cwd": "/Users/jake/src" }
 { "requestId": "8cba5d78-79a0-4a55-9047-f77e57e463c7", "cwd": "/Users/jake/src", "agent": "claude" }
 { "requestId": "8cba5d78-79a0-4a55-9047-f77e57e463c7", "cwd": "/Users/jake/src", "agent": "codex" }
 { "requestId": "8cba5d78-79a0-4a55-9047-f77e57e463c7", "cwd": "/Users/jake/src", "agent": "claude", "model": "claude-opus-5-5" }
+{ "requestId": "8cba5d78-79a0-4a55-9047-f77e57e463c7", "cwd": "/Users/jake/src", "agent": "codex", "instructions": "This chat was started from Overlord Mobile…" }
 ```
 
 `requestId` is a canonical hyphenated UUID and is the idempotency key. The Mac
@@ -155,6 +156,38 @@ which may be an alias outside the list). A well-formed id the agent does not
 list is `model_unavailable` (422); a `model` without `agent`, or one shaped
 like anything but a model id, is `invalid_request`. The request id is bound to
 the model as it is to the folder and agent.
+
+`instructions` is optional orientation text the agent receives through its
+own system-level mechanism, never as a message in the conversation: Claude
+Code gets it as `--append-system-prompt=<text>` (appended to its default
+system prompt) and Codex as `-c developer_instructions=<TOML string>` (a
+developer-role item, which replaces any `developer_instructions` the owner
+configured for that one session). Each value travels as a single argv element,
+so text that starts with `-` cannot become another option, and the login shell
+receives it as a positional parameter rather than script text. It is
+advertised as `features.sessionInstructions: { agents, maxBytes }`, present
+exactly when the create route accepts the field; a client sends it only with
+an `agent` listed there and must create without it anywhere else (an older
+gateway's closed contract refuses the key). The text must be non-empty after
+trimming, at most `maxBytes` UTF-8 bytes (8192), and free of control
+characters other than tab and newline; anything else, or instructions without
+an eligible agent, is `invalid_request` before anything is accepted. The
+request id is bound to the text by its SHA-256 digest (the receipt never stores
+the text), so a retry with other text, or none, is `request_id_conflict`. The
+session's display metadata and command label never contain it.
+
+`features.overlord: { signedIn, backendOrigin?, connectorAgents }` reports
+this Mac's local Overlord readiness for clients that start chats meant to act
+in Overlord. `signedIn` is true when the Overlord CLI's stored sign-in
+(`$OVLD_HOME/auth.json`, default `~/.ovld/auth.json`) has a token, a backend
+and no recorded expiry in the past; `backendOrigin` is that backend's scheme,
+host and port only. `connectorAgents` lists the agents of `sessionAgents` whose
+Overlord connector install record (`~/.ovld/connectors/<agent>.json`, written
+by `ovld agent-setup <agent>`) names a directory that still exists. The
+gateway reads these files on each discovery and never contacts Overlord, so a
+revoked token still reads as signed in and the account itself is not known:
+it is guidance, not authorization. An absent key means an older gateway, which
+is unknown rather than unavailable.
 
 Codex currently has a connector identity but no automatic transcript-source
 binding for a newly launched session. Its conversation remains in `starting`

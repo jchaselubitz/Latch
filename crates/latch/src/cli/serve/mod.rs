@@ -18,6 +18,7 @@ mod conversation;
 mod directory;
 mod git;
 mod http;
+mod overlord;
 mod pty;
 pub(crate) mod routes;
 mod terminal;

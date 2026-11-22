@@ -32,6 +32,47 @@ There is no manual gateway address/token mode and no compatibility fallback to
 an older pairing or transport. If the saved record lacks current Remote Link
 grant metadata, the app fails closed and asks the owner to pair again.
 
+## Use the kit in another app
+
+The release archive is a self-contained Swift package with the Swift sources,
+generated UniFFI bindings, and the static transport XCFramework. From a Latch
+checkout, run `scripts/package-latch-mobile-kit.sh dist` on a Mac with Xcode and
+the Rust targets listed in `scripts/build-latch-transport-xcframework.sh`.
+Use the generated archive filename and SHA-256 as the dependency pin. Rebuilding
+from the same sources can produce different native bytes with a different
+toolchain. The archive records the toolchain, base Git commit, native input
+hashes, and checksums for all XCFramework files.
+
+In the consuming app's build setup, check the archive against the pinned
+checksum before extraction. Add the extracted `LatchMobile` directory as an
+Xcode local package and link both `LatchMobileKit` and `LatchTransportNative` to
+the app target. Keep the extracted dependency under the consuming build's
+workspace so the package reference can be relative. The app can build with
+iOS 17 or later. The binary includes arm64 devices, arm64 and x86_64 simulators,
+and arm64 and x86_64 Macs for SwiftPM development.
+
+Give the app its own keychain service, such as
+`dev.cooperativ.overlord.mobile.latch`. Construct a
+`KeychainDeviceIdentityStore(service:)` and pass the same store to
+`PairingModel`, `NativeRemoteEnrollmentProvider`, and
+`NativeRemoteLinkConnector`. Supply a recognizable `PairingModel.deviceName`,
+such as “Overlord on iPhone”. The HTTP enrollment client registers it as
+`ios`. Add `NSLocalNetworkUsageDescription` and the `_latch-remote._tcp`
+entry in `NSBonjourServices`, plus the camera and Face ID usage descriptions if
+the app uses those features.
+
+Use a separate `KeychainPairedDeviceStore(service:account:)` whose account
+includes the verified Mac public key for each saved host. A new pairing can
+start with a `MemoryPairedDeviceStore`, then move the confirmed record to the
+slot for `record.mac.publicKey`. Keep one linked `AppModel` per active host,
+with the same `RemotePathReporter` passed to it and its native connector.
+Scope the folder, model, presentation, and path-metrics store keys or suites
+to the host. For conversation content that must stay in memory, pass
+`conversationStorage: { _, _ in MemoryConversationStoreStorage() }` to
+`AppModel`. The factory receives the paired record and session ID, so callers
+can also supply their own account- and host-scoped cache. When using
+`ConversationStore` directly, pass the storage in its initializer.
+
 ## Pairing
 
 In Latch Desktop, configure the control plane, turn Remote Access on, and

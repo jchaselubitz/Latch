@@ -283,6 +283,102 @@ final class GatewayV2Tests: XCTestCase {
         XCTAssertEqual(Set(shellBody.keys), ["requestId", "cwd"])
     }
 
+    /// Orientation travels only to a Mac that lists the agent under
+    /// `sessionInstructions`. Every other Mac gets the ordinary request, so a
+    /// chat still starts there, just without injected text.
+    func testInstructionsAreSentOnlyWhereTheMacAdvertisesThem() async throws {
+        let created = """
+        {"protocolVersion":2,"session":{"id":"ses_new","name":"claude",
+        "state":"running","createdAt":"2026-09-06T00:00:00Z"}}
+        """
+        let orientation = "This chat was started from Overlord Mobile.\n\tNo mission is attached."
+        func keys(_ body: String?) throws -> Set<String> {
+            let object = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: Data(XCTUnwrap(body).utf8)) as? [String: Any]
+            )
+            return Set(object.keys)
+        }
+
+        // An older Mac: no feature key. The request is the pre-feature shape.
+        StubProtocol.stub(path: "/v2/capabilities", body: capabilities(agents: ["claude", "codex"]))
+        StubProtocol.stub(path: "/v2/sessions", body: created)
+        var gateway = makeGateway()
+        let sendsOnOld = try await gateway.sendsInstructions(for: .claude)
+        XCTAssertFalse(sendsOnOld)
+        _ = try await gateway.createSession(
+            requestID: UUID(), cwd: "/tmp/a", agent: .claude, instructions: orientation
+        )
+        XCTAssertEqual(try keys(StubProtocol.requests.last?.body), ["requestId", "cwd", "agent"])
+
+        // A current Mac that orients Claude only.
+        StubProtocol.reset()
+        StubProtocol.stub(path: "/v2/capabilities", body: capabilities(
+            agents: ["claude", "codex"],
+            extraFeatures: #""sessionInstructions":{"agents":["claude","future-agent"],"maxBytes":128}"#
+        ))
+        StubProtocol.stub(path: "/v2/sessions", body: created)
+        gateway = makeGateway()
+        let sendsClaude = try await gateway.sendsInstructions(for: .claude)
+        let sendsCodex = try await gateway.sendsInstructions(for: .codex)
+        XCTAssertTrue(sendsClaude)
+        XCTAssertFalse(sendsCodex)
+        let requestID = UUID()
+        _ = try await gateway.createSession(
+            requestID: requestID, cwd: "/tmp/a", agent: .claude, instructions: orientation
+        )
+        let oriented = try XCTUnwrap(StubProtocol.requests.last)
+        XCTAssertEqual(
+            try JSONDecoder().decode(CreateSessionRequest.self, from: Data(oriented.body.utf8)),
+            CreateSessionRequest(requestId: requestID, cwd: "/tmp/a", agent: .claude, instructions: orientation)
+        )
+        _ = try await gateway.createSession(
+            requestID: UUID(), cwd: "/tmp/a", agent: .codex, instructions: orientation
+        )
+        XCTAssertEqual(try keys(StubProtocol.requests.last?.body), ["requestId", "cwd", "agent"])
+        _ = try await gateway.createSession(requestID: UUID(), cwd: "/tmp/a", instructions: orientation)
+        XCTAssertEqual(try keys(StubProtocol.requests.last?.body), ["requestId", "cwd"])
+
+        // Text the Mac would refuse never leaves the phone.
+        let sent = StubProtocol.requests.count
+        for refused in [String(repeating: "x", count: 129), " \n ", "bell\u{7}"] {
+            do {
+                _ = try await gateway.createSession(
+                    requestID: UUID(), cwd: "/tmp/a", agent: .claude, instructions: refused
+                )
+                XCTFail("\(refused.debugDescription) must be refused locally")
+            } catch {
+                guard case .refused = error as? LatchError else {
+                    return XCTFail("unexpected \(error)")
+                }
+            }
+        }
+        XCTAssertEqual(StubProtocol.requests.count, sent)
+    }
+
+    /// The Mac's Overlord readiness decodes when present, is nil on an older
+    /// Mac, and drops agent kinds this build does not know.
+    func testOverlordReadinessDecodesOptionally() async throws {
+        StubProtocol.stub(path: "/v2/capabilities", body: capabilities(agents: ["claude"]))
+        let old = try await makeGateway().discover()
+        XCTAssertNil(old.features.overlord)
+        XCTAssertNil(old.features.sessionInstructions)
+
+        StubProtocol.reset()
+        StubProtocol.stub(path: "/v2/capabilities", body: capabilities(
+            agents: ["claude"],
+            extraFeatures: #""overlord":{"signedIn":true,"backendOrigin":"https://backend.example.com","connectorAgents":["claude","future-agent"]}"#
+        ))
+        let current = try await makeGateway().discover()
+        XCTAssertEqual(
+            current.features.overlord,
+            OverlordReadiness(
+                signedIn: true,
+                backendOrigin: "https://backend.example.com",
+                connectorAgents: [.claude]
+            )
+        )
+    }
+
     /// A Mac that predates model choice is never asked for a list or sent a
     /// model; the agent still starts, on the Mac's own default.
     func testAMacWithoutModelChoiceIsNeverAskedForOne() async throws {
@@ -375,12 +471,14 @@ final class GatewayV2Tests: XCTestCase {
         browse: Bool = true,
         create: Bool = true,
         agents: [String]? = nil,
-        agentModels: Bool = false
+        agentModels: Bool = false,
+        extraFeatures: String = ""
     ) -> String {
+        let extra = extraFeatures.isEmpty ? "" : "," + extraFeatures
         let features = agents.map { names in
             let list = names.map { "\"\($0)\"" }.joined(separator: ",")
-            return #"{"exclusiveTerminal":true,"sessionAgents":[\#(list)]}"#
-        } ?? #"{"exclusiveTerminal":true}"#
+            return #"{"exclusiveTerminal":true,"sessionAgents":[\#(list)]"# + extra + "}"
+        } ?? (#"{"exclusiveTerminal":true"# + extra + "}")
         return """
         {"protocolVersion":2,"productVersion":"2.0.0",
          "capabilities":{"create":true,"openViewer":true,"localAttach":true,

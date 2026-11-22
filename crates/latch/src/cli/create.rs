@@ -130,6 +130,11 @@ pub struct RemoteSessionRequest {
     /// agent on its own configured default. The caller has already checked it
     /// against the agent's catalog; it is never set without `agent`.
     pub model: Option<String>,
+    /// Orientation the agent receives through its own system-level
+    /// instruction mechanism, never as a user message. The caller has
+    /// already checked it with [`is_valid_instructions`] for an agent in
+    /// [`INSTRUCTION_AGENTS`]; it is never set without `agent`.
+    pub instructions: Option<String>,
     /// Opaque device that submitted the request, when it came through the
     /// paired proxy. A request id is owned by the device that first used it.
     pub device: Option<String>,
@@ -173,6 +178,11 @@ pub struct CreationReceipt {
     /// receipts written before a model could be chosen, which named none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// SHA-256 of the orientation the request carried, so a retry with other
+    /// text conflicts instead of reusing a session oriented differently. The
+    /// text itself is never written here. Absent when none was sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions_digest: Option<String>,
     /// Digest of the rest of a local launch (arguments after the program,
     /// environment, agent declaration). Only local `latch create
     /// --request-id` receipts carry it; phone receipts never do.
@@ -350,6 +360,7 @@ fn create_remote_session_with(
         )));
     }
     let harness = request.agent.map(|agent| agent.harness().to_owned());
+    let instructions_digest = request.instructions.as_deref().map(digest_instructions);
 
     // The receipt is the device- and payload-scoped owner of this id. Only
     // the device that first used the id may reuse it, and only for the same
@@ -359,7 +370,11 @@ fn create_remote_session_with(
         if receipt.device != request.device {
             return Err(RemoteSessionError::DeviceConflict);
         }
-        if receipt.cwd != cwd || receipt.agent != harness || receipt.model != request.model {
+        if receipt.cwd != cwd
+            || receipt.agent != harness
+            || receipt.model != request.model
+            || receipt.instructions_digest != instructions_digest
+        {
             return Err(RemoteSessionError::RequestIdConflict);
         }
     }
@@ -396,6 +411,7 @@ fn create_remote_session_with(
         cwd: cwd.clone(),
         agent: harness,
         model: request.model.clone(),
+        instructions_digest,
         launch_digest: None,
         status: CreationReceiptStatus::Accepted,
         session_id: None,
@@ -423,6 +439,9 @@ fn create_remote_session_with(
     let manifest = match program {
         Some(program) => {
             let mut argv = vec![program.display().to_string()];
+            if let (Some(agent), Some(text)) = (request.agent, request.instructions.as_deref()) {
+                argv.extend(instruction_arguments(agent, text));
+            }
             if let Some(model) = request.model {
                 argv.extend(["--model".to_owned(), model]);
             }
@@ -463,6 +482,63 @@ fn create_remote_session_with(
         created_at: meta.created_at,
         reused: false,
     })
+}
+
+/// Largest orientation, in UTF-8 bytes, a phone may ask an agent to start
+/// with. A few paragraphs: enough for orientation, small enough that the
+/// create body stays far below the paired proxy's initial-request limit.
+pub const INSTRUCTIONS_MAX_BYTES: usize = 8 * 1024;
+
+/// Agents creation can orient, each through its own system-level mechanism.
+/// An agent joins this list only with a mechanism that keeps the text out of
+/// the conversation's user messages.
+pub const INSTRUCTION_AGENTS: &[SessionAgent] = &[SessionAgent::Claude, SessionAgent::Codex];
+
+/// Whether `text` may be sent as an agent's orientation: non-empty, within
+/// [`INSTRUCTIONS_MAX_BYTES`], and free of control characters other than tab
+/// and newline (argv cannot carry NUL; the rest would only disguise text).
+pub fn is_valid_instructions(text: &str) -> bool {
+    !text.trim().is_empty()
+        && text.len() <= INSTRUCTIONS_MAX_BYTES
+        && text
+            .chars()
+            .all(|c| c == '\n' || c == '\t' || !c.is_control())
+}
+
+/// The arguments that hand `text` to `agent` as system-level instructions.
+///
+/// Each value is one argv element joined to its flag, so a text that begins
+/// with `-` can never be read as another option, and nothing is re-parsed by
+/// the login shell (argv reaches it as positional parameters).
+///
+/// - Claude Code appends it to its default system prompt; the transcript
+///   records no user message for it.
+/// - Codex takes it as `developer_instructions`, a developer-role item that
+///   the Codex projection never shows (only completed user and agent
+///   messages reach the thread). The value is a TOML basic string; JSON's
+///   string escapes are a subset TOML accepts. It replaces any
+///   `developer_instructions` the owner set in `~/.codex/config.toml` for this
+///   one session.
+fn instruction_arguments(agent: SessionAgent, text: &str) -> Vec<String> {
+    match agent {
+        SessionAgent::Claude => vec![format!("--append-system-prompt={text}")],
+        SessionAgent::Codex => vec![
+            "-c".to_owned(),
+            format!(
+                "developer_instructions={}",
+                serde_json::Value::String(text.to_owned())
+            ),
+        ],
+    }
+}
+
+/// Hex SHA-256 of an orientation, the only form a receipt keeps.
+fn digest_instructions(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(text.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn failed(error: impl Into<anyhow::Error>) -> RemoteSessionError {
@@ -824,6 +900,7 @@ fn create_local_session_with(
         cwd: binding.cwd.clone(),
         agent: Some(binding.program.clone()),
         model: None,
+        instructions_digest: None,
         launch_digest: Some(binding.digest.clone()),
         status: CreationReceiptStatus::Accepted,
         session_id: None,
@@ -1057,6 +1134,7 @@ mod tests {
             cwd: cwd.to_owned(),
             agent: None,
             model: None,
+            instructions: None,
             device: Some("phone-a".to_owned()),
         }
     }
@@ -1426,6 +1504,117 @@ mod tests {
             conflict,
             Err(RemoteSessionError::RequestIdConflict)
         ));
+    }
+
+    const ORIENTATION: &str =
+        "This chat was started from Overlord Mobile.\n- Confirm \"before\" deleting.\tThanks";
+
+    #[test]
+    fn claude_receives_instructions_as_appended_system_prompt_not_a_message() {
+        let (_temp, home, cwd) = home();
+        let oriented = || RemoteSessionRequest {
+            model: Some("claude-opus-5-5".to_owned()),
+            instructions: Some(ORIENTATION.to_owned()),
+            ..claude_request(&home, &cwd)
+        };
+        let outcome = create_remote_session_with(oriented(), fake_claude, |options| {
+            // One argv element joined to its flag: never a positional prompt
+            // (which Claude would submit as the first user message), and
+            // never split or re-parsed by the login shell.
+            assert_eq!(
+                options.manifest.launch.argv,
+                [
+                    "/opt/fake/bin/claude".to_owned(),
+                    format!("--append-system-prompt={ORIENTATION}"),
+                    "--model".to_owned(),
+                    "claude-opus-5-5".to_owned(),
+                ]
+            );
+            assert_eq!(options.manifest.launch.agent, Some(AgentKind::Claude));
+            stub_launch(options)
+        })
+        .unwrap();
+        // The receipt binds the id to the text by digest only.
+        let receipt = read_receipt(&home, REQUEST_ID).unwrap().unwrap();
+        assert_eq!(
+            receipt.instructions_digest.as_ref().map(String::len),
+            Some(64)
+        );
+        let text = std::fs::read_to_string(receipt_path(&home, REQUEST_ID)).unwrap();
+        assert!(!text.contains("Overlord Mobile"));
+        let meta = meta::read(&home.session(&SessionId::parse(&outcome.id).unwrap())).unwrap();
+        assert_eq!(meta.command_label, "claude");
+        assert!(!serde_json::to_string(&meta)
+            .unwrap()
+            .contains("Overlord Mobile"));
+
+        // A retry with the same text reuses; other text, or none, conflicts.
+        let retry = create_remote_session_with(oriented(), fake_claude, |_| {
+            panic!("a retry must not launch a second agent")
+        })
+        .unwrap();
+        assert!(retry.reused);
+        for other in [Some("Other orientation".to_owned()), None] {
+            let request = RemoteSessionRequest {
+                instructions: other,
+                ..oriented()
+            };
+            let conflict = create_remote_session_with(request, fake_claude, |_| {
+                panic!("different instructions must conflict")
+            });
+            assert!(matches!(
+                conflict,
+                Err(RemoteSessionError::RequestIdConflict)
+            ));
+        }
+    }
+
+    #[test]
+    fn codex_receives_instructions_as_developer_instructions() {
+        let (_temp, home, cwd) = home();
+        let request = RemoteSessionRequest {
+            instructions: Some(ORIENTATION.to_owned()),
+            ..codex_request(&home, &cwd)
+        };
+        create_remote_session_with(request, fake_codex, |options| {
+            let argv = &options.manifest.launch.argv;
+            assert_eq!(argv[..2], ["/opt/fake/bin/codex", "-c"]);
+            assert_eq!(argv.len(), 3);
+            let value = argv[2]
+                .strip_prefix("developer_instructions=")
+                .expect("a config override");
+            // A TOML basic string that reads back as exactly the text.
+            assert_eq!(serde_json::from_str::<String>(value).unwrap(), ORIENTATION);
+            assert!(value.starts_with('"') && !value.contains('\n'));
+            stub_launch(options)
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn a_leading_dash_stays_inside_the_instruction_argument() {
+        assert_eq!(
+            instruction_arguments(SessionAgent::Claude, "--dangerously-skip-permissions"),
+            ["--append-system-prompt=--dangerously-skip-permissions"]
+        );
+        assert_eq!(
+            instruction_arguments(SessionAgent::Codex, "-x\nmodel=\"evil\""),
+            ["-c", r#"developer_instructions="-x\nmodel=\"evil\"""#]
+        );
+    }
+
+    #[test]
+    fn instructions_are_bounded_visible_text() {
+        assert!(is_valid_instructions(ORIENTATION));
+        assert!(is_valid_instructions(
+            &"é".repeat(INSTRUCTIONS_MAX_BYTES / 2)
+        ));
+        assert!(!is_valid_instructions(
+            &"é".repeat(INSTRUCTIONS_MAX_BYTES / 2 + 1)
+        ));
+        for refused in ["", " \n\t", "nul\0", "bell\u{7}", "escape\u{1b}[2J", "cr\r"] {
+            assert!(!is_valid_instructions(refused), "{refused:?}");
+        }
     }
 
     #[test]

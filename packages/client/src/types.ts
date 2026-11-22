@@ -38,6 +38,7 @@ export type SessionSummary = {
   created_at: string;
   last_activity_at?: string;
   idle_ms?: number;
+  source?: { kind: string; externalRunId?: string | null } | null;
 };
 
 export type ListReport = { sessions: SessionSummary[] };

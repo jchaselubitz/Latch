@@ -27,6 +27,24 @@ extension AppModel {
         return capabilities.features.sessionAgents
     }
 
+    /// Whether the linked Mac gives `agent` a create-time orientation as
+    /// system-level instructions. False on a Mac that predates the field,
+    /// where a chat starts the ordinary way with no injected text.
+    public func acceptsSessionInstructions(for agent: SessionAgent) -> Bool {
+        guard availableSessionAgents.contains(agent),
+              case .linked(let capabilities) = linkState
+        else { return false }
+        return capabilities.features.sessionInstructions?.agents.contains(agent) == true
+    }
+
+    /// The linked Mac's Overlord sign-in and connector state, as its own files
+    /// report it. `nil` when not linked or on a Mac that predates the signal,
+    /// which means unknown rather than missing.
+    public var linkedOverlordReadiness: OverlordReadiness? {
+        guard case .linked(let capabilities) = linkState else { return nil }
+        return capabilities.features.overlord
+    }
+
     /// Whether this phone may start `agent` right now: creation itself must
     /// be allowed, and the Mac must have said it launches that kind.
     public func canCreateNewSession(agent: SessionAgent?) -> Bool {

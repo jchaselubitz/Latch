@@ -110,17 +110,41 @@ public actor LatchGateway {
     /// `model` is one id from ``agentModels(for:)`` and travels only with an
     /// agent, and only to a Mac that serves model choice; `nil` starts the
     /// agent on whatever the Mac's owner configured.
+    ///
+    /// `instructions` is an optional orientation the agent receives through
+    /// its own system-level mechanism, never as a message in the thread. It
+    /// is sent only when discovery lists `agent` under
+    /// `features.sessionInstructions`; on any other Mac (an older one, or an
+    /// agent it cannot orient) creation proceeds without it, exactly as it
+    /// would have without the argument. Text the Mac advertises support for
+    /// but would refuse (empty, over `maxBytes`, or control characters other
+    /// than tab and newline) throws ``LatchError/refused(_:)`` before
+    /// anything is sent. Use ``sendsInstructions(for:)`` to know beforehand.
     public func createSession(
         requestID: UUID,
         cwd: String,
         agent: SessionAgent? = nil,
-        model: String? = nil
+        model: String? = nil,
+        instructions: String? = nil
     ) async throws -> CreateReport {
         try await require(.createSession)
+        var instructions = agent == nil ? nil : instructions
         if let agent {
             let discovered = try await discoveredCapabilities()
             guard discovered.features.sessionAgents.contains(agent) else {
                 throw LatchError.agentUnavailable(agent)
+            }
+            if let text = instructions {
+                if let support = discovered.features.sessionInstructions,
+                   support.agents.contains(agent) {
+                    guard support.accepts(text, for: agent) else {
+                        throw LatchError.refused(
+                            "The orientation for this chat is empty, too long, or contains control characters."
+                        )
+                    }
+                } else {
+                    instructions = nil
+                }
             }
         }
         let model = agent == nil ? nil : model
@@ -130,12 +154,28 @@ public actor LatchGateway {
         let body: Data
         do {
             body = try JSONEncoder().encode(
-                CreateSessionRequest(requestId: requestID, cwd: cwd, agent: agent, model: model)
+                CreateSessionRequest(
+                    requestId: requestID,
+                    cwd: cwd,
+                    agent: agent,
+                    model: model,
+                    instructions: instructions
+                )
             )
         } catch {
             throw LatchError.malformedResponse(String(describing: error))
         }
         return try await request(method: "POST", path: "/v2/sessions", body: body)
+    }
+
+    /// Whether ``createSession(requestID:cwd:agent:model:instructions:)``
+    /// would deliver `instructions` to `agent` on this Mac, from discovery.
+    /// False on a Mac that predates orientation; creation there still works.
+    public func sendsInstructions(for agent: SessionAgent) async throws -> Bool {
+        let discovered = try await discoveredCapabilities()
+        return GatewayCompatibility.supports(endpoint: .createSession, capabilities: discovered)
+            && discovered.features.sessionAgents.contains(agent)
+            && discovered.features.sessionInstructions?.agents.contains(agent) == true
     }
 
     /// The models `agent` can start with on the Mac, read from the agent's

@@ -23,10 +23,11 @@ use super::attention::AttentionWatcher;
 use super::auth::selected_subprotocol;
 use super::contract::{
     AgentModelCatalog, CreateSessionRequest, GatewayFeatures, GatewayReadiness, SessionAgent,
-    OPERATION_RETENTION_SECONDS, REMOTE_ACCESS_SCHEMA_VERSION,
+    SessionInstructionsSupport, OPERATION_RETENTION_SECONDS, REMOTE_ACCESS_SCHEMA_VERSION,
 };
 use super::conversation::{self, ConversationConnect, ConversationQuery};
 use super::directory::{self, BrowseError};
+use super::overlord::{self, OverlordPaths};
 use super::routes::{Grant, RouteId, RouteSpec, ATTACHMENT_MAX_BYTES, ROUTES};
 use super::terminal::{self, ResumeRegistry, TerminalConnect, TerminalQuery};
 use super::ServeOptions;
@@ -343,6 +344,25 @@ async fn gateway_capabilities(State(state): State<AppState>) -> Response {
             exclusive_terminal: true,
             session_agents: SESSION_AGENTS.to_vec(),
             attachment_max_bytes: Some(ATTACHMENT_MAX_BYTES),
+            session_instructions: Some(SessionInstructionsSupport {
+                agents: create::INSTRUCTION_AGENTS
+                    .iter()
+                    .copied()
+                    .filter(|agent| SESSION_AGENTS.contains(agent))
+                    .collect(),
+                max_bytes: create::INSTRUCTIONS_MAX_BYTES as u64,
+            }),
+            // Two small local files; read per request so a sign-in or
+            // `ovld agent-setup` on the Mac shows on the phone's next refresh.
+            overlord: tokio::task::spawn_blocking(|| {
+                overlord::readiness(
+                    OverlordPaths::from_env().as_ref(),
+                    SESSION_AGENTS,
+                    &crate::engine::format_rfc3339(SystemTime::now()),
+                )
+            })
+            .await
+            .ok(),
         },
         gateway_instance_id: state.gateway_instance_id,
         operation_retention_seconds: OPERATION_RETENTION_SECONDS,
@@ -483,10 +503,11 @@ async fn agent_models_catalog(Path(agent): Path<String>) -> Result<Response, Api
     Ok(Json(catalog).into_response())
 }
 
-/// Upper bound on a creation body. The request carries three short strings;
-/// the paired proxy already refuses a larger initial request, and this is the
+/// Upper bound on a creation body: a few short strings plus an orientation of
+/// at most [`create::INSTRUCTIONS_MAX_BYTES`], which JSON escaping can at most
+/// double. It stays below the paired proxy's initial-request limit, and is the
 /// same refusal for the manual HTTPS route.
-const MAX_CREATE_BODY_BYTES: usize = 1024;
+const MAX_CREATE_BODY_BYTES: usize = 24 * 1024;
 
 /// Hosted agents the create route will launch when asked. Advertised in
 /// discovery so a phone shows only controls this gateway can serve; whether
@@ -543,6 +564,28 @@ async fn create_session(
             ));
         }
     }
+    if let Some(instructions) = &request.instructions {
+        // Instructions orient an agent; a shell has nothing to give them to,
+        // and an agent without a system-level mechanism would have to see
+        // them as a user message, which creation never does.
+        let supported = request
+            .agent
+            .is_some_and(|agent| create::INSTRUCTION_AGENTS.contains(&agent));
+        if !supported {
+            return Err(ApiError::coded(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "instructions need an agent this gateway can orient",
+            ));
+        }
+        if !create::is_valid_instructions(instructions) {
+            return Err(ApiError::coded(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "instructions must be non-empty text within the advertised size",
+            ));
+        }
+    }
     let cwd = directory::canonical_directory_from_str(&request.cwd).map_err(map_browse_error)?;
 
     let home = state.home.clone();
@@ -564,6 +607,7 @@ async fn create_session(
             cwd,
             agent: request.agent,
             model: request.model,
+            instructions: request.instructions,
             device: device.0,
         })
     })

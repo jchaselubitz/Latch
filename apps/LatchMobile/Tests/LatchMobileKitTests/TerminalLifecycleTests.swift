@@ -65,7 +65,10 @@ final class TerminalLifecycleTests: XCTestCase {
     private func linkedModel(
         authenticator: StubDeviceOwnerAuthenticator = StubDeviceOwnerAuthenticator(),
         permission: DevicePermission = .control,
-        dials: TerminalDials = TerminalDials()
+        dials: TerminalDials = TerminalDials(),
+        conversationStorage: @escaping @MainActor (PairedDeviceRecord, String) -> any ConversationStoreStorage = { _, _ in
+            FileConversationStoreStorage()
+        }
     ) async -> AppModel {
         StubProtocol.reset()
         StubProtocol.stub(path: "/v2/capabilities", body: Self.capabilities)
@@ -83,7 +86,8 @@ final class TerminalLifecycleTests: XCTestCase {
                 dials.record()
                 return FakeConnection()
             },
-            terminalUnlock: TerminalUnlock(authenticator: authenticator, grace: 600)
+            terminalUnlock: TerminalUnlock(authenticator: authenticator, grace: 600),
+            conversationStorage: conversationStorage
         )
         await model.connectPairedDevice(pairedRecord(permission: permission))
         return model
@@ -224,6 +228,29 @@ final class TerminalLifecycleTests: XCTestCase {
         await unlocked(model)
         XCTAssertEqual(authenticator.prompts, 1)
         XCTAssertNotNil(model.terminalSession(for: session))
+    }
+
+    func testConversationRestoresFromCallerStorageForThePairedHost() async throws {
+        let expected = pairedRecord(permission: .control)
+        let storage = MemoryConversationStoreStorage()
+        let otherHostStorage = MemoryConversationStoreStorage()
+        let model = await linkedModel(conversationStorage: { host, sessionID in
+            XCTAssertEqual(host.mac.publicKey, expected.mac.publicKey)
+            XCTAssertEqual(sessionID, "ses_a")
+            return storage
+        })
+        storage.save(ConversationStoreCache(generation: "host-a", revision: 6), sessionID: "ses_a")
+        _ = storage.append(ConversationJournalEntry(
+            sequence: 1, generation: "host-a", revision: 7, operationEpoch: nil, state: nil,
+            hasMoreBefore: false, operations: [], upserts: [], removedIDs: []
+        ), sessionID: "ses_a")
+        otherHostStorage.save(ConversationStoreCache(generation: "host-b", revision: 2), sessionID: "ses_a")
+
+        let session = try XCTUnwrap(model.sessions.first)
+        let store = try XCTUnwrap(model.conversationStore(for: session))
+        XCTAssertEqual(store.generation, "host-a")
+        XCTAssertEqual(store.revision, 7)
+        XCTAssertEqual(otherHostStorage.load(sessionID: session.id)?.generation, "host-b")
     }
 
     /// Backgrounding and foregrounding an open chat stops and restarts the

@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://latch.cooperativ.dev/schemas/remote-access/v2/session-list.schema.json",
+  "title": "Authenticated session list",
+  "type": "object",
+  "required": ["sessions"],
+  "properties": {
+    "sessions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "state", "cwd", "command_label", "created_at"],
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "title": { "type": ["string", "null"] },
+          "state": { "type": "string" },
+          "cwd": { "type": "string" },
+          "command_label": { "type": "string" },
+          "created_at": { "type": "string" },
+          "last_activity_at": { "type": ["string", "null"] },
+          "idle_ms": { "type": ["integer", "null"], "minimum": 0 },
+          "connector": { "type": ["string", "null"] },
+          "agent_phase": { "type": ["string", "null"] },
+          "source": {
+            "description": "Visible with session-list access. Missing or null means unknown provenance. Correlate only within the exact stored kind.",
+            "type": ["object", "null"],
+            "required": ["kind"],
+            "additionalProperties": false,
+            "properties": {
+              "kind": { "type": "string", "minLength": 1 },
+              "externalRunId": { "type": ["string", "null"], "minLength": 1 }
+            }
+          }
+        }
+      }
+    }
+  }
+}

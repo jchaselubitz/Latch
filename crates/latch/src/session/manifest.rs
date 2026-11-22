@@ -164,6 +164,7 @@ pub struct DisplayMetadata {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceInfo {
     /// Broad source kind.
+    #[serde(default)]
     pub kind: String,
     /// Opaque external correlation id.
     #[serde(default)]

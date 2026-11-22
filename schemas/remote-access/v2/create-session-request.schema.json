@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://latch.cooperativ.dev/schemas/remote-access/v2/create-session-request.schema.json",
   "title": "LatchCreateSessionRequestV2",
-  "description": "The only caller-controlled inputs for a mobile-created session: where it starts, and optionally which hosted agent the Mac launches there instead of a standard shell.",
+  "description": "The only caller-controlled inputs for a mobile-created session: where it starts, optionally which hosted agent the Mac launches there instead of a standard shell, and optionally a short orientation the agent receives as system-level instructions.",
   "type": "object",
   "required": ["requestId", "cwd"],
   "properties": {
@@ -19,6 +19,12 @@
       "maxLength": 128,
       "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@\\[\\]-]*$",
       "description": "Model the agent starts with, passed to it as `--model`. Only valid with `agent`, and only an id the gateway lists for that agent at GET /v2/agents/{agent}/models. Absent means the agent's own configured default on the Mac."
+    },
+    "instructions": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 8192,
+      "description": "Orientation text the agent receives through its own system-level instruction mechanism (Claude Code: --append-system-prompt; Codex: developer_instructions), never as a user message. Only valid with `agent`, only for an agent listed in features.sessionInstructions.agents, and at most features.sessionInstructions.maxBytes UTF-8 bytes. Tab and newline are the only control characters accepted. Absent means the agent starts with no injected text; a gateway that predates the field refuses the key, so a caller sends it only when advertised."
     }
   },
   "additionalProperties": false

@@ -38,7 +38,16 @@ pub struct SessionMeta {
     /// Initial geometry.
     pub initial_size: TerminalSize,
     /// Integration provenance.
+    #[serde(default = "unknown_source")]
     pub source: SourceInfo,
+}
+
+// New CLI launches have a known source. Old sidecars without one do not.
+fn unknown_source() -> SourceInfo {
+    SourceInfo {
+        kind: String::new(),
+        ..SourceInfo::default()
+    }
 }
 
 /// Exit information derived from latchd's retained child status.

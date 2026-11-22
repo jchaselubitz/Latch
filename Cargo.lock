@@ -1187,7 +1187,7 @@ dependencies = [
 
 [[package]]
 name = "latch"
-version = "0.2611220814.0"
+version = "0.2611221704.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1212,7 +1212,7 @@ dependencies = [
 
 [[package]]
 name = "latch-remote"
-version = "0.2611220814.0"
+version = "0.2611221704.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1236,7 +1236,7 @@ dependencies = [
 
 [[package]]
 name = "latch-term"
-version = "0.2611220814.0"
+version = "0.2611221704.0"
 dependencies = [
  "proptest",
  "serde_json",
@@ -1245,7 +1245,7 @@ dependencies = [
 
 [[package]]
 name = "latch-transport"
-version = "0.2611220814.0"
+version = "0.2611221704.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -1265,14 +1265,14 @@ dependencies = [
 
 [[package]]
 name = "latch-transport-bindgen"
-version = "0.2611220814.0"
+version = "0.2611221704.0"
 dependencies = [
  "uniffi",
 ]
 
 [[package]]
 name = "latch-transport-ffi"
-version = "0.2611220814.0"
+version = "0.2611221704.0"
 dependencies = [
  "async-trait",
  "latch-transport",
@@ -1285,7 +1285,7 @@ dependencies = [
 
 [[package]]
 name = "latchd"
-version = "0.2611220814.0"
+version = "0.2611221704.0"
 dependencies = [
  "anyhow",
  "latch-term",

@@ -15,6 +15,7 @@ MANIFEST = APP / "Contract/manifest.json"
 SWIFT = APP / "Sources/LatchMobileKit/Generated/LatchContract.swift"
 DEFAULT_UPSTREAM = APP.parent.parent
 NAMES = (
+    "session-list.schema.json",
     "create-session-request.schema.json",
     "create-session-response.schema.json",
     "agent-model-catalog.schema.json",
@@ -69,6 +70,16 @@ import Foundation
 
 public enum LatchContract {
     public static let protocolVersion = 2
+}
+
+public struct SessionSource: Decodable, Equatable, Sendable {
+    public let kind: String
+    public let externalRunId: String?
+
+    public init(kind: String, externalRunId: String? = nil) {
+        self.kind = kind
+        self.externalRunId = externalRunId
+    }
 }
 
 /// Reason carried in a terminal WebSocket close frame. `detached` is a clean
@@ -1453,16 +1464,28 @@ public struct CreateSessionRequest: Codable, Equatable, Sendable {
     /// listed for it, and omitted on the wire when absent for the same reason
     /// `agent` is.
     public var model: String?
+    /// Orientation the agent receives as system-level instructions, never as
+    /// a message in the thread. Only with `agent`, only when the Mac lists that
+    /// agent in `GatewayFeatures.sessionInstructions`, and omitted on the wire
+    /// when absent so an older Mac still accepts the request.
+    public var instructions: String?
 
-    public init(requestId: UUID, cwd: String, agent: SessionAgent? = nil, model: String? = nil) {
+    public init(
+        requestId: UUID,
+        cwd: String,
+        agent: SessionAgent? = nil,
+        model: String? = nil,
+        instructions: String? = nil
+    ) {
         self.requestId = requestId
         self.cwd = cwd
         self.agent = agent
         self.model = model
+        self.instructions = instructions
     }
 
     private enum CodingKeys: String, CodingKey {
-        case requestId, cwd, agent, model
+        case requestId, cwd, agent, model, instructions
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -1471,6 +1494,70 @@ public struct CreateSessionRequest: Codable, Equatable, Sendable {
         try container.encode(cwd, forKey: .cwd)
         try container.encodeIfPresent(agent, forKey: .agent)
         try container.encodeIfPresent(model, forKey: .model)
+        try container.encodeIfPresent(instructions, forKey: .instructions)
+    }
+}
+
+/// Which agents the create route can give `instructions` to, and the largest
+/// value it accepts in UTF-8 bytes.
+public struct SessionInstructionsSupport: Codable, Equatable, Sendable {
+    public var agents: [SessionAgent]
+    public var maxBytes: Int
+
+    public init(agents: [SessionAgent], maxBytes: Int) {
+        self.agents = agents
+        self.maxBytes = maxBytes
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case agents, maxBytes
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let names = try container.decodeIfPresent([String].self, forKey: .agents) ?? []
+        agents = names.compactMap(SessionAgent.init(rawValue:))
+        maxBytes = try container.decode(Int.self, forKey: .maxBytes)
+    }
+
+    /// Whether `text` may be sent as `instructions` when creating `agent`.
+    public func accepts(_ text: String, for agent: SessionAgent) -> Bool {
+        agents.contains(agent)
+            && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && text.utf8.count <= maxBytes
+            && text.unicodeScalars.allSatisfy { scalar in
+                scalar == "\\n" || scalar == "\\t"
+                    || !(scalar.properties.generalCategory == .control)
+            }
+    }
+}
+
+/// The Mac's own Overlord readiness, read from its local files. The Mac does
+/// not contact Overlord, so `signedIn` cannot detect a revoked sign-in.
+public struct OverlordReadiness: Codable, Equatable, Sendable {
+    /// An Overlord CLI sign-in exists and has not passed its recorded expiry.
+    public var signedIn: Bool
+    /// Scheme, host and port of the backend that sign-in belongs to.
+    public var backendOrigin: String?
+    /// Agents whose Overlord connector is installed (`ovld agent-setup`).
+    public var connectorAgents: [SessionAgent]
+
+    public init(signedIn: Bool, backendOrigin: String? = nil, connectorAgents: [SessionAgent] = []) {
+        self.signedIn = signedIn
+        self.backendOrigin = backendOrigin
+        self.connectorAgents = connectorAgents
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case signedIn, backendOrigin, connectorAgents
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        signedIn = try container.decode(Bool.self, forKey: .signedIn)
+        backendOrigin = try? container.decodeIfPresent(String.self, forKey: .backendOrigin)
+        let names = try container.decodeIfPresent([String].self, forKey: .connectorAgents) ?? []
+        connectorAgents = names.compactMap(SessionAgent.init(rawValue:))
     }
 }
 
@@ -1527,22 +1614,32 @@ public struct GatewayFeatures: Codable, Equatable, Sendable {
     /// Largest body the attachments route accepts, in bytes. `nil` on a Mac
     /// that does not serve the route.
     public var attachmentMaxBytes: Int?
+    /// Which agents creation can orient with `instructions`. `nil` on a Mac
+    /// that predates the field: create without instructions there.
+    public var sessionInstructions: SessionInstructionsSupport?
+    /// The Mac's Overlord sign-in and connector state. `nil` on an older Mac,
+    /// which means unknown rather than unavailable.
+    public var overlord: OverlordReadiness?
     public var gitCommitMessage: GitDraftReadiness?
 
     public init(
         exclusiveTerminal: Bool = false,
         sessionAgents: [SessionAgent] = [],
         attachmentMaxBytes: Int? = nil,
+        sessionInstructions: SessionInstructionsSupport? = nil,
+        overlord: OverlordReadiness? = nil,
         gitCommitMessage: GitDraftReadiness? = nil
     ) {
         self.exclusiveTerminal = exclusiveTerminal
         self.sessionAgents = sessionAgents
         self.attachmentMaxBytes = attachmentMaxBytes
+        self.sessionInstructions = sessionInstructions
+        self.overlord = overlord
         self.gitCommitMessage = gitCommitMessage
     }
 
     private enum CodingKeys: String, CodingKey {
-        case exclusiveTerminal, sessionAgents, attachmentMaxBytes, gitCommitMessage
+        case exclusiveTerminal, sessionAgents, attachmentMaxBytes, sessionInstructions, overlord, gitCommitMessage
     }
 
     public init(from decoder: Decoder) throws {
@@ -1551,6 +1648,8 @@ public struct GatewayFeatures: Codable, Equatable, Sendable {
         let names = try container.decodeIfPresent([String].self, forKey: .sessionAgents) ?? []
         sessionAgents = names.compactMap(SessionAgent.init(rawValue:))
         attachmentMaxBytes = try? container.decodeIfPresent(Int.self, forKey: .attachmentMaxBytes)
+        sessionInstructions = try? container.decodeIfPresent(SessionInstructionsSupport.self, forKey: .sessionInstructions)
+        overlord = try? container.decodeIfPresent(OverlordReadiness.self, forKey: .overlord)
         gitCommitMessage = try? container.decodeIfPresent(GitDraftReadiness.self, forKey: .gitCommitMessage)
     }
 }

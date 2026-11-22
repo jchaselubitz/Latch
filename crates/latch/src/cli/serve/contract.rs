@@ -1,5 +1,5 @@
 //! Generated from `schemas/remote-access/v2/*.schema.json`; do not edit by hand.
-//! Canonical schema set SHA-256: ece2fa12b1384d4491cb1e9b3bd2697f2b3a20c5b0b14aad2d3b077c9c5e6e71
+//! Canonical schema set SHA-256: a6ed5761ee0930c7ab7e62d02da5d347ae83adbbce3a2102755be889b4359bf7
 
 use serde::{Deserialize, Serialize};
 
@@ -35,6 +35,11 @@ pub struct CreateSessionRequest {
     /// with `agent`, and only an id the gateway lists for that agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Orientation the agent receives as system-level instructions, never as
+    /// a user message. Valid only with an agent the gateway lists in
+    /// `features.session_instructions`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
 }
 
 /// Hosted agent kinds a caller may name at creation. The Mac resolves the
@@ -679,8 +684,37 @@ pub struct GatewayFeatures {
     /// gateway serves that route; an older gateway omits the key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attachment_max_bytes: Option<u64>,
+    /// Present exactly when the create route accepts `instructions`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_instructions: Option<SessionInstructionsSupport>,
+    /// This Mac's local Overlord readiness. Absent on an older gateway,
+    /// which a client reads as unknown rather than unavailable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overlord: Option<OverlordReadiness>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_commit_message: Option<GitDraftReadiness>,
+}
+
+/// Which agents the create route can give `instructions` to, and how many
+/// UTF-8 bytes it accepts.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionInstructionsSupport {
+    pub agents: Vec<SessionAgent>,
+    pub max_bytes: u64,
+}
+
+/// Overlord sign-in and connector state read from this Mac's own files.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OverlordReadiness {
+    /// An Overlord CLI sign-in exists and has not passed its recorded expiry.
+    pub signed_in: bool,
+    /// Scheme, host and port of the backend the sign-in belongs to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_origin: Option<String>,
+    /// Hosted agents whose Overlord connector is installed on this Mac.
+    pub connector_agents: Vec<SessionAgent>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

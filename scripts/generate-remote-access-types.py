@@ -19,6 +19,7 @@ SCHEMAS = ROOT / "schemas/remote-access/v2"
 RUST = ROOT / "crates/latch/src/cli/serve/contract.rs"
 TYPESCRIPT = ROOT / "packages/client/src/generated.ts"
 SCHEMA_NAMES = (
+    "session-list.schema.json",
     "create-session-request.schema.json",
     "create-session-response.schema.json",
     "agent-model-catalog.schema.json",
@@ -94,6 +95,11 @@ pub struct CreateSessionRequest {
     /// with `agent`, and only an id the gateway lists for that agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Orientation the agent receives as system-level instructions, never as
+    /// a user message. Valid only with an agent the gateway lists in
+    /// `features.session_instructions`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
 }
 
 /// Hosted agent kinds a caller may name at creation. The Mac resolves the
@@ -738,8 +744,37 @@ pub struct GatewayFeatures {
     /// gateway serves that route; an older gateway omits the key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attachment_max_bytes: Option<u64>,
+    /// Present exactly when the create route accepts `instructions`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_instructions: Option<SessionInstructionsSupport>,
+    /// This Mac's local Overlord readiness. Absent on an older gateway,
+    /// which a client reads as unknown rather than unavailable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overlord: Option<OverlordReadiness>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_commit_message: Option<GitDraftReadiness>,
+}
+
+/// Which agents the create route can give `instructions` to, and how many
+/// UTF-8 bytes it accepts.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionInstructionsSupport {
+    pub agents: Vec<SessionAgent>,
+    pub max_bytes: u64,
+}
+
+/// Overlord sign-in and connector state read from this Mac's own files.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OverlordReadiness {
+    /// An Overlord CLI sign-in exists and has not passed its recorded expiry.
+    pub signed_in: bool,
+    /// Scheme, host and port of the backend the sign-in belongs to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_origin: Option<String>,
+    /// Hosted agents whose Overlord connector is installed on this Mac.
+    pub connector_agents: Vec<SessionAgent>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1060,6 +1095,9 @@ export type CreateSessionRequest = {
   agent?: SessionAgent;
   /** Only with `agent`, and only an id the gateway lists for it. */
   model?: string;
+  /** System-level orientation for the agent; only with an agent listed in
+   * `features.sessionInstructions.agents`, never sent to an older gateway. */
+  instructions?: string;
 };
 export type AgentModel = { id: string; name: string; description?: string };
 /** `GET /v2/agents/{agent}/models`, served when `endpoints.agentModels` is true. */
@@ -1068,13 +1106,24 @@ export type AgentModelCatalog = {
   models: AgentModel[];
   defaultModel: string | null;
 };
+/** Present exactly when the create route accepts `instructions`. */
+export type SessionInstructionsSupport = { agents: SessionAgent[]; maxBytes: number };
+/** Overlord sign-in and connector state read from the Mac's own files. */
+export type OverlordReadiness = {
+  signedIn: boolean;
+  backendOrigin?: string;
+  connectorAgents: SessionAgent[];
+};
 /** `sessionAgents` is absent on a gateway that predates agent creation; read
  * that as shells only. `attachmentMaxBytes` is present exactly when the
- * gateway serves the attachments route. */
+ * gateway serves the attachments route. `sessionInstructions` and `overlord`
+ * are absent on an older gateway. */
 export type GatewayFeatures = {
   exclusiveTerminal: boolean;
   sessionAgents?: SessionAgent[];
   attachmentMaxBytes?: number;
+  sessionInstructions?: SessionInstructionsSupport;
+  overlord?: OverlordReadiness;
   gitCommitMessage?: GitDraftReadiness;
 };
 /** Git routes (all at the control grant), served when the matching

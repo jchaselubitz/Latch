@@ -11,11 +11,11 @@ extension AppModel {
         return capabilities.features.attachmentMaxBytes
     }
 
-    /// Returns the one persistent conversation store for this session. This
+    /// Returns the linked host's conversation store for this session. This
     /// consumes discovery already performed during link setup; it never makes
     /// a separate interaction-capabilities preflight.
     public func conversationStore(for session: SessionSummary) -> ConversationStore? {
-        guard let gateway,
+        guard let gateway, let pairedDevice,
               case .linked(let capabilities) = linkState,
               GatewayCompatibility.supports(endpoint: .conversation, capabilities: capabilities)
         else { return nil }
@@ -23,7 +23,8 @@ extension AppModel {
         let store = ConversationStore(
             sessionID: session.id,
             gateway: gateway,
-            operationRetentionSeconds: capabilities.operationRetentionSeconds
+            operationRetentionSeconds: capabilities.operationRetentionSeconds,
+            storage: conversationStorage(pairedDevice, session.id)
         )
         conversationStores[session.id] = store
         return store

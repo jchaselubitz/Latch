@@ -1,5 +1,5 @@
 // Generated from schemas/remote-access/v2/*.schema.json; do not edit by hand.
-// Canonical schema set SHA-256: ece2fa12b1384d4491cb1e9b3bd2697f2b3a20c5b0b14aad2d3b077c9c5e6e71
+// Canonical schema set SHA-256: a6ed5761ee0930c7ab7e62d02da5d347ae83adbbce3a2102755be889b4359bf7
 
 
 export type TerminalCloseReason =
@@ -24,6 +24,9 @@ export type CreateSessionRequest = {
   agent?: SessionAgent;
   /** Only with `agent`, and only an id the gateway lists for it. */
   model?: string;
+  /** System-level orientation for the agent; only with an agent listed in
+   * `features.sessionInstructions.agents`, never sent to an older gateway. */
+  instructions?: string;
 };
 export type AgentModel = { id: string; name: string; description?: string };
 /** `GET /v2/agents/{agent}/models`, served when `endpoints.agentModels` is true. */
@@ -32,13 +35,24 @@ export type AgentModelCatalog = {
   models: AgentModel[];
   defaultModel: string | null;
 };
+/** Present exactly when the create route accepts `instructions`. */
+export type SessionInstructionsSupport = { agents: SessionAgent[]; maxBytes: number };
+/** Overlord sign-in and connector state read from the Mac's own files. */
+export type OverlordReadiness = {
+  signedIn: boolean;
+  backendOrigin?: string;
+  connectorAgents: SessionAgent[];
+};
 /** `sessionAgents` is absent on a gateway that predates agent creation; read
  * that as shells only. `attachmentMaxBytes` is present exactly when the
- * gateway serves the attachments route. */
+ * gateway serves the attachments route. `sessionInstructions` and `overlord`
+ * are absent on an older gateway. */
 export type GatewayFeatures = {
   exclusiveTerminal: boolean;
   sessionAgents?: SessionAgent[];
   attachmentMaxBytes?: number;
+  sessionInstructions?: SessionInstructionsSupport;
+  overlord?: OverlordReadiness;
   gitCommitMessage?: GitDraftReadiness;
 };
 /** Git routes (all at the control grant), served when the matching

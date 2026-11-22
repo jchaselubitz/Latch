@@ -221,6 +221,67 @@
           "minimum": 1,
           "description": "Largest file body the attachments route accepts, in bytes. Present exactly when `endpoints.attachments` is true."
         },
+        "sessionInstructions": {
+          "type": "object",
+          "required": [
+            "agents",
+            "maxBytes"
+          ],
+          "properties": {
+            "agents": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "claude",
+                  "codex"
+                ]
+              },
+              "uniqueItems": true,
+              "description": "Agents the create route can give `instructions` to. Creation with instructions for any other agent, or without an agent, is refused."
+            },
+            "maxBytes": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Largest `instructions` value accepted, in UTF-8 bytes."
+            }
+          },
+          "additionalProperties": false,
+          "description": "Present exactly when the create route accepts `instructions`. Absence means an older gateway: create without instructions."
+        },
+        "overlord": {
+          "type": "object",
+          "required": [
+            "signedIn",
+            "connectorAgents"
+          ],
+          "properties": {
+            "signedIn": {
+              "type": "boolean",
+              "description": "True when this Mac holds an Overlord CLI sign-in (`ovld auth login`) that has not passed its recorded expiry. Read locally; the backend is not contacted, so a revoked token still reads true."
+            },
+            "backendOrigin": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "description": "Scheme, host and port of the backend that sign-in belongs to. Absent when not signed in. Lets a client notice a host signed in to a different Overlord backend; it does not identify the account."
+            },
+            "connectorAgents": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "claude",
+                  "codex"
+                ]
+              },
+              "uniqueItems": true,
+              "description": "Hosted agents (of features.sessionAgents) whose Overlord connector is installed on this Mac (`ovld agent-setup <agent>`), so a session started for them can use Overlord tools."
+            }
+          },
+          "additionalProperties": false,
+          "description": "This Mac's local Overlord readiness, for guidance before a chat is started. Absent on an older gateway, which means unknown rather than unavailable."
+        },
         "gitCommitMessage": {
           "$ref": "git-commit-message.schema.json#/$defs/GitDraftReadiness"
         }

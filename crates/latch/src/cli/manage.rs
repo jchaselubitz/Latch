@@ -13,7 +13,7 @@ use crate::cli::attach;
 use crate::cli::json::{
     CapabilitiesReport, CapabilityFlags, ConfigReport, DoctorFinding, DoctorReport, InspectReport,
     ListReport, PruneReport, RemoveReport, RenameReport, ResizeReport, RetainedSession,
-    SessionSummary, StopAllReport, StopReport,
+    SessionSource, SessionSummary, StopAllReport, StopReport,
 };
 use crate::conversation::connector_kind;
 use crate::engine::{self, SessionState, PROTOCOL_VERSION};
@@ -75,6 +75,13 @@ pub fn list(options: ListOptions) -> anyhow::Result<ListReport> {
             last_activity_at: Some(engine::format_rfc3339(activity)),
             idle_ms: Some(now.duration_since(activity).unwrap_or_default().as_millis() as u64),
             connector,
+            source: (!metadata.source.kind.trim().is_empty()).then(|| SessionSource {
+                kind: metadata.source.kind,
+                external_run_id: metadata
+                    .source
+                    .external_run_id
+                    .filter(|id| !id.trim().is_empty()),
+            }),
             agent_phase: None,
         });
     }

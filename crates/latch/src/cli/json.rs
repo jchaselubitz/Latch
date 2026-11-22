@@ -19,6 +19,16 @@ use crate::session::manifest::TerminalSize;
 use crate::session::meta::ExitRecord;
 use crate::session::timing::LaunchPhase;
 
+/// Public integration provenance. The local create-retry key stays private.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSource {
+    /// Integration that supplied the session.
+    pub kind: String,
+    /// Opaque correlation ID in the integration's namespace.
+    pub external_run_id: Option<String>,
+}
+
 /// One row of `latch list --json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionSummary {
@@ -52,6 +62,9 @@ pub struct SessionSummary {
     /// connector-less sessions, so no `skip_serializing_if` here.
     #[serde(default)]
     pub connector: Option<String>,
+    /// Stored provenance, omitted for legacy metadata without a source kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<SessionSource>,
     /// The hosted agent's conversation phase, in the conversation-state
     /// schema's vocabulary (`working`, `awaiting_input`, `idle`, ...).
     ///
