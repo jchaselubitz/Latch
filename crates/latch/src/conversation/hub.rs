@@ -14,8 +14,8 @@ use serde::{Deserialize, Serialize};
 use super::{
     ActionDescriptor, ApplyResult, Connector, ConnectorAction, ConversationCache, ConversationId,
     ConversationItem, ConversationItemId, ConversationSnapshot, ConversationState, Detection,
-    GatewayLock, GenerationId, MutationEffect, OperationEpoch, Ordinal, PollBudget, Projection,
-    Revision,
+    GatewayLock, GenerationId, MutationEffect, ObservationWake, OperationEpoch, Ordinal,
+    PollBudget, Projection, Revision,
 };
 use crate::cli::serve::routes::Grant;
 
@@ -165,7 +165,12 @@ struct SessionActor {
     last_active: Instant,
     /// Set while one task owns this session's observation loop, so polling
     /// stays O(1) per session rather than per subscriber.
-    observing: bool,
+    observation: Option<Observation>,
+}
+
+struct Observation {
+    wake: Arc<ObservationWake>,
+    refresh_pending: bool,
 }
 
 /// One process-local Hub.  `Mutex` is used only to serialize state transitions;
@@ -317,7 +322,7 @@ impl ConversationHub {
                 retained_bytes: 0,
                 next_subscriber: 1,
                 last_active: Instant::now(),
-                observing: false,
+                observation: None,
             },
         );
         Ok(())
@@ -435,32 +440,72 @@ impl ConversationHub {
             projection.pending_request_metadata().cloned(),
         ))
     }
-    /// Grants exactly one caller the right to run this session's observation
-    /// loop. Later subscribers share its output instead of polling the source.
-    pub fn claim_observation(&self, id: &ConversationId) -> bool {
+    /// Starts an observer or wakes the one already owned by this session.
+    /// Concurrent requests share one signal until the observer starts a poll.
+    pub fn request_observation(&self, id: &ConversationId) -> Result<bool> {
         let mut hub = self.inner.lock().expect("hub poisoned");
-        let Some(actor) = hub.sessions.get_mut(id) else {
-            return false;
-        };
-        if actor.observing {
-            return false;
+        let actor = hub
+            .sessions
+            .get_mut(id)
+            .ok_or_else(|| anyhow::anyhow!("unknown conversation"))?;
+        if let Some(observation) = &mut actor.observation {
+            if !observation.refresh_pending {
+                observation.wake.signal()?;
+                observation.refresh_pending = true;
+            }
+            return Ok(false);
         }
-        actor.observing = true;
-        true
+        actor.observation = Some(Observation {
+            wake: Arc::new(ObservationWake::new()?),
+            refresh_pending: false,
+        });
+        Ok(true)
     }
     pub fn release_observation(&self, id: &ConversationId) {
         if let Ok(mut hub) = self.inner.lock() {
             if let Some(actor) = hub.sessions.get_mut(id) {
-                actor.observing = false;
+                actor.observation = None;
             }
         }
     }
-    pub fn has_subscribers(&self, id: &ConversationId) -> bool {
-        self.inner
-            .lock()
-            .ok()
-            .and_then(|hub| hub.sessions.get(id).map(|a| !a.subscribers.is_empty()))
-            .unwrap_or(false)
+    /// Honor a refresh that arrived while a worker was failing. Otherwise
+    /// release ownership so a later socket can start a fresh observation.
+    pub fn retry_observation_after_error(&self, id: &ConversationId) -> bool {
+        let mut hub = self.inner.lock().expect("hub poisoned");
+        let Some(actor) = hub.sessions.get_mut(id) else {
+            return false;
+        };
+        if !actor.subscribers.is_empty()
+            && actor
+                .observation
+                .as_ref()
+                .is_some_and(|observation| observation.refresh_pending)
+        {
+            return true;
+        }
+        actor.observation = None;
+        false
+    }
+    /// Consume coalesced requests immediately before polling. Releasing an idle
+    /// observer is atomic with checking subscribers, so an opening socket can
+    /// never signal a loop that has already decided to exit.
+    pub fn begin_observation_poll(&self, id: &ConversationId) -> Result<bool> {
+        let mut hub = self.inner.lock().expect("hub poisoned");
+        let Some(actor) = hub.sessions.get_mut(id) else {
+            return Ok(false);
+        };
+        if actor.subscribers.is_empty() {
+            actor.observation = None;
+            return Ok(false);
+        }
+        let Some(observation) = &mut actor.observation else {
+            return Ok(false);
+        };
+        if observation.refresh_pending {
+            observation.wake.clear()?;
+            observation.refresh_pending = false;
+        }
+        Ok(true)
     }
     pub fn unsubscribe(&self, id: &ConversationId, subscriber: u64) {
         if let Ok(mut hub) = self.inner.lock() {
@@ -479,7 +524,9 @@ impl ConversationHub {
             .sessions
             .iter()
             .filter(|(_, actor)| {
-                actor.subscribers.is_empty() && now.duration_since(actor.last_active) >= warm_for
+                actor.subscribers.is_empty()
+                    && actor.observation.is_none()
+                    && now.duration_since(actor.last_active) >= warm_for
             })
             .map(|(id, _)| id.clone())
             .collect();
@@ -627,7 +674,8 @@ impl ConversationHub {
     }
     /// Executes observation on a blocking worker.  The state lock is released
     /// before source I/O begins, so a hung source cannot stall fanout/actions.
-    pub async fn poll_once(&self, id: ConversationId, budget: PollBudget) -> Result<()> {
+    /// Returns true only if the committed batch requests immediate continuation.
+    pub async fn poll_once(&self, id: ConversationId, budget: PollBudget) -> Result<bool> {
         let (connector, recovery_checkpoint) = {
             let hub = self.inner.lock().expect("hub poisoned");
             let actor = hub
@@ -655,7 +703,7 @@ impl ConversationHub {
             let checkpoint = connector.checkpoint_snapshot()?;
             Ok::<_, anyhow::Error>((result, checkpoint))
         });
-        match tokio::time::timeout(deadline, task).await {
+        let failure = match tokio::time::timeout(deadline, task).await {
             Ok(Ok(Ok((result, checkpoint)))) => {
                 let checkpoint_delta =
                     (!result.checkpoint_delta.is_empty()).then_some(result.checkpoint_delta);
@@ -665,15 +713,17 @@ impl ConversationHub {
                     checkpoint_delta,
                     Some(checkpoint),
                 ) {
-                    self.degrade(&id, format!("observation failed: {error}"))
+                    format!("observation failed: {error}")
                 } else {
-                    Ok(())
+                    return Ok(result.has_more_source_work);
                 }
             }
-            Ok(Ok(Err(error))) => self.degrade(&id, format!("observation failed: {error}")),
-            Ok(Err(_)) => self.degrade(&id, "observation worker stopped".into()),
-            Err(_) => self.degrade(&id, "observation deadline exceeded".into()),
-        }
+            Ok(Ok(Err(error))) => format!("observation failed: {error}"),
+            Ok(Err(_)) => "observation worker stopped".into(),
+            Err(_) => "observation deadline exceeded".into(),
+        };
+        self.degrade(&id, failure)?;
+        Ok(false)
     }
     /// Waits outside the Hub lock until the connector has likely changed.
     /// latchd connectors block on their persistent event subscription;
@@ -684,19 +734,26 @@ impl ConversationHub {
         fallback_poll: Duration,
         event_timeout: Duration,
     ) -> Result<()> {
-        let connector = {
+        let (connector, wake) = {
             let hub = self.inner.lock().expect("hub poisoned");
-            hub.sessions
+            let actor = hub
+                .sessions
                 .get(&id)
-                .ok_or_else(|| anyhow::anyhow!("unknown conversation"))?
-                .observation_connector
-                .clone()
+                .ok_or_else(|| anyhow::anyhow!("unknown conversation"))?;
+            let observation = actor
+                .observation
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("no conversation observer"))?;
+            (
+                actor.observation_connector.clone(),
+                observation.wake.clone(),
+            )
         };
         let task = tokio::task::spawn_blocking(move || {
             connector
                 .lock()
                 .map_err(|_| anyhow::anyhow!("connector worker poisoned"))?
-                .wait_for_activity(fallback_poll, event_timeout)
+                .wait_for_activity(fallback_poll, event_timeout, &wake)
         });
         match tokio::time::timeout(event_timeout + Duration::from_secs(1), task).await {
             Ok(Ok(result)) => result,
@@ -1360,6 +1417,7 @@ mod tests {
         }
         fn poll(&mut self, _: PollBudget) -> Result<PollResult> {
             Ok(PollResult {
+                has_more_source_work: false,
                 mutations: vec![],
                 checkpoint_delta: CheckpointDelta {
                     source_offsets: vec![],
@@ -1391,6 +1449,7 @@ mod tests {
         }
         fn poll(&mut self, _: PollBudget) -> Result<PollResult> {
             Ok(PollResult {
+                has_more_source_work: true,
                 mutations: vec![ConnectorMutation::Upsert(ObservedItem {
                     parent_subagent_id: None,
                     id: ConversationItemId::native("large"),
@@ -1434,6 +1493,7 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(250));
             }
             Ok(PollResult {
+                has_more_source_work: false,
                 mutations: vec![],
                 checkpoint_delta: CheckpointDelta {
                     source_offsets: vec![],
@@ -1730,6 +1790,9 @@ mod tests {
 
     #[test]
     fn only_one_task_ever_observes_a_session() {
+        use std::os::fd::AsFd;
+        use std::os::unix::net::UnixStream;
+
         let temp = tempfile::tempdir().unwrap();
         let hub = ConversationHub::new(temp.path()).unwrap();
         let id = ConversationId::new("ses_observe");
@@ -1741,13 +1804,26 @@ mod tests {
         .unwrap();
         hub.subscribe(&id, Grant::Observe).unwrap();
         hub.subscribe(&id, Grant::Observe).unwrap();
-        assert!(hub.claim_observation(&id));
+        assert!(hub.request_observation(&id).unwrap());
         assert!(
-            !hub.claim_observation(&id),
+            !hub.request_observation(&id).unwrap(),
             "a second subscriber must share"
         );
-        hub.release_observation(&id);
-        assert!(hub.claim_observation(&id));
+        assert!(!hub.request_observation(&id).unwrap());
+        assert!(hub.retry_observation_after_error(&id));
+        let wake = hub.inner.lock().unwrap().sessions[&id]
+            .observation
+            .as_ref()
+            .unwrap()
+            .wake
+            .clone();
+        let (source, peer) = UnixStream::pair().unwrap();
+        drop(peer); // EOF is readable and must stay pending through a Chat wake.
+        assert!(!wake.wait(Duration::ZERO, Some(source.as_fd())).unwrap());
+        assert!(hub.begin_observation_poll(&id).unwrap());
+        assert!(wake.wait(Duration::ZERO, Some(source.as_fd())).unwrap());
+        assert!(!hub.retry_observation_after_error(&id));
+        assert!(hub.request_observation(&id).unwrap());
     }
 
     #[tokio::test]
@@ -1787,16 +1863,18 @@ mod tests {
             ConversationState::starting(None),
         )
         .unwrap();
-        hub.poll_once(
-            id.clone(),
-            PollBudget {
-                max_records: 1,
-                max_bytes: crate::conversation::MAX_CONVERSATION_BATCH_BYTES,
-                deadline: Duration::from_secs(1),
-            },
-        )
-        .await
-        .unwrap();
+        let has_more = hub
+            .poll_once(
+                id.clone(),
+                PollBudget {
+                    max_records: 1,
+                    max_bytes: crate::conversation::MAX_CONVERSATION_BATCH_BYTES,
+                    deadline: Duration::from_secs(1),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(!has_more, "a rejected batch cannot request another poll");
         let state = hub.snapshot(&id, 0).unwrap().state;
         assert_eq!(state.phase, super::super::ConversationPhase::Unavailable);
         assert!(state

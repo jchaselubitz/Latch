@@ -38,6 +38,7 @@ impl Connector for PendingConnector {
                 active_branch_delta: Vec::new(),
                 connector_state: None,
             },
+            has_more_source_work: false,
         })
     }
     /// The descriptors are advertised even though they are disabled: the Hub

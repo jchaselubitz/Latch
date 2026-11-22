@@ -8,6 +8,7 @@ pub(super) struct SourceBudget {
     records: usize,
     bytes: usize,
     pub(super) consumed_records: usize,
+    pub(super) has_more: bool,
 }
 
 impl SourceBudget {
@@ -16,6 +17,7 @@ impl SourceBudget {
             records: budget.max_records,
             bytes: budget.max_bytes,
             consumed_records: 0,
+            has_more: false,
         }
     }
 
@@ -29,6 +31,14 @@ impl SourceBudget {
         self.bytes = self.bytes.saturating_sub(bytes);
         self.consumed_records += 1;
         true
+    }
+
+    fn note_read(&mut self, consumed: usize, complete: usize, read: usize, available: u64) {
+        // A newline already in the read is authoritative. At the read cap,
+        // known bytes beyond the window also warrant another bounded scan
+        // if this read advanced. A short unterminated tail waits for activity.
+        self.has_more |= consumed < complete
+            || (consumed > 0 && read == MAX_READ_BYTES && (read as u64) < available);
     }
 }
 
@@ -72,6 +82,12 @@ impl JsonlConnector {
                     Err(_) => self.malformed_records += 1,
                 }
             }
+            budget.note_read(
+                consumed,
+                complete,
+                bytes.len(),
+                hook_length - self.hook_offset,
+            );
             self.hook_offset += consumed as u64;
             delta
                 .source_offsets
@@ -184,6 +200,12 @@ impl JsonlConnector {
                     Err(_) => self.malformed_records += 1,
                 }
             }
+            budget.note_read(
+                consumed,
+                complete,
+                bytes.len(),
+                length.saturating_sub(self.offset),
+            );
             self.offset += consumed as u64;
             delta
                 .source_offsets

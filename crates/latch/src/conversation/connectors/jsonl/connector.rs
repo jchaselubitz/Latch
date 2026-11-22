@@ -13,12 +13,15 @@ impl Connector for JsonlConnector {
         &mut self,
         fallback_poll: Duration,
         event_timeout: Duration,
+        wake: &crate::conversation::ObservationWake,
     ) -> Result<()> {
         if !self.live_screen {
-            std::thread::sleep(fallback_poll);
+            wake.wait(fallback_poll, None)?;
             return Ok(());
         }
-        let wake = self.control()?.wait_for_activity(event_timeout)?;
+        let wake = self
+            .control()?
+            .wait_for_activity_or_refresh(event_timeout, wake)?;
         // A timeout still performs bounded source catch-up, covering hooks or
         // transcript writes that did not coincide with terminal output. It
         // does not take a screen snapshot. Every actual event and every event
@@ -161,6 +164,7 @@ impl JsonlConnector {
             PollResult {
                 mutations,
                 checkpoint_delta: delta,
+                has_more_source_work: source_budget.consumed_records > 0 && source_budget.has_more,
             },
             source_budget.consumed_records,
         ))

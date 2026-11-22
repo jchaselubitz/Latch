@@ -475,6 +475,96 @@ fn connect_terminal(gateway: &Gateway, session: &str, cols: u16, rows: u16) -> W
     tungstenite::connect(request).expect("terminal websocket").0
 }
 
+fn connect_chat(gateway: &Gateway, session: &str, query: &str) -> Ws {
+    use tungstenite::client::IntoClientRequest;
+    let mut request = format!(
+        "ws://{}/v2/sessions/{session}/conversation{query}",
+        gateway.addr
+    )
+    .into_client_request()
+    .unwrap();
+    request.headers_mut().insert(
+        "Authorization",
+        format!("Bearer {}", gateway.token).parse().unwrap(),
+    );
+    request
+        .headers_mut()
+        .insert("x-latch-device-grant", "observe".parse().unwrap());
+    let stream = TcpStream::connect(&gateway.addr).expect("connect Chat");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    tungstenite::client::client(request, tungstenite::stream::MaybeTlsStream::Plain(stream))
+        .expect("Chat websocket")
+        .0
+}
+
+fn next_chat_frame(socket: &mut Ws, deadline: Instant) -> Value {
+    let tungstenite::stream::MaybeTlsStream::Plain(stream) = socket.get_ref() else {
+        panic!("test gateway must use loopback without TLS");
+    };
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    assert!(!remaining.is_zero(), "timed out waiting for Chat");
+    stream.set_read_timeout(Some(remaining)).unwrap();
+    match socket.read().expect("read Chat frame") {
+        tungstenite::Message::Text(frame) => serde_json::from_str(frame.as_str()).unwrap(),
+        other => panic!("expected a Chat text frame, received {other:?}"),
+    }
+}
+
+/// The padding is ignored by the connector but consumes the source byte
+/// budget. Each range requires several polls and stays within the socket queue.
+fn append_saved_messages(source: &Path, range: std::ops::Range<usize>, padding: &str) {
+    let document: String = range
+        .map(|index| {
+            let record = json!({
+                "type": "user",
+                "uuid": format!("saved-{index}"),
+                "parentUuid": index.checked_sub(1).map(|index| format!("saved-{index}")),
+                "timestamp": "2026-11-22T00:00:00Z",
+                "message": {"content": format!("message {index}")},
+                "testPadding": padding,
+            });
+            format!("{record}\n")
+        })
+        .collect();
+    fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(source)
+        .unwrap()
+        .write_all(document.as_bytes())
+        .unwrap();
+}
+
+fn read_saved_messages(
+    socket: &mut Ws,
+    range: std::ops::Range<usize>,
+    deadline: Instant,
+    mut revision: u64,
+) -> u64 {
+    for index in range {
+        loop {
+            let frame = next_chat_frame(socket, deadline);
+            let next_revision = frame["revision"].as_u64().expect("mutation revision");
+            if frame["type"] == "items_upserted" {
+                assert_eq!(next_revision, revision + 1, "{frame}");
+                revision = next_revision;
+                assert_eq!(frame["items"].as_array().unwrap().len(), 1);
+                assert_eq!(frame["items"][0]["id"], format!("saved-{index}"));
+                break;
+            }
+            assert_eq!(frame["type"], "state_changed", "{frame}");
+            assert!(
+                (revision..=revision + 1).contains(&next_revision),
+                "{frame}"
+            );
+            revision = next_revision;
+        }
+    }
+    revision
+}
+
 fn read_ws_until(socket: &mut Ws, needle: &[u8], within: Duration) -> bool {
     if let tungstenite::stream::MaybeTlsStream::Plain(stream) = socket.get_ref() {
         let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
@@ -732,6 +822,109 @@ fn attaching_to_an_exited_session_paints_the_last_frame_and_releases() {
             "{:?}",
             surface.text()
         );
+        h.remove(&id);
+    });
+}
+
+#[test]
+fn chat_drains_saved_backlog_while_the_real_terminal_is_idle() {
+    use latch::session::{meta, paths};
+
+    with_kernel("chat-idle-backlog", |h| {
+        let id = h.create(
+            "stty -echo; printf 'READY\n'; while read line; do printf '%s\n' \"$line\"; done",
+        );
+        h.wait_visible(&id, "READY");
+        let session = paths::SessionId::parse(&id).unwrap();
+        let paths = paths::LatchHome::new(&h.home).session(&session);
+        // Supply the metadata and source that an agent launch normally writes.
+        // The PTY child is a deterministic shell and only prints on input.
+        let mut metadata = meta::read(&paths).unwrap();
+        metadata.harness = Some("claude".into());
+        fs::write(paths.meta(), serde_json::to_vec(&metadata).unwrap()).unwrap();
+        let source = h.temp.path().join("saved.jsonl");
+        fs::write(
+            paths.conversation_source_binding(),
+            json!({"connector": "claude", "source": source, "agentSessionId": "saved"}).to_string(),
+        )
+        .unwrap();
+
+        let padding = "x".repeat(16 * 1024);
+        append_saved_messages(&source, 0..48, &padding);
+        let gateway = start_gateway(h);
+        let bound = Duration::from_secs(3);
+        let cold_started = Instant::now();
+        let mut cold = connect_chat(&gateway, &id, "");
+        let snapshot = next_chat_frame(&mut cold, cold_started + bound);
+        assert_eq!(snapshot["type"], "snapshot");
+        assert_eq!(snapshot["revision"], 0);
+        let cold_revision = read_saved_messages(&mut cold, 0..48, cold_started + bound, 0);
+        eprintln!(
+            "cold Chat open to newest saved message: {:?}",
+            cold_started.elapsed()
+        );
+
+        // Keep the first socket open so the second wakes a warm observer.
+        // Allow the connector to park on its event subscription before writing.
+        thread::sleep(Duration::from_millis(200));
+        append_saved_messages(&source, 48..96, &padding);
+        let resume_revision = cold_revision - 1;
+        let generation = snapshot["generation"].as_str().unwrap();
+        let epoch = snapshot["operationEpoch"].as_str().unwrap();
+        let query = format!(
+            "?generation={generation}&afterRevision={resume_revision}&operationEpoch={epoch}"
+        );
+        let warm_started = Instant::now();
+        let mut warm = connect_chat(&gateway, &id, &query);
+        let warm_revision =
+            read_saved_messages(&mut warm, 47..96, warm_started + bound, resume_revision);
+        eprintln!(
+            "warm Chat reconnect to newest saved message: {:?}",
+            warm_started.elapsed()
+        );
+        assert_eq!(
+            read_saved_messages(&mut cold, 48..96, warm_started + bound, cold_revision),
+            warm_revision
+        );
+        assert_eq!(h.visible(&id).trim(), "READY");
+
+        warm.send(tungstenite::Message::Text(
+            json!({
+                "type": "history_request", "requestId": "older", "beforeOrdinal": 8, "limit": 3
+            })
+            .to_string()
+            .into(),
+        ))
+        .unwrap();
+        let deadline = Instant::now() + bound;
+        let page = loop {
+            let frame = next_chat_frame(&mut warm, deadline);
+            if frame["type"] == "history_page" {
+                break frame;
+            }
+            assert_eq!(frame["type"], "state_changed");
+        };
+        assert_eq!(page["requestId"], "older");
+        assert_eq!(page["hasMoreBefore"], true);
+        let ids: Vec<_> = page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["saved-4", "saved-5", "saved-6"]);
+
+        // The observer is back on the kernel event stream after the backlog.
+        append_saved_messages(&source, 96..97, "");
+        latchd::client::call(
+            &h.socket(&id),
+            &latchd::protocol::Request::Submit {
+                text: "live output".into(),
+            },
+        )
+        .unwrap();
+        h.wait_visible(&id, "live output");
+        read_saved_messages(&mut cold, 96..97, Instant::now() + bound, warm_revision);
         h.remove(&id);
     });
 }

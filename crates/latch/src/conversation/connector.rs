@@ -94,6 +94,9 @@ pub struct BranchEntry {
 pub struct PollResult {
     pub mutations: Vec<ConnectorMutation>,
     pub checkpoint_delta: CheckpointDelta,
+    /// Schedule another bounded read after committing this batch. Connectors
+    /// set this only when the read advanced and known source work remains.
+    pub has_more_source_work: bool,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ActionDescriptor {
@@ -131,8 +134,9 @@ pub trait Connector: Send {
         &mut self,
         fallback_poll: Duration,
         _event_timeout: Duration,
+        wake: &super::ObservationWake,
     ) -> Result<()> {
-        std::thread::sleep(fallback_poll);
+        wake.wait(fallback_poll, None)?;
         Ok(())
     }
     fn poll(&mut self, budget: PollBudget) -> Result<PollResult>;

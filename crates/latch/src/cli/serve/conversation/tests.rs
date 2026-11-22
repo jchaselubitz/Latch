@@ -27,7 +27,7 @@ fn wire_state_carries_turn_outcome_and_commands_only_when_known() {
 use std::collections::VecDeque;
 use std::net::{SocketAddr, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc as blocking_channel, Arc, Mutex};
 
 use anyhow::Result;
 use serde_json::{json, Value};
@@ -38,7 +38,7 @@ use super::*;
 use crate::conversation::{
     ActionDescriptor, ApplyResult, CheckpointDelta, Connector, ConnectorIdentity,
     ConnectorMutation, ConversationItemId, ConversationItemKind, Detection, MessageRole,
-    MessageStatus, ObservedItem, PollResult,
+    MessageStatus, ObservationWake, ObservedItem, PollResult,
 };
 use crate::session::manifest::{SourceInfo, TerminalSize};
 use crate::session::meta::{self, SessionMeta};
@@ -52,6 +52,13 @@ struct ScriptedConnector {
     pending: Arc<Mutex<VecDeque<ConnectorMutation>>>,
     applies: Arc<AtomicUsize>,
     enabled: bool,
+    idle: Option<Arc<IdleObservation>>,
+}
+
+struct IdleObservation {
+    waits: blocking_channel::Sender<usize>,
+    allow_poll: Mutex<Option<blocking_channel::Receiver<()>>>,
+    polls: AtomicUsize,
 }
 impl Connector for ScriptedConnector {
     fn detect(&self) -> Detection {
@@ -60,7 +67,29 @@ impl Connector for ScriptedConnector {
             version: "1".into(),
         })
     }
+    fn wait_for_activity(
+        &mut self,
+        fallback_poll: Duration,
+        event_timeout: Duration,
+        wake: &ObservationWake,
+    ) -> Result<()> {
+        if let Some(idle) = &self.idle {
+            let _ = idle.waits.send(idle.polls.load(Ordering::SeqCst));
+            wake.wait(event_timeout, None)?;
+            // Keep the next poll from starting until all the test's sockets
+            // have requested a refresh.
+            if let Some(allow_poll) = idle.allow_poll.lock().unwrap().take() {
+                allow_poll.recv_timeout(event_timeout)?;
+            }
+        } else {
+            wake.wait(fallback_poll, None)?;
+        }
+        Ok(())
+    }
     fn poll(&mut self, _budget: PollBudget) -> Result<PollResult> {
+        if let Some(idle) = &self.idle {
+            idle.polls.fetch_add(1, Ordering::SeqCst);
+        }
         let mutations = self
             .pending
             .lock()
@@ -74,6 +103,7 @@ impl Connector for ScriptedConnector {
                 active_branch_delta: Vec::new(),
                 connector_state: None,
             },
+            has_more_source_work: false,
         })
     }
     fn actions(&self) -> Vec<ActionDescriptor> {
@@ -127,6 +157,13 @@ struct Harness {
 /// Boots the production router (token and grant middleware included) on a
 /// real loopback port.
 async fn harness(connector_enabled: bool) -> Harness {
+    harness_with_idle_observer(connector_enabled, None).await
+}
+
+async fn harness_with_idle_observer(
+    connector_enabled: bool,
+    idle: Option<Arc<IdleObservation>>,
+) -> Harness {
     let dir = tempfile::tempdir().expect("temp home");
     let home = LatchHome::new(dir.path());
     home.ensure().expect("home");
@@ -167,6 +204,7 @@ async fn harness(connector_enabled: bool) -> Harness {
                 pending: factory_script.clone(),
                 applies: factory_applies.clone(),
                 enabled: connector_enabled,
+                idle: idle.clone(),
             })
         }),
     )
@@ -270,6 +308,79 @@ async fn fresh_socket_receives_a_snapshot_with_no_client_round_trip() {
     assert_eq!(first["revision"], 0);
     assert!(first["items"].as_array().expect("items").is_empty());
     assert_eq!(first["state"]["connector"]["id"], "scripted");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_chat_opens_and_resume_wake_one_idle_observer() {
+    let (waits, entered_wait) = blocking_channel::channel();
+    let (allow_poll, poll_gate) = blocking_channel::channel();
+    let harness = harness_with_idle_observer(
+        true,
+        Some(Arc::new(IdleObservation {
+            waits,
+            allow_poll: Mutex::new(Some(poll_gate)),
+            polls: AtomicUsize::new(0),
+        })),
+    )
+    .await;
+
+    tokio::task::spawn_blocking(move || {
+        let before_idle_timeout = Duration::from_secs(3);
+        harness.script.lock().unwrap().push_back(message("saved"));
+        let mut first = Client::open(&harness, "", "observe");
+        let snapshot = first.next();
+        assert_eq!(snapshot["type"], "snapshot");
+        assert_eq!(snapshot["revision"], 0);
+        let saved = first.next_of("items_upserted");
+        assert_eq!(saved["items"][0]["id"], "saved");
+        assert_eq!(entered_wait.recv_timeout(before_idle_timeout).unwrap(), 1);
+
+        // Only the authoritative source changes. No simulated terminal event
+        // or idle resync is needed to make the saved record visible.
+        harness
+            .script
+            .lock()
+            .unwrap()
+            .push_back(message("while-idle"));
+        let generation = snapshot["generation"].as_str().unwrap();
+        let epoch = snapshot["operationEpoch"].as_str().unwrap();
+        let resume = &format!("?generation={generation}&afterRevision=0&operationEpoch={epoch}");
+        let mut resumed = Client::open(&harness, resume, "observe");
+        let mut opened = Client::open(&harness, "", "observe");
+        assert_eq!(resumed.next(), saved);
+        let opened_snapshot = opened.next();
+        assert_eq!(opened_snapshot["type"], "snapshot");
+        assert_eq!(opened_snapshot["revision"], saved["revision"]);
+        for client in [&mut resumed, &mut opened] {
+            // The history response proves each handler has requested its
+            // wake before the blocked observer can consume either one.
+            client.send(json!({
+                "type": "history_request",
+                "requestId": "ready",
+                "beforeOrdinal": 2,
+                "limit": 1,
+            }));
+            assert_eq!(client.next_of("history_page")["requestId"], "ready");
+        }
+        allow_poll.send(()).unwrap();
+        for client in [&mut first, &mut resumed, &mut opened] {
+            client
+                .socket
+                .get_ref()
+                .set_read_timeout(Some(before_idle_timeout))
+                .unwrap();
+            let latest = client.next_of("items_upserted");
+            assert_eq!(latest["items"][0]["id"], "while-idle");
+            assert_eq!(
+                latest["revision"].as_u64().unwrap(),
+                saved["revision"].as_u64().unwrap() + 1
+            );
+        }
+        assert_eq!(entered_wait.recv_timeout(before_idle_timeout).unwrap(), 2);
+        assert!(entered_wait.try_recv().is_err());
+    })
+    .await
+    .expect("client");
 }
 
 #[tokio::test(flavor = "multi_thread")]

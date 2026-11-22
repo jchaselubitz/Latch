@@ -265,13 +265,19 @@ mod tests {
         connector.home = home.clone();
         connector.session = session.clone();
         let budget = PollBudget {
-            max_records: 100,
+            max_records: 1,
             max_bytes: crate::conversation::MAX_CONVERSATION_BATCH_BYTES,
             deadline: Duration::from_secs(1),
         };
         let first = connector.poll(budget.clone()).unwrap();
-        assert_eq!(first.checkpoint_delta.source_offsets.len(), 2);
+        assert!(first.has_more_source_work);
+        assert_eq!(connector.offset, 0);
+        assert!(connector.hook_offset > 0);
         assert_eq!(connector.state().phase, ConversationPhase::Working);
+        let next = connector.poll(budget.clone()).unwrap();
+        assert!(!next.has_more_source_work);
+        assert_eq!(next.checkpoint_delta.source_offsets.len(), 1);
+        assert!(connector.offset > 0);
         let checkpoint = connector.checkpoint_snapshot().unwrap();
         let mut restored = JsonlConnector::fixture("cursor", source);
         restored.home = home;

@@ -186,7 +186,10 @@ struct ConversationScreen: View {
                     .foregroundStyle(.secondary)
                     .padding(.vertical, 4)
             }
-            if content.canCancelTurn || content.cancelStatus != nil {
+            // With a request pending the composer is replaced by its choices,
+            // so the stop control keeps its own row there. Otherwise it lives
+            // in the composer, in place of the send button.
+            if content.transcript.pendingRequest != nil, content.canCancelTurn || content.cancelStatus != nil {
                 HStack {
                     if let status = content.cancelStatus { Text(status).font(.caption).foregroundStyle(.secondary) }
                     Spacer()
@@ -226,6 +229,8 @@ struct ConversationScreen: View {
                     attachments: attachments,
                     commands: content.commands,
                     canUseSlashCommands: content.canUseSlashCommands,
+                    stopTurn: content.canCancelTurn ? actions.cancelTurn : nil,
+                    stopStatus: content.cancelStatus,
                     send: actions.send
                 )
                 // Matches the transcript's readable column on iPad; the fade

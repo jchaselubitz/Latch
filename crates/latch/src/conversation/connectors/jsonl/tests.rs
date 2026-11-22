@@ -282,6 +282,10 @@ fn an_expanding_record_batch_rewinds_to_a_prefix_that_fits() {
     assert!(records.len() < budget.max_bytes);
     for index in 0..10 {
         let poll = connector.poll(budget.clone()).unwrap();
+        assert_eq!(
+            poll.has_more_source_work,
+            connector.offset < records.len() as u64
+        );
         if index == 0 {
             assert!(connector.offset > 0 && connector.offset < records.len() as u64);
         }
@@ -307,6 +311,55 @@ fn an_expanding_record_batch_rewinds_to_a_prefix_that_fits() {
             .map(|i| ConversationItemId::native(format!("m{i}")))
             .collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn continuation_requires_progress_and_waits_for_an_unterminated_tail() {
+    use std::io::Write;
+
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.jsonl");
+    let tail = claude_user_message("three", "latest");
+    fs::write(
+        &source,
+        format!(
+            "{}\n{}\n{tail}",
+            claude_user_message("one", "first"),
+            claude_user_message("two", "second")
+        ),
+    )
+    .unwrap();
+    let mut connector = JsonlConnector::fixture("claude", source.clone());
+    let mut budget = PollBudget {
+        max_records: 0,
+        max_bytes: crate::conversation::MAX_CONVERSATION_BATCH_BYTES,
+        deadline: Duration::from_secs(5),
+    };
+    assert!(!connector.poll(budget.clone()).unwrap().has_more_source_work);
+    assert_eq!(connector.offset, 0);
+
+    budget.max_records = 1;
+    assert!(connector.poll(budget.clone()).unwrap().has_more_source_work);
+    assert!(!connector.poll(budget.clone()).unwrap().has_more_source_work);
+    let offset = connector.offset;
+    let waiting = connector.poll(budget.clone()).unwrap();
+    assert!(!waiting.has_more_source_work);
+    assert!(waiting.mutations.is_empty());
+    assert_eq!(connector.offset, offset);
+
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&source)
+        .unwrap()
+        .write_all(b"\n")
+        .unwrap();
+    let completed = connector.poll(budget).unwrap();
+    assert!(!completed.has_more_source_work);
+    assert!(completed.mutations.iter().any(|mutation| matches!(
+        mutation,
+        ConnectorMutation::Upsert(item) if item.id == ConversationItemId::native("three")
+    )));
+    assert_eq!(connector.offset, fs::metadata(source).unwrap().len());
 }
 
 #[test]

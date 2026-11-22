@@ -67,6 +67,7 @@ fn cursor_chat_sends_and_observes_two_turns() {
     let _stop = Stop(binary, &home, session);
     let conversation = ConversationId::new(session);
     let mut connector = connector_for_session(home.clone(), &conversation);
+    let wake = crate::conversation::ObservationWake::new().unwrap();
     let mut can_send = false;
     for expected in ["LATCH_CURSOR_FIRST", "LATCH_CURSOR_SECOND"] {
         let deadline = Instant::now() + Duration::from_secs(90);
@@ -90,7 +91,11 @@ fn cursor_chat_sends_and_observes_two_turns() {
                     "Cursor never offered its empty composer"
                 );
                 connector
-                    .wait_for_activity(Duration::from_millis(200), Duration::from_millis(500))
+                    .wait_for_activity(
+                        Duration::from_millis(200),
+                        Duration::from_millis(500),
+                        &wake,
+                    )
                     .unwrap();
             }
         }
@@ -124,7 +129,11 @@ fn cursor_chat_sends_and_observes_two_turns() {
                 "Cursor response did not reach the connector"
             );
             connector
-                .wait_for_activity(Duration::from_millis(200), Duration::from_millis(500))
+                .wait_for_activity(
+                    Duration::from_millis(200),
+                    Duration::from_millis(500),
+                    &wake,
+                )
                 .unwrap();
         }
         eprintln!("Observed Cursor reply: {expected}");

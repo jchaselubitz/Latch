@@ -572,6 +572,7 @@ mod tests {
                     active_branch_delta: vec![],
                     connector_state: None,
                 },
+                has_more_source_work: false,
             })
         }
         fn actions(&self) -> Vec<ActionDescriptor> {

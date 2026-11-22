@@ -275,6 +275,32 @@ fn chat_observes_and_sends_beside_an_attached_desktop_terminal() {
     pty.start();
     pty.wait_text("SIZE:48 160");
 
+    // A Chat-open wake can interrupt the real event wait with a surface
+    // attached. It leaves the persistent subscription usable.
+    let wake = crate::conversation::ObservationWake::new().unwrap();
+    let session = SessionId::parse("ses_fixture").unwrap();
+    let mut observer = ConversationControl::open(&pty.home, &session).unwrap();
+    let timeout = Duration::from_secs(5);
+    assert_eq!(
+        observer
+            .wait_for_activity_or_refresh(timeout, &wake)
+            .unwrap(),
+        ConversationWake::Resynchronized,
+    );
+    wake.signal().unwrap();
+    let started = Instant::now();
+    assert_eq!(
+        observer
+            .wait_for_activity_or_refresh(timeout, &wake)
+            .unwrap(),
+        ConversationWake::Timeout,
+    );
+    assert!(
+        started.elapsed() < timeout,
+        "Chat waited for the idle timeout"
+    );
+    wake.clear().unwrap();
+
     let mut connector = JsonlConnector::fixture("claude", PathBuf::from("unused-source.jsonl"));
     connector.home = pty.home.clone();
     // Opening, backgrounding, and foregrounding Chat: each round is a fresh
@@ -320,6 +346,7 @@ fn chat_observes_and_sends_beside_an_attached_desktop_terminal() {
         (stat.cols, stat.rows, stat.attached, stat.pinned),
         (160, 48, true, false)
     );
+    assert_eq!((stat.surface_attaches, stat.surface_steals), (1, 0));
     drop(desktop);
 }
 

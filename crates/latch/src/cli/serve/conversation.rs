@@ -160,7 +160,18 @@ pub async fn run(mut socket: WebSocket, connect: ConversationConnect) {
     // The observation task belongs to the session actor, not this socket.
     // Dropping one subscriber must not stop updates for another subscriber
     // that reconnected or was already attached.
-    let _observation = spawn_observation(hub.clone(), id.clone());
+    if let Err(error) = start_observation(hub.clone(), id.clone()) {
+        let _ = send(
+            &mut socket,
+            protocol_error(
+                "unavailable",
+                &format!("conversation is unavailable: {error}"),
+            ),
+        )
+        .await;
+        hub.unsubscribe(&id, subscriber);
+        return;
+    }
     let (results, mut result_rx) = mpsc::channel::<ConversationServerMessage>(64);
     let mut flush = tokio::time::interval(FLUSH_INTERVAL);
     flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -240,28 +251,34 @@ pub async fn run(mut socket: WebSocket, connect: ConversationConnect) {
 ///
 /// Only one task per session ever claims it, so steady-state connector work is
 /// independent of how many clients are attached.
-fn spawn_observation(hub: ConversationHub, id: ConversationId) -> tokio::task::JoinHandle<()> {
+fn start_observation(hub: ConversationHub, id: ConversationId) -> anyhow::Result<()> {
+    if !hub.request_observation(&id)? {
+        return Ok(());
+    }
     tokio::spawn(async move {
-        if !hub.claim_observation(&id) {
-            return;
-        }
         loop {
-            if !hub.has_subscribers(&id) {
-                break;
+            match hub.begin_observation_poll(&id) {
+                Ok(true) => {}
+                Ok(false) => return,
+                Err(_) => {
+                    hub.release_observation(&id);
+                    return;
+                }
             }
-            if hub.poll_once(id.clone(), POLL_BUDGET).await.is_err() {
-                break;
-            }
-            if hub
-                .wait_for_activity_once(id.clone(), POLL_INTERVAL, EVENT_IDLE_RESYNC)
-                .await
-                .is_err()
-            {
-                break;
+            let result = match hub.poll_once(id.clone(), POLL_BUDGET).await {
+                Ok(true) => continue,
+                Ok(false) => {
+                    hub.wait_for_activity_once(id.clone(), POLL_INTERVAL, EVENT_IDLE_RESYNC)
+                        .await
+                }
+                Err(error) => Err(error),
+            };
+            if result.is_err() && !hub.retry_observation_after_error(&id) {
+                return;
             }
         }
-        hub.release_observation(&id);
-    })
+    });
+    Ok(())
 }
 
 /// Returns false when the socket should close.

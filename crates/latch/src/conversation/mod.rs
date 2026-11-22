@@ -9,6 +9,7 @@ mod connector;
 mod connectors;
 mod hub;
 mod model;
+mod observation_wake;
 mod pending;
 mod projection;
 
@@ -17,5 +18,6 @@ pub use connector::*;
 pub use connectors::*;
 pub use hub::*;
 pub use model::*;
+pub use observation_wake::ObservationWake;
 pub use pending::*;
 pub use projection::*;

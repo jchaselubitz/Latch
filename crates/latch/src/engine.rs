@@ -2,7 +2,7 @@
 #![allow(missing_docs)]
 
 use std::fs::{self, OpenOptions};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsFd, AsRawFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -265,6 +265,20 @@ impl ConversationControl {
         })
     }
     pub fn wait_for_activity(&mut self, event_timeout: Duration) -> Result<ConversationWake> {
+        self.wait_for_activity_inner(event_timeout, None)
+    }
+    pub(crate) fn wait_for_activity_or_refresh(
+        &mut self,
+        event_timeout: Duration,
+        wake: &crate::conversation::ObservationWake,
+    ) -> Result<ConversationWake> {
+        self.wait_for_activity_inner(event_timeout, Some(wake))
+    }
+    fn wait_for_activity_inner(
+        &mut self,
+        event_timeout: Duration,
+        wake: Option<&crate::conversation::ObservationWake>,
+    ) -> Result<ConversationWake> {
         if self.events.is_none() {
             self.events = Some(
                 latchd::client::Client::connect_with_timeout(&self.socket, event_timeout)?
@@ -272,12 +286,13 @@ impl ConversationControl {
             );
             return Ok(ConversationWake::Resynchronized);
         }
-        let event = match self
-            .events
-            .as_mut()
-            .expect("subscription installed")
-            .recv_timeout(event_timeout)
-        {
+        let events = self.events.as_mut().expect("subscription installed");
+        if let Some(wake) = wake {
+            if !wake.wait(event_timeout, Some(events.as_fd()))? {
+                return Ok(ConversationWake::Timeout);
+            }
+        }
+        let event = match events.recv_timeout(event_timeout) {
             Ok(Some(event)) => event,
             Ok(None) => return Ok(ConversationWake::Timeout),
             Err(_) => {

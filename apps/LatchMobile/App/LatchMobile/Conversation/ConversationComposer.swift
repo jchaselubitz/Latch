@@ -32,6 +32,11 @@ struct ConversationComposer: View {
     var attachments = ConversationAttachmentControls()
     var commands: [AdvertisedCommand] = []
     var canUseSlashCommands = false
+    /// Stops the running turn; nil when there is nothing to stop. While set,
+    /// the stop button takes the send button's place, and the send button
+    /// returns to its left once there is something to send.
+    var stopTurn: (() -> Void)?
+    var stopStatus: String?
     let send: (String) -> Void
 
     /// The picker the "+" menu asked for, presented by the modifier below.
@@ -61,6 +66,12 @@ struct ConversationComposer: View {
                 ConversationSendNoticeView(notice: notice)
                     .padding(.horizontal, fieldHeight + 8)
             }
+            if let status = stopStatus {
+                Text(status)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, fieldHeight + 8)
+            }
             if !attachments.items.isEmpty || attachments.phase != .idle {
                 ConversationAttachmentStrip(controls: attachments)
                     .padding(.leading, fieldHeight + 8)
@@ -68,7 +79,12 @@ struct ConversationComposer: View {
             HStack(alignment: .bottom, spacing: 8) {
                 moreMenu
                 field
-                sendButton
+                if stopTurn == nil || hasContent {
+                    sendButton
+                }
+                if let stopTurn {
+                    stopButton(stopTurn)
+                }
             }
         }
         .padding(.horizontal, 12)
@@ -225,6 +241,22 @@ struct ConversationComposer: View {
         .accessibilityLabel(attachments.isUploading ? "Sending attachments" : "Send")
         .accessibilityHint(presentation.notice?.title ?? "")
         .accessibilityIdentifier("conversation.composer.send")
+    }
+
+    private func stopButton(_ stop: @escaping () -> Void) -> some View {
+        Button(action: stop) {
+            FloatingControl(shape: .circle, size: 48, tint: nil) {
+                FloatingControlGlyph(systemImage: "stop.fill")
+            }
+            .foregroundStyle(Color.primary)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Stop current turn")
+        .accessibilityIdentifier("conversation.stopTurn")
+    }
+
+    private var hasContent: Bool {
+        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.items.isEmpty
     }
 
     /// A file alone is a message; text is not required alongside it.

@@ -6,7 +6,7 @@
 //! splices bytes in both directions until the daemon closes the connection.
 
 use std::io::{self, ErrorKind, Read, Write};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -115,6 +115,12 @@ impl Client {
 /// An event stream.
 pub struct Subscription {
     stream: UnixStream,
+}
+
+impl AsFd for Subscription {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.stream.as_fd()
+    }
 }
 
 impl Subscription {
