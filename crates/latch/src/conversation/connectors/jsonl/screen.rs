@@ -18,6 +18,19 @@ impl JsonlConnector {
     }
 
     pub(super) fn observe_screen(&mut self, screen: &str) -> Vec<ConnectorMutation> {
+        if self.id == "codex"
+            && self
+                .pending_request
+                .as_ref()
+                .is_some_and(|request| request.bridge_call)
+        {
+            self.screen_can_send = Some(
+                self.pending_request.is_none()
+                    && !self.tool_running
+                    && screen.lines().any(|line| is_empty_composer(self.id, line)),
+            );
+            return Vec::new();
+        }
         let mut mutations = self.follow_painted_request(screen);
         // With other dialogs waiting, the numbered decisions on the screen
         // may be another dialog's: only the painted request reads them.

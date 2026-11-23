@@ -1,0 +1,19 @@
+{
+  "id": "subagent-tasks",
+  "what": "Two TaskCreate tasks, one background general-purpose subagent that runs Bash, both tasks completed with TaskUpdate, then the engine's task-notification and the follow-up turn.",
+  "files": {
+    "hooks.jsonl": "SessionStart, TaskCreated x2, SubagentStart, TaskCompleted x2, Stop (with background_tasks naming the running subagent), SubagentStop (agent_transcript_path, last_assistant_message), Stop",
+    "transcript.jsonl": "main transcript: the Agent tool_use and its async_launched toolUseResult (agentId, resolvedModel), TaskCreate results (toolUseResult.task), TaskUpdate inputs, the isMeta reminder and the task-notification user record (origin.kind task-notification)",
+    "subagents/agent-ae6a238f4d47fe252.jsonl": "the subagent's own transcript (isSidechain true, agentId): its prompt, a Bash tool_use and result, its answer. Claude 2.1.330 writes subagents here, not into the main transcript",
+    "subagents/agent-ae6a238f4d47fe252.meta.json": "agentType, description and toolUseId of the Agent call that started it",
+    "post-tool-use-agent.jsonl": "PostToolUse for the Agent call (not registered by the observer): its tool_response equals the transcript's toolUseResult"
+  },
+  "capture": "Claude Code 2.1.330, headless `claude -p` (haiku) with isolated settings (`--setting-sources local`) and capture command hooks on every hook event (docs/experiments/claude-dialog-probe/capture.py); 2026-11-23.",
+  "sanitized": [
+    "session_id, transcript_path and cwd removed from hook records",
+    "work directory rewritten to /work, the probe directory to /probe, the home directory to ~, Claude's project directory to ~/.claude/projects/-work",
+    "hook records stamped with synthetic whole-second timestamps in capture order (capture.py stamps none; Latch's capture_record adds them), connector and latch_observer_version 4",
+    "transcript records trimmed to type, subtype, uuid, parentUuid, timestamp, isSidechain, agentId, promptId, message, toolUseResult, isMeta, origin, permissionMode; attachment and bookkeeping records dropped and their children re-parented; thinking blocks dropped",
+    "long free-text fields (last_assistant_message, compact_summary) cut to 300 characters"
+  ]
+}

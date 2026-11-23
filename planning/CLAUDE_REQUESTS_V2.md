@@ -105,9 +105,8 @@ yet. Never type keys for these dialogs.
   dialog opens. Never auto-accept. Correlate with the running MCP call through
   the bridge's `tool.call` for an `mcp__<server>__*` tool with the same
   `mcp_server_name`, and with `prompt_id`.
-- **Code Mode.** Not exercised here (coo:1334.w5d6). Note for that objective:
-  the in-script calls also run the PermissionRequest hook, so the module
-  `decision` path above may avoid the missing `tool_use_id` problem.
+- **Code Mode.** Not exercised here. Settled in coo:1334.w5d6: see "Code
+  Mode (REPL)" below.
 
 ## Fixtures
 
@@ -121,3 +120,196 @@ yet. Never type keys for these dialogs.
 | `permission-suggestions` | `permission_suggestions` payload; allow-for-session sequence with no second prompt. |
 | `computer-use-app-access` | Synthetic `request_access` call and result in the shape of a real session. |
 | `terminal-only` | Engine extract: dialog kinds, options, notification texts, the 6 s rule, the status-file writer, MCP OAuth and trust notes. |
+
+## Implemented in coo:1334.tvhe
+
+Observer plugin v3 and bridge v3 (older launches keep their old hook set; the
+connector reads only records that exist).
+
+- **Plan approval and suggestions.** `classic.PermissionRequest` in
+  `register.ts` reports `permission.open` with `plan`, `plan_path` and the
+  `options` its own hook can carry out, then holds the hook for the phone. An
+  answer returns `{decision}` (`updatedInput` + `setMode` for a plan,
+  `updatedPermissions` for `allow_session` / `allow_always`, `deny` + message
+  for the feedback options). If the call ends another way the hook is released
+  and falls through to `next(e)`. ExitPlanMode is never re-run. Plain
+  allow/deny still use the existing `tool.call` path.
+- **Elicitation.** The `Elicitation` command hook (`latch __conversation-hook`)
+  records the request, then blocks up to `LATCH_ELICITATION_WAIT_SECS` (default
+  120; hook timeout 135) for an answer file queued by the connector. No answer:
+  an `ElicitationTimeout` record, no output, and the terminal form opens; the
+  phone request becomes `answerable: false`. Never auto-accepts. Forms are
+  checked against `requested_schema` before the answer is queued.
+- **Terminal-only.** `Notification` (observer) and the bridge's
+  `terminal.open` (computer-use `request_access`, reported only if it outlasts
+  1.5 s) raise `answerable: false` requests with a reason. They close on
+  `terminal.closed`, `Stop`, `ElicitationResult`, or a replacement. Keys are
+  never typed. The status file is not read (advisory, deferred).
+- **Attention notifications** already carry `request_kind` (and `appName`);
+  the new kinds pass through unchanged.
+
+## Richer activity and session state (coo:1334.m1ng)
+
+Captured live on Claude Code 2.1.330 (headless `claude -p`, capture hooks on
+every event). Fixtures: `fixtures/conversation/claude/activity/`.
+
+### What the engine provides
+
+- **Subagents are no longer sidechain records in the main transcript.** Each
+  subagent writes `<transcript dir>/<session id>/subagents/agent-<id>.jsonl`
+  (`isSidechain: true`, `agentId`) and `agent-<id>.meta.json`, whose
+  `toolUseId` names the Agent call that started it. `SubagentStart` carries
+  `agent_id` and `agent_type`; `SubagentStop` adds `agent_transcript_path` and
+  `last_assistant_message`. Agents launched in the background return
+  `status: async_launched` at once; their end reaches the transcript as a
+  user record with `origin.kind: task-notification` and a
+  `<task-notification>` body (`<task-id>`, `<status>`), which Latch used to
+  show as a prompt the person typed. The Agent call's PostToolUse
+  `tool_response` is the transcript's `toolUseResult` (`agentId`, `status`,
+  `totalTokens`, `totalDurationMs`, `totalToolUseCount`, `resolvedModel`), so
+  the observer does not register PostToolUse.
+- **Compaction runs as an untyped engine fork**: a `SubagentStop` with
+  `agent_type: ""` and no `SubagentStart`. It is not a subagent.
+- **Tasks**: `TaskCreated` / `TaskCompleted` (`task_id`, `task_subject`); the
+  transcript has the same through `TaskCreate` results (`toolUseResult.task`)
+  and `TaskUpdate` inputs (`taskId`, `status`, including `in_progress`, which
+  no hook reports).
+- **Notices**: `PreCompact` / `PostCompact` (`trigger`, `compact_summary`),
+  `StopFailure` (`error`, e.g. `model_not_found`, `rate_limit`; no `Stop`
+  follows), `PostModelSwitch` (`from_model`, `to_model`, `source`).
+- **State**: every hook carries `permission_mode` and `effort.level` (main
+  loop only when `agent_id` is absent); `SessionStart` names the `model`;
+  assistant records carry `message.model`; user records `permissionMode`. The
+  bridge reads `$.session.usage()` (context tokens, window and percent, rate
+  limits, cost) and `$.session.model()`.
+
+### Implemented
+
+- **Observer v4** adds `SubagentStart`, `SubagentStop`, `TaskCreated`,
+  `TaskCompleted`, `PreCompact`, `PostCompact`, `StopFailure` and
+  `PostModelSwitch`. `PreModelSwitch` is not registered: it can block the
+  switch, and a process per switch adds latency for nothing the post event
+  lacks. Free-text fields (`last_assistant_message`, `compact_summary`,
+  `task_description`, `error_details`, `custom_instructions`) are cut to 4 KiB
+  before the sidecar; the record itself stays under `MAX_HOOK_BYTES`.
+- **Bridge v4** reports `session.usage` at greeting and after each main-loop
+  turn (no polling while idle).
+- **Connector** (`connectors/jsonl/activity.rs`):
+  - a `subagent` item per subagent, linked to its Agent call
+    (`parent_tool_id`, from the meta file, else the oldest unclaimed Agent call
+    of its type), sent only after that call so it always follows it; its own
+    tool calls are read incrementally from its transcript within the poll
+    budget and nested with `parent_subagent_id`, at most 60 shown per subagent
+    (the rest counted in its summary); summary = description, final answer
+    (2 KiB) and the call's stats. A subagent whose call is never read is shown
+    alone once the sources are caught up. Nested subagents nest under their
+    parent subagent. At most 32 are tracked.
+  - `task-notification` records update their subagent and are no longer shown
+    as prompts.
+  - one `task_list` item per turn, placed where the transcript first changed
+    the list; hooks only refresh it (they are read ahead of the transcript).
+    `TodoWrite` fills the same list.
+  - `notice` items: compaction (one item, settled by `PostCompact`), a failed
+    turn (which also closes the turn with outcome `error`), a model switch.
+  - state: `model`, `effort`, `permissionMode` (newest-timestamp wins, so a
+    replayed older record cannot undo a newer hook) and the new
+    `usage` (`contextTokens`, `contextWindow`, `contextPercent`,
+    `rateLimits[]`, `costCents`).
+- **Mobile** shows subagents (collapsed, with their calls), task lists and
+  notices with the coo:1332 renderers, and a one-line session summary above
+  the composer: "Haiku 5.5 · medium effort · Plan mode · 25% context ·
+  7-day limit 81% · $0.42".
+
+### Changing model, effort or permission mode from the phone (investigated)
+
+| Option | Finding | Decision |
+| --- | --- | --- |
+| `/model <alias>` as a prompt | Live in `-p`: `/model sonnet` ran the command, fired Pre/PostModelSwitch with `source: command` (fixture `model-switch`). The phone's composer already offers the advertised slash commands through the bridge's `prompt.submit`, at the Interact grant. In an interactive session the engine's PreModelSwitch path returns `skipConfirm`, so a switch can open a confirmation dialog (cache cost) that only the terminal answers; not observed live. | Not added as a dedicated control. Follow-up. |
+| `$.command.run({command: 'model' \| 'effort', args})` from the bridge | The kit's explicit API for the same commands; would allow a typed `set_model` / `set_effort` action gated on the Control grant, with the result reported back. Needs an interactive run to prove the confirmation behaviour. | Follow-up. |
+| `PermissionRequest` `updatedPermissions` `setMode` | Works only while a permission dialog is open (proven in tvhe for plan approval and suggestions). Not a general mode switch. | Already used where it applies. |
+| `$.config.set` | Sets `/config` rows; the permission mode there is the persisted default, not the live session's mode, and a write changes the person's settings. | Rejected as unsafe. |
+
+## Code Mode (REPL) (coo:1334.w5d6)
+
+Captured live on Claude Code 2.1.330 with Sonnet 5.5, headless. The engine
+accepts a headless Code Mode opt-in only from flag settings, so the run sets
+`CLAUDE_CODE_EXPERIMENTAL_CODE_MODE=1` both in the environment and in
+`--settings`. Harness: `docs/experiments/claude-code-mode-probe`. Fixtures:
+`fixtures/conversation/claude/code-mode/` (`repl-parallel`, `refused-call`,
+`script-error`). An interactive Code Mode session in Latch (`latch run --
+claude`) was not run from here (a nested interactive Claude cannot be
+driven); the bridge was loaded as a module in every headless run.
+
+### What the engine writes
+
+- **Transcript.** A `repl-mode` record, the assistant `tool_use` named `REPL`
+  (`input.code`, optional `input.description`), and its `tool_result` whose
+  `toolUseResult` has `code`, `result`, `stdout`, `stderr`, `toolsUsed`, and
+  `error` (script threw; `is_error: true`) or `refusedCalls` (a note: `-
+  "Bash", refused: "…"` per call) when they apply. While the script runs,
+  `host-row` records (`ranByToolUseId`, `block` = the in-script `tool_use` or a
+  placeholder `tool_result`) are written, the first ones before the REPL
+  `tool_use` record itself. After the result, a virtual assistant/user pair
+  per in-script call (`isVirtual`, `ranByToolUseId` on the call, ids
+  `toolu_cc_…`) sits on the main chain; a script that throws adds a virtual
+  `REPL` pair with id `repl-error-…` and `scriptErrorCopy`.
+- **Hooks.** The REPL call raises PostToolUse only (no PreToolUse, no module
+  `tool.call`). Each in-script call raises PreToolUse, PostToolUse,
+  `tool.call` and `tool.check` with its own `tool_use_id` (`toolu_cc_…`), and
+  PermissionRequest when it asks. Stop is unchanged.
+- **Refusals.** Every refusal seen refused that call alone and the script went
+  on: a PermissionRequest deny with a message, a deny with no message
+  ("Permission denied by hook"), the headless default, and a `{deny}` returned
+  from the module's `tool.call`. Only the terminal's own "No" without a
+  comment stops the whole script (per the Code Mode docs; not reproducible
+  headless).
+
+### Decisions (implemented)
+
+- **Connector.** A REPL call is one Tool item named **Code**. Its summary is
+  the script's `description` (or "Script"), then, while running, "running
+  Bash, Read" from the `host-row` records, and when done "used Bash, Read",
+  "N calls refused (Bash)" and "failed: <first error line>". It ends Failed
+  when `error` is present or the result is an error. The code is never
+  shown. The virtual in-script records add no items; they stay on the branch
+  chain, and a task or subagent call inside a script still updates the task
+  list or links the subagent, under the Code item. The same naming applies
+  to scripts in subagent transcripts. Without `toolUseResult` (a record with
+  several results) the facts are read from the result's tagged text.
+- **Bridge (v5).** In-script calls are identified by the engine's own id
+  convention (`repl_` / `toolu_cc_`, the prefixes the engine itself checks), reported
+  with `in_script: true` on `permission.open`, and are answerable from the
+  phone. Every answer, including plain Yes and No, is returned from the
+  `classic.PermissionRequest` hook: Yes = `{behavior: allow}`, No =
+  `{behavior: deny, message: "The person denied this call in Latch."}`, so a
+  phone No refuses that call only. The `tool.call` deny and re-run paths are
+  not used for them (a re-run would run outside the script). The connector
+  adds the reason "A Code Mode script made this call. No refuses this call
+  only; the script goes on." when the input gives none.
+- **`tool.check` self-approval.** Kept, with a comment: Latch sets no minimum
+  Claude version (the bridge was built on 2.1.292), and the approval is
+  redundant only from 2.1.321.
+
+
+## Background work (coo:1334.4s0s)
+
+Captured live (Claude Code 2.1.330, headless; `fixtures/conversation/claude/activity/background-work/`):
+
+- Every `Stop` carries `background_tasks`: `{id, type, status, description}` plus `command`
+  (shell, monitor) or `agent_type` (subagent). Seen types: `shell`, `monitor`, `subagent`;
+  status is `running` for every listed task.
+- `SubagentStop` lists the subagent itself and anything it started, so it is not the
+  session's view; the connector ignores it for background work.
+- No hook fires when a task ends. The engine injects a task-notification prompt, runs a short
+  turn, and that turn's `Stop` lists what is left, down to an empty list. `SessionEnd`
+  follows on exit.
+
+Connector: each `Stop` replaces `ConversationState.background_work` (count of unsettled
+tasks; kinds in first-seen order, normalised to snake_case). It clears on a later real prompt
+(newer than that `Stop`; a task-notification turn keeps it), an empty `Stop`, `SessionEnd`
+(observer v5 registers it), a rebind, or when the Hub marks observation unavailable. Persisted
+in the runtime checkpoint.
+
+Attention: a turn that ends Idle with work running still sends a completion alert, but the
+sealed payload carries `b` (count) and the phone says "Turn finished · N background tasks
+still running" instead of "Finished working".

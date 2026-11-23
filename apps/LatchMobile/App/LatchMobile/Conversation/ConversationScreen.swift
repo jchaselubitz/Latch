@@ -11,6 +11,8 @@ struct ConversationScreenContent {
     var canCancelTurn = false
     var cancelStatus: String? = nil
     var backgroundTaskCount: UInt32 = 0
+    /// Model, effort, permission mode and context usage, when known.
+    var sessionFacts: String? = nil
     var viewState: ConversationViewState
     var transcript: ConversationTranscriptPresentation
     /// Hub phase plus the newest live tool, when the phase is working.
@@ -88,6 +90,7 @@ extension ConversationScreenContent {
             skippedUpdates: diagnostics.droppedItems + diagnostics.undecodableFrames
         )
         backgroundTaskCount = store.state?.backgroundWork?.count ?? 0
+        sessionFacts = ConversationSessionFacts.line(store.state)
         canCancelTurn = store.canCancelTurn
         commands = store.commands
         canUseSlashCommands = ConversationComposerChrome.canUseSlashCommands(
@@ -185,6 +188,18 @@ struct ConversationScreen: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .padding(.vertical, 4)
+            }
+            if let facts = content.sessionFacts {
+                Text(facts)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .padding(.horizontal, 20)
+                    .padding(.top, 2)
+                    .frame(maxWidth: ConversationTranscript.maxColumnWidth)
+                    .frame(maxWidth: .infinity)
+                    .accessibilityIdentifier("conversation.sessionFacts")
             }
             // With a request pending the composer is replaced by its choices,
             // so the stop control keeps its own row there. Otherwise it lives

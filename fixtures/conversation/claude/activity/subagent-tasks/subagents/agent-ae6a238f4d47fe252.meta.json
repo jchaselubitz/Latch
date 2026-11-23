@@ -1,0 +1,13 @@
+{
+  "agentType": "general-purpose",
+  "isBuiltIn": true,
+  "launchedWithDefaults": true,
+  "description": "List current directory files",
+  "toolUseId": "toolu_0195AbMT25NaejVsKsEynvnD",
+  "spawnDepth": 1,
+  "requestShape": "background",
+  "requestNonInteractive": true,
+  "model": "claude-haiku-5-5",
+  "pickedEffortModel": "claude-haiku-5-5",
+  "finished": true
+}

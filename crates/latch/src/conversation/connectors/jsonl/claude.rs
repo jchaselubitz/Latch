@@ -1,5 +1,6 @@
 //! Claude transcript and hook records: the branch graph, tool calls and
 //! results, permission hooks, and authoritative turn boundaries.
+use super::code_mode;
 use super::*;
 
 impl JsonlConnector {
@@ -17,6 +18,7 @@ impl JsonlConnector {
         if let Some(version) = object.get("latch_observer_version").and_then(Value::as_u64) {
             self.hook_observer_version = Some(version as u32);
         }
+        self.observe_session_facts(object, event, hook_event_name.is_some());
         if event == "permission_request" || hook_event_name.as_deref() == Some("PermissionRequest")
         {
             // Claude raises its permission hook for a question too. The
@@ -46,16 +48,46 @@ impl JsonlConnector {
         if hook_event_name.as_deref() == Some(crate::observer::CLAUDE_BRIDGE_EVENT) {
             return self.claude_bridge_record(object);
         }
+        match hook_event_name.as_deref() {
+            Some("Elicitation") => return self.claude_elicitation(object),
+            Some("ElicitationTimeout") => return self.claude_elicitation_timeout(object),
+            Some("ElicitationResult") => return self.claude_elicitation_result(object),
+            Some("Notification") => return self.claude_notification(object),
+            Some(name) => {
+                if let Some(mutations) = self.claude_activity_hook(object, name, ordinal) {
+                    return mutations;
+                }
+            }
+            _ => {}
+        }
         if hook_event_name.as_deref() == Some("Stop") {
             // Authoritative turn boundary: the agent itself reported that it
             // stopped responding, so the turn this session opened is closed
             // regardless of what the transcript or screen otherwise suggest.
             self.turn_open = false;
             self.last_turn_close = string(object, "timestamp").or(self.last_turn_close.take());
+            // Every Stop lists what is still running, so it replaces the
+            // last report outright; an empty list clears it.
+            self.background_work = background_work(object);
+            self.background_work_at = self
+                .background_work
+                .as_ref()
+                .and(self.last_turn_close.clone());
+            return self.dismiss_terminal_only();
+        }
+        if hook_event_name.as_deref() == Some("SessionEnd") {
+            // The session's background tasks end with it, and no later Stop
+            // will say so.
+            self.background_work = None;
+            self.background_work_at = None;
             return Vec::new();
         }
         if hook_event_name.is_some() {
             return Vec::new();
+        }
+        // A Code Mode script's calls, written while the script runs.
+        if event == "host-row" {
+            return self.code_host_row(object);
         }
         let uuid = string(object, "uuid");
         if object
@@ -112,6 +144,13 @@ impl JsonlConnector {
         }
 
         let at = string(object, "timestamp").unwrap_or_else(|| "1970-01-01T00:00:00Z".to_owned());
+        // A Code Mode script's calls, replayed after it: on the chain, but
+        // told by the script's own item.
+        if let Some(script) = self.code_script_record(object, event, &at) {
+            mutations.extend(script);
+            self.active_chain.push(uuid);
+            return mutations;
+        }
         // Any authoritative main-chain progress after the request dismisses
         // it when it was not itself re-announced. Hooks are read before the
         // transcript, however, so replaying an older transcript record must
@@ -145,8 +184,13 @@ impl JsonlConnector {
                 } else {
                     claude_text(content)
                 };
+                // The engine's word that a background task ended reads as a
+                // prompt in the transcript; it updates the task's item.
+                let notification = !text.is_empty() && Self::is_task_notification(object, &text);
                 if !text.is_empty() {
-                    self.chain_items.insert(uuid.clone(), uuid.clone());
+                    if !notification {
+                        self.chain_items.insert(uuid.clone(), uuid.clone());
+                    }
                     // A real user turn starts here. It only stays open on the
                     // authority of a later `Stop` hook when this session is
                     // known to emit one; otherwise this flag never turns on
@@ -160,16 +204,44 @@ impl JsonlConnector {
                         self.turn_open = true;
                         self.turn_outcome = None;
                     }
-                    mutations.push(upsert(
-                        &uuid,
-                        at.clone(),
-                        ConversationItemKind::Message {
-                            role: MessageRole::User,
-                            text: bounded_message_text(text),
-                            status: MessageStatus::Observed,
-                        },
-                    ));
+                    if notification {
+                        mutations.extend(self.task_notification(&text));
+                    } else {
+                        self.activity_turn_started();
+                        // A new prompt starts a turn whose own Stop reports
+                        // background work afresh. Hooks are read before the
+                        // transcript, so a replayed older prompt must not
+                        // clear what a later Stop reported.
+                        if self
+                            .background_work_at
+                            .as_deref()
+                            .is_none_or(|reported| timestamp_is_after(&at, reported))
+                        {
+                            self.background_work = None;
+                            self.background_work_at = None;
+                        }
+                        mutations.push(upsert(
+                            &uuid,
+                            at.clone(),
+                            ConversationItemKind::Message {
+                                role: MessageRole::User,
+                                text: bounded_message_text(text),
+                                status: MessageStatus::Observed,
+                            },
+                        ));
+                    }
                 }
+                // `toolUseResult` describes a record's result only when it
+                // carries one.
+                let single_result = content.and_then(Value::as_array).is_some_and(|blocks| {
+                    blocks
+                        .iter()
+                        .filter(|block| {
+                            string_value(block, "type").as_deref() == Some("tool_result")
+                        })
+                        .count()
+                        == 1
+                });
                 for block in content.and_then(Value::as_array).into_iter().flatten() {
                     if string_value(block, "type").as_deref() != Some("tool_result") {
                         continue;
@@ -179,17 +251,27 @@ impl JsonlConnector {
                     };
                     if let Some((name, item_id)) = self.tools.remove(&call_id) {
                         let input = self.tool_summaries.remove(&call_id).unwrap_or_default();
-                        let (status, summary) = claude_tool_outcome(&input, block);
-                        mutations.push(upsert(
-                            &item_id,
-                            at.clone(),
+                        let is_error = block
+                            .get("is_error")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false);
+                        let kind = if name == code_mode::SCRIPT_TOOL {
+                            let outcome = object.get("toolUseResult").filter(|_| single_result);
+                            self.code_script_finished(&call_id, block, outcome)
+                        } else {
+                            let (status, summary) = claude_tool_outcome(&input, block);
                             ConversationItemKind::Tool {
-                                name,
+                                name: name.clone(),
                                 summary,
                                 status,
                                 parent_message_id: None,
-                            },
-                        ));
+                            }
+                        };
+                        mutations.push(upsert(&item_id, at.clone(), kind));
+                        if single_result {
+                            mutations
+                                .extend(self.activity_tool_result(&name, object, is_error, &at));
+                        }
                         self.tool_running = false;
                     }
                 }
@@ -239,9 +321,17 @@ impl JsonlConnector {
                             // the boundary regardless of Stop-hook support.
                             self.tool_running = true;
                             self.chain_items.insert(uuid.clone(), item_id.clone());
-                            mutations.push(upsert(
-                                &item_id,
-                                at.clone(),
+                            let kind = if name == code_mode::SCRIPT_TOOL {
+                                // The script is shown by what it does, never
+                                // by its code.
+                                self.code_script_started(
+                                    &call_id,
+                                    &item_id,
+                                    &uuid,
+                                    block.get("input"),
+                                    &at,
+                                )
+                            } else {
                                 ConversationItemKind::Tool {
                                     name: name.clone(),
                                     summary,
@@ -249,7 +339,16 @@ impl JsonlConnector {
                                     parent_message_id: Some(ConversationItemId::native(
                                         uuid.clone(),
                                     )),
-                                },
+                                }
+                            };
+                            mutations.push(upsert(&item_id, at.clone(), kind));
+                            mutations.extend(self.activity_tool_use(
+                                &name,
+                                &call_id,
+                                &item_id,
+                                block.get("input"),
+                                &at,
+                                None,
                             ));
                             // With a bridge the question was announced when it
                             // opened; by the time its call is in the transcript
@@ -285,6 +384,36 @@ impl JsonlConnector {
         object: &serde_json::Map<String, Value>,
         ordinal: u64,
     ) -> Vec<ConnectorMutation> {
+        let tool = string(object, "tool_name").unwrap_or_default();
+        let mut prompt = object
+            .get("tool_input")
+            .or_else(|| object.get("toolInput"))
+            .and_then(|input| input.get("description"))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_else(|| {
+                format!(
+                    "Allow {}?",
+                    string(object, "tool_name").unwrap_or_else(|| "this tool".to_owned())
+                )
+            });
+        let mut metadata = claude_permission_metadata(
+            &tool,
+            object.get("tool_input").or_else(|| object.get("toolInput")),
+            object.get("cwd").and_then(Value::as_str),
+        );
+        if tool == "ExitPlanMode" {
+            // Without the bridge the plan is still readable from the hook;
+            // the dialog is answered through the terminal's own labels.
+            let input = object.get("tool_input").and_then(Value::as_object);
+            let mut plan = serde_json::Map::new();
+            for (from, to) in [("plan", "plan"), ("planFilePath", "plan_path")] {
+                if let Some(value) = input.and_then(|input| input.get(from)) {
+                    plan.insert(to.to_owned(), value.clone());
+                }
+            }
+            super::dialogs::apply_permission_extras(&tool, &plan, &mut prompt, &mut metadata);
+        }
         let request = PendingRequest {
             id: string(object, "request_id")
                 .or_else(|| string(object, "prompt_id"))
@@ -295,18 +424,7 @@ impl JsonlConnector {
                     )
                 }),
             request_type: RequestType::Permission,
-            prompt: object
-                .get("tool_input")
-                .or_else(|| object.get("toolInput"))
-                .and_then(|input| input.get("description"))
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-                .unwrap_or_else(|| {
-                    format!(
-                        "Allow {}?",
-                        string(object, "tool_name").unwrap_or_else(|| "this tool".to_owned())
-                    )
-                }),
+            prompt,
             // Some providers include choices in the hook payload. Preserve
             // those as a fallback, but replace them with the numbered labels
             // Claude actually paints before presenting the request to a user.
@@ -322,14 +440,7 @@ impl JsonlConnector {
             screen_seen: false,
             announced_at: string(object, "timestamp"),
             bridge_call: false,
-            metadata: claude_permission_metadata(
-                object
-                    .get("tool_name")
-                    .and_then(Value::as_str)
-                    .unwrap_or(""),
-                object.get("tool_input").or_else(|| object.get("toolInput")),
-                object.get("cwd").and_then(Value::as_str),
-            ),
+            metadata,
         };
         let mut mutations = Vec::new();
         // The hook names no call, so a later dialog cannot wait behind this
@@ -383,4 +494,48 @@ fn timestamp_is_after(timestamp: &str, reference: &str) -> bool {
     // order `.123Z` before `Z`; keeping whole-second precision avoids treating
     // the same observed prompt as later transcript progress.
     timestamp.get(..19).unwrap_or(timestamp) > reference.get(..19).unwrap_or(reference)
+}
+
+/// Most background-task kinds named in a state; the schema's bound.
+const MAX_BACKGROUND_KINDS: usize = 32;
+const MAX_BACKGROUND_KIND_CHARS: usize = 64;
+
+/// The work a `Stop` or `SubagentStop` payload's `background_tasks` reports
+/// still running: how many tasks, and their kinds in first-seen order
+/// (`shell`, `subagent`, `monitor`, `workflow`, …). `None` when nothing is.
+/// A task with a settled status no longer counts; one without a status does,
+/// as every task Claude lists there is, by its own account, unfinished.
+pub(super) fn background_work(
+    object: &serde_json::Map<String, Value>,
+) -> Option<crate::conversation::BackgroundWork> {
+    let tasks = object.get("background_tasks")?.as_array()?;
+    let mut count = 0u32;
+    let mut kinds: Vec<String> = Vec::new();
+    for task in tasks.iter().filter(|task| task.is_object()) {
+        let settled = string_value(task, "status").is_some_and(|status| {
+            matches!(
+                status.as_str(),
+                "completed" | "failed" | "killed" | "stopped" | "cancelled" | "canceled"
+            )
+        });
+        if settled {
+            continue;
+        }
+        count = count.saturating_add(1);
+        let kind = string_value(task, "type")
+            .map(|kind| {
+                kind.trim()
+                    .to_lowercase()
+                    .replace([' ', '-'], "_")
+                    .chars()
+                    .take(MAX_BACKGROUND_KIND_CHARS)
+                    .collect::<String>()
+            })
+            .filter(|kind| !kind.is_empty())
+            .unwrap_or_else(|| "task".to_owned());
+        if kinds.len() < MAX_BACKGROUND_KINDS && !kinds.contains(&kind) {
+            kinds.push(kind);
+        }
+    }
+    (count > 0).then_some(crate::conversation::BackgroundWork { count, kinds })
 }

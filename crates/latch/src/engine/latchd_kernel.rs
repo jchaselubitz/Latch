@@ -92,7 +92,6 @@ pub(super) fn create(request: CreateRequest) -> Result<CreateResult> {
     let mut manifest = request.manifest;
     super::materialize_environment(&mut manifest);
     crate::observer::prepare_claude_launch(&request.home, &mut manifest)?;
-    crate::observer::prepare_codex_launch(&mut manifest)?;
     crate::observer::prepare_cursor_launch(&request.home, &mut manifest)?;
     let prepare = watch.lap();
 
@@ -113,6 +112,9 @@ pub(super) fn create(request: CreateRequest) -> Result<CreateResult> {
         created_at: &created_at,
     });
     meta::write_once(&paths, &metadata)?;
+    if !crate::observer::codex::wrap_launch(&paths, &mut manifest)? {
+        crate::observer::prepare_codex_launch(&mut manifest)?;
+    }
     // Identity and observer preparation above read the agent argv; only now
     // is it handed to the login shell that starts it.
     manifest.launch.apply_login_shell();

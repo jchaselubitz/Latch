@@ -26,8 +26,14 @@ impl JsonlConnector {
             // distinguish the actual user message from that setup material.
             return Vec::new();
         }
-        if self.id == "codex" && event == "event_msg" {
-            return self.codex_conversation_item(object, ordinal);
+        if self.id == "codex"
+            && (object.contains_key("method")
+                || matches!(
+                    event.as_str(),
+                    "event_msg" | "compacted" | "token_usage_record"
+                ))
+        {
+            return self.codex_conversation_item(&value, ordinal);
         }
         if matches!(event.as_str(), "branch_rewrite" | "branch_replace") {
             let parent = string(object, "parent_id").or_else(|| string(object, "parent_uuid"));
@@ -110,6 +116,15 @@ impl JsonlConnector {
             }
             "approval_request" | "permission_request" | "question_request" => {
                 let request_id = string(object, "request_id").unwrap_or_else(|| native.clone());
+                let metadata = if self.id == "codex" {
+                    crate::conversation::RequestMetadata {
+                        answerable: Some(false),
+                        reason: Some("Answer this request at the Mac.".into()),
+                        ..Default::default()
+                    }
+                } else {
+                    Default::default()
+                };
                 self.pending_request = Some(PendingRequest {
                     id: request_id.clone(),
                     request_type: if event == "question_request" {
@@ -132,7 +147,7 @@ impl JsonlConnector {
                     screen_seen: false,
                     announced_at: None,
                     bridge_call: false,
-                    metadata: Default::default(),
+                    metadata: metadata.clone(),
                 });
                 Some(ConversationItemKind::Request {
                     request_id,
@@ -140,7 +155,7 @@ impl JsonlConnector {
                     prompt: self.pending_request.as_ref().unwrap().prompt.clone(),
                     choices: self.pending_request.as_ref().unwrap().choices.clone(),
                     questions: Vec::new(),
-                    metadata: Default::default(),
+                    metadata: Box::new(metadata),
                     status: RequestStatus::Pending,
                 })
             }

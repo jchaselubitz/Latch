@@ -852,14 +852,14 @@ fn codex_conforms_to_the_connector_suite() {
 #[test]
 fn codex_rollout_projects_only_completed_conversation_items() {
     let mut connector = JsonlConnector::fixture("codex", PathBuf::from("unused"));
-    let user = serde_json::json!({"timestamp":"2026-09-22T12:00:00Z","payload":{"type":"item_completed","item":{"type":"UserMessage","id":"user-1","content":[{"type":"text","text":"hello"}]}}});
-    let assistant = serde_json::json!({"timestamp":"2026-09-22T12:00:01Z","payload":{"type":"item_completed","item":{"type":"AgentMessage","id":"assistant-1","content":[{"type":"Text","text":"hi"}]}}});
-    let setup = serde_json::json!({"payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"AGENTS.md secret"}]}});
-    let projected = connector.codex_conversation_item(user.as_object().unwrap(), 1);
+    let user = serde_json::json!({"type":"event_msg","timestamp":"2026-09-22T12:00:00Z","payload":{"type":"item_completed","item":{"type":"UserMessage","id":"user-1","content":[{"type":"text","text":"hello"}]}}});
+    let assistant = serde_json::json!({"type":"event_msg","timestamp":"2026-09-22T12:00:01Z","payload":{"type":"item_completed","item":{"type":"AgentMessage","id":"assistant-1","content":[{"type":"Text","text":"hi"}]}}});
+    let setup = serde_json::json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"AGENTS.md secret"}]}});
+    let projected = connector.record(user, 1);
     assert!(
         matches!(&projected[0], ConnectorMutation::Upsert(item) if matches!(&item.kind, ConversationItemKind::Message { role: MessageRole::User, text, .. } if text == "hello"))
     );
-    let projected = connector.codex_conversation_item(assistant.as_object().unwrap(), 2);
+    let projected = connector.record(assistant, 2);
     assert!(
         matches!(&projected[0], ConnectorMutation::Upsert(item) if matches!(&item.kind, ConversationItemKind::Message { role: MessageRole::Assistant, text, .. } if text == "hi"))
     );
@@ -3119,4 +3119,548 @@ fn a_late_bridge_close_enriches_the_already_dismissed_request() {
     })] if metadata.resolved_by == Some(crate::conversation::ResolutionSource::Terminal)
         && metadata.decision.as_deref() == Some("deny"))
     );
+}
+
+// ---- Claude dialogs beyond a plain permission (coo:1334.tvhe) ----
+
+fn dialog_fixture(case: &str, file: &str) -> Vec<Value> {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/conversation/claude/dialogs")
+        .join(case)
+        .join(file);
+    fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+fn hook_named(records: &[Value], event: &str) -> Value {
+    records
+        .iter()
+        .find(|record| record["hook_event_name"] == event)
+        .unwrap_or_else(|| panic!("fixture has no {event} record"))
+        .clone()
+}
+
+fn feed_at(connector: &mut JsonlConnector, mut record: Value, at: &str) -> Vec<ConnectorMutation> {
+    record["timestamp"] = Value::from(at);
+    connector.claude_record(record.as_object().unwrap(), "hook", 9)
+}
+
+fn request_of(
+    mutations: &[ConnectorMutation],
+) -> (&crate::conversation::RequestMetadata, RequestStatus) {
+    mutations
+        .iter()
+        .rev()
+        .find_map(|mutation| match mutation {
+            ConnectorMutation::Upsert(ObservedItem {
+                kind:
+                    ConversationItemKind::Request {
+                        metadata, status, ..
+                    },
+                ..
+            }) => Some((metadata.as_ref(), status.clone())),
+            _ => None,
+        })
+        .expect("a request mutation")
+}
+
+fn option_ids(metadata: &crate::conversation::RequestMetadata) -> Vec<&str> {
+    metadata.options.iter().map(|o| o.id.as_str()).collect()
+}
+
+fn resolve_option(request_id: &str, option: &str) -> ConnectorAction {
+    ConnectorAction {
+        id: ACTION_RESOLVE_REQUEST.to_owned(),
+        payload: serde_json::json!({ "requestId": request_id, "optionId": option }),
+    }
+}
+
+fn plan_open() -> Value {
+    let fixture = dialog_fixture("plan-approval", "hooks.jsonl");
+    let ask = hook_named(&fixture, "PermissionRequest");
+    let mut open = bridge_record("permission.open", "2026-11-23T10:00:01.000Z");
+    open["tool_use_id"] = Value::from("toolu_plan");
+    open["tool"] = Value::from("ExitPlanMode");
+    open["input"] = serde_json::json!({});
+    open["plan"] = ask["tool_input"]["plan"].clone();
+    open["plan_path"] = ask["tool_input"]["planFilePath"].clone();
+    open["options"] = serde_json::json!([
+        {"id": "approve_plan", "label": "Yes, and manually approve edits", "requires_text": false},
+        {"id": "approve_plan_accept_edits", "label": "Yes, and auto-accept edits", "requires_text": false},
+        {"id": "reject_plan_with_feedback", "label": "No, keep planning", "requires_text": true},
+    ]);
+    open
+}
+
+#[test]
+fn a_plan_is_shown_with_its_markdown_and_answered_through_the_bridge() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut connector = bridged_connector(temp.path());
+    let mutations = feed_at(&mut connector, plan_open(), "2026-11-23T10:00:01.000Z");
+    let (metadata, status) = request_of(&mutations);
+    assert_eq!(status, RequestStatus::Pending);
+    assert_eq!(metadata.request_kind.as_deref(), Some("plan_approval"));
+    assert_eq!(metadata.answerable, Some(true));
+    assert!(metadata.details["planMarkdown"]
+        .as_str()
+        .unwrap()
+        .contains("hello.txt"));
+    assert!(metadata.details["planPath"]
+        .as_str()
+        .unwrap()
+        .ends_with(".md"));
+    assert_eq!(
+        option_ids(metadata),
+        [
+            "approve_plan",
+            "approve_plan_accept_edits",
+            "reject_plan_with_feedback"
+        ]
+    );
+    assert!(metadata.options[2].requires_text);
+
+    // Rejecting needs the feedback; nothing reaches the bridge without it.
+    let inbox = connector
+        .home
+        .session(&connector.session)
+        .conversation_bridge_inbox();
+    let refused = connector
+        .apply(
+            resolve_option("toolu_plan", "reject_plan_with_feedback"),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+    assert!(matches!(refused, ApplyResult::Refused { .. }));
+    assert!(!inbox.exists() || fs::read_dir(&inbox).unwrap().count() == 0);
+
+    let module = answer_next_bridge_command(&connector, "accepted");
+    let result = connector
+        .apply(
+            ConnectorAction {
+                id: ACTION_RESOLVE_REQUEST.to_owned(),
+                payload: serde_json::json!({
+                    "requestId": "toolu_plan",
+                    "optionId": "reject_plan_with_feedback",
+                    "text": "Add a test first",
+                }),
+            },
+            Duration::from_secs(5),
+        )
+        .unwrap();
+    assert_eq!(result, ApplyResult::Accepted { correlation: None });
+    let command = module.join().unwrap();
+    assert_eq!(command["kind"], "answer_permission");
+    assert_eq!(command["tool_use_id"], "toolu_plan");
+    assert_eq!(command["option"], "reject_plan_with_feedback");
+    assert_eq!(command["text"], "Add a test first");
+    assert!(command.get("decision").is_none());
+    assert!(connector.pending_request.is_none());
+}
+
+#[test]
+fn a_plan_the_terminal_approved_first_closes_as_terminal_answered() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut connector = bridged_connector(temp.path());
+    feed_at(&mut connector, plan_open(), "2026-11-23T10:00:01.000Z");
+    let mut closed = bridge_record("permission.closed", "2026-11-23T10:00:05.000Z");
+    closed["tool_use_id"] = Value::from("toolu_plan");
+    closed["answered_by"] = Value::from("terminal");
+    let mutations = feed_at(&mut connector, closed, "2026-11-23T10:00:05.000Z");
+    let (metadata, status) = request_of(&mutations);
+    assert_eq!(status, RequestStatus::Resolved);
+    assert_eq!(
+        metadata.resolved_by,
+        Some(crate::conversation::ResolutionSource::Terminal)
+    );
+    // The phone's later tap finds nothing open.
+    let late = connector
+        .apply(
+            resolve_option("toolu_plan", "approve_plan"),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+    assert!(matches!(late, ApplyResult::Refused { .. }));
+}
+
+#[test]
+fn permission_suggestions_become_session_and_always_options_with_a_label_fallback() {
+    let fixture = dialog_fixture("permission-suggestions", "hooks-unanswered.jsonl");
+    let ask = hook_named(&fixture, "PermissionRequest");
+    assert!(ask["permission_suggestions"]
+        .as_array()
+        .is_some_and(|s| !s.is_empty()));
+    let temp = tempfile::tempdir().unwrap();
+    let mut connector = bridged_connector(temp.path());
+    let mut open = bridge_record("permission.open", "2026-11-23T10:00:01.000Z");
+    open["tool_use_id"] = Value::from("toolu_bash");
+    open["tool"] = Value::from("Bash");
+    open["input"] = ask["tool_input"].clone();
+    open["options"] = serde_json::json!([
+        {"id": "allow_session", "label": "Yes, for this session", "requires_text": false},
+        {"id": "allow_always", "label": "Yes, and don't ask again for Bash(git status)", "requires_text": false},
+        {"id": "deny_with_feedback", "label": "No, and tell Claude what to do instead", "requires_text": true},
+        {"id": "not_a_known_option", "label": "ignored", "requires_text": false},
+    ]);
+    let mutations = feed_at(&mut connector, open, "2026-11-23T10:00:01.000Z");
+    let (metadata, _) = request_of(&mutations);
+    assert_eq!(metadata.request_kind.as_deref(), Some("command"));
+    assert_eq!(
+        option_ids(metadata),
+        [
+            "allow_once",
+            "allow_session",
+            "allow_always",
+            "deny",
+            "deny_with_feedback"
+        ]
+    );
+
+    let module = answer_next_bridge_command(&connector, "accepted");
+    let result = connector
+        .apply(
+            resolve_option("toolu_bash", "allow_session"),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+    assert_eq!(result, ApplyResult::Accepted { correlation: None });
+    let command = module.join().unwrap();
+    assert_eq!(command["option"], "allow_session");
+
+    // An option the bridge did not offer is never sent to it.
+    feed_at(
+        &mut connector,
+        {
+            let mut again = bridge_record("permission.open", "2026-11-23T10:00:09.000Z");
+            again["tool_use_id"] = Value::from("toolu_two");
+            again["tool"] = Value::from("Bash");
+            again["input"] = serde_json::json!({"command": "ls"});
+            again
+        },
+        "2026-11-23T10:00:09.000Z",
+    );
+    let (unoffered, _) = (connector.pending_request.clone().unwrap(), ());
+    assert_eq!(
+        option_ids(&unoffered.metadata),
+        Vec::<&str>::new(),
+        "label-only fallback: the Yes and No options are derived at publication"
+    );
+    let result = connector
+        .apply(
+            resolve_option("toolu_two", "allow_always"),
+            Duration::from_secs(1),
+        )
+        .unwrap_or(ApplyResult::Refused {
+            reason: "key path".into(),
+        });
+    assert!(matches!(result, ApplyResult::Refused { .. }));
+}
+
+fn elicitation_record(case: &str, file: &str) -> Value {
+    let mut record = hook_named(&dialog_fixture(case, file), "Elicitation");
+    let id = crate::observer::elicitation_request_id(record.as_object().unwrap());
+    record["latch_elicitation_id"] = Value::from(id);
+    record
+}
+
+#[test]
+fn an_elicitation_form_is_answered_by_the_blocked_hook() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut connector = bridged_connector(temp.path());
+    let record = elicitation_record("elicitation-form", "hooks-unanswered.jsonl");
+    let id = record["latch_elicitation_id"].as_str().unwrap().to_owned();
+    let mutations = feed_at(&mut connector, record, "2026-11-23T10:00:01.000Z");
+    let (metadata, status) = request_of(&mutations);
+    assert_eq!(status, RequestStatus::Pending);
+    assert_eq!(metadata.request_kind.as_deref(), Some("elicitation_form"));
+    assert_eq!(metadata.answerable, Some(true));
+    assert_eq!(metadata.details["server"], "probe");
+    assert_eq!(metadata.details["schema"]["required"][0], "name");
+    assert_eq!(option_ids(metadata), ["submit_form", "deny", "cancel"]);
+    assert!(connector.state().resolve_request.enabled);
+
+    let submit = |form: Value| ConnectorAction {
+        id: ACTION_RESOLVE_REQUEST.to_owned(),
+        payload: serde_json::json!({"requestId": id, "optionId": "submit_form", "form": form}),
+    };
+    // The schema is the server's: wrong values are refused before Claude sees them.
+    for bad in [
+        serde_json::json!({"count": 3}),
+        serde_json::json!({"name": "x", "count": 99}),
+        serde_json::json!({"name": "x", "color": "purple"}),
+        serde_json::json!({"name": "x", "extra": 1}),
+    ] {
+        let refused = connector
+            .apply(submit(bad), Duration::from_secs(1))
+            .unwrap();
+        assert!(
+            matches!(refused, ApplyResult::Refused { .. }),
+            "{refused:?}"
+        );
+    }
+    let answers = connector
+        .home
+        .session(&connector.session)
+        .conversation_elicitation_answers();
+    assert!(!answers.exists() || fs::read_dir(&answers).unwrap().count() == 0);
+
+    let accepted = connector
+        .apply(
+            submit(serde_json::json!({"name": "Latch phone", "count": 3, "color": "blue"})),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+    assert_eq!(accepted, ApplyResult::Accepted { correlation: None });
+    let files: Vec<_> = fs::read_dir(&answers).unwrap().collect();
+    assert_eq!(files.len(), 1);
+    let answer: Value =
+        serde_json::from_slice(&fs::read(files[0].as_ref().unwrap().path()).unwrap()).unwrap();
+    assert_eq!(answer["action"], "accept");
+    assert_eq!(answer["content"]["name"], "Latch phone");
+    assert!(connector.pending_request.is_none());
+}
+
+#[test]
+fn an_elicitation_declined_or_cancelled_and_one_the_terminal_answers() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut connector = bridged_connector(temp.path());
+    let record = elicitation_record("elicitation-form", "hooks-unanswered.jsonl");
+    let id = record["latch_elicitation_id"].as_str().unwrap().to_owned();
+    feed_at(&mut connector, record.clone(), "2026-11-23T10:00:01.000Z");
+    let declined = connector
+        .apply(resolve_option(&id, "deny"), Duration::from_secs(1))
+        .unwrap();
+    assert_eq!(declined, ApplyResult::Accepted { correlation: None });
+    let file = fs::read_dir(
+        connector
+            .home
+            .session(&connector.session)
+            .conversation_elicitation_answers(),
+    )
+    .unwrap()
+    .next()
+    .unwrap()
+    .unwrap()
+    .path();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&fs::read(file).unwrap()).unwrap()["action"],
+        "decline"
+    );
+
+    // The phone-answered race: the hook's own result arrives after the answer
+    // and finds nothing left to close.
+    let result = hook_named(
+        &dialog_fixture("elicitation-form", "hooks-unanswered.jsonl"),
+        "ElicitationResult",
+    );
+    assert!(feed_at(&mut connector, result.clone(), "2026-11-23T10:00:03.000Z").is_empty());
+
+    // The terminal-answered race: the result arrives first and resolves it.
+    let mut second = record;
+    second["message"] = Value::from("A second form");
+    let id = crate::observer::elicitation_request_id(second.as_object().unwrap());
+    second["latch_elicitation_id"] = Value::from(id.clone());
+    feed_at(&mut connector, second, "2026-11-23T10:01:00.000Z");
+    let mutations = feed_at(&mut connector, result, "2026-11-23T10:01:05.000Z");
+    let (metadata, status) = request_of(&mutations);
+    assert_eq!(status, RequestStatus::Resolved);
+    assert_eq!(
+        metadata.resolved_by,
+        Some(crate::conversation::ResolutionSource::Terminal)
+    );
+    assert_eq!(metadata.decision.as_deref(), Some("cancel"));
+    assert!(connector
+        .apply(resolve_option(&id, "deny"), Duration::from_secs(1))
+        .map(|result| matches!(result, ApplyResult::Refused { .. }))
+        .unwrap_or(true));
+}
+
+#[test]
+fn an_elicitation_that_timed_out_steps_aside_to_the_terminal_and_never_auto_accepts() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut connector = bridged_connector(temp.path());
+    let record = elicitation_record("elicitation-form", "hooks-unanswered.jsonl");
+    let id = record["latch_elicitation_id"].as_str().unwrap().to_owned();
+    feed_at(&mut connector, record, "2026-11-23T10:00:01.000Z");
+    let mutations = feed_at(
+        &mut connector,
+        serde_json::json!({"hook_event_name": "ElicitationTimeout", "latch_elicitation_id": id}),
+        "2026-11-23T10:02:01.000Z",
+    );
+    let (metadata, status) = request_of(&mutations);
+    assert_eq!(status, RequestStatus::Pending);
+    assert_eq!(metadata.answerable, Some(false));
+    assert_eq!(metadata.request_kind.as_deref(), Some("elicitation_form"));
+    assert!(metadata.options.is_empty());
+    assert!(!connector.state().resolve_request.enabled);
+    let refused = connector
+        .apply(
+            resolve_option(&format!("{id}:terminal"), "submit_form"),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+    assert!(matches!(refused, ApplyResult::Refused { .. }));
+    let answers = connector
+        .home
+        .session(&connector.session)
+        .conversation_elicitation_answers();
+    assert!(!answers.exists() || fs::read_dir(&answers).unwrap().count() == 0);
+
+    // The terminal's answer closes it.
+    let result = hook_named(
+        &dialog_fixture("elicitation-form", "hooks-unanswered.jsonl"),
+        "ElicitationResult",
+    );
+    let mutations = feed_at(&mut connector, result, "2026-11-23T10:02:30.000Z");
+    assert_eq!(request_of(&mutations).1, RequestStatus::Resolved);
+    assert!(connector.pending_request.is_none());
+}
+
+#[test]
+fn an_elicitation_url_opens_a_link_or_declines() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut connector = bridged_connector(temp.path());
+    let record = elicitation_record("elicitation-url", "hooks.jsonl");
+    let id = record["latch_elicitation_id"].as_str().unwrap().to_owned();
+    let mutations = feed_at(&mut connector, record, "2026-11-23T10:00:01.000Z");
+    let (metadata, _) = request_of(&mutations);
+    assert_eq!(metadata.request_kind.as_deref(), Some("elicitation_url"));
+    assert_eq!(
+        metadata.details["url"],
+        "https://example.com/latch-probe/authorize?state=probe"
+    );
+    assert_eq!(metadata.details["origin"], "example.com");
+    assert_eq!(option_ids(metadata), ["open_url", "deny", "cancel"]);
+    let accepted = connector
+        .apply(resolve_option(&id, "open_url"), Duration::from_secs(1))
+        .unwrap();
+    assert_eq!(accepted, ApplyResult::Accepted { correlation: None });
+    let file = fs::read_dir(
+        connector
+            .home
+            .session(&connector.session)
+            .conversation_elicitation_answers(),
+    )
+    .unwrap()
+    .next()
+    .unwrap()
+    .unwrap()
+    .path();
+    let answer: Value = serde_json::from_slice(&fs::read(file).unwrap()).unwrap();
+    assert_eq!(answer["action"], "accept");
+    assert!(answer.get("content").is_none());
+}
+
+#[test]
+fn app_access_shows_unanswerable_with_its_reason_and_closes_when_the_terminal_answers() {
+    let transcript = dialog_fixture("computer-use-app-access", "transcript.jsonl");
+    let call = transcript[0]["message"]["content"][0].clone();
+    let temp = tempfile::tempdir().unwrap();
+    let mut connector = bridged_connector(temp.path());
+    let mut open = bridge_record("terminal.open", "2026-11-23T10:00:01.000Z");
+    open["tool_use_id"] = call["id"].clone();
+    open["kind"] = Value::from("app_access");
+    open["apps"] = call["input"]["apps"].clone();
+    open["request_reason"] = call["input"]["reason"].clone();
+    let mutations = feed_at(&mut connector, open, "2026-11-23T10:00:01.000Z");
+    let (metadata, status) = request_of(&mutations);
+    assert_eq!(status, RequestStatus::Pending);
+    assert_eq!(metadata.request_kind.as_deref(), Some("app_access"));
+    assert_eq!(metadata.answerable, Some(false));
+    assert_eq!(
+        metadata.reason.as_deref(),
+        Some("Allow or deny app access at the Mac.")
+    );
+    assert_eq!(metadata.details["appName"], "com.example.app");
+    assert!(!connector.state().resolve_request.enabled);
+    let id = call["id"].as_str().unwrap().to_owned();
+    let refused = connector
+        .apply(resolve_option(&id, "allow_once"), Duration::from_secs(1))
+        .unwrap();
+    assert!(matches!(refused, ApplyResult::Refused { .. }));
+    assert!(connector.pending_request.is_some());
+
+    // A transcript record after it does not close it: the bridge owns it.
+    let later = serde_json::json!({
+        "type": "assistant", "uuid": "later", "timestamp": "2026-11-23T10:00:30.000Z",
+        "message": {"content": [{"type": "text", "text": "waiting"}]}
+    });
+    connector.claude_record(later.as_object().unwrap(), "assistant", 10);
+    assert!(connector.pending_request.is_some());
+
+    let mut closed = bridge_record("terminal.closed", "2026-11-23T10:00:40.000Z");
+    closed["tool_use_id"] = Value::from(id);
+    closed["answered_by"] = Value::from("terminal");
+    let mutations = feed_at(&mut connector, closed, "2026-11-23T10:00:40.000Z");
+    let (metadata, status) = request_of(&mutations);
+    assert_eq!(status, RequestStatus::Resolved);
+    assert_eq!(
+        metadata.resolved_by,
+        Some(crate::conversation::ResolutionSource::Terminal)
+    );
+}
+
+#[test]
+fn terminal_only_notifications_show_with_a_kind_and_a_reason_and_close_with_the_turn() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut connector = bridged_connector(temp.path());
+    let notification = |message: &str, kind: &str| {
+        serde_json::json!({
+            "hook_event_name": "Notification",
+            "message": message,
+            "notification_type": kind,
+        })
+    };
+    let mutations = feed_at(
+        &mut connector,
+        notification("Session paused", "permission_prompt"),
+        "2026-11-23T10:00:07.000Z",
+    );
+    let (metadata, status) = request_of(&mutations);
+    assert_eq!(status, RequestStatus::Pending);
+    assert_eq!(metadata.request_kind.as_deref(), Some("other"));
+    assert_eq!(metadata.answerable, Some(false));
+    assert!(metadata.reason.as_deref().unwrap().contains("terminal"));
+    assert!(!connector.state().resolve_request.enabled);
+    let id = connector.pending_request.as_ref().unwrap().id.clone();
+    assert!(matches!(
+        connector
+            .apply(resolve_option(&id, "allow_once"), Duration::from_secs(1))
+            .unwrap(),
+        ApplyResult::Refused { .. }
+    ));
+
+    // The turn ending closes a dialog nobody here can answer.
+    let stop = serde_json::json!({"hook_event_name": "Stop", "latch_observer_version": 3});
+    let mutations = feed_at(&mut connector, stop, "2026-11-23T10:00:20.000Z");
+    assert_eq!(request_of(&mutations).1, RequestStatus::Dismissed);
+    assert!(connector.pending_request.is_none());
+
+    // Network access names its kind; an idle reminder and a shown request add nothing.
+    let mutations = feed_at(
+        &mut connector,
+        notification(
+            "A sandboxed command needs network access",
+            "permission_prompt",
+        ),
+        "2026-11-23T10:01:00.000Z",
+    );
+    assert_eq!(
+        request_of(&mutations).0.request_kind.as_deref(),
+        Some("network")
+    );
+    assert!(feed_at(
+        &mut connector,
+        notification("Claude is waiting for your input", "idle_prompt"),
+        "2026-11-23T10:01:05.000Z"
+    )
+    .is_empty());
+    assert!(feed_at(
+        &mut connector,
+        notification("Session paused", "permission_prompt"),
+        "2026-11-23T10:01:09.000Z"
+    )
+    .is_empty());
 }

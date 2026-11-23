@@ -432,12 +432,22 @@ impl ConversationHub {
     pub(crate) fn attention_snapshot(
         &self,
         id: &ConversationId,
-    ) -> Option<(ConversationSnapshot, Option<super::RequestMetadata>)> {
-        let hub = self.inner.lock().ok()?;
-        let projection = &hub.sessions.get(id)?.projection;
+        subscriber: u64,
+    ) -> Option<(
+        ConversationSnapshot,
+        Option<super::RequestMetadata>,
+        Vec<SubscriberEvent>,
+    )> {
+        let mut hub = self.inner.lock().ok()?;
+        let actor = hub.sessions.get_mut(id)?;
+        let subscriber = actor.subscribers.get_mut(&subscriber)?;
+        let changes = subscriber.queue.drain(..).collect();
+        subscriber.overflowed = false;
+        subscriber.bytes = 0;
         Some((
-            projection.snapshot(0),
-            projection.pending_request_metadata().cloned(),
+            actor.projection.snapshot(0),
+            actor.projection.pending_request_metadata().cloned(),
+            changes,
         ))
     }
     /// Starts an observer or wakes the one already owned by this session.
@@ -814,6 +824,9 @@ impl ConversationHub {
         actor.observation_needs_resync = true;
         let mut state = actor.projection.snapshot(0).state;
         state.phase = super::ConversationPhase::Unavailable;
+        // Nothing vouches for background work the agent can no longer
+        // report on, and a session that exited took its work with it.
+        state.background_work = None;
         state.send_message.enabled = false;
         state.cancel_turn.enabled = false;
         state.cancel_turn.reason = Some(reason.clone());

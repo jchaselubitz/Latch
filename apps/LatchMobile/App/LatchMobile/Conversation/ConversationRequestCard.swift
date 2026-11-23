@@ -378,11 +378,12 @@ private extension ConversationRequestPresentation {
         default: nil
         }
         let label = metadata?.decision.map { decision in
-            switch decision {
+            switch decision.split(separator: "-", maxSplits: 1).first.map(String.init) ?? decision {
             case "allow_once": "Allowed once"
             case "allow_session": "Allowed for session"
             case "allow_always": "Always allowed"
             case "deny", "deny_with_feedback": "Denied"
+            case "deny_always": "Always denied"
             case "approve_plan": "Plan approved"
             case "reject_plan_with_feedback": "Plan rejected"
             case "cancel": "Cancelled"
@@ -410,8 +411,13 @@ private struct ConversationRequestDetails: View {
                 }
                 field("Working directory", "cwd")
                 field("Sandbox", "sandbox")
+                field("Action", "action")
                 field("Reason", "reason")
+                lines("fileSystemScope")
+                lines("networkScope")
             case .fileChange:
+                field("Write access under", "grantRoot")
+                field("Reason", "reason")
                 lines("paths")
                 if let diff = details["diff"]?.string { ConversationDiffDisclosure(diff: diff) }
                 ForEach(Array((details["changes"]?.array ?? []).enumerated()), id: \.offset) { _, change in
@@ -423,21 +429,31 @@ private struct ConversationRequestDetails: View {
                 }
             case .network:
                 field("Host", "host")
+                field("Protocol", "protocol")
+                field("Command", "command")
+                field("Working directory", "cwd")
+                field("Reason", "reason")
             case .permissions, .sandboxEscalation:
                 field("Reason", "reason")
+                field("Working directory", "cwd")
                 field("Scope", "scope")
                 lines("fileSystemScope")
                 lines("networkScope")
             case .mcpTool:
+                field("App", "connectorName")
                 field("Server", "server")
                 field("Tool", "tool")
                 field("Arguments", "argumentsSummary")
             case .appAccess:
                 field("App", "appName")
+                field("Bundle identifier", "appId")
+                field("Server", "server")
+                field("Tool", "tool")
                 field("Scope", "scope")
             case .browser:
                 field("Origin", "origin")
                 field("Action", "action")
+                field("Access lifetime", "scope")
             case .planApproval:
                 field("Plan file", "planPath")
                 if let markdown = details["planMarkdown"]?.string {

@@ -25,14 +25,26 @@ use super::super::{
 const MAX_RECORD_BYTES: usize = 1024 * 1024;
 const MAX_READ_BYTES: usize = 2 * 1024 * 1024;
 
+mod activity;
+#[cfg(test)]
+mod activity_tests;
+#[cfg(test)]
+mod background_tests;
 mod bridge;
 mod checkpoint;
 mod claude;
+mod code_mode;
+#[cfg(test)]
+mod code_mode_tests;
 mod codex;
+#[cfg(test)]
+mod codex_tests;
 mod connector;
 mod cursor;
 #[cfg(test)]
 mod cursor_live_tests;
+mod dialogs;
+pub(crate) use dialogs::validate_form;
 #[cfg(test)]
 mod geometry_tests;
 mod questions;
@@ -153,6 +165,13 @@ pub struct JsonlConnector {
     /// The slash commands the bridge greeting advertised. Dropped with the
     /// bridge: a catalog nobody can vouch for is unknown, not empty.
     commands: Option<Vec<crate::conversation::AdvertisedCommand>>,
+    /// Subagents, tasks, notices and session facts; see `activity`.
+    activity: activity::ClaudeActivity,
+    /// Background tasks the agent's last `Stop` reported still running, and
+    /// that `Stop`'s timestamp. Cleared by a later prompt, an empty `Stop`
+    /// or `SessionEnd`; see `claude::background_work`.
+    background_work: Option<crate::conversation::BackgroundWork>,
+    background_work_at: Option<String>,
     last_state: Option<ConversationState>,
     screen_can_send: Option<bool>,
     live_screen: bool,
@@ -199,6 +218,9 @@ impl JsonlConnector {
             last_turn_close: None,
             turn_outcome: None,
             commands: None,
+            activity: activity::ClaudeActivity::default(),
+            background_work: None,
+            background_work_at: None,
             last_state: None,
             screen_can_send: None,
             live_screen,
@@ -224,7 +246,7 @@ impl JsonlConnector {
     }
 
     #[cfg(test)]
-    fn fixture(id: &'static str, source: PathBuf) -> Self {
+    pub(crate) fn fixture(id: &'static str, source: PathBuf) -> Self {
         Self::new(
             id,
             LatchHome::new("/tmp/latch-connector-fixture"),
@@ -281,6 +303,13 @@ impl JsonlConnector {
         self.tools.clear();
         self.tool_summaries.clear();
         self.tool_running = false;
+        self.activity.forget_source();
+        if self.id == "codex" {
+            self.turn_outcome = None;
+            self.activity = activity::ClaudeActivity::default();
+        }
+        self.background_work = None;
+        self.background_work_at = None;
         // `hook_observer_version` deliberately survives a rebind, exactly
         // like `hook_offset`: both describe the one continuous hook sidecar
         // for this Latch session, not the specific source file currently
@@ -323,6 +352,7 @@ impl JsonlConnector {
                     .as_ref()
                     .is_some_and(|r| !r.questions.is_empty())
                     && self.bridge_version.is_none()
+                    && self.id != "codex"
                 {
                     (
                         false,
@@ -330,6 +360,18 @@ impl JsonlConnector {
                             "the question bridge is no longer live; answer at the terminal".into(),
                         ),
                     )
+                } else if let Some(reason) = self
+                    .pending_request
+                    .as_ref()
+                    .filter(|r| r.metadata.answerable == Some(false))
+                    .map(|r| {
+                        r.metadata
+                            .reason
+                            .clone()
+                            .unwrap_or_else(|| "answer at the terminal".to_owned())
+                    })
+                {
+                    (false, Some(reason))
                 } else {
                     (true, None)
                 },
@@ -386,10 +428,11 @@ impl JsonlConnector {
             } else {
                 self.turn_outcome
             },
-            background_work: None,
-            model: None,
-            effort: None,
-            permission_mode: None,
+            background_work: self.background_work.clone(),
+            model: self.activity.model(),
+            effort: self.activity.effort(),
+            permission_mode: self.activity.permission_mode(),
+            usage: self.activity.usage(),
             commands: if self.bridge_version.is_some() {
                 self.commands.clone()
             } else {
@@ -474,4 +517,8 @@ fn read_binding(
                     .map(str::to_owned),
             )
         })
+}
+
+pub(crate) fn codex_request_text(text: &str, max_chars: usize) -> String {
+    sanitize_part(text, max_chars)
 }

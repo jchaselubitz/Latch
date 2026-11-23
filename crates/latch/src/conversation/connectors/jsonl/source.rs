@@ -21,7 +21,7 @@ impl SourceBudget {
         }
     }
 
-    fn take(&mut self, bytes: usize) -> bool {
+    pub(super) fn take(&mut self, bytes: usize) -> bool {
         if self.records == 0 || (self.consumed_records > 0 && bytes > self.bytes) {
             return false;
         }
@@ -33,7 +33,13 @@ impl SourceBudget {
         true
     }
 
-    fn note_read(&mut self, consumed: usize, complete: usize, read: usize, available: u64) {
+    pub(super) fn note_read(
+        &mut self,
+        consumed: usize,
+        complete: usize,
+        read: usize,
+        available: u64,
+    ) {
         // A newline already in the read is authoritative. At the read cap,
         // known bytes beyond the window also warrant another bounded scan
         // if this read advanced. A short unterminated tail waits for activity.
@@ -123,6 +129,7 @@ impl JsonlConnector {
             self.tool_running = false;
             self.turn_open = false;
             self.turn_outcome = None;
+            self.activity.forget_source();
             mutations.push(ConnectorMutation::Rebuild {
                 reason: "authoritative source file was replaced".to_owned(),
             });
@@ -132,6 +139,7 @@ impl JsonlConnector {
         if length < self.offset {
             self.offset = 0;
             self.forget_chain();
+            self.activity.forget_source();
             mutations.push(ConnectorMutation::Rebuild {
                 reason: "authoritative source was truncated".to_owned(),
             });

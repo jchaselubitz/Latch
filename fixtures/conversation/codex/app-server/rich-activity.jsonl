@@ -1,0 +1,18 @@
+{"method":"turn/started","params":{"threadId":"root","turn":{"id":"turn-1","status":"inProgress"}}}
+{"method":"item/started","params":{"threadId":"root","turnId":"turn-1","item":{"type":"commandExecution","id":"command","command":"cat notes.txt","cwd":"/work","status":"inProgress"}}}
+{"method":"item/completed","params":{"threadId":"root","turnId":"turn-1","item":{"type":"commandExecution","id":"command","command":"cat notes.txt","cwd":"/work","status":"completed","exitCode":0,"aggregatedOutput":"sample output"}}}
+{"method":"item/started","params":{"threadId":"root","turnId":"turn-1","item":{"type":"fileChange","id":"patch","status":"inProgress","changes":[]}}}
+{"method":"item/fileChange/patchUpdated","params":{"threadId":"root","turnId":"turn-1","itemId":"patch","changes":[{"path":"/work/notes.txt","kind":{"type":"update"},"diff":"@@ -1 +1 @@\n-old\n+new"}]}}
+{"method":"item/completed","params":{"threadId":"root","turnId":"turn-1","item":{"type":"fileChange","id":"patch","status":"completed","changes":[{"path":"/work/notes.txt","kind":{"type":"update"},"diff":"@@ -1 +1 @@\n-old\n+new"}]}}}
+{"method":"item/completed","params":{"threadId":"root","turnId":"turn-1","item":{"type":"reasoning","id":"reason","summary":["Check the file."],"content":["never project this raw reasoning"]}}}
+{"method":"turn/plan/updated","params":{"threadId":"root","turnId":"turn-1","plan":[{"step":"Check the file","status":"inProgress"}]}}
+{"method":"thread/started","params":{"thread":{"id":"child","parentThreadId":"root","agentRole":"explorer","agentNickname":"Ada"}}}
+{"method":"item/completed","latchParentSubagentId":"child","params":{"threadId":"child","turnId":"child-turn","item":{"type":"agentMessage","id":"child-message","text":"Child result."}}}
+{"method":"item/started","latchParentSubagentId":"child","params":{"threadId":"child","turnId":"child-turn","item":{"type":"mcpToolCall","id":"child-tool","server":"example","tool":"inspect","status":"inProgress"}}}
+{"method":"item/completed","latchParentSubagentId":"child","params":{"threadId":"child","turnId":"child-turn","item":{"type":"mcpToolCall","id":"child-tool","server":"example","tool":"inspect","status":"failed"}}}
+{"method":"item/completed","params":{"threadId":"root","turnId":"turn-1","item":{"type":"subAgentActivity","id":"child-end","agentThreadId":"child","agentPath":"root/child","kind":"completed"}}}
+{"method":"item/completed","params":{"threadId":"root","turnId":"turn-1","item":{"type":"webSearch","id":"web","query":"an example"}}}
+{"method":"item/completed","params":{"threadId":"root","turnId":"turn-1","item":{"type":"imageView","id":"image","path":"/work/chart.png"}}}
+{"method":"thread/tokenUsage/updated","params":{"threadId":"root","turnId":"turn-1","tokenUsage":{"last":{"totalTokens":4000},"modelContextWindow":10000}}}
+{"method":"item/started","params":{"threadId":"root","turnId":"turn-1","item":{"type":"imageGeneration","id":"generation","status":"inProgress"}}}
+{"method":"turn/completed","params":{"threadId":"root","turn":{"id":"turn-1","status":"interrupted"}}}

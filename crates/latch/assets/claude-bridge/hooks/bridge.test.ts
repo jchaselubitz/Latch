@@ -1,6 +1,8 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
+import { BRIDGE_VERSION } from './config'
+
 type Run = { action: string; record: Record<string, unknown> | undefined }
 
 /**
@@ -74,20 +76,20 @@ test('it greets Latch and reports the main loop turn boundaries', async ($, on) 
 
   expect(latch.events()).toEqual([
     expect.objectContaining({
-      bridge_version: 2,
+      bridge_version: BRIDGE_VERSION,
       claude_version: '2.1.292',
       model: 'claude-test',
       commands: [{ name: 'compact', description: 'Compacts the conversation.', source: 'builtin' }],
     }),
     {
       bridge_event: 'turn.start',
-      bridge_version: 2,
+      bridge_version: BRIDGE_VERSION,
       timestamp: '1970-01-01T00:00:00.000Z',
       turn_id: 't1',
     },
     {
       bridge_event: 'turn.complete',
-      bridge_version: 2,
+      bridge_version: BRIDGE_VERSION,
       timestamp: '1970-01-01T00:00:00.000Z',
       turn_id: 't1',
       reason: 'aborted',
@@ -120,7 +122,7 @@ test('a queued prompt is submitted as the person and acknowledged', async ($, on
   ])
   expect(latch.events().at(-1)).toEqual({
     bridge_event: 'command.result',
-    bridge_version: 2,
+    bridge_version: BRIDGE_VERSION,
     timestamp: '1970-01-01T00:00:00.500Z',
     command_id: 'cmd-1',
     outcome: 'accepted',
@@ -281,7 +283,9 @@ test('a permission the person allows in Latch is re-run and the dialog is abando
   await $.session.start(START)
   const call = $.tool.call({ ...BASH, tool_use_id: 'toolu_bash' })
   await clock.advance(1)
-  await $.classic.PermissionRequest(DIALOG)
+  // The hook is held for the phone until the call ends or Latch answers.
+  void $.classic.PermissionRequest(DIALOG)
+  await clock.advance(1)
 
   queued.push(
     { id: 'cmd-1', kind: 'answer_permission', tool_use_id: 'toolu_other', decision: 'allow' },
@@ -336,7 +340,9 @@ test('a deny from Latch ends the call while the dialog is still open', async ($,
   await $.session.start(START)
   const call = $.tool.call({ ...BASH, tool_use_id: 'toolu_bash' })
   await clock.advance(1)
-  await $.classic.PermissionRequest(DIALOG)
+  // The hook is held for the phone until the call ends or Latch answers.
+  void $.classic.PermissionRequest(DIALOG)
+  await clock.advance(1)
   queued.push({ id: 'cmd-1', kind: 'answer_permission', tool_use_id: 'toolu_bash', decision: 'deny' })
   await clock.advance(500)
 
@@ -365,7 +371,9 @@ test('an answer at the terminal still settles the permission, and a late one is 
   await $.session.start(START)
   const call = $.tool.call({ ...BASH, tool_use_id: 'toolu_bash' })
   await clock.advance(1)
-  await $.classic.PermissionRequest(DIALOG)
+  // The hook is held for the phone until the call ends or Latch answers.
+  void $.classic.PermissionRequest(DIALOG)
+  await clock.advance(1)
   release?.({ result: { stdout: 'ran', stderr: '', interrupted: false } })
 
   expect((await call).result).toEqual({ stdout: 'ran', stderr: '', interrupted: false })
@@ -423,11 +431,12 @@ test('a parallel batch announces every dialog under its own call id, answered in
   // The engine raises the hook for every queued dialog at once, while it
   // paints only the first.
   for (const marker of ['a', 'b', 'c']) {
-    await $.classic.PermissionRequest({
+    void $.classic.PermissionRequest({
       tool_name: 'Bash',
       tool_input: { command: `touch ${marker}`, description: `Create marker ${marker}` },
     })
   }
+  await clock.advance(1)
 
   // Latch denies the second, the terminal answers the first, Latch denies
   // the third.
@@ -462,5 +471,59 @@ test('a parallel batch announces every dialog under its own call id, answered in
     expect.objectContaining({ bridge_event: 'permission.closed', tool_use_id: 'toolu_a', answered_by: 'terminal' }),
     expect.objectContaining({ command_id: 'cmd-c', outcome: 'accepted' }),
     expect.objectContaining({ bridge_event: 'permission.closed', tool_use_id: 'toolu_c', answered_by: 'latch' }),
+  ])
+})
+
+test('a call inside a Code Mode script is answered through its permission hook', async ($, on) => {
+  mock.env(on, { LATCH_SESSION_ID: 'ses_1' })
+  const clock = mock.clock(on)
+  const queued: unknown[] = []
+  const latch = latchHost(on, queued)
+  const calls: string[] = []
+  const release = new Map<string, (value: unknown) => void>()
+
+  // The engine's path for each in-script call: open on its dialog until the
+  // permission hook's answer settles it.
+  on('tool.call', { tool: 'Bash' }, (_$, e) => {
+    calls.push(e.command)
+
+    return new Promise(resolve => {
+      release.set(e.command, resolve)
+    }) as never
+  })
+
+  await $.session.start(START)
+  const denied = $.tool.call({ tool: 'Bash', command: 'touch a', tool_use_id: 'toolu_cc_a' })
+  const allowed = $.tool.call({ tool: 'Bash', command: 'touch b', tool_use_id: 'toolu_cc_b' })
+  await clock.advance(1)
+  const deniedDialog = $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'touch a' } })
+  const allowedDialog = $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'touch b' } })
+  await clock.advance(1)
+
+  queued.push(
+    { id: 'cmd-a', kind: 'answer_permission', tool_use_id: 'toolu_cc_a', decision: 'deny' },
+    { id: 'cmd-b', kind: 'answer_permission', tool_use_id: 'toolu_cc_b', decision: 'allow' },
+  )
+  await clock.advance(500)
+
+  // A deny carries a message, so the engine refuses this call alone and the
+  // script goes on; nothing is ended or run again from `tool.call`.
+  expect(await deniedDialog).toEqual({
+    decision: { behavior: 'deny', message: 'The person denied this call in Latch.' },
+  })
+  expect(await allowedDialog).toEqual({ decision: { behavior: 'allow' } })
+  release.get('touch a')?.({ deny: 'Permission denied for Bash: The person denied this call in Latch.' })
+  release.get('touch b')?.({ result: { stdout: '', stderr: '', interrupted: false } })
+
+  expect((await allowed).result).toEqual({ stdout: '', stderr: '', interrupted: false })
+  expect((await denied).deny).toBe('Permission denied for Bash: The person denied this call in Latch.')
+  expect(calls).toEqual(['touch a', 'touch b'])
+  expect(latch.events().slice(1)).toEqual([
+    expect.objectContaining({ bridge_event: 'permission.open', tool_use_id: 'toolu_cc_a', in_script: true }),
+    expect.objectContaining({ bridge_event: 'permission.open', tool_use_id: 'toolu_cc_b', in_script: true }),
+    expect.objectContaining({ command_id: 'cmd-a', outcome: 'accepted' }),
+    expect.objectContaining({ command_id: 'cmd-b', outcome: 'accepted' }),
+    expect.objectContaining({ bridge_event: 'permission.closed', tool_use_id: 'toolu_cc_a', answered_by: 'latch', decision: 'deny' }),
+    expect.objectContaining({ bridge_event: 'permission.closed', tool_use_id: 'toolu_cc_b', answered_by: 'latch', decision: 'allow' }),
   ])
 })

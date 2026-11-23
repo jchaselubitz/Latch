@@ -28,12 +28,24 @@ public struct AttentionNotification: Equatable, Sendable {
             case "plan_approval": "Plan ready for approval"
             case "command": "Command approval requested"
             case "file_change": "File change approval requested"
-            case "network", "browser": "Network access requested"
+            case "network": "Network access requested"
+            case "browser": "Browser access requested"
+            case "permissions": "Additional permissions requested"
+            case "question": "Has a question"
+            case "elicitation_form": "Information requested"
+            case "elicitation_url": "Action requested"
             case "mcp_tool": "Tool approval requested"
             case "sign_in": "Sign-in requested"
             default: "Needs your input"
             }
-        case .completion: body = "Finished working"
+        case .completion:
+            // A turn that ends with background work still running has not
+            // finished all of its work.
+            body = switch payload.backgroundTasks ?? 0 {
+            case 0: "Finished working"
+            case 1: "Turn finished · 1 background task still running"
+            case let count: "Turn finished · \(count) background tasks still running"
+            }
         }
         threadIdentifier = "latch-session-\(payload.sessionID)"
         sessionID = payload.sessionID

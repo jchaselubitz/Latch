@@ -243,6 +243,12 @@ impl SessionPaths {
         self.dir.join("conversation-bridge-inbox")
     }
 
+    /// Answers to an MCP elicitation, one private file each, that the blocked
+    /// `Elicitation` command hook is waiting for.
+    pub fn conversation_elicitation_answers(&self) -> PathBuf {
+        self.dir.join("conversation-elicitation-answers")
+    }
+
     /// Agent-supplied authoritative source binding for a conversation connector.
     /// This is intentionally a Latch sidecar, never a guessed path derived from
     /// a working directory.

@@ -273,6 +273,7 @@ pub(super) fn wire_state(
         model: state.model.clone(),
         effort: state.effort.clone(),
         permission_mode: state.permission_mode.clone(),
+        usage: state.usage.clone(),
         commands: state.commands.as_ref().map(|commands| {
             commands
                 .iter()

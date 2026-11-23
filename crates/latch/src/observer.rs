@@ -16,17 +16,41 @@ use serde_json::Value;
 use crate::engine;
 use crate::session::manifest::LaunchManifest;
 use crate::session::paths::{LatchHome, SessionId, SessionPaths, DIR_MODE, FILE_MODE};
+
+pub mod codex;
 use crate::util::shell_quote;
 
 const MAX_HOOK_BYTES: usize = 1024 * 1024;
 const CLAUDE_PLUGIN_NAME: &str = "latch-conversation-observer";
-const OBSERVER_VERSION: u32 = 2;
+/// Version 3 adds the `Elicitation`, `ElicitationResult` and `Notification`
+/// hooks. Version 4 adds the activity hooks: `SubagentStart`, `SubagentStop`,
+/// `TaskCreated`, `TaskCompleted`, `PreCompact`, `PostCompact`, `StopFailure`
+/// and `PostModelSwitch`. Version 5 adds `SessionEnd`, so pending background
+/// work is cleared when the session exits. A running Claude keeps the hook set of the plugin
+/// directory it launched with, so the connector never relies on them for
+/// older launches.
+const OBSERVER_VERSION: u32 = 5;
+/// Free-text hook fields the connector shows at most a summary of. They are
+/// cut before the record reaches the sidecar, so one long subagent answer or
+/// compaction summary cannot crowd the hook source.
+const BOUNDED_HOOK_FIELDS: [&str; 5] = [
+    "last_assistant_message",
+    "compact_summary",
+    "task_description",
+    "error_details",
+    "custom_instructions",
+];
+const MAX_HOOK_FIELD_BYTES: usize = 4 * 1024;
 const CODEX_SOURCE_ENV: &str = "LATCH_CODEX_CONVERSATION_SOURCE";
 const CLAUDE_BRIDGE_PLUGIN_NAME: &str = "latch-conversation-bridge";
 /// Version of the bridge module and of the records and commands it exchanges
 /// with the connector. The plugin directory is stamped with it, for the same
 /// reason the observer's is: a running Claude keeps the module it loaded.
-pub const CLAUDE_BRIDGE_VERSION: u32 = 2;
+/// Version 4 adds the `session.usage` record (model, context, rate limits,
+/// cost) after each main-loop turn. Version 5 settles a permission for a call
+/// inside a Code Mode script through the permission hook (`in_script` on
+/// `permission.open`), so a phone answer allows or refuses that call alone.
+pub const CLAUDE_BRIDGE_VERSION: u32 = 5;
 /// Set to `0` to launch Claude with the observer alone.
 const CLAUDE_BRIDGE_ENV: &str = "LATCH_CLAUDE_BRIDGE";
 /// `hook_event_name` of every record the bridge module writes.
@@ -197,6 +221,10 @@ pub fn prepare_codex_launch(manifest: &mut LaunchManifest) -> anyhow::Result<()>
     if crate::session::meta::launch_harness(&manifest.launch) != Some("codex") {
         return Ok(());
     }
+    install_codex_hook(&mut manifest.launch.argv)
+}
+
+fn install_codex_hook(argv: &mut Vec<String>) -> anyhow::Result<()> {
     let executable = fs::canonicalize(std::env::current_exe()?)?;
     let command = format!("{} __codex-conversation-hook", shell_quote(&executable));
     let hook = format!(
@@ -205,17 +233,12 @@ pub fn prepare_codex_launch(manifest: &mut LaunchManifest) -> anyhow::Result<()>
     );
     // Resume has its own CLI argument parser. Put its config and hook flags
     // after the subcommand, where they configure the resumed TUI.
-    let flags_at = if manifest
-        .launch
-        .argv
-        .get(1)
-        .is_some_and(|arg| arg == "resume")
-    {
+    let flags_at = if argv.get(1).is_some_and(|arg| arg == "resume") {
         2
     } else {
         1
     };
-    manifest.launch.argv.splice(
+    argv.splice(
         flags_at..flags_at,
         [
             // Codex otherwise pauses at a terminal-only hook review prompt
@@ -230,6 +253,95 @@ pub fn prepare_codex_launch(manifest: &mut LaunchManifest) -> anyhow::Result<()>
     Ok(())
 }
 
+/// How long an `Elicitation` hook holds the terminal's form for the phone.
+/// `LATCH_ELICITATION_WAIT_SECS=0` never waits.
+const ELICITATION_WAIT_ENV: &str = "LATCH_ELICITATION_WAIT_SECS";
+const ELICITATION_WAIT_DEFAULT_SECS: u64 = 120;
+/// The hook's own timeout in `hooks.json`, a little past the wait.
+const ELICITATION_HOOK_TIMEOUT_SECS: u64 = 135;
+const MAX_ELICITATION_ANSWER_BYTES: u64 = 64 * 1024;
+
+/// The id the phone answers an elicitation by. The hook and the connector
+/// both compute it from the hook payload, so neither has to tell the other.
+pub fn elicitation_request_id(object: &serde_json::Map<String, Value>) -> String {
+    use std::hash::{Hash, Hasher};
+    let text = |key: &str| object.get(key).and_then(Value::as_str).unwrap_or("");
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for part in [
+        text("prompt_id"),
+        text("mcp_server_name"),
+        text("mode"),
+        text("message"),
+        text("elicitation_id"),
+        text("url"),
+        text("timestamp"),
+    ] {
+        part.hash(&mut hasher);
+    }
+    format!("elicitation:{:016x}", hasher.finish())
+}
+
+fn elicitation_answer_file(paths: &SessionPaths, id: &str) -> PathBuf {
+    let safe: String = id
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    paths
+        .conversation_elicitation_answers()
+        .join(format!("{safe}.json"))
+}
+
+/// Hands the phone's answer to the `Elicitation` hook waiting on `id`.
+/// `action` is `accept`, `decline` or `cancel`; `content` accompanies accept.
+pub fn queue_elicitation_answer(
+    paths: &SessionPaths,
+    id: &str,
+    action: &str,
+    content: Option<Value>,
+) -> anyhow::Result<()> {
+    let directory = paths.conversation_elicitation_answers();
+    fs::create_dir_all(&directory)?;
+    fs::set_permissions(&directory, fs::Permissions::from_mode(DIR_MODE))?;
+    let mut answer = serde_json::json!({ "action": action });
+    if let Some(content) = content {
+        answer["content"] = content;
+    }
+    let bytes = serde_json::to_vec(&answer)?;
+    if bytes.len() as u64 > MAX_ELICITATION_ANSWER_BYTES {
+        bail!("the form answer is too large");
+    }
+    write_private(PrivateWrite {
+        path: &elicitation_answer_file(paths, id),
+        contents: &bytes,
+        mode: FILE_MODE,
+    })
+}
+
+/// What the `Elicitation` hook prints for the phone's answer, or nothing.
+fn read_elicitation_answer(path: &Path) -> Option<String> {
+    let raw = fs::read(path).ok()?;
+    // Removal is the hand-over, exactly as for bridge commands.
+    fs::remove_file(path).ok()?;
+    if raw.len() as u64 > MAX_ELICITATION_ANSWER_BYTES {
+        return None;
+    }
+    let answer: Value = serde_json::from_slice(&raw).ok()?;
+    let action = answer.get("action")?.as_str()?;
+    if !matches!(action, "accept" | "decline" | "cancel") {
+        return None;
+    }
+    let mut output = serde_json::json!({
+        "hookEventName": "Elicitation",
+        "action": action,
+    });
+    if action == "accept" {
+        if let Some(content) = answer.get("content").filter(|c| c.is_object()) {
+            output["content"] = content.clone();
+        }
+    }
+    Some(serde_json::json!({ "hookSpecificOutput": output }).to_string())
+}
+
 /// Captures one bounded Claude hook payload in the hosted session's raw
 /// sidecar. `observer_version` is the version baked into the invoking hook
 /// command at plugin-generation time (see `ensure_claude_plugin`), not the
@@ -239,8 +351,83 @@ pub fn capture_claude_hook(
     home: &LatchHome,
     reader: impl Read,
     observer_version: u32,
-) -> anyhow::Result<()> {
-    capture_hook(home, reader, "claude", Some(observer_version))
+) -> anyhow::Result<Option<String>> {
+    let raw = read_bounded_hook(reader)?;
+    let mut record: Value =
+        serde_json::from_slice(&raw).context("conversation hook payload is not JSON")?;
+    let latch_id = std::env::var(crate::session::paths::SESSION_ID_ENV)
+        .context("conversation hook did not inherit LATCH_SESSION_ID")?;
+    let id = SessionId::parse(&latch_id)?;
+    let is_elicitation =
+        record.get("hook_event_name").and_then(Value::as_str) == Some("Elicitation");
+    if let Some(object) = record.as_object_mut() {
+        bound_hook_fields(object);
+    }
+    let mut waiting_on = None;
+    if is_elicitation {
+        let object = record
+            .as_object_mut()
+            .context("conversation hook payload must be an object")?;
+        object
+            .entry("timestamp")
+            .or_insert_with(|| Value::String(engine::format_rfc3339(SystemTime::now())));
+        let request = elicitation_request_id(object);
+        object.insert(
+            "latch_elicitation_id".to_owned(),
+            Value::from(request.clone()),
+        );
+        waiting_on = Some(request);
+    }
+    capture_record(home, &id, record, "claude", Some(observer_version))?;
+    let Some(request) = waiting_on else {
+        return Ok(None);
+    };
+    let wait = std::env::var(ELICITATION_WAIT_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(ELICITATION_WAIT_DEFAULT_SECS)
+        .min(ELICITATION_HOOK_TIMEOUT_SECS - 5);
+    let answer = elicitation_answer_file(&home.session(&id), &request);
+    let _ = fs::remove_file(&answer);
+    let started = std::time::Instant::now();
+    while started.elapsed().as_secs() < wait {
+        if let Some(output) = read_elicitation_answer(&answer) {
+            return Ok(Some(output));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(150));
+    }
+    // Step aside: print nothing, so the terminal's own dialog opens. Never
+    // accept on the person's behalf.
+    capture_record(
+        home,
+        &id,
+        serde_json::json!({
+            "hook_event_name": "ElicitationTimeout",
+            "latch_elicitation_id": request,
+        }),
+        "claude",
+        Some(observer_version),
+    )?;
+    Ok(None)
+}
+
+/// Cuts the free-text fields Latch only summarizes to `MAX_HOOK_FIELD_BYTES`,
+/// on a character boundary, marking the cut.
+fn bound_hook_fields(object: &mut serde_json::Map<String, Value>) {
+    for key in BOUNDED_HOOK_FIELDS {
+        let Some(Value::String(text)) = object.get_mut(key) else {
+            continue;
+        };
+        if text.len() <= MAX_HOOK_FIELD_BYTES {
+            continue;
+        }
+        let mut end = MAX_HOOK_FIELD_BYTES;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+        text.push('…');
+    }
 }
 
 /// Captures a Codex hook/sidecar payload.  Integrations invoke this hidden
@@ -458,10 +645,29 @@ fn ensure_claude_plugin(home: &LatchHome) -> anyhow::Result<PathBuf> {
     }))?;
     let hook =
         serde_json::json!({"matcher": ".*", "hooks": [{"type": "command", "command": command}]});
+    // The elicitation hook blocks while the phone answers, so it carries its
+    // own timeout, a little past the wait.
+    let blocking = serde_json::json!({"matcher": ".*", "hooks": [{
+        "type": "command",
+        "command": command,
+        "timeout": ELICITATION_HOOK_TIMEOUT_SECS,
+    }]});
     let hooks = serde_json::to_vec_pretty(&serde_json::json!({
         "hooks": {
             "SessionStart": [hook.clone()],
             "PermissionRequest": [hook.clone()],
+            "Notification": [hook.clone()],
+            "Elicitation": [blocking],
+            "ElicitationResult": [hook.clone()],
+            "SubagentStart": [hook.clone()],
+            "SubagentStop": [hook.clone()],
+            "TaskCreated": [hook.clone()],
+            "TaskCompleted": [hook.clone()],
+            "PreCompact": [hook.clone()],
+            "PostCompact": [hook.clone()],
+            "StopFailure": [hook.clone()],
+            "PostModelSwitch": [hook.clone()],
+            "SessionEnd": [hook.clone()],
             "Stop": [hook],
         }
     }))?;
@@ -736,6 +942,23 @@ mod tests {
     }
 
     #[test]
+    fn long_free_text_hook_fields_are_cut_before_the_sidecar() {
+        let long = "é".repeat(MAX_HOOK_FIELD_BYTES);
+        let mut record = serde_json::json!({
+            "hook_event_name": "SubagentStop",
+            "agent_id": "a1",
+            "last_assistant_message": long,
+            "compact_summary": "short",
+        });
+        bound_hook_fields(record.as_object_mut().unwrap());
+        let cut = record["last_assistant_message"].as_str().unwrap();
+        assert!(cut.len() <= MAX_HOOK_FIELD_BYTES + '…'.len_utf8());
+        assert!(cut.ends_with('…'));
+        assert_eq!(record["compact_summary"], "short");
+        assert_eq!(record["agent_id"], "a1");
+    }
+
+    #[test]
     fn claude_plugin_registers_a_versioned_stop_hook() {
         let temp = tempfile::tempdir().unwrap();
         let home = LatchHome::new(temp.path());
@@ -753,7 +976,23 @@ mod tests {
         let hooks: Value =
             serde_json::from_slice(&fs::read(plugin.join("hooks").join("hooks.json")).unwrap())
                 .unwrap();
-        for event in ["SessionStart", "PermissionRequest", "Stop"] {
+        for event in [
+            "SessionStart",
+            "PermissionRequest",
+            "Notification",
+            "Elicitation",
+            "ElicitationResult",
+            "SubagentStart",
+            "SubagentStop",
+            "TaskCreated",
+            "TaskCompleted",
+            "PreCompact",
+            "PostCompact",
+            "StopFailure",
+            "PostModelSwitch",
+            "SessionEnd",
+            "Stop",
+        ] {
             let command = hooks["hooks"][event][0]["hooks"][0]["command"]
                 .as_str()
                 .unwrap_or_else(|| panic!("{event} hook is registered"));
@@ -762,7 +1001,49 @@ mod tests {
                 "{event} command does not bake in the observer version: {command}"
             );
         }
-        assert_eq!(OBSERVER_VERSION, STOP_HOOK_MIN_OBSERVER_VERSION);
+        const { assert!(OBSERVER_VERSION >= STOP_HOOK_MIN_OBSERVER_VERSION) };
+    }
+
+    #[test]
+    fn an_elicitation_answer_is_handed_to_the_hook_once_and_never_as_a_default() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = SessionPaths::new(temp.path().join("session"));
+        paths.ensure().unwrap();
+        let record = serde_json::json!({
+            "prompt_id": "p", "mcp_server_name": "probe", "message": "m", "mode": "form",
+        });
+        let id = elicitation_request_id(record.as_object().unwrap());
+        assert_eq!(id, elicitation_request_id(record.as_object().unwrap()));
+        let file = elicitation_answer_file(&paths, &id);
+        // Nothing queued: the hook prints nothing and the terminal's form opens.
+        assert!(read_elicitation_answer(&file).is_none());
+        queue_elicitation_answer(
+            &paths,
+            &id,
+            "accept",
+            Some(serde_json::json!({"name": "Latch phone"})),
+        )
+        .unwrap();
+        let printed: Value =
+            serde_json::from_str(&read_elicitation_answer(&file).unwrap()).unwrap();
+        assert_eq!(
+            printed["hookSpecificOutput"]["hookEventName"],
+            "Elicitation"
+        );
+        assert_eq!(printed["hookSpecificOutput"]["action"], "accept");
+        assert_eq!(
+            printed["hookSpecificOutput"]["content"]["name"],
+            "Latch phone"
+        );
+        assert!(
+            read_elicitation_answer(&file).is_none(),
+            "taken exactly once"
+        );
+        queue_elicitation_answer(&paths, &id, "decline", None).unwrap();
+        let printed: Value =
+            serde_json::from_str(&read_elicitation_answer(&file).unwrap()).unwrap();
+        assert_eq!(printed["hookSpecificOutput"]["action"], "decline");
+        assert!(printed["hookSpecificOutput"].get("content").is_none());
     }
 
     #[test]

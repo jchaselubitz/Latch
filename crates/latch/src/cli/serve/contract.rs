@@ -1,5 +1,5 @@
 //! Generated from `schemas/remote-access/v2/*.schema.json`; do not edit by hand.
-//! Canonical schema set SHA-256: b0f90bc11f1f3f0e6f69dbf4c3b03dad8ccf15214f0f5e2061d01b85953ca379
+//! Canonical schema set SHA-256: 2e0d81057e1752479bc27353d51be05e0443ac7eb787aaedf4d0bfd6c6bde3ef
 
 use serde::{Deserialize, Serialize};
 
@@ -976,6 +976,9 @@ pub struct ConversationState {
     pub effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<String>,
+    /// Context window, rate limits and cost as the agent last reported them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<crate::conversation::SessionUsage>,
     /// Derived from the newest request item whose status is pending.
     pub pending_request: Option<String>,
     pub connector: Option<ConnectorIdentity>,

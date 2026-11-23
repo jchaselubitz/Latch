@@ -17,7 +17,7 @@
 //
 // Outside a Latch session (no LATCH_SESSION_ID) the module does nothing.
 
-import type { Register, ToolCallArgs } from 'claude-code'
+import type { PermissionRequestDecision, Register, ToolCallArgs } from 'claude-code'
 
 import { BRIDGE_VERSION, LATCH_BIN } from './config'
 
@@ -34,7 +34,14 @@ const PLUGIN_NAME = 'latch-conversation-bridge'
 /** How much of each string argument a `permission.open` record carries. */
 const MAX_INPUT_TEXT = 1000
 const MAX_INPUT_FIELDS = 32
-/** How long the approval for a re-run outlives the re-run's own permission check. */
+/**
+ * How long the approval for a re-run outlives the re-run's own permission check.
+ * Claude Code 2.1.321 stopped raising a permission prompt for a module's own
+ * `$.tool.call`, which makes this approval redundant there. Latch hosts
+ * whichever Claude is installed and sets no minimum version (the bridge was
+ * built against 2.1.292), so the approval stays until a minimum of 2.1.321 or
+ * later is enforced.
+ */
 const APPROVAL_TTL_MS = 30_000
 const CONSENT = 'The person pressed "Allow" in Latch.'
 const DENIED = 'The person denied this call in Latch.'
@@ -46,8 +53,17 @@ type Command = {
   tool_use_id?: unknown
   answers?: unknown
   decision?: unknown
+  option?: unknown
 }
 type Decision = 'allow' | 'deny'
+/** A permission update the engine suggested ("don't ask again for ..."). */
+type Allowed = Extract<PermissionRequestDecision, { behavior: 'allow' }>
+type Suggestion = NonNullable<Allowed['updatedPermissions']>[number]
+type SetMode = Extract<Suggestion, { type: 'setMode' }>
+/** An answer only the engine's own permission hook can carry out. */
+type HookAnswer = { option: string; text?: string }
+/** What the hook waits on while the dialog is open. */
+type HookSlot = { answer: (answer: HookAnswer) => void; suggestions: Suggestion[] }
 /** A tool call of the model's whose permission dialog Latch may answer. */
 type OpenPermission = {
   tool: string
@@ -56,7 +72,33 @@ type OpenPermission = {
   /** True once the engine raised the dialog and the Hub was told. */
   isAnnounced: boolean
   answer: (decision: Decision) => void
+  /** Set once the engine's permission hook is waiting for the phone. */
+  hook?: HookSlot
+  /** The first answer Latch gave, by either path. A second is refused. */
+  latch?: string
+  /** Lets the permission hook go when the call ends another way. */
+  release?: () => void
+  /** True for a call a Code Mode script made: only its hook settles it. */
+  inScript: boolean
 }
+/** The words of each option the permission hook can carry out. */
+type OfferedOption = { id: string; label: string; requires_text: boolean }
+const PLAN_MODES: Record<string, string> = {
+  approve_plan: 'default',
+  approve_plan_accept_edits: 'acceptEdits',
+}
+const MAX_PLAN = 8192
+const MAX_LABEL = 200
+/** The computer-use tool whose dialog is raised inside the call itself. */
+const APP_ACCESS_TOOL = 'mcp__computer-use__request_access'
+/**
+ * Whether a call was made inside a Code Mode script rather than by the model
+ * directly. The engine names script calls this way (`repl_` or `toolu_cc_`),
+ * and the transcript files them under the REPL call that ran them.
+ */
+const isScriptCall = (id: string): boolean => id.startsWith('repl_') || id.startsWith('toolu_cc_')
+/** A dialog this short-lived never reaches the phone. */
+const TERMINAL_DIALOG_DELAY_MS = 1500
 /** A re-run of a call the person allowed, waiting on its own permission check. */
 type Approval = { tool: string; until: number }
 type Answers = Record<string, string>
@@ -244,13 +286,170 @@ function answerPermission(bridge: Bridge, command: Command): Outcome {
     return { outcome: 'refused', detail: 'the permission request is no longer open' }
   }
 
+  if (open.latch !== undefined) {
+    return { outcome: 'refused', detail: 'the permission request was already answered' }
+  }
+
+  if (typeof command.option === 'string') {
+    const text = typeof command.text === 'string' ? command.text.trim().slice(0, 4096) : undefined
+
+    if (open.hook === undefined || !offeredIds(open).includes(command.option)) {
+      return { outcome: 'refused', detail: 'that option is not offered for this request' }
+    }
+
+    if (needsText(command.option) && (text === undefined || text === '')) {
+      return { outcome: 'refused', detail: 'this option needs a message' }
+    }
+
+    open.latch = command.option
+    open.hook.answer({ option: command.option, text })
+
+    return { outcome: 'accepted' }
+  }
+
   if (command.decision !== 'allow' && command.decision !== 'deny') {
     return { outcome: 'refused', detail: 'the decision must be allow or deny' }
   }
 
+  // ExitPlanMode is settled only by its permission hook: running it again
+  // would open a second dialog.
+  if (open.tool === 'ExitPlanMode') {
+    return { outcome: 'refused', detail: 'a plan is approved or rejected, not allowed' }
+  }
+
+  // A call inside a Code Mode script is settled by its permission hook too.
+  // Ending it from `tool.call` would hand the script a refusal it did not
+  // ask for, and a re-run would run outside the script. A deny carries a
+  // message, so the engine refuses this one call and the script goes on.
+  if (open.inScript) {
+    if (open.hook === undefined) {
+      return { outcome: 'refused', detail: 'the permission request is not open yet' }
+    }
+
+    open.latch = command.decision
+    open.hook.answer({ option: command.decision === 'allow' ? 'allow_once' : 'deny' })
+
+    return { outcome: 'accepted' }
+  }
+
+  open.latch = command.decision
   open.answer(command.decision)
 
   return { outcome: 'accepted' }
+}
+
+function needsText(option: string): boolean {
+  return option === 'deny_with_feedback' || option === 'reject_plan_with_feedback'
+}
+
+function offeredIds(open: OpenPermission): string[] {
+  return offeredOptions(open.tool, open.hook?.suggestions ?? []).map(option => option.id)
+}
+
+const isRuleUpdate = (update: Suggestion): boolean =>
+  update.type === 'addRules' || update.type === 'addDirectories'
+
+/** A short account of what a suggestion would stop asking about. */
+function describeSuggestion(update: Suggestion): string {
+  const fields = update as unknown as Record<string, unknown>
+  const rules = Array.isArray(fields.rules) ? (fields.rules as Record<string, unknown>[]) : []
+  const parts = rules
+    .map(rule => `${String(rule.toolName ?? '')}${rule.ruleContent ? `(${String(rule.ruleContent)})` : ''}`)
+    .filter(part => part !== '')
+  const dirs = Array.isArray(fields.directories) ? (fields.directories as unknown[]).map(String) : []
+
+  return [...parts, ...dirs].join(', ').slice(0, MAX_LABEL)
+}
+
+/** The options the permission hook can carry out for this dialog. */
+function offeredOptions(tool: string, suggestions: readonly Suggestion[]): OfferedOption[] {
+  if (tool === 'ExitPlanMode') {
+    return [
+      { id: 'approve_plan', label: 'Yes, and manually approve edits', requires_text: false },
+      { id: 'approve_plan_accept_edits', label: 'Yes, and auto-accept edits', requires_text: false },
+      { id: 'reject_plan_with_feedback', label: 'No, keep planning', requires_text: true },
+    ]
+  }
+
+  const offered: OfferedOption[] = []
+  const rules = suggestions.filter(isRuleUpdate)
+
+  if (rules.length > 0) {
+    offered.push({ id: 'allow_session', label: 'Yes, for this session', requires_text: false })
+
+    if (rules.some(update => (update as { destination?: string }).destination !== 'session')) {
+      const what = rules.map(describeSuggestion).filter(text => text !== '').join('; ')
+
+      offered.push({
+        id: 'allow_always',
+        label: `Yes, and don't ask again${what === '' ? '' : ` for ${what}`}`.slice(0, MAX_LABEL),
+        requires_text: false,
+      })
+    }
+  }
+
+  for (const update of suggestions) {
+    if (update.type === 'setMode' && /^[A-Za-z0-9]{1,32}$/.test(update.mode)) {
+      offered.push({ id: `allow_mode_${update.mode}`, label: `Yes, and switch to ${update.mode}`, requires_text: false })
+    }
+  }
+
+  offered.push({ id: 'deny_with_feedback', label: 'No, and tell Claude what to do instead', requires_text: true })
+
+  return offered
+}
+
+/** The engine's own verdict for an answer given in Latch. */
+function verdict(
+  open: OpenPermission,
+  answer: HookAnswer,
+  input: Record<string, unknown>,
+): PermissionRequestDecision {
+  const suggestions = open.hook?.suggestions ?? []
+  const message = answer.text ?? DENIED
+
+  if (answer.option in PLAN_MODES) {
+    const setMode: SetMode = {
+      type: 'setMode',
+      mode: PLAN_MODES[answer.option] as SetMode['mode'],
+      destination: 'session',
+    }
+
+    // A tool that waits on a person is settled only with its input.
+    return { behavior: 'allow', updatedInput: input, updatedPermissions: [setMode] }
+  }
+
+  if (
+    answer.option === 'reject_plan_with_feedback' ||
+    answer.option === 'deny_with_feedback' ||
+    answer.option === 'deny'
+  ) {
+    return { behavior: 'deny', message }
+  }
+
+  if (answer.option === 'allow_once') {
+    return { behavior: 'allow' }
+  }
+
+  if (answer.option === 'allow_session') {
+    return {
+      behavior: 'allow',
+      updatedPermissions: suggestions
+        .filter(isRuleUpdate)
+        .map(update => ({ ...update, destination: 'session' }) as Suggestion),
+    }
+  }
+
+  if (answer.option === 'allow_always') {
+    return { behavior: 'allow', updatedPermissions: suggestions.filter(isRuleUpdate) }
+  }
+
+  const mode = answer.option.startsWith('allow_mode_') ? answer.option.slice('allow_mode_'.length) : undefined
+
+  return {
+    behavior: 'allow',
+    updatedPermissions: suggestions.filter(update => update.type === 'setMode' && update.mode === mode),
+  }
 }
 
 /**
@@ -353,7 +552,10 @@ async function describeSession($: Host): Promise<Record<string, unknown>> {
       'abort_turn',
       'answer_question',
       'answer_permission',
+      'permission_options',
+      'terminal_dialogs',
       'command_catalog',
+      'session_usage',
     ],
   }
 
@@ -370,6 +572,38 @@ async function describeSession($: Host): Promise<Record<string, unknown>> {
   }
 
   return facts
+}
+
+/** How many rate-limit windows a usage report carries. */
+const MAX_RATE_LIMITS = 8
+
+/**
+ * Reports the session's model, context window, rate limits and cost: the
+ * status line's figures. Read once per main-loop turn, so it costs nothing
+ * while the session is idle.
+ */
+async function reportUsage($: Host, bridge: Bridge): Promise<void> {
+  if (bridge.inbox === undefined) {
+    return
+  }
+
+  try {
+    const usage = await $.session.usage()
+    await report($, bridge, 'session.usage', {
+      model: await $.session.model(),
+      context_tokens: usage.context.tokens,
+      context_window: usage.context.window,
+      context_percent: usage.context.percent,
+      rate_limits: usage.rateLimits.slice(0, MAX_RATE_LIMITS).map(limit => ({
+        kind: limit.kind,
+        percent_used: limit.percentUsed,
+        resets_at: limit.resetsAt,
+      })),
+      cost_usd: usage.cost?.usd,
+    })
+  } catch {
+    // An engine without these figures leaves the phone without them.
+  }
 }
 
 /** Greets Latch and, once it answers where commands are queued, starts looking. */
@@ -405,6 +639,7 @@ export const register: Register = on => {
 
     if (session !== undefined && session !== '') {
       await open($, bridge)
+      await reportUsage($, bridge)
     }
 
     return next(e)
@@ -430,6 +665,7 @@ export const register: Register = on => {
         reason: e.reason,
         duration_ms: e.durationMs,
       })
+      await reportUsage($, bridge)
     }
 
     return next(e)
@@ -447,17 +683,50 @@ export const register: Register = on => {
       return next(e)
     }
 
+    // A dialog raised inside a tool call (computer-use app access) has no hook
+    // that could answer it. It is reported, only if it outlasts a moment, so the
+    // phone can say where to answer; the call itself runs as the engine would.
+    if (e.tool === APP_ACCESS_TOOL) {
+      const raw = e as unknown as Record<string, unknown>
+      const running = next(e)
+      const ended = running.then(
+        () => true,
+        () => true,
+      )
+      const quick = await Promise.race([ended, $.clock.sleep(TERMINAL_DIALOG_DELAY_MS).then(() => false)])
+
+      if (!quick) {
+        await report($, bridge, 'terminal.open', {
+          tool_use_id: id,
+          kind: 'app_access',
+          apps: Array.isArray(raw.apps) ? raw.apps.slice(0, 8).map(app => String(app).slice(0, 64)) : [],
+          request_reason: typeof raw.reason === 'string' ? raw.reason.slice(0, MAX_INPUT_TEXT) : undefined,
+        })
+      }
+
+      try {
+        return await running
+      } finally {
+        if (!quick) {
+          await report($, bridge, 'terminal.closed', { tool_use_id: id, answered_by: 'terminal' })
+        }
+      }
+    }
+
     const fromLatch = new Promise<Decision>(resolve => {
       bridge.permissions.set(id, {
         tool: e.tool,
         input: toolArguments(e as Record<string, unknown>),
         isAnnounced: false,
-        answer: resolve,
+        // A plan, and a call inside a script, are settled by the permission
+        // hook alone.
+        answer: e.tool === 'ExitPlanMode' || isScriptCall(id) ? () => undefined : resolve,
+        inScript: isScriptCall(id),
       })
     })
     const atTerminal = next(e).then(result => ({ result }))
     let answeredBy = 'nobody'
-    let decision: Decision | undefined
+    let decision: string | undefined
 
     try {
       const first = await Promise.race([
@@ -466,7 +735,11 @@ export const register: Register = on => {
       ])
 
       if ('result' in first) {
-        answeredBy = 'terminal'
+        // An answer given in Latch through the permission hook ends the call
+        // the engine's way: the call's own result arrives here.
+        const given = bridge.permissions.get(id)?.latch
+        answeredBy = given === undefined ? 'terminal' : 'latch'
+        decision = given
 
         return first.result
       }
@@ -484,6 +757,7 @@ export const register: Register = on => {
     } finally {
       const open = bridge.permissions.get(id)
       bridge.permissions.delete(id)
+      open?.release?.()
 
       if (open?.isAnnounced === true) {
         await report($, bridge, 'permission.closed', { tool_use_id: id, answered_by: answeredBy, decision })
@@ -506,12 +780,39 @@ export const register: Register = on => {
     if (match !== undefined) {
       const [id, open] = match
       open.isAnnounced = true
+      const suggestions = (Array.isArray(e.permission_suggestions)
+        ? (e.permission_suggestions as unknown as Suggestion[])
+        : []
+      ).slice(0, 8)
+      const toolInput = e.tool_input as Record<string, unknown>
+      const answered = new Promise<HookAnswer>(resolve => {
+        open.hook = { answer: resolve, suggestions }
+      })
+      const released = new Promise<undefined>(resolve => {
+        open.release = () => resolve(undefined)
+      })
+      const plan = open.tool === 'ExitPlanMode'
+
       await report($, bridge, 'permission.open', {
         tool_use_id: id,
         tool: open.tool,
         cwd: 'cwd' in e && typeof e.cwd === 'string' ? e.cwd.slice(0, 1024) : undefined,
-        input: describeInput(open.input),
+        input: plan ? {} : describeInput(open.input),
+        plan: plan && typeof toolInput.plan === 'string' ? toolInput.plan.slice(0, MAX_PLAN) : undefined,
+        plan_path:
+          plan && typeof toolInput.planFilePath === 'string' ? toolInput.planFilePath.slice(0, 1024) : undefined,
+        options: offeredOptions(open.tool, suggestions),
+        in_script: open.inScript ? true : undefined,
       })
+
+      // The engine runs this hook beside the dialog it paints, and whichever
+      // answers first settles the call. Hold the hook for the phone, and let
+      // it go when the call ends some other way.
+      const first = await Promise.race([answered, released])
+
+      if (first !== undefined) {
+        return { decision: verdict(open, first, toolInput) }
+      }
     }
 
     return next(e)

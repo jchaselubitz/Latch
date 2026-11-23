@@ -148,7 +148,7 @@ impl JsonlConnector {
     /// last one the screen displaced, which clients still hold as their
     /// newest pending request, else the oldest the bridge announced.
     pub(super) fn surface_next_request(&mut self) -> Vec<ConnectorMutation> {
-        if self.bridge_version.is_none() {
+        if self.bridge_version.is_none() && self.id != "codex" {
             // Only the bridge says when a waiting request closes.
             return self.drop_waiting_requests();
         }
@@ -222,10 +222,20 @@ pub(super) fn request_mutation(
 ) -> ConnectorMutation {
     let mut metadata = request.metadata.clone();
     if metadata.request_kind.is_some() && status == RequestStatus::Pending {
-        let answerable = request.bridge_call || !request.choices.is_empty();
+        // A request that arrived with its own verdict (a dialog only the
+        // terminal can answer, or a form the phone can) keeps it.
+        let answerable = metadata
+            .answerable
+            .unwrap_or(request.bridge_call || !request.choices.is_empty());
         metadata.answerable = Some(answerable);
-        metadata.reason =
-            (!answerable).then(|| "This request can only be answered at the terminal.".into());
+        metadata.reason = if answerable {
+            None
+        } else {
+            metadata
+                .reason
+                .take()
+                .or_else(|| Some("This request can only be answered at the terminal.".into()))
+        };
         if request.bridge_call && request.request_type == RequestType::Permission {
             for label in &request.choices {
                 if let Some(id) = permission_option_id(label) {
@@ -238,6 +248,9 @@ pub(super) fn request_mutation(
                     }
                 }
             }
+            metadata
+                .options
+                .sort_by_key(|option| super::dialogs::option_rank(&option.id));
         }
     }
     upsert(

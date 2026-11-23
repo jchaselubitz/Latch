@@ -23,6 +23,20 @@ final class AttentionPayloadTests: XCTestCase {
         XCTAssertEqual(AttentionNotification(plan).body, "Plan ready for approval")
     }
 
+    func testCodexRequestKindsUseSpecificNotificationCopy() {
+        for (kind, expected) in [
+            ("browser", "Browser access requested"),
+            ("permissions", "Additional permissions requested"),
+            ("question", "Has a question"),
+            ("elicitation_form", "Information requested"),
+            ("elicitation_url", "Action requested")
+        ] {
+            let payload = AttentionPayload(sessionID: "session", name: "Codex", title: nil,
+                                           kind: .approval, requestKind: kind)
+            XCTAssertEqual(AttentionNotification(payload).body, expected)
+        }
+    }
+
     func testOpensWhatTheMacSealed() throws {
         let payload = try AttentionPayload.open(sealedHex: wire, eventID: event, privateKey: key)
         XCTAssertEqual(payload, AttentionPayload(sessionID: "ses_vector", name: "auth-refactor", title: "Refactor auth", kind: .approval))
@@ -45,6 +59,17 @@ final class AttentionPayloadTests: XCTestCase {
         let done = AttentionNotification(AttentionPayload(sessionID: "ses_2", name: "n", title: "Refactor auth", kind: .completion))
         XCTAssertEqual(done.title, "Refactor auth")
         XCTAssertEqual(done.body, "Finished working")
+        let background = AttentionNotification(AttentionPayload(sessionID: "ses_3", name: "n", title: nil, kind: .completion, backgroundTasks: 2))
+        XCTAssertEqual(background.body, "Turn finished · 2 background tasks still running")
+        let one = AttentionNotification(AttentionPayload(sessionID: "ses_3", name: "n", title: nil, kind: .completion, backgroundTasks: 1))
+        XCTAssertEqual(one.body, "Turn finished · 1 background task still running")
+    }
+
+    func testDecodesTheBackgroundCountAndToleratesItsAbsence() throws {
+        let json = Data(#"{"v":1,"s":"ses_1","n":"n","k":"completion","b":3}"#.utf8)
+        XCTAssertEqual(try JSONDecoder().decode(AttentionPayload.self, from: json).backgroundTasks, 3)
+        let plain = Data(#"{"v":1,"s":"ses_1","n":"n","k":"completion"}"#.utf8)
+        XCTAssertNil(try JSONDecoder().decode(AttentionPayload.self, from: plain).backgroundTasks)
     }
 
     func testFindsSealedFieldsOnlyInTheExpectedShape() {

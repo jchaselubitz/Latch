@@ -3,6 +3,11 @@
 //! Latch hands it in place of typing into the terminal.
 use super::*;
 
+/// Why a call inside a Code Mode script asks, when its own input gives no
+/// reason.
+const SCRIPT_CALL_REASON: &str =
+    "A Code Mode script made this call. No refuses this call only; the script goes on.";
+
 impl JsonlConnector {
     /// One record from the session's bridge module: what the engine itself
     /// reported, as opposed to what the transcript or screen imply.
@@ -38,35 +43,59 @@ impl JsonlConnector {
                     return Vec::new();
                 };
                 let tool = string(object, "tool").unwrap_or_else(|| "this tool".to_owned());
+                // The same words the permission hook would give it, so the
+                // dialog on the screen is found by either.
+                let mut prompt = object
+                    .get("input")
+                    .and_then(|input| input.get("description"))
+                    .and_then(Value::as_str)
+                    .filter(|text| !text.is_empty())
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| format!("Allow {tool}?"));
+                let mut metadata = claude_permission_metadata(
+                    &tool,
+                    object.get("input"),
+                    object.get("cwd").and_then(Value::as_str),
+                );
+                super::dialogs::apply_permission_extras(&tool, object, &mut prompt, &mut metadata);
+                // A call a Code Mode script made: the bridge settles it through
+                // the permission hook, and a No refuses this call alone.
+                if object.get("in_script").and_then(Value::as_bool) == Some(true) {
+                    metadata
+                        .details
+                        .entry("reason")
+                        .or_insert_with(|| Value::String(SCRIPT_CALL_REASON.to_owned()));
+                }
                 return self.announce_bridge_request(PendingRequest {
                     id,
                     request_type: RequestType::Permission,
-                    // The same words the permission hook would give it, so
-                    // the dialog on the screen is found by either.
-                    prompt: object
-                        .get("input")
-                        .and_then(|input| input.get("description"))
-                        .and_then(Value::as_str)
-                        .filter(|text| !text.is_empty())
-                        .map(str::to_owned)
-                        .unwrap_or_else(|| format!("Allow {tool}?")),
+                    prompt,
                     // What the bridge can carry out. The labels Claude paints
-                    // replace these once the dialog is on the screen.
-                    choices: vec!["Yes".to_owned(), "No".to_owned()],
+                    // replace these once the dialog is on the screen. A plan
+                    // has no such yes and no: its options are the bridge's.
+                    choices: if tool == "ExitPlanMode" {
+                        Vec::new()
+                    } else {
+                        vec!["Yes".to_owned(), "No".to_owned()]
+                    },
                     questions: Vec::new(),
                     screen_seen: false,
                     announced_at: string(object, "timestamp"),
                     bridge_call: true,
-                    metadata: claude_permission_metadata(
-                        &tool,
-                        object.get("input"),
-                        object.get("cwd").and_then(Value::as_str),
-                    ),
+                    metadata,
                 });
+            }
+            // A dialog raised inside a tool, which only the terminal can
+            // answer (computer-use app access).
+            Some("terminal.open") => {
+                return match super::dialogs::terminal_request_from_bridge(object) {
+                    Some(request) => self.announce_bridge_request(request),
+                    None => Vec::new(),
+                };
             }
             // Answered at the terminal, from Latch, or by nobody: the next
             // dialog of a parallel batch is shown once the shown one closes.
-            Some("question.closed") | Some("permission.closed") => {
+            Some("question.closed") | Some("permission.closed") | Some("terminal.closed") => {
                 if let Some(closed) = string(object, "tool_use_id") {
                     use crate::conversation::ResolutionSource;
                     let source = match object.get("answered_by").and_then(Value::as_str) {
@@ -78,6 +107,7 @@ impl JsonlConnector {
                         Some("allow") => Some("allow_once"),
                         Some("deny") => Some("deny"),
                         Some("submitted") => Some("submitted"),
+                        Some(option) if option.len() <= 64 => Some(option),
                         _ => None,
                     };
                     return self.settle_request(&closed, source, decision);
@@ -95,6 +125,7 @@ impl JsonlConnector {
                     .and_then(Value::as_array)
                     .map(|list| bridge_commands(list));
             }
+            Some("session.usage") => self.bridge_usage(object),
             Some("turn.start") => {
                 self.turn_open = true;
                 self.turn_outcome = None;

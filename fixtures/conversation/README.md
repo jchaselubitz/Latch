@@ -21,6 +21,7 @@ fixtures/conversation/
     reconnect-optimistic.json
     operations-refused-ambiguous.json
   codex/source-corpus.jsonl   # invented; do not copy this shape
+  codex/app-server/           # real Codex 0.171.0 app-server captures (see planning/CODEX_CONNECTOR_V2.md)
 ```
 
 `expected.json` is the public Conversation Hub snapshot the phone already

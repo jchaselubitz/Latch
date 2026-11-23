@@ -46,6 +46,10 @@ pub struct Payload {
     /// Display name for a requested app, if known.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub a: Option<String>,
+    /// Background tasks still running when a turn completed. Absent when
+    /// none are, so the alert says the agent finished working.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub b: Option<u32>,
 }
 
 impl Payload {
@@ -58,6 +62,7 @@ impl Payload {
             t: title.map(truncate).filter(|value| !value.is_empty()),
             r: None,
             a: None,
+            b: None,
             k: match kind {
                 AttentionKind::Approval => "approval",
                 AttentionKind::Completion => "completion",
@@ -70,6 +75,11 @@ impl Payload {
         // Keep the expanded sealed payload within the phone's hex limit,
         // even when every character in the session labels takes four bytes.
         self.a = app_name.map(|name| name.chars().take(40).collect());
+        self
+    }
+    /// Says how many background tasks a completed turn left running.
+    pub fn with_background(mut self, count: Option<u32>) -> Self {
+        self.b = count.filter(|count| *count > 0);
         self
     }
 }
@@ -122,6 +132,19 @@ mod tests {
             event_id.as_bytes(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn background_count_is_carried_only_when_work_is_running() {
+        let payload = |count| {
+            serde_json::to_value(
+                Payload::new("ses_1", "n", None, AttentionKind::Completion).with_background(count),
+            )
+            .unwrap()
+        };
+        assert_eq!(payload(Some(2))["b"], 2);
+        assert!(payload(Some(0)).get("b").is_none());
+        assert!(payload(None).get("b").is_none());
     }
 
     #[test]

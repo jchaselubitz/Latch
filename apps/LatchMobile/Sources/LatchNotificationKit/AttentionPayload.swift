@@ -25,6 +25,8 @@ public struct AttentionPayload: Decodable, Equatable, Sendable {
     public let kind: Kind
     public let requestKind: String?
     public let appName: String?
+    /// Background tasks a completed turn left running; nil when none were.
+    public let backgroundTasks: UInt32?
 
     enum CodingKeys: String, CodingKey {
         case version = "v"
@@ -34,15 +36,17 @@ public struct AttentionPayload: Decodable, Equatable, Sendable {
         case kind = "k"
         case requestKind = "r"
         case appName = "a"
+        case backgroundTasks = "b"
     }
 
-    public init(sessionID: String, name: String, title: String?, kind: Kind, requestKind: String? = nil, appName: String? = nil) {
+    public init(sessionID: String, name: String, title: String?, kind: Kind, requestKind: String? = nil, appName: String? = nil, backgroundTasks: UInt32? = nil) {
         self.sessionID = sessionID
         self.name = name
         self.title = title
         self.kind = kind
         self.requestKind = requestKind
         self.appName = appName
+        self.backgroundTasks = backgroundTasks
     }
 
     public init(from decoder: Decoder) throws {
@@ -56,6 +60,7 @@ public struct AttentionPayload: Decodable, Equatable, Sendable {
         kind = try container.decode(Kind.self, forKey: .kind)
         requestKind = try container.decodeIfPresent(String.self, forKey: .requestKind)
         appName = try container.decodeIfPresent(String.self, forKey: .appName)
+        backgroundTasks = try? container.decodeIfPresent(UInt32.self, forKey: .backgroundTasks)
     }
 
     /// HPKE `info`, identical to the Mac's.

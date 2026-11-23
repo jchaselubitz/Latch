@@ -4,3 +4,8 @@
 mod jsonl;
 
 pub use jsonl::{connector_for_session, connector_kind};
+
+pub(crate) use jsonl::{codex_request_text, validate_form};
+
+#[cfg(test)]
+pub(crate) use jsonl::JsonlConnector;

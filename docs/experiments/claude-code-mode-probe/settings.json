@@ -1,0 +1,81 @@
+{
+ "env": {
+  "CLAUDE_CODE_EXPERIMENTAL_CODE_MODE": "1"
+ },
+ "hooks": {
+  "PreToolUse": [
+   {
+    "matcher": "*",
+    "hooks": [
+     {
+      "type": "command",
+      "command": "python3 -I ../claude-dialog-probe/capture.py"
+     }
+    ]
+   }
+  ],
+  "PostToolUse": [
+   {
+    "matcher": "*",
+    "hooks": [
+     {
+      "type": "command",
+      "command": "python3 -I ../claude-dialog-probe/capture.py"
+     }
+    ]
+   }
+  ],
+  "PostToolUseFailure": [
+   {
+    "matcher": "*",
+    "hooks": [
+     {
+      "type": "command",
+      "command": "python3 -I ../claude-dialog-probe/capture.py"
+     }
+    ]
+   }
+  ],
+  "PermissionRequest": [
+   {
+    "matcher": "*",
+    "hooks": [
+     {
+      "type": "command",
+      "command": "python3 -I ../claude-dialog-probe/capture.py"
+     }
+    ]
+   }
+  ],
+  "Stop": [
+   {
+    "hooks": [
+     {
+      "type": "command",
+      "command": "python3 -I ../claude-dialog-probe/capture.py"
+     }
+    ]
+   }
+  ],
+  "SessionStart": [
+   {
+    "hooks": [
+     {
+      "type": "command",
+      "command": "python3 -I ../claude-dialog-probe/capture.py"
+     }
+    ]
+   }
+  ],
+  "Notification": [
+   {
+    "hooks": [
+     {
+      "type": "command",
+      "command": "python3 -I ../claude-dialog-probe/capture.py"
+     }
+    ]
+   }
+  ]
+ }
+}

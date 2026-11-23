@@ -1,0 +1,14 @@
+{
+  "id": "background-work",
+  "what": "One turn that starts a background Bash command, a Monitor and a background general-purpose subagent (which itself starts a background `sleep 60`), then ends without waiting. Each task's completion starts a task-notification turn whose Stop lists what is still running, until a Stop with an empty list and SessionEnd.",
+  "files": {
+    "hooks.jsonl": "The observer-registered hooks only (SessionStart, SubagentStart, Stop, SubagentStop, SessionEnd). Stop background_tasks entries carry id, type (subagent, shell, monitor), status (running), description, and command (shell, monitor) or agent_type (subagent). The first Stop lists 3 tasks; SubagentStop lists the subagent itself and its own shell task as well; later Stops list 3, 3, 3, 2, 1, 0; SessionEnd has reason \"other\" (headless exit). UserPromptSubmit (one per task-notification turn) and PostToolUse were captured but are not registered by the observer, so they are left out."
+  },
+  "capture": "Claude Code 2.1.330, headless `claude -p` (haiku) with isolated settings (`--setting-sources local`) and docs/experiments/claude-dialog-probe/capture.py on SessionStart, SessionEnd, UserPromptSubmit, SubagentStart, SubagentStop, Stop and PostToolUse; 2026-11-23. Headless `-p` keeps the session alive until every background task has ended, so the final Stop is empty; an interactive session that exits earlier ends its tasks with it and only SessionEnd follows.",
+  "sanitized": [
+    "session_id, transcript_path, agent_transcript_path and cwd removed",
+    "the probe directory rewritten to /probe, the home directory to ~, Claude's task output directory to /tmp/claude/-work",
+    "hook records stamped with synthetic whole-second timestamps in capture order (capture.py stamps none; Latch's capture_record adds them), connector and latch_observer_version 5",
+    "long free-text fields cut to 300 characters"
+  ]
+}

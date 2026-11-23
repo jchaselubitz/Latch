@@ -92,6 +92,15 @@ pub(super) struct RuntimeCheckpoint {
     /// The catalog the bridge greeting carried. Absent in older checkpoints.
     #[serde(default)]
     pub(super) commands: Option<Vec<crate::conversation::AdvertisedCommand>>,
+    /// Subagents, tasks and session facts. Absent in older checkpoints.
+    #[serde(default)]
+    pub(super) activity: super::activity::ClaudeActivity,
+    /// Background work the last `Stop` reported, and when. Absent in older
+    /// checkpoints.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) background_work: Option<crate::conversation::BackgroundWork>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) background_work_at: Option<String>,
     pub(super) last_state: Option<ConversationState>,
     pub(super) screen_can_send: Option<bool>,
 }
@@ -112,6 +121,9 @@ impl JsonlConnector {
             last_turn_close: self.last_turn_close.clone(),
             turn_outcome: self.turn_outcome,
             commands: self.commands.clone(),
+            activity: self.activity.clone(),
+            background_work: self.background_work.clone(),
+            background_work_at: self.background_work_at.clone(),
             // The catalog is already in `commands`. Keep the comparison state
             // without a second copy in every runtime delta and compact base.
             last_state: self.last_state.clone().map(|mut state| {
@@ -136,6 +148,9 @@ impl JsonlConnector {
         self.last_turn_close = runtime.last_turn_close;
         self.turn_outcome = runtime.turn_outcome;
         self.commands = runtime.commands;
+        self.activity = runtime.activity;
+        self.background_work = runtime.background_work;
+        self.background_work_at = runtime.background_work_at;
         self.last_state = runtime.last_state.map(|mut state| {
             state.commands = self.commands.clone();
             state

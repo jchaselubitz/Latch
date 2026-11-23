@@ -1,0 +1,5 @@
+{"event": "tool.call", "at": 1795450426073, "e": {"command": "echo before", "tool": "Bash", "tool_use_id": "toolu_cc_07283f415b45490ab54887a762a3bbb7"}}
+{"event": "classic.PreToolUse", "at": 1795450426076, "e": {"command": "echo before", "tool": "Bash", "tool_use_id": "toolu_cc_07283f415b45490ab54887a762a3bbb7"}}
+{"event": "tool.check", "at": 1795450426116, "e": {"e": {"tool": "Bash", "input": {"command": "echo before"}, "tool_use_id": "toolu_cc_07283f415b45490ab54887a762a3bbb7", "isReadOnly": true}, "origin": {"plugin": "engine", "tier": "core"}}}
+{"event": "tool.check.result", "at": 1795450426120, "e": {"tool": "Bash", "r": {"decision": "allow", "rule": "Bash(echo:*)"}}}
+{"event": "tool.call.result", "at": 1795450426906, "e": {"tool": "Bash", "tool_use_id": "toolu_cc_07283f415b45490ab54887a762a3bbb7", "r": {"ref": 1, "result": {"stdout": "before", "stderr": "", "interrupted": false, "isImage": false, "noOutputExpected": false}, "text": "before", "isReadOnly": true}}}

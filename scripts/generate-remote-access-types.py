@@ -988,6 +988,9 @@ pub struct ConversationState {
     pub effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<String>,
+    /// Context window, rate limits and cost as the agent last reported them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<crate::conversation::SessionUsage>,
     /// Derived from the newest request item whose status is pending.
     pub pending_request: Option<String>,
     pub connector: Option<ConnectorIdentity>,

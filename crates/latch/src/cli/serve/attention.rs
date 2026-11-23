@@ -32,7 +32,10 @@ use serde::{Deserialize, Serialize};
 use sha2::Digest;
 
 use crate::cli::remote_access::{self, DevicePermission};
-use crate::conversation::{ConversationHub, ConversationId, ConversationPhase};
+use crate::conversation::{
+    ConversationHub, ConversationId, ConversationItemKind, ConversationPhase, MutationEffect,
+    RequestStatus, SubscriberEvent,
+};
 use crate::session::paths::{LatchHome, DIR_MODE, FILE_MODE};
 
 pub mod seal;
@@ -114,6 +117,9 @@ struct Persisted {
 struct Observed {
     phase: ConversationPhase,
     pending: Option<String>,
+    /// Background tasks the agent reported still running. Not a transition
+    /// of its own: it only changes what a completion alert says.
+    background: u32,
 }
 
 struct State {
@@ -264,18 +270,26 @@ impl AttentionWatcher {
                 };
                 state.subscriptions.insert(session.clone(), subscriber);
             }
-            if let Some(subscriber) = state.subscriptions.get(&session) {
-                // The queue is bounded; draining discards fanout this
-                // watcher never renders.
-                let _ = self.hub.drain(&id, *subscriber);
-            }
-            let Some((snapshot, request)) = self.hub.attention_snapshot(&id) else {
+            let Some((snapshot, request, changes)) = state
+                .subscriptions
+                .get(&session)
+                .and_then(|subscriber| self.hub.attention_snapshot(&id, *subscriber))
+            else {
                 continue;
             };
             let current = Observed {
                 phase: snapshot.state.phase,
                 pending: snapshot.state.pending_request,
+                background: snapshot
+                    .state
+                    .background_work
+                    .as_ref()
+                    .map_or(0, |work| work.count),
             };
+            // A turn that ends with work still running in the background is
+            // not "finished working"; an exit took that work with it.
+            let background =
+                (current.phase == ConversationPhase::Idle).then_some(current.background);
             // One observation per session per tick, shared by every device:
             // observing per device would let the first device consume the
             // transition and leave the rest seeing no change.
@@ -285,52 +299,127 @@ impl AttentionWatcher {
                 // a helper restart must not re-notify the state it finds.
                 continue;
             };
-            let Some(kind) = transition(previous, current) else {
-                continue;
-            };
-            let request = request.filter(|_| kind == AttentionKind::Approval);
-            let request_kind = request
+            // Codex can start and finish between watcher ticks. Its source
+            // publishes both boundaries even when the Hub reads them together.
+            let mut events = Vec::new();
+            let mut completion = None;
+            let is_codex = snapshot
+                .state
+                .connector
                 .as_ref()
-                .and_then(|request| request.request_kind.as_deref())
-                .map(|kind| kind.chars().take(64).collect::<String>());
-            let app_name = request
-                .as_ref()
-                .filter(|_| request_kind.as_deref() == Some("app_access"))
-                .and_then(|request| request.details.get("appName"))
-                .and_then(serde_json::Value::as_str);
-            let label = state.labels.get(&session).cloned().unwrap_or_default();
-            for device in devices {
-                let event_id = event_id(
-                    &device,
-                    &session,
-                    &snapshot.generation.as_wire(),
-                    snapshot.revision.get(),
-                    kind,
-                );
-                if state.persisted.delivered.iter().any(|id| *id == event_id) {
-                    continue;
-                }
-                let sealed = remote_access::notification_key(&self.home, &device).and_then(|key| {
-                    let payload =
-                        seal::Payload::new(&session, &label.name, label.title.as_deref(), kind)
-                            .with_request(request_kind.as_deref(), app_name);
-                    seal::seal(&key, &event_id, &payload).ok()
-                });
-                let event = AttentionEvent {
-                    event_id: event_id.clone(),
-                    device_id: device,
-                    kind,
-                    request_kind: request_kind.clone(),
-                    created_at: now,
-                    session_id: Some(session.clone()),
-                    sealed,
-                };
-                if spool(&self.home, &event).is_ok() {
-                    state.persisted.delivered.push_back(event_id);
-                    while state.persisted.delivered.len() > MAX_DEDUPE_RECORDS {
-                        state.persisted.delivered.pop_front();
+                .is_some_and(|connector| connector.id == "codex");
+            if is_codex {
+                let mut phase = previous.phase.clone();
+                for change in changes {
+                    let SubscriberEvent::Mutation(change) = change else {
+                        continue;
+                    };
+                    if change.generation != snapshot.generation {
+                        continue;
                     }
-                    spooled.push(event);
+                    match change.effect {
+                        MutationEffect::StateChanged(next) => {
+                            if phase == ConversationPhase::Working
+                                && next.phase == ConversationPhase::Idle
+                            {
+                                completion = Some(change.revision);
+                            }
+                            phase = next.phase;
+                        }
+                        MutationEffect::Upserted {
+                            item,
+                            state: Some(next),
+                        } => {
+                            if let ConversationItemKind::Request {
+                                request_id,
+                                status: RequestStatus::Pending,
+                                metadata,
+                                ..
+                            } = item.kind
+                            {
+                                if next.pending_request.as_deref() == Some(request_id.as_str()) {
+                                    events.push((
+                                        AttentionKind::Approval,
+                                        change.revision,
+                                        Some(*metadata),
+                                    ));
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            let newly_waiting = previous.pending.is_none();
+            let snapshot_transition = transition(previous, current.clone());
+            if events.is_empty()
+                && (!is_codex || newly_waiting)
+                && snapshot_transition == Some(AttentionKind::Approval)
+            {
+                events.push((AttentionKind::Approval, snapshot.revision, request));
+            }
+            if current.phase == ConversationPhase::Idle
+                || current.phase == ConversationPhase::Exited
+            {
+                if let Some(revision) = completion.or_else(|| {
+                    (snapshot_transition == Some(AttentionKind::Completion))
+                        .then_some(snapshot.revision)
+                }) {
+                    events.push((AttentionKind::Completion, revision, None));
+                }
+            }
+            let label = state.labels.get(&session).cloned().unwrap_or_default();
+            for (kind, event_revision, request) in events {
+                let request_kind = request
+                    .as_ref()
+                    .and_then(|request| request.request_kind.as_deref())
+                    .map(|kind| kind.chars().take(64).collect::<String>());
+                let app_name = request
+                    .as_ref()
+                    .filter(|_| request_kind.as_deref() == Some("app_access"))
+                    .and_then(|request| request.details.get("appName"))
+                    .and_then(serde_json::Value::as_str);
+                for device in &devices {
+                    let event_id = event_id(
+                        device,
+                        &session,
+                        &snapshot.generation.as_wire(),
+                        event_revision.get(),
+                        kind,
+                    );
+                    if state.persisted.delivered.iter().any(|id| *id == event_id) {
+                        continue;
+                    }
+                    let sealed =
+                        remote_access::notification_key(&self.home, device).and_then(|key| {
+                            let payload = seal::Payload::new(
+                                &session,
+                                &label.name,
+                                label.title.as_deref(),
+                                kind,
+                            )
+                            .with_request(request_kind.as_deref(), app_name)
+                            .with_background(
+                                background.filter(|_| kind == AttentionKind::Completion),
+                            );
+                            seal::seal(&key, &event_id, &payload).ok()
+                        });
+                    let event = AttentionEvent {
+                        event_id: event_id.clone(),
+                        device_id: device.clone(),
+                        kind,
+                        request_kind: request_kind.clone(),
+                        created_at: now,
+                        session_id: Some(session.clone()),
+                        sealed,
+                    };
+                    if spool(&self.home, &event).is_ok() {
+                        state.persisted.delivered.push_back(event_id);
+                        while state.persisted.delivered.len() > MAX_DEDUPE_RECORDS {
+                            state.persisted.delivered.pop_front();
+                        }
+                        spooled.push(event);
+                    }
                 }
             }
         }
@@ -611,6 +700,112 @@ mod tests {
             .remove(0)
             .device_id;
         (directory, home, device)
+    }
+
+    #[test]
+    fn a_codex_turn_that_finishes_between_ticks_spools_completion_once() {
+        let (directory, home, device) = enrolled_home();
+        let hub = ConversationHub::with_connector_factory(
+            directory.path().join("hub"),
+            Arc::new(|_| Box::new(IdleConnector) as Box<dyn Connector>),
+        )
+        .unwrap();
+        let id = ConversationId::new("ses_codex_attention");
+        hub.ensure_watched(&id).unwrap();
+        let codex_state = |phase| {
+            let mut state = state(phase, None);
+            state.connector = Some(ConnectorIdentity {
+                id: "codex".into(),
+                version: "1".into(),
+            });
+            ConnectorMutation::State(state)
+        };
+        hub.apply_poll(&id, vec![codex_state(ConversationPhase::Idle)])
+            .unwrap();
+        let watcher = AttentionWatcher::new(home.clone(), hub.clone());
+        watcher.watch(id.as_str(), &device);
+        assert!(watcher.tick_at(1_000).unwrap().is_empty());
+        hub.apply_poll(
+            &id,
+            vec![
+                codex_state(ConversationPhase::Working),
+                codex_state(ConversationPhase::Idle),
+            ],
+        )
+        .unwrap();
+        let events = watcher.tick_at(1_001).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, AttentionKind::Completion);
+        assert_eq!(pending_events(&home).unwrap(), events);
+        assert!(watcher.tick_at(1_002).unwrap().is_empty());
+    }
+
+    #[test]
+    fn codex_approvals_each_spool_once_even_when_several_arrive_between_ticks() {
+        use crate::conversation::{ConversationItemId, ObservedItem, RequestMetadata, RequestType};
+
+        let (directory, home, device) = enrolled_home();
+        let hub = ConversationHub::with_connector_factory(
+            directory.path().join("hub"),
+            Arc::new(|_| Box::new(IdleConnector) as Box<dyn Connector>),
+        )
+        .unwrap();
+        let id = ConversationId::new("ses_codex_approvals");
+        hub.ensure_watched(&id).unwrap();
+        let mut active = state(ConversationPhase::Working, None);
+        active.connector = Some(ConnectorIdentity {
+            id: "codex".into(),
+            version: "1".into(),
+        });
+        hub.apply_poll(&id, vec![ConnectorMutation::State(active)])
+            .unwrap();
+        let watcher = AttentionWatcher::new(home, hub.clone());
+        watcher.watch(id.as_str(), &device);
+        assert!(watcher.tick_at(1_000).unwrap().is_empty());
+        let request = |kind: &str, status| {
+            ConnectorMutation::Upsert(ObservedItem {
+                id: ConversationItemId::native(kind),
+                created_at: "now".into(),
+                parent_subagent_id: None,
+                kind: ConversationItemKind::Request {
+                    request_id: kind.into(),
+                    request_type: RequestType::Permission,
+                    prompt: "Permission requested".into(),
+                    choices: vec![],
+                    questions: vec![],
+                    status,
+                    metadata: Box::new(RequestMetadata {
+                        request_kind: Some(kind.into()),
+                        answerable: Some(false),
+                        ..Default::default()
+                    }),
+                },
+            })
+        };
+        hub.apply_poll(
+            &id,
+            vec![
+                request("command", RequestStatus::Pending),
+                request("app_access", RequestStatus::Pending),
+            ],
+        )
+        .unwrap();
+        let actual: Vec<_> = watcher
+            .tick_at(1_001)
+            .unwrap()
+            .into_iter()
+            .map(|event| (event.kind, event.request_kind.unwrap()))
+            .collect();
+        assert_eq!(
+            actual,
+            [
+                (AttentionKind::Approval, "command".into()),
+                (AttentionKind::Approval, "app_access".into()),
+            ]
+        );
+        hub.apply_poll(&id, vec![request("app_access", RequestStatus::Resolved)])
+            .unwrap();
+        assert!(watcher.tick_at(1_002).unwrap().is_empty());
     }
 
     #[test]

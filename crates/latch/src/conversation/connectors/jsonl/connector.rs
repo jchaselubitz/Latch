@@ -19,6 +19,12 @@ impl Connector for JsonlConnector {
             wake.wait(fallback_poll, None)?;
             return Ok(());
         }
+        let event_timeout = if self.id == "codex" {
+            // App-server events can arrive independently of a terminal paint.
+            event_timeout.min(fallback_poll)
+        } else {
+            event_timeout
+        };
         let wake = self
             .control()?
             .wait_for_activity_or_refresh(event_timeout, wake)?;
@@ -130,6 +136,9 @@ impl JsonlConnector {
         }
         if let Some(source) = self.source.clone() {
             self.read_transcript(source, &mut source_budget, &mut mutations, &mut delta)?;
+            if self.id == "claude" {
+                self.read_subagent_transcripts(&mut source_budget, &mut mutations);
+            }
         }
         // An open control channel delivers kernel events; before it opens,
         // the screen is refreshed on source progress or a slow timer.
@@ -200,8 +209,30 @@ impl JsonlConnector {
         if action.id == crate::conversation::ACTION_CANCEL_TURN {
             return self.cancel_turn(deadline);
         }
+        if action.id == ACTION_RESOLVE_REQUEST && self.id == "codex" {
+            if !self.pending_request.as_ref().is_some_and(|pending| {
+                action.payload["requestId"] == pending.id
+                    && pending.metadata.answerable == Some(true)
+            }) {
+                return Ok(ApplyResult::Refused {
+                    reason: "Codex no longer offers this request. Refresh or answer at the Mac."
+                        .into(),
+                });
+            }
+            return crate::observer::codex::submit_answer(
+                &self.home,
+                &self.session,
+                &action.payload,
+                deadline,
+            );
+        }
         if action.id == ACTION_RESOLVE_REQUEST && action.payload.get("answers").is_some() {
             return self.answer_structured_questions(&action.payload, deadline);
+        }
+        if action.id == ACTION_RESOLVE_REQUEST && self.id == "claude" {
+            if let Some(result) = self.answer_dialog(&action.payload, deadline)? {
+                return Ok(result);
+            }
         }
         if action.id == ACTION_RESOLVE_REQUEST
             && self

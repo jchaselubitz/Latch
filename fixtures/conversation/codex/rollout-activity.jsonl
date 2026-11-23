@@ -1,0 +1,20 @@
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>never project this</environment_context>"}]}}
+{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}
+{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","id":"user-1","content":[{"type":"text","text":"Inspect notes"}]}}}
+{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","id":"exec-1","command":"cat notes.txt","cwd":"/work","status":"completed","aggregated_output":"notes","exit_code":0}}}
+{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"FileChange","id":"patch-1","status":"completed","changes":{"/work/notes.txt":{"unified_diff":"@@ -1 +1 @@\n-old\n+new"}}}}}
+{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"Reasoning","id":"reasoning-1","summary_text":["Review the notes first."],"raw_content":["never project this raw reasoning"]}}}
+{"type":"event_msg","payload":{"type":"plan_update","turn_id":"turn-1","plan":[{"step":"Read notes","status":"completed"},{"step":"Update notes","status":"in_progress"}]}}
+{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"McpToolCall","id":"mcp-1","server":"example","tool":"lookup","status":"failed"}}}
+{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"Extension","id":"web-1","kind":"web_search","query":"paper"}}}
+{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"ImageView","id":"view-1","path":"/work/chart.png"}}}
+{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"SubAgentActivity","id":"child-start","agent_thread_id":"child-1","kind":"started"}}}
+{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"SubAgentActivity","id":"child-end","agent_thread_id":"child-1","kind":"completed"}}}
+{"type":"event_msg","payload":{"type":"token_count","info":{"model_context_window":10000,"last_token_usage":{"total_tokens":2000}}}}
+{"type":"compacted","payload":{"message":"private internal compaction text"}}
+{"type":"event_msg","payload":{"type":"model_reroute","turn_id":"turn-1","to_model":"another-model"}}
+{"type":"event_msg","payload":{"type":"error","turn_id":"turn-1","message":"Rate limit reached"}}
+{"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"turn-1"}}
+{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-2"}}
+{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"AgentMessage","id":"reply-2","content":[{"type":"Text","text":"Notes updated."}]}}}
+{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-2"}}

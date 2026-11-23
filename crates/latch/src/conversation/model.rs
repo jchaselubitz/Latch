@@ -193,6 +193,33 @@ pub struct BackgroundWork {
     pub kinds: Vec<String>,
 }
 
+/// One rate-limit window the agent's last API response reported.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RateLimitUsage {
+    pub kind: String,
+    pub percent_used: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resets_at: Option<String>,
+}
+
+/// The session's context window, rate limits and cost, as the agent last
+/// reported them. Whole numbers only, so the state stays comparable.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionUsage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_percent: Option<u8>,
+    #[serde(default)]
+    pub rate_limits: Vec<RateLimitUsage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_cents: Option<u64>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ActivityStep {
     pub id: String,
@@ -343,6 +370,8 @@ pub struct ConversationState {
     pub effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<SessionUsage>,
 }
 impl ConversationState {
     pub fn starting(connector: Option<ConnectorIdentity>) -> Self {
@@ -365,6 +394,7 @@ impl ConversationState {
             model: None,
             effort: None,
             permission_mode: None,
+            usage: None,
         }
     }
     /// No connector can observe or act on this session yet. Terminal attach
@@ -389,6 +419,7 @@ impl ConversationState {
             model: None,
             effort: None,
             permission_mode: None,
+            usage: None,
         }
     }
 }

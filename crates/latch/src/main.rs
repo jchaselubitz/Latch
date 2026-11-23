@@ -348,6 +348,12 @@ enum Command {
     /// Capture one Codex source binding or observation record. Internal only.
     #[command(hide = true, name = "__codex-conversation-hook")]
     CodexConversationHook,
+    #[command(hide = true, name = "__codex-session")]
+    CodexSession {
+        session_dir: std::path::PathBuf,
+        #[arg(last = true, required = true)]
+        argv: Vec<String>,
+    },
     /// Capture one Cursor hook record. Internal only.
     #[command(hide = true, name = "__cursor-conversation-hook")]
     CursorConversationHook,
@@ -1023,11 +1029,14 @@ fn dispatch(command: Option<Command>) -> Result<()> {
             latch::engine::launch_from_fifo(std::path::Path::new(&manifest_fifo))
         }
         Some(Command::ConversationHook { observer_version }) => {
-            latch::observer::capture_claude_hook(
+            if let Some(output) = latch::observer::capture_claude_hook(
                 &LatchHome::from_env()?,
                 std::io::stdin(),
                 observer_version,
-            )
+            )? {
+                println!("{output}");
+            }
+            Ok(())
         }
         Some(Command::ConversationBridge { action }) => {
             let answer = latch::observer::serve_claude_bridge(
@@ -1040,6 +1049,9 @@ fn dispatch(command: Option<Command>) -> Result<()> {
         }
         Some(Command::CodexConversationHook) => {
             latch::observer::capture_codex_hook(&LatchHome::from_env()?, std::io::stdin())
+        }
+        Some(Command::CodexSession { session_dir, argv }) => {
+            std::process::exit(latch::observer::codex::run(&session_dir, argv)?)
         }
         Some(Command::CursorConversationHook) => {
             latch::observer::capture_cursor_hook(&LatchHome::from_env()?, std::io::stdin())?;

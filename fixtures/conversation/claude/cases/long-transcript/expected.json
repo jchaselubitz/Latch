@@ -1,9 +1,53 @@
 {
-  "projectedItemCount": 633,
+  "projectedItemCount": 627,
   "snapshot": {
     "generation": "generation-1",
     "hasMoreBefore": true,
     "items": [
+      {
+        "createdAt": "2026-09-08T07:32:47.801Z",
+        "id": "0930c2ba-5615-4670-8b55-c1566bc46b96",
+        "kind": {
+          "name": "Bash",
+          "status": "succeeded",
+          "summary": "Read the link driver's close and write path · returned 8 lines",
+          "type": "tool"
+        },
+        "ordinal": 328
+      },
+      {
+        "createdAt": "2026-09-08T07:32:51.525Z",
+        "id": "09728171-e4ca-4f43-a4cb-5bceb7e59fbe",
+        "kind": {
+          "name": "Bash",
+          "status": "succeeded",
+          "summary": "Check the yamux version and its close API · returned 8 lines",
+          "type": "tool"
+        },
+        "ordinal": 329
+      },
+      {
+        "createdAt": "2026-09-08T07:33:34.422Z",
+        "id": "98a81311-98d5-4cc8-8af5-9a57b6a105c6",
+        "kind": {
+          "name": "Bash",
+          "status": "succeeded",
+          "summary": "Read how the driver and crypt tasks are spawned and joined · returned 9 lines",
+          "type": "tool"
+        },
+        "ordinal": 330
+      },
+      {
+        "createdAt": "2026-09-08T07:33:34.402Z",
+        "id": "76c16209-b644-4059-8eb6-dcd7c07df046",
+        "kind": {
+          "name": "Bash",
+          "status": "succeeded",
+          "summary": "Read the memory transport test helpers · returned 14 lines",
+          "type": "tool"
+        },
+        "ordinal": 331
+      },
       {
         "createdAt": "2026-09-08T07:33:35.319Z",
         "id": "589df0ed-0c5e-4297-b258-86ce78b4bf7b",
@@ -13,7 +57,7 @@
           "summary": "Read an existing link test for the establish, open, and read pattern · returned 10 lines",
           "type": "tool"
         },
-        "ordinal": 334
+        "ordinal": 332
       },
       {
         "createdAt": "2026-09-08T07:34:01.944Z",
@@ -24,7 +68,7 @@
           "summary": "Read the transport loop's end and the buffer constants · returned 8 lines",
           "type": "tool"
         },
-        "ordinal": 335
+        "ordinal": 333
       },
       {
         "createdAt": "2026-09-08T07:34:03.700Z",
@@ -35,7 +79,7 @@
           "summary": "Read the logical stream wrapper's shutdown and IO forwarding · returned 8 lines",
           "type": "tool"
         },
-        "ordinal": 336
+        "ordinal": 334
       },
       {
         "createdAt": "2026-09-08T07:35:10.919Z",
@@ -46,7 +90,7 @@
           "summary": "Patch the link driver's close and carrier-end drains and run transport tests · returned 6 lines",
           "type": "tool"
         },
-        "ordinal": 337
+        "ordinal": 335
       },
       {
         "createdAt": "2026-09-08T07:35:24.005Z",
@@ -57,7 +101,7 @@
           "text": "Transport tests pass. Before rebuilding, I'll confirm the new test actually fails without the driver fix, so it is real regression evidence.",
           "type": "message"
         },
-        "ordinal": 338
+        "ordinal": 336
       },
       {
         "createdAt": "2026-09-08T07:45:33.436Z",
@@ -68,7 +112,7 @@
           "summary": "Prove the regression fails on the old driver and passes on the fixed one · returned 1 line",
           "type": "tool"
         },
-        "ordinal": 339
+        "ordinal": 337
       },
       {
         "createdAt": "2026-09-08T07:45:42.584Z",
@@ -79,7 +123,7 @@
           "summary": "Check the stalled regression run and which link.rs is on disk · returned 5 lines",
           "type": "tool"
         },
-        "ordinal": 340
+        "ordinal": 338
       },
       {
         "createdAt": "2026-09-08T07:46:00.214Z",
@@ -90,7 +134,7 @@
           "summary": "Restore the fixed driver and rerun the regression · returned 4 lines",
           "type": "tool"
         },
-        "ordinal": 341
+        "ordinal": 339
       },
       {
         "createdAt": "2026-09-08T07:46:08.068Z",
@@ -101,7 +145,7 @@
           "text": "The fix is confirmed on both sides. Rebuilding the native library, the iOS app, and the Mac payload with it now (both in the background), then I'll reinstall on the phone and the Mac.",
           "type": "message"
         },
-        "ordinal": 342
+        "ordinal": 340
       },
       {
         "createdAt": "2026-09-08T07:46:17.975Z",
@@ -112,7 +156,7 @@
           "summary": "Test, rebuild the XCFramework and iOS app, and reinstall on the phone · returned 1 line",
           "type": "tool"
         },
-        "ordinal": 343
+        "ordinal": 341
       },
       {
         "createdAt": "2026-09-08T07:46:20.432Z",
@@ -123,7 +167,7 @@
           "summary": "Bump the version and build the signed CLI payload with the transport fix · returned 1 line",
           "type": "tool"
         },
-        "ordinal": 344
+        "ordinal": 342
       },
       {
         "createdAt": "2026-09-08T07:46:26.902Z",
@@ -134,7 +178,7 @@
           "text": "While the builds run, recording this second demonstrated failure in the plan.",
           "type": "message"
         },
-        "ordinal": 345
+        "ordinal": 343
       },
       {
         "createdAt": "2026-09-08T07:46:38.967Z",
@@ -145,7 +189,7 @@
           "summary": "Record the receipt-loss failure and fix in the plan · returned 1 line",
           "type": "tool"
         },
-        "ordinal": 346
+        "ordinal": 344
       },
       {
         "createdAt": "2026-09-08T07:46:48.861Z",
@@ -156,18 +200,7 @@
           "text": "Two real defects, both now fixed and covered by tests that fail on the old code:\n\n1. **Authority lookup** picked the first record for the phone's key (a revoked one). Fixed in `latch`; you saw the helper come up after that, but the phone still failed because of the second defect.\n2. **Enrollment receipt lost at close.** The Mac helper writes the encrypted receipt and closes the link in the same breath, and the link layer aborted its transport task before the last frames were sent; the phone side also dropped its connection the instant the carrier closed, even with the receipt still buffered. Both ends now drain within a bounded 3 seconds. This is the \"final response before close\" protection the plan required; the composed tests had not exercised a close immediately after the last write.\n\nThe second fix is in the shared native library, so it needs a new phone build and a new Mac payload. Both are building now (a few minutes), and I'll reinstall the phone app over USB and the Mac payload when they finish. After that, do one more pairing from scratch (revoke the current iPhone entry on the Mac first, then Pair a Device again); the phone should show the session list within a few seconds of your approval.",
           "type": "message"
         },
-        "ordinal": 347
-      },
-      {
-        "createdAt": "2026-09-08T07:47:52.397Z",
-        "id": "e679a5e5-4fc8-4c0b-8afb-1531e261754d",
-        "kind": {
-          "role": "user",
-          "status": "observed",
-          "text": "<task-notification>\n<task-id>bagmewfe2</task-id>\n<tool-use-id>toolu_01SGghD9abbfp4xYZ3A146Vp</tool-use-id>\n<output-file>/tmp/claude/session/0e920c11-b282-4c38-a48d-1af826a485c5/tasks/bagmewfe2.output</output-file>\n<status>completed</status>\n<summary>Background command \"Bump the version and build the signed CLI payload with the transport fix\" completed (exit code 0)</summary>\n</task-notification>",
-          "type": "message"
-        },
-        "ordinal": 348
+        "ordinal": 345
       },
       {
         "createdAt": "2026-09-08T07:48:04.329Z",
@@ -178,7 +211,7 @@
           "summary": "Install the new CLI payload and check the phone chain progress · returned 7 lines",
           "type": "tool"
         },
-        "ordinal": 349
+        "ordinal": 346
       },
       {
         "createdAt": "2026-09-08T07:48:22.151Z",
@@ -189,7 +222,7 @@
           "summary": "Restart the helper so Desktop relaunches it from the new binary · returned 2 lines",
           "type": "tool"
         },
-        "ordinal": 350
+        "ordinal": 347
       },
       {
         "createdAt": "2026-09-08T07:48:24.602Z",
@@ -200,7 +233,7 @@
           "summary": "Rebuild and notarize the Desktop app at 0.2609080746.0 · returned 1 line",
           "type": "tool"
         },
-        "ordinal": 351
+        "ordinal": 348
       },
       {
         "createdAt": "2026-09-08T07:48:24.994Z",
@@ -211,7 +244,7 @@
           "summary": "Check the phone build chain output so far · returned 1 line",
           "type": "tool"
         },
-        "ordinal": 352
+        "ordinal": 349
       },
       {
         "createdAt": "2026-09-08T07:48:37.987Z",
@@ -222,7 +255,7 @@
           "summary": "Wait for the phone build chain and show its result · returned 5 lines",
           "type": "tool"
         },
-        "ordinal": 353
+        "ordinal": 350
       },
       {
         "createdAt": "2026-09-08T07:48:47.937Z",
@@ -233,7 +266,7 @@
           "text": "The phone app with the fix is installed (executable `7a9e7340…`), and the Mac payload 0.2609080746.0 is running the new helper. Launching the app and handing it to you to pair.",
           "type": "message"
         },
-        "ordinal": 354
+        "ordinal": 351
       },
       {
         "createdAt": "2026-09-08T07:48:54.187Z",
@@ -244,7 +277,7 @@
           "summary": "Launch the fixed phone app and list the active Mac record · returned 2 lines",
           "type": "tool"
         },
-        "ordinal": 355
+        "ordinal": 352
       },
       {
         "createdAt": "2026-09-08T07:49:00.223Z",
@@ -255,18 +288,7 @@
           "text": "Everything with the fixes is installed and running: the Mac payload 0.2609080746.0 (new helper is up), and the fixed phone app just launched on the iPhone.\n\nPlease pair once more, from scratch:\n\n1. In Latch on the Mac, Remote Access → Revoke the current \"iPhone\" entry (the one from your last attempt). Revoking there also clears it in the directory, which a CLI revoke would not.\n2. Pair a Device… → scan on the phone → confirm the words → Approve on the Mac.\n\nExpected now: the phone shows \"paired\" and, within a few seconds, the session list. Tell me the result either way; if it still fails, tell me the exact sentence the phone shows and I'll read the logs on both sides again.",
           "type": "message"
         },
-        "ordinal": 356
-      },
-      {
-        "createdAt": "2026-09-08T07:49:14.609Z",
-        "id": "29f3397f-f9a7-4eaa-b228-299398473c38",
-        "kind": {
-          "role": "user",
-          "status": "observed",
-          "text": "<task-notification>\n<task-id>b388scuas</task-id>\n<tool-use-id>toolu_01B5T7wg3fqpFUZ3xFWPbhiv</tool-use-id>\n<output-file>/tmp/claude/session/0e920c11-b282-4c38-a48d-1af826a485c5/tasks/b388scuas.output</output-file>\n<status>completed</status>\n<summary>Background command \"Rebuild and notarize the Desktop app at 0.2609080746.0\" completed (exit code 0)</summary>\n</task-notification>",
-          "type": "message"
-        },
-        "ordinal": 357
+        "ordinal": 353
       },
       {
         "createdAt": "2026-09-08T07:49:32.007Z",
@@ -277,7 +299,7 @@
           "summary": "Commit the transport fix, push main, and tag the release · returned 7 lines",
           "type": "tool"
         },
-        "ordinal": 358
+        "ordinal": 354
       },
       {
         "createdAt": "2026-09-08T07:49:54.325Z",
@@ -288,7 +310,7 @@
           "summary": "Format, commit the fix, and move the release tag onto it · returned 7 lines",
           "type": "tool"
         },
-        "ordinal": 359
+        "ordinal": 355
       },
       {
         "createdAt": "2026-09-08T07:49:57.020Z",
@@ -299,7 +321,7 @@
           "summary": "List release workflow runs to cancel the one from the wrong commit · returned 3 lines",
           "type": "tool"
         },
-        "ordinal": 360
+        "ordinal": 356
       },
       {
         "createdAt": "2026-09-08T07:50:09.256Z",
@@ -310,7 +332,7 @@
           "summary": "Cancel the release run that started from the wrong commit · returned 3 lines",
           "type": "tool"
         },
-        "ordinal": 361
+        "ordinal": 357
       },
       {
         "createdAt": "2026-09-08T07:50:10.956Z",
@@ -321,7 +343,7 @@
           "summary": "Check whether the owner has re-paired yet · returned 7 lines",
           "type": "tool"
         },
-        "ordinal": 362
+        "ordinal": 358
       },
       {
         "createdAt": "2026-09-08T07:50:19.659Z",
@@ -332,7 +354,7 @@
           "text": "The tag is now on the fix commit (`ebf7a88`), the wrong release run is cancelled, and the correct one is building. Two background waits and a progress note, then I'm waiting on your pairing result.",
           "type": "message"
         },
-        "ordinal": 363
+        "ordinal": 359
       },
       {
         "createdAt": "2026-09-08T07:50:26.744Z",
@@ -343,7 +365,7 @@
           "summary": "Wait for the release workflow, then attach the Desktop archive and checksums · returned 2 lines",
           "type": "tool"
         },
-        "ordinal": 364
+        "ordinal": 360
       },
       {
         "createdAt": "2026-09-08T07:50:30.643Z",
@@ -354,7 +376,7 @@
           "summary": "Post Overlord progress update · returned 1 line",
           "type": "tool"
         },
-        "ordinal": 365
+        "ordinal": 361
       },
       {
         "createdAt": "2026-09-08T07:50:35.585Z",
@@ -365,7 +387,7 @@
           "text": "Ready on my side. Both fixes are installed on the Mac (payload 0.2609080746.0, helper restarted from it) and on the phone (fresh app build with the new native library), commits are pushed, and the release for 0.2609080746.0 is building with the Desktop archive queued to attach.\n\nOne thing left for you: revoke the stale \"iPhone\" entry in Latch on the Mac, then Pair a Device… again and approve. I'll check the Mac audit and the service logs the moment you say what the phone shows.",
           "type": "message"
         },
-        "ordinal": 366
+        "ordinal": 362
       },
       {
         "createdAt": "2026-09-08T07:53:16.955Z",
@@ -376,7 +398,7 @@
           "text": "ok paired",
           "type": "message"
         },
-        "ordinal": 367
+        "ordinal": 363
       },
       {
         "createdAt": "2026-09-08T07:53:24.689Z",
@@ -387,7 +409,7 @@
           "summary": "Check the Mac audit for the new pairing and streams · returned 10 lines",
           "type": "tool"
         },
-        "ordinal": 368
+        "ordinal": 364
       },
       {
         "createdAt": "2026-09-08T07:53:45.475Z",
@@ -398,7 +420,7 @@
           "summary": "returned 1 line",
           "type": "tool"
         },
-        "ordinal": 369
+        "ordinal": 365
       },
       {
         "createdAt": "2026-09-08T07:53:57.322Z",
@@ -409,7 +431,7 @@
           "summary": "Install the 0.2609080746.0 Desktop app and relaunch it · returned 4 lines",
           "type": "tool"
         },
-        "ordinal": 370
+        "ordinal": 366
       },
       {
         "createdAt": "2026-09-08T07:54:08.589Z",
@@ -420,7 +442,7 @@
           "summary": "returned 1 line",
           "type": "tool"
         },
-        "ordinal": 371
+        "ordinal": 367
       },
       {
         "createdAt": "2026-09-08T07:55:13.937Z",
@@ -431,7 +453,7 @@
           "summary": "Confirm the helper restarted and the phone reconnected after the Desktop swap · returned 8 lines",
           "type": "tool"
         },
-        "ordinal": 372
+        "ordinal": 368
       },
       {
         "createdAt": "2026-09-08T07:55:36.444Z",
@@ -442,7 +464,7 @@
           "summary": "Record Mac-side baselines and check the phone's lock state · returned 3 lines",
           "type": "tool"
         },
-        "ordinal": 373
+        "ordinal": 369
       },
       {
         "createdAt": "2026-09-08T07:55:42.587Z",
@@ -453,7 +475,7 @@
           "summary": "Run 30 reconnect cycles then 30 cold opens on the phone over USB · returned 1 line",
           "type": "tool"
         },
-        "ordinal": 374
+        "ordinal": 370
       },
       {
         "createdAt": "2026-09-08T07:56:10.103Z",
@@ -464,7 +486,7 @@
           "summary": "Confirm the reconnect-cycle run started on the phone · returned 1 line",
           "type": "tool"
         },
-        "ordinal": 375
+        "ordinal": 371
       },
       {
         "createdAt": "2026-09-08T07:56:19.974Z",
@@ -475,7 +497,7 @@
           "summary": "Check the release assets and cycle-run progress · returned 6 lines",
           "type": "tool"
         },
-        "ordinal": 376
+        "ordinal": 372
       },
       {
         "createdAt": "2026-09-08T07:56:32.308Z",
@@ -486,7 +508,7 @@
           "summary": "Check whether the app is running on the phone and what the harness is doing · returned 4 lines",
           "type": "tool"
         },
-        "ordinal": 377
+        "ordinal": 373
       },
       {
         "createdAt": "2026-09-08T07:56:42.968Z",
@@ -497,7 +519,7 @@
           "summary": "Show the latest Mac audit events · returned 9 lines",
           "type": "tool"
         },
-        "ordinal": 378
+        "ordinal": 374
       },
       {
         "createdAt": "2026-09-08T07:56:46.137Z",
@@ -508,7 +530,7 @@
           "summary": "Peek at the phone's diagnostics files · returned 1 line",
           "type": "tool"
         },
-        "ordinal": 379
+        "ordinal": 375
       },
       {
         "createdAt": "2026-09-08T07:57:16.461Z",
@@ -519,7 +541,7 @@
           "summary": "returned 1 line",
           "type": "tool"
         },
-        "ordinal": 380
+        "ordinal": 376
       },
       {
         "createdAt": "2026-09-08T07:57:20.939Z",
@@ -530,7 +552,7 @@
           "summary": "Inspect the running app's arguments and devicectl's argument handling · returned 4 lines",
           "type": "tool"
         },
-        "ordinal": 381
+        "ordinal": 377
       },
       {
         "createdAt": "2026-09-08T07:58:34.379Z",
@@ -541,7 +563,7 @@
           "summary": "Launch the app without arguments and watch for its first streams · returned 2 lines",
           "type": "tool"
         },
-        "ordinal": 382
+        "ordinal": 378
       },
       {
         "createdAt": "2026-09-08T07:58:42.356Z",
@@ -552,7 +574,7 @@
           "summary": "Read the launch error details and the lock state · returned 17 lines",
           "type": "tool"
         },
-        "ordinal": 383
+        "ordinal": 379
       },
       {
         "createdAt": "2026-09-08T07:59:01.030Z",
@@ -563,7 +585,7 @@
           "summary": "Wait for the phone to be unlocked, then run 30 cycles and 30 cold opens · returned 1 line",
           "type": "tool"
         },
-        "ordinal": 384
+        "ordinal": 380
       },
       {
         "createdAt": "2026-09-08T07:59:09.759Z",
@@ -574,7 +596,7 @@
           "text": "Pairing works: approval at 2001:db8::1, first served request at 2001:db8::1, and the phone recovered in about two seconds when I swapped the Desktop app (helper restart). The measured rows are now blocked only by the phone's lock.\n\nPlease do these on the iPhone and leave it alone afterwards:\n\n1. Settings → Display & Brightness → Auto-Lock → **Never**, then unlock the phone and keep it plugged into the Mac. The harness is waiting and starts on its own the moment the phone is unlocked: 30 reconnect cycles (about 4 minutes), then 30 real cold opens (about 11 minutes). Do not open the Latch app by hand during that time; the harness relaunches it.\n2. Tell me which network the phone is on right now. Its traffic reaches the services from a Verizon address while the Mac is on Telekom, so it is not on the Mac's LAN; I need to know whether that is cellular with Wi-Fi off or some other Wi-Fi, so the row is labeled honestly.\n\nWhen the run finishes I'll post the per-stage p50/p95 numbers and then ask you for the short manual subset (open a terminal, type a command, send one conversation message and approve one action) on this network.",
           "type": "message"
         },
-        "ordinal": 385
+        "ordinal": 381
       },
       {
         "createdAt": "2026-09-08T08:13:42.539Z",
@@ -585,7 +607,7 @@
           "text": "currently wifi is on. the Verizon sim is off and the german sim (network: 1&1) is the one I currently use. It was on VPN before, but I just turned that off",
           "type": "message"
         },
-        "ordinal": 386
+        "ordinal": 382
       },
       {
         "createdAt": "2026-09-08T08:13:49.263Z",
@@ -596,7 +618,7 @@
           "text": "Thanks. That means the earlier attempts went through the VPN, which explains the foreign address. With the VPN off and Wi-Fi on, the row depends on whether the phone is on the Mac's Wi-Fi. Checking the phone's current address and the harness state.",
           "type": "message"
         },
-        "ordinal": 387
+        "ordinal": 383
       },
       {
         "createdAt": "2026-09-08T08:13:56.159Z",
@@ -607,7 +629,7 @@
           "summary": "Check harness progress, phone lock state, and the Mac's public address · returned 4 lines",
           "type": "tool"
         },
-        "ordinal": 388
+        "ordinal": 384
       },
       {
         "createdAt": "2026-09-08T08:13:58.925Z",
@@ -618,7 +640,7 @@
           "summary": "returned 1 line",
           "type": "tool"
         },
-        "ordinal": 389
+        "ordinal": 385
       },
       {
         "createdAt": "2026-09-08T08:14:45.317Z",
@@ -629,7 +651,7 @@
           "summary": "Launch the app with diagnostics arguments while unlocked and watch for streams · returned 5 lines",
           "type": "tool"
         },
-        "ordinal": 390
+        "ordinal": 386
       },
       {
         "createdAt": "2026-09-08T08:14:57.931Z",
@@ -640,7 +662,7 @@
           "summary": "Pass app arguments after a -- separator in the harness · returned 1 line",
           "type": "tool"
         },
-        "ordinal": 391
+        "ordinal": 387
       },
       {
         "createdAt": "2026-09-08T08:15:39.798Z",
@@ -651,7 +673,7 @@
           "summary": "Launch with the separator and a 3-cycle diagnostics run, then count streams · returned 3 lines",
           "type": "tool"
         },
-        "ordinal": 392
+        "ordinal": 388
       },
       {
         "createdAt": "2026-09-08T08:15:53.634Z",
@@ -662,7 +684,7 @@
           "summary": "Fix the harness launch separator and stop the broken run · returned 6 lines",
           "type": "tool"
         },
-        "ordinal": 393
+        "ordinal": 389
       },
       {
         "createdAt": "2026-09-08T08:15:56.548Z",
@@ -673,7 +695,7 @@
           "summary": "Pull and summarize the phone's diagnostics from the 3-cycle test · returned 5 lines",
           "type": "tool"
         },
-        "ordinal": 394
+        "ordinal": 390
       },
       {
         "createdAt": "2026-09-08T08:16:16.001Z",
@@ -684,7 +706,7 @@
           "summary": "returned 1 line",
           "type": "tool"
         },
-        "ordinal": 395
+        "ordinal": 391
       },
       {
         "createdAt": "2026-09-08T08:16:18.421Z",
@@ -695,7 +717,7 @@
           "summary": "Read the Mac audit since 08:14 and the recovery-cycle implementation · returned 10 lines",
           "type": "tool"
         },
-        "ordinal": 396
+        "ordinal": 392
       },
       {
         "createdAt": "2026-09-08T08:17:20.228Z",
@@ -706,7 +728,7 @@
           "summary": "returned 1 line",
           "type": "tool"
         },
-        "ordinal": 397
+        "ordinal": 393
       },
       {
         "createdAt": "2026-09-08T08:17:19.631Z",
@@ -717,7 +739,7 @@
           "summary": "Read the helper's status emission points · returned 16 lines",
           "type": "tool"
         },
-        "ordinal": 398
+        "ordinal": 394
       },
       {
         "createdAt": "2026-09-08T08:17:20.870Z",
@@ -728,7 +750,7 @@
           "summary": "Find the audit writer and the crate's public surface for the helper · returned 12 lines",
           "type": "tool"
         },
-        "ordinal": 399
+        "ordinal": 395
       },
       {
         "createdAt": "2026-09-08T08:17:29.475Z",
@@ -739,7 +761,7 @@
           "summary": "Read the helper's status details and the LatchHome type · returned 7 lines",
           "type": "tool"
         },
-        "ordinal": 400
+        "ordinal": 396
       },
       {
         "createdAt": "2026-09-08T08:17:33.128Z",
@@ -750,7 +772,7 @@
           "summary": "returned 1 line",
           "type": "tool"
         },
-        "ordinal": 401
+        "ordinal": 397
       },
       {
         "createdAt": "2026-09-08T08:18:04.118Z",
@@ -761,7 +783,7 @@
           "summary": "Print the raw per-attempt stages from the 3-cycle test · returned 4 lines",
           "type": "tool"
         },
-        "ordinal": 402
+        "ordinal": 398
       },
       {
         "createdAt": "2026-09-08T08:18:04.256Z",
@@ -772,7 +794,7 @@
           "summary": "Read how the phone races the LAN and relay carriers · returned 6 lines",
           "type": "tool"
         },
-        "ordinal": 403
+        "ordinal": 399
       },
       {
         "createdAt": "2026-09-08T08:18:18.396Z",
@@ -783,7 +805,7 @@
           "summary": "Record helper link status transitions in the Mac audit trail · returned 9 lines",
           "type": "tool"
         },
-        "ordinal": 404
+        "ordinal": 400
       },
       {
         "createdAt": "2026-09-08T08:18:48.975Z",
@@ -794,7 +816,7 @@
           "summary": "Read the phone's LAN/relay race and loser handling · returned 6 lines",
           "type": "tool"
         },
-        "ordinal": 405
+        "ordinal": 401
       },
       {
         "createdAt": "2026-09-08T08:18:50.682Z",
@@ -805,7 +827,7 @@
           "summary": "Read the LAN connect timeouts and how LAN targets are discovered · returned 13 lines",
           "type": "tool"
         },
-        "ordinal": 406
+        "ordinal": 402
       },
       {
         "createdAt": "2026-09-08T08:18:51.241Z",
@@ -816,7 +838,7 @@
           "summary": "Read the Mac's Bonjour advertisement and LAN-accept replacement rule · returned 14 lines",
           "type": "tool"
         },
-        "ordinal": 407
+        "ordinal": 403
       },
       {
         "createdAt": "2026-09-08T08:19:24.594Z",
@@ -827,7 +849,7 @@
           "summary": "Check whether generated Swift bindings propagate task cancellation to Rust futures · returned 1 line",
           "type": "tool"
         },
-        "ordinal": 408
+        "ordinal": 404
       },
       {
         "createdAt": "2026-09-08T08:20:54.367Z",
@@ -838,7 +860,7 @@
           "summary": "Build the instrumented helper, install it unsigned for diagnosis, and restart it · returned 9 lines",
           "type": "tool"
         },
-        "ordinal": 409
+        "ordinal": 405
       },
       {
         "createdAt": "2026-09-08T08:22:37.726Z",
@@ -849,7 +871,7 @@
           "summary": "Run three diagnostics cycles and read the Mac's link lifecycle audit · returned 1 line",
           "type": "tool"
         },
-        "ordinal": 410
+        "ordinal": 406
       },
       {
         "createdAt": "2026-09-08T08:22:37.877Z",
@@ -860,7 +882,7 @@
           "summary": "Locate the coordinator's link-loss detection and retry scheduling · returned 7 lines",
           "type": "tool"
         },
-        "ordinal": 411
+        "ordinal": 407
       },
       {
         "createdAt": "2026-09-08T08:22:57.152Z",
@@ -871,7 +893,7 @@
           "summary": "Check whether the instrumented helper is running and writing audit events · returned 6 lines",
           "type": "tool"
         },
-        "ordinal": 412
+        "ordinal": 408
       },
       {
         "createdAt": "2026-09-08T08:23:00.936Z",
@@ -882,7 +904,7 @@
           "summary": "returned 1 line",
           "type": "tool"
         },
-        "ordinal": 413
+        "ordinal": 409
       },
       {
         "createdAt": "2026-09-08T08:23:37.914Z",
@@ -893,7 +915,7 @@
           "summary": "Inspect the running helper's sockets, gateway child, and home resolution · returned 8 lines",
           "type": "tool"
         },
-        "ordinal": 414
+        "ordinal": 410
       },
       {
         "createdAt": "2026-09-08T08:23:37.128Z",
@@ -904,7 +926,7 @@
           "summary": "Read the audit writer for a reason it could silently fail · returned 8 lines",
           "type": "tool"
         },
-        "ordinal": 415
+        "ordinal": 411
       },
       {
         "createdAt": "2026-09-08T08:24:09.030Z",
@@ -915,7 +937,7 @@
           "summary": "Sign the diagnostic helper, reinstall, and verify it starts its gateway and sockets · returned 8 lines",
           "type": "tool"
         },
-        "ordinal": 416
+        "ordinal": 412
       },
       {
         "createdAt": "2026-09-08T08:25:42.330Z",
@@ -926,7 +948,7 @@
           "summary": "Run three cycles and read the Mac's link lifecycle from the audit · returned 12 lines",
           "type": "tool"
         },
-        "ordinal": 417
+        "ordinal": 413
       },
       {
         "createdAt": "2026-09-08T08:25:42.466Z",
@@ -937,7 +959,7 @@
           "summary": "Read the phone's suspend, resume, and settle logic · returned 9 lines",
           "type": "tool"
         },
-        "ordinal": 418
+        "ordinal": 414
       },
       {
         "createdAt": "2026-09-08T08:26:19.884Z",
@@ -948,7 +970,7 @@
           "summary": "Read the coordinator's suspend and resume semantics · returned 9 lines",
           "type": "tool"
         },
-        "ordinal": 419
+        "ordinal": 415
       },
       {
         "createdAt": "2026-09-08T08:26:20.054Z",
@@ -959,7 +981,7 @@
           "summary": "Read the app-model recovery test fixtures · returned 9 lines",
           "type": "tool"
         },
-        "ordinal": 420
+        "ordinal": 416
       },
       {
         "createdAt": "2026-09-08T08:26:39.476Z",
@@ -970,7 +992,7 @@
           "summary": "Read the scripted connector test fixture · returned 4 lines",
           "type": "tool"
         },
-        "ordinal": 421
+        "ordinal": 417
       },
       {
         "createdAt": "2026-09-08T08:26:52.830Z",
@@ -981,7 +1003,7 @@
           "summary": "Make suspend and resume apply in request order in the app model · returned 1 line",
           "type": "tool"
         },
-        "ordinal": 422
+        "ordinal": 418
       },
       {
         "createdAt": "2026-09-08T08:27:01.210Z",
@@ -992,7 +1014,7 @@
           "summary": "Read the connector fixture API and the existing suspend/resume test · returned 11 lines",
           "type": "tool"
         },
-        "ordinal": 423
+        "ordinal": 419
       },
       {
         "createdAt": "2026-09-08T08:27:36.750Z",
@@ -1003,7 +1025,7 @@
           "summary": "Add the suspend/resume ordering regression and run the recovery suites · returned 5 lines",
           "type": "tool"
         },
-        "ordinal": 424
+        "ordinal": 420
       },
       {
         "createdAt": "2026-09-08T08:27:44.672Z",
@@ -1014,7 +1036,7 @@
           "text": "Recovery tests pass with the ordering fix. Rebuilding the phone app with it, reinstalling, and rerunning three cycles; meanwhile recording these findings in the plan and the runbook.",
           "type": "message"
         },
-        "ordinal": 425
+        "ordinal": 421
       },
       {
         "createdAt": "2026-09-08T08:27:58.851Z",
@@ -1025,7 +1047,7 @@
           "summary": "Rebuild and reinstall the phone app, run five cycles, and read both sides · returned 2 lines",
           "type": "tool"
         },
-        "ordinal": 426
+        "ordinal": 422
       },
       {
         "createdAt": "2026-09-08T08:28:10.989Z",
@@ -1036,7 +1058,7 @@
           "summary": "Record the suspend/resume race, the audited link lifecycle, and the signing note · returned 1 line",
           "type": "tool"
         },
-        "ordinal": 427
+        "ordinal": 423
       },
       {
         "createdAt": "2026-09-08T08:28:21.869Z",
@@ -1047,7 +1069,7 @@
           "summary": "Run the whole mobile kit suite after the app-model change · returned 1 line",
           "type": "tool"
         },
-        "ordinal": 428
+        "ordinal": 424
       },
       {
         "createdAt": "2026-09-08T08:28:23.808Z",
@@ -1058,7 +1080,7 @@
           "summary": "Record the same-LAN Mac baseline and drop the two mislabeled baselines · returned 2 lines",
           "type": "tool"
         },
-        "ordinal": 429
+        "ordinal": 425
       },
       {
         "createdAt": "2026-09-08T08:29:25.911Z",
@@ -1069,7 +1091,7 @@
           "summary": "Wait for the five-cycle run and show both sides' results · returned 13 lines",
           "type": "tool"
         },
-        "ordinal": 430
+        "ordinal": 426
       },
       {
         "createdAt": "2026-09-08T08:31:01.075Z",
@@ -1080,7 +1102,7 @@
           "summary": "Run five cycles with the LAN attempt skipped and read the phone's stages · returned 4 lines",
           "type": "tool"
         },
-        "ordinal": 431
+        "ordinal": 427
       },
       {
         "createdAt": "2026-09-08T08:31:35.662Z",
@@ -1091,7 +1113,7 @@
           "summary": "Read the coordinator's supervise loop, publish, and stopSupervisor · returned 12 lines",
           "type": "tool"
         },
-        "ordinal": 432
+        "ordinal": 428
       },
       {
         "createdAt": "2026-09-08T08:31:37.776Z",
@@ -1102,7 +1124,7 @@
           "summary": "Read the FFI connect path and the native connection's close and wait behavior · returned 11 lines",
           "type": "tool"
         },
-        "ordinal": 433
+        "ordinal": 429
       },
       {
         "createdAt": "2026-09-08T08:32:13.056Z",
@@ -1113,7 +1135,7 @@
           "summary": "Read the FFI connect_wss implementation and its runtime · returned 11 lines",
           "type": "tool"
         },
-        "ordinal": 434
+        "ordinal": 430
       },
       {
         "createdAt": "2026-09-08T08:32:14.987Z",
@@ -1124,7 +1146,7 @@
           "summary": "Read stopSupervisor's tail and the FFI close, wait_closed, and open_service · returned 13 lines",
           "type": "tool"
         },
-        "ordinal": 435
+        "ordinal": 431
       },
       {
         "createdAt": "2026-09-08T08:33:15.292Z",
@@ -1135,7 +1157,7 @@
           "summary": "Add the content-free phone stage trace and build the kit · returned 2 lines",
           "type": "tool"
         },
-        "ordinal": 436
+        "ordinal": 432
       },
       {
         "createdAt": "2026-09-08T08:34:35.681Z",
@@ -1146,7 +1168,7 @@
           "summary": "Rebuild with the trace, reinstall, run three cycles, and read the phone trace with the Mac audit · returned 17 lines",
           "type": "tool"
         },
-        "ordinal": 437
+        "ordinal": 433
       },
       {
         "createdAt": "2026-09-08T08:34:49.091Z",
@@ -1157,7 +1179,7 @@
           "summary": "Read the snapshot observation code on both sides and the trace head · returned 7 lines",
           "type": "tool"
         },
-        "ordinal": 438
+        "ordinal": 434
       },
       {
         "createdAt": "2026-09-08T08:35:18.712Z",
@@ -1168,7 +1190,7 @@
           "summary": "Check the stub protocol capabilities, request timeouts, and the refresh path · returned 3 lines",
           "type": "tool"
         },
-        "ordinal": 439
+        "ordinal": 435
       },
       {
         "createdAt": "2026-09-08T08:35:24.831Z",
@@ -1179,7 +1201,7 @@
           "summary": "Run discovery as a generation-guarded task instead of inline in the snapshot loop · returned 1 line",
           "type": "tool"
         },
-        "ordinal": 440
+        "ordinal": 436
       },
       {
         "createdAt": "2026-09-08T08:35:43.188Z",
@@ -1190,7 +1212,7 @@
           "summary": "Read the stub URL protocol to add a hanging response · returned 8 lines",
           "type": "tool"
         },
-        "ordinal": 441
+        "ordinal": 437
       },
       {
         "createdAt": "2026-09-08T08:36:04.975Z",
@@ -1201,7 +1223,7 @@
           "summary": "Run the app-model suites after the discovery change · returned 4 lines",
           "type": "tool"
         },
-        "ordinal": 442
+        "ordinal": 438
       },
       {
         "createdAt": "2026-09-08T08:36:12.648Z",
@@ -1212,7 +1234,7 @@
           "text": "Suites pass with the change. Adding a regression where the previous generation's session refresh hangs, then rebuilding the phone app to confirm on the device.",
           "type": "message"
         },
-        "ordinal": 443
+        "ordinal": 439
       },
       {
         "createdAt": "2026-09-08T08:36:35.928Z",
@@ -1223,7 +1245,7 @@
           "summary": "Add the hung-request regression and run the app-model suite · returned 4 lines",
           "type": "tool"
         },
-        "ordinal": 444
+        "ordinal": 440
       },
       {
         "createdAt": "2026-09-08T08:37:01.125Z",
@@ -1234,7 +1256,7 @@
           "summary": "Rebuild, smoke-test three cycles, then run the same-LAN measured rows · returned 1 line",
           "type": "tool"
         },
-        "ordinal": 445
+        "ordinal": 441
       },
       {
         "createdAt": "2026-09-08T08:37:06.467Z",
@@ -1245,7 +1267,7 @@
           "text": "While the device run proceeds, recording the fourth demonstrated failure (the serialized snapshot loop) in the plan.",
           "type": "message"
         },
-        "ordinal": 446
+        "ordinal": 442
       },
       {
         "createdAt": "2026-09-08T08:39:44.921Z",
@@ -1256,7 +1278,7 @@
           "summary": "Record the finding, then check the smoke result · returned 8 lines",
           "type": "tool"
         },
-        "ordinal": 447
+        "ordinal": 443
       },
       {
         "createdAt": "2026-09-08T08:39:55.012Z",
@@ -1267,7 +1289,7 @@
           "text": "Smoke passed: 3 of 3 cycles, link ready in 0.4–0.55 s and gateway usable in 0.5–0.8 s over the relay. The measured same-LAN rows are running (about 15 minutes). Committing the fixes meanwhile.",
           "type": "message"
         },
-        "ordinal": 448
+        "ordinal": 444
       },
       {
         "createdAt": "2026-09-08T08:40:08.990Z",
@@ -1278,7 +1300,7 @@
           "summary": "Commit and push the phone stall fixes and the audit instrumentation · returned 2 lines",
           "type": "tool"
         },
-        "ordinal": 449
+        "ordinal": 445
       },
       {
         "createdAt": "2026-09-08T08:44:24.444Z",
@@ -1289,7 +1311,7 @@
           "summary": "Post progress and check the same-LAN run · returned 4 lines",
           "type": "tool"
         },
-        "ordinal": 450
+        "ordinal": 446
       },
       {
         "createdAt": "2026-09-08T08:44:41.920Z",
@@ -1300,7 +1322,7 @@
           "summary": "Report the larger applicationReady sample per attempt and re-summarize the smoke run · returned 10 lines",
           "type": "tool"
         },
-        "ordinal": 451
+        "ordinal": 447
       },
       {
         "createdAt": "2026-09-08T08:53:31.937Z",
@@ -1311,7 +1333,7 @@
           "summary": "Wait for the same-LAN run to finish · returned 5 lines",
           "type": "tool"
         },
-        "ordinal": 452
+        "ordinal": 448
       },
       {
         "createdAt": "2026-09-08T08:53:40.851Z",
@@ -1322,7 +1344,7 @@
           "summary": "Summarize the same-LAN cycles and cold opens · returned 14 lines",
           "type": "tool"
         },
-        "ordinal": 453
+        "ordinal": 449
       },
       {
         "createdAt": "2026-09-08T08:53:43.376Z",
@@ -1333,7 +1355,7 @@
           "summary": "List every measured reconnect attempt with its path and outcome · returned 5 lines",
           "type": "tool"
         },
-        "ordinal": 454
+        "ordinal": 450
       },
       {
         "createdAt": "2026-09-08T08:54:31.773Z",
@@ -1344,7 +1366,7 @@
           "summary": "Record the same-LAN automated rows as a field run · returned 2 lines",
           "type": "tool"
         },
-        "ordinal": 455
+        "ordinal": 451
       },
       {
         "createdAt": "2026-09-08T08:54:36.891Z",
@@ -1355,7 +1377,7 @@
           "summary": "Inspect the LAN attempt outcomes in the phone trace · returned 14 lines",
           "type": "tool"
         },
-        "ordinal": 456
+        "ordinal": 452
       },
       {
         "createdAt": "2026-09-08T08:54:37.042Z",
@@ -1366,7 +1388,7 @@
           "summary": "Read how the LAN target host is chosen on both ends · returned 12 lines",
           "type": "tool"
         },
-        "ordinal": 457
+        "ordinal": 453
       },
       {
         "createdAt": "2026-09-08T08:55:08.926Z",
@@ -1377,7 +1399,7 @@
           "summary": "Check the Mac's Bonjour advertisement and the phone's local-network entitlements · returned 7 lines",
           "type": "tool"
         },
-        "ordinal": 458
+        "ordinal": 454
       },
       {
         "createdAt": "2026-09-08T08:55:13.029Z",
@@ -1388,7 +1410,7 @@
           "summary": "Record the same-LAN measurements in the field report · returned 1 line",
           "type": "tool"
         },
-        "ordinal": 459
+        "ordinal": 455
       },
       {
         "createdAt": "2026-09-08T08:55:46.693Z",
@@ -1399,7 +1421,7 @@
           "summary": "Widen the Bonjour browse, trace its result, rebuild, and run five LAN-allowed cycles · returned 1 line",
           "type": "tool"
         },
-        "ordinal": 460
+        "ordinal": 456
       },
       {
         "createdAt": "2026-09-08T08:56:50.828Z",
@@ -1410,7 +1432,7 @@
           "summary": "Wait for the LAN check and show the browse results · returned 12 lines",
           "type": "tool"
         },
-        "ordinal": 461
+        "ordinal": 457
       },
       {
         "createdAt": "2026-09-08T08:57:23.676Z",
@@ -1421,7 +1443,7 @@
           "text": "Same-LAN automated rows are done and both gates hold, but the LAN entry is not being used: the phone's Bonjour browse finds no Mac even with a 1.5 s window, while the Mac advertises the service on three interfaces. That needs two things only you can check on the iPhone. Here is the status and what I need.\n\n**Measured, same LAN (phone on your Wi-Fi, VPN off), recorded as `docs/field-runs/same-lan-20260908T085431Z.json`**\n\n| Row | Attempts | Result |\n| --- | --- | --- |\n| Cold opens (real launches over USB) | 30 | 30/30, launch to usable gateway p50 923 ms, p95 1500 ms, max 1617 ms |\n| Reconnect cycles, LAN allowed | 30 | 30/30, resume to usable gateway p95 1030 ms |\n| Reconnect cycles, relay only | 30 | 30/30 |\n\nAll 90 went over the relay. Gates: cold open ≤ 5 s met, explicit recovery ≤ 5 s met.\n\n**Fixed along the way** (committed as `6dc55a8`): a suspend/resume ordering race and a serialized snapshot loop that stalled the phone for 20 s after every resume; the Mac helper now audits its link lifecycle; the harness passes `--` before app arguments.\n\n**Please check on the iPhone**\n1. Settings → Apps → Latch → is **Local Network** switched on? If iOS never showed the prompt, toggle it on. Without it the app cannot browse for the Mac and will always use the relay.\n2. Settings → Wi-Fi → tap the (i) next to your network: what is the phone's IP address? The Mac is 192.0.2.10; if the phone is on a different subnet or a guest network, LAN discovery cannot work there.\n\n**Manual subset on this network, whenever you have two minutes** (the app is installed and paired; leave Auto-Lock at Never): open a session's terminal, type `pwd` and Enter, confirm the output; send one conversation message to any session and approve one action if one is pending; open a preview. Tell me what you saw and roughly how long each took. After that, turn Wi-Fi off and tell me; I'll run the cellular rows over USB.",
           "type": "message"
         },
-        "ordinal": 462
+        "ordinal": 458
       },
       {
         "createdAt": "2026-09-08T09:12:22.505Z",
@@ -1432,7 +1454,7 @@
           "text": "192.0.2.10 is the phones wifi ip",
           "type": "message"
         },
-        "ordinal": 463
+        "ordinal": 459
       },
       {
         "createdAt": "2026-09-08T09:12:47.470Z",
@@ -1443,7 +1465,7 @@
           "text": "Same subnet as the Mac (192.0.2.10 and 192.0.2.10), so discovery should work there. That leaves the Local Network permission as the likely blocker. Please check Settings → Apps → Latch and tell me whether **Local Network** is on; if it is off or missing, switch it on and I'll rerun five LAN-allowed cycles immediately.\n\nMeanwhile I'll look at the browse from the Mac's side once more and keep the rest of the matrix ready.",
           "type": "message"
         },
-        "ordinal": 464
+        "ordinal": 460
       },
       {
         "createdAt": "2026-09-08T09:12:59.147Z",
@@ -1454,7 +1476,7 @@
           "summary": "Resolve the Mac's advertised LAN service and its addresses · returned 1 line",
           "type": "tool"
         },
-        "ordinal": 465
+        "ordinal": 461
       },
       {
         "createdAt": "2026-09-08T09:13:13.389Z",
@@ -1465,7 +1487,7 @@
           "summary": "Show the Mac's advertised service record and address resolution · returned 1 line",
           "type": "tool"
         },
-        "ordinal": 466
+        "ordinal": 462
       },
       {
         "createdAt": "2026-09-08T09:13:24.918Z",
@@ -1476,7 +1498,7 @@
           "summary": "Bump the version and build the signed, notarized CLI payload with the audited helper · returned 1 line",
           "type": "tool"
         },
-        "ordinal": 467
+        "ordinal": 463
       },
       {
         "createdAt": "2026-09-08T09:13:29.840Z",
@@ -1487,7 +1509,7 @@
           "summary": "Record the LAN discovery finding as outstanding · returned 1 line",
           "type": "tool"
         },
-        "ordinal": 468
+        "ordinal": 464
       },
       {
         "createdAt": "2026-09-08T09:14:08.228Z",
@@ -1498,7 +1520,7 @@
           "summary": "Wait for the payload build to finish · failed: The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP wh…",
           "type": "tool"
         },
-        "ordinal": 469
+        "ordinal": 465
       },
       {
         "createdAt": "2026-09-08T09:14:08.231Z",
@@ -1509,7 +1531,7 @@
           "text": "[Request interrupted by user for tool use]",
           "type": "message"
         },
-        "ordinal": 470
+        "ordinal": 466
       },
       {
         "createdAt": "2026-09-08T09:14:08.265Z",
@@ -1520,7 +1542,7 @@
           "text": "The app now has local network access",
           "type": "message"
         },
-        "ordinal": 471
+        "ordinal": 467
       },
       {
         "createdAt": "2026-09-08T09:14:11.339Z",
@@ -1531,7 +1553,7 @@
           "text": "Local Network is on now. Running five LAN-allowed cycles to see whether the LAN carrier is discovered and wins.",
           "type": "message"
         },
-        "ordinal": 472
+        "ordinal": 468
       },
       {
         "createdAt": "2026-09-08T09:15:00.837Z",
@@ -1542,7 +1564,7 @@
           "summary": "Run five LAN-allowed cycles and read the browse and path results · returned 16 lines",
           "type": "tool"
         },
-        "ordinal": 473
+        "ordinal": 469
       },
       {
         "createdAt": "2026-09-08T09:15:21.161Z",
@@ -1553,7 +1575,7 @@
           "summary": "Read the connect options struct to extend it · returned 7 lines",
           "type": "tool"
         },
-        "ordinal": 474
+        "ordinal": 470
       },
       {
         "createdAt": "2026-09-08T09:15:58.145Z",
@@ -1564,7 +1586,7 @@
           "summary": "Add the diagnostics-only prefer-LAN option and build the kit · returned 2 lines",
           "type": "tool"
         },
-        "ordinal": 475
+        "ordinal": 471
       },
       {
         "createdAt": "2026-09-08T09:16:00.398Z",
@@ -1575,7 +1597,7 @@
           "summary": "Show the finished payload build · returned 5 lines",
           "type": "tool"
         },
-        "ordinal": 476
+        "ordinal": 472
       },
       {
         "createdAt": "2026-09-08T09:16:20.971Z",
@@ -1586,7 +1608,7 @@
           "summary": "Install the notarized 0.2609080913.0 payload and restart the helper · returned 6 lines",
           "type": "tool"
         },
-        "ordinal": 477
+        "ordinal": 473
       },
       {
         "createdAt": "2026-09-08T09:16:22.770Z",
@@ -1597,7 +1619,7 @@
           "summary": "Rebuild the phone app with prefer-LAN, install, and run five LAN-first cycles · returned 1 line",
           "type": "tool"
         },
-        "ordinal": 478
+        "ordinal": 474
       },
       {
         "createdAt": "2026-09-08T09:17:49.087Z",
@@ -1608,7 +1630,7 @@
           "summary": "Wait for the LAN-first cycles and show the results · returned 14 lines",
           "type": "tool"
         },
-        "ordinal": 479
+        "ordinal": 475
       },
       {
         "createdAt": "2026-09-08T09:18:11.789Z",
@@ -1619,7 +1641,7 @@
           "summary": "Map interface names to the indices the advertisement appeared on · returned 18 lines",
           "type": "tool"
         },
-        "ordinal": 480
+        "ordinal": 476
       },
       {
         "createdAt": "2026-09-08T09:18:13.488Z",
@@ -1630,7 +1652,7 @@
           "summary": "Check the mdns-sd interface controls available · returned 5 lines",
           "type": "tool"
         },
-        "ordinal": 481
+        "ordinal": 477
       },
       {
         "createdAt": "2026-09-08T09:18:38.112Z",
@@ -1641,7 +1663,7 @@
           "summary": "Fix the Bonjour descriptor, rebuild, and rerun five LAN-first cycles · returned 1 line",
           "type": "tool"
         },
-        "ordinal": 482
+        "ordinal": 478
       },
       {
         "createdAt": "2026-09-08T09:18:53.992Z",
@@ -1652,7 +1674,7 @@
           "summary": "Record the Bonjour descriptor finding in the plan · returned 1 line",
           "type": "tool"
         },
-        "ordinal": 483
+        "ordinal": 479
       },
       {
         "createdAt": "2026-09-08T09:19:58.151Z",
@@ -1663,7 +1685,7 @@
           "summary": "Wait for the LAN-first cycles with the descriptor fix · returned 11 lines",
           "type": "tool"
         },
-        "ordinal": 484
+        "ordinal": 480
       },
       {
         "createdAt": "2026-09-08T09:20:35.683Z",
@@ -1674,7 +1696,7 @@
           "summary": "Check if-addrs availability and the LAN target parsing · returned 10 lines",
           "type": "tool"
         },
-        "ordinal": 485
+        "ordinal": 481
       },
       {
         "createdAt": "2026-09-08T09:21:19.309Z",
@@ -1685,7 +1707,7 @@
           "summary": "Publish LAN addresses from the Mac, try them first on the phone, and widen LAN bounds · returned 5 lines",
           "type": "tool"
         },
-        "ordinal": 486
+        "ordinal": 482
       },
       {
         "createdAt": "2026-09-08T09:21:19.711Z",
@@ -1696,7 +1718,7 @@
           "summary": "Find tests and fixtures that pin the TXT record shape · returned 1 line",
           "type": "tool"
         },
-        "ordinal": 487
+        "ordinal": 483
       },
       {
         "createdAt": "2026-09-08T09:21:53.281Z",
@@ -1707,7 +1729,7 @@
           "summary": "Build helper, FFI, XCFramework, and app with the LAN fixes, then measure LAN-first and race cycles · returned 1 line",
           "type": "tool"
         },
-        "ordinal": 488
+        "ordinal": 484
       },
       {
         "createdAt": "2026-09-08T09:26:27.775Z",
@@ -1718,7 +1740,7 @@
           "summary": "Wait for the LAN chain and show its full log · returned 10 lines",
           "type": "tool"
         },
-        "ordinal": 489
+        "ordinal": 485
       },
       {
         "createdAt": "2026-09-08T09:26:43.772Z",
@@ -1729,7 +1751,7 @@
           "summary": "Read the browse completion code and the continuation guard helper · returned 11 lines",
           "type": "tool"
         },
-        "ordinal": 490
+        "ordinal": 486
       },
       {
         "createdAt": "2026-09-08T09:27:05.973Z",
@@ -1740,7 +1762,7 @@
           "summary": "Return the browse on first match, rebuild, and measure the ordinary race · returned 1 line",
           "type": "tool"
         },
-        "ordinal": 491
+        "ordinal": 487
       },
       {
         "createdAt": "2026-09-08T09:27:11.295Z",
@@ -1751,7 +1773,7 @@
           "summary": "Record the LAN address publication and browse changes in the plan · returned 1 line",
           "type": "tool"
         },
-        "ordinal": 492
+        "ordinal": 488
       },
       {
         "createdAt": "2026-09-08T09:28:18.177Z",
@@ -1762,7 +1784,7 @@
           "summary": "Wait for the race check and show its result · returned 11 lines",
           "type": "tool"
         },
-        "ordinal": 493
+        "ordinal": 489
       },
       {
         "createdAt": "2026-09-08T09:28:56.623Z",
@@ -1773,7 +1795,7 @@
           "summary": "Read the connector's current race section before rewriting it · returned 9 lines",
           "type": "tool"
         },
-        "ordinal": 494
+        "ordinal": 490
       },
       {
         "createdAt": "2026-09-08T09:29:37.357Z",
@@ -1784,7 +1806,7 @@
           "summary": "Rewrite the connector as LAN-then-relay and drop the prefer-LAN option · returned 5 lines",
           "type": "tool"
         },
-        "ordinal": 495
+        "ordinal": 491
       },
       {
         "createdAt": "2026-09-08T09:29:37.502Z",
@@ -1795,7 +1817,7 @@
           "summary": "Find docs and comments that still describe a LAN/relay race · returned 3 lines",
           "type": "tool"
         },
-        "ordinal": 496
+        "ordinal": 492
       },
       {
         "createdAt": "2026-09-08T09:29:50.182Z",
@@ -1806,7 +1828,7 @@
           "summary": "Fix the connector's doc comment and check for uses of the old race helper · returned 7 lines",
           "type": "tool"
         },
-        "ordinal": 497
+        "ordinal": 493
       },
       {
         "createdAt": "2026-09-08T09:30:00.896Z",
@@ -1817,7 +1839,7 @@
           "summary": "Record the LAN-then-relay design change in the decision and plan · returned 1 line",
           "type": "tool"
         },
-        "ordinal": 498
+        "ordinal": 494
       },
       {
         "createdAt": "2026-09-08T09:30:18.589Z",
@@ -1828,7 +1850,7 @@
           "summary": "Test, rebuild, smoke the LAN-then-relay connector, then rerun the same-LAN rows on the LAN path · returned 1 line",
           "type": "tool"
         },
-        "ordinal": 499
+        "ordinal": 495
       },
       {
         "createdAt": "2026-09-08T09:40:29.823Z",
@@ -1839,7 +1861,7 @@
           "summary": "Wait for the LAN-path same-LAN run and show the results · returned 1 line",
           "type": "tool"
         },
-        "ordinal": 500
+        "ordinal": 496
       },
       {
         "createdAt": "2026-09-08T09:40:34.264Z",
@@ -1850,7 +1872,7 @@
           "summary": "Show the LAN-path run progress so far · returned 11 lines",
           "type": "tool"
         },
-        "ordinal": 501
+        "ordinal": 497
       },
       {
         "createdAt": "2026-09-08T09:41:31.744Z",
@@ -1861,7 +1883,7 @@
           "summary": "Wait for the cold opens and show the LAN-path summaries · returned 9 lines",
           "type": "tool"
         },
-        "ordinal": 502
+        "ordinal": 498
       },
       {
         "createdAt": "2026-09-08T09:41:52.237Z",
@@ -1872,7 +1894,7 @@
           "summary": "Record the LAN-path same-LAN run and tidy the connector comment · returned 1 line",
           "type": "tool"
         },
-        "ordinal": 503
+        "ordinal": 499
       },
       {
         "createdAt": "2026-09-08T09:42:02.756Z",
@@ -1883,7 +1905,7 @@
           "summary": "Update the field report with the LAN-path results · returned 5 lines",
           "type": "tool"
         },
-        "ordinal": 504
+        "ordinal": 500
       },
       {
         "createdAt": "2026-09-08T09:42:20.643Z",
@@ -1894,7 +1916,7 @@
           "summary": "Fix the record reference, commit the LAN fixes and evidence, and push · returned 3 lines",
           "type": "tool"
         },
-        "ordinal": 505
+        "ordinal": 501
       },
       {
         "createdAt": "2026-09-08T09:42:22.308Z",
@@ -1905,7 +1927,7 @@
           "summary": "Post Overlord progress · returned 1 line",
           "type": "tool"
         },
-        "ordinal": 506
+        "ordinal": 502
       },
       {
         "createdAt": "2026-09-08T09:43:21.879Z",
@@ -1916,7 +1938,7 @@
           "summary": "Run ten helper restarts and ten gateway restarts with the phone on the LAN path · returned 1 line",
           "type": "tool"
         },
-        "ordinal": 507
+        "ordinal": 503
       },
       {
         "createdAt": "2026-09-08T09:43:36.990Z",
@@ -1927,18 +1949,7 @@
           "text": "Status while the restart rows run (about 12 minutes; please don't touch the phone until I say so):\n\n**Same LAN is now measured on both carriers and both gates hold.** After three LAN fixes (the phone's Bonjour browser was discarding the Mac it found because its descriptor carried no TXT record; the `.local` target outlasted the connect bound, so the Mac now publishes its real LAN addresses; and racing two links to one Mac proved unsound because a losing attempt cannot be cancelled in Rust and the Mac replaces the winner, so the phone now tries LAN then relay):\n\n| Same LAN | Cold opens (30) | Reconnect cycles (30) |\n| --- | --- | --- |\n| LAN carrier | 30/30, launch to usable gateway p95 474 ms | 30/30, p95 429 ms |\n| Relay carrier | 30/30, p95 1500 ms | 60/60, p95 1030 ms |\n\nRecords: `docs/field-runs/same-lan-20260908T085431Z.json` (relay) and `same-lan-20260908T094151Z.json` (LAN). Commits pushed (`4c4af42`).\n\n**Running now:** 10 helper restarts and 10 gateway restarts with the phone recovering on its own; then I'll force the relay path and do 10 relay restarts and a control-plane restart as the outage row.\n\n**Then I need you, in this order.**\n1. Manual subset on this Wi-Fi (I'll say \"go\"): open a session's terminal, type `pwd`, Enter; send one conversation message and approve one action if offered; open a preview. Tell me what you saw.\n2. Turn Wi-Fi off and tell me; I run the cellular rows over USB (about 20 minutes).\n3. Then 20 Wi-Fi/cellular switches with a terminal open: I'll drive the terminal check, you toggle Wi-Fi when I say.\n4. 10 Mac sleep/wake cycles: I can put the Mac to sleep; you wake it each time.\n5. The UDP-blocked hotspot and the NAT64 network need you to join them from the phone when I have them up.",
           "type": "message"
         },
-        "ordinal": 508
-      },
-      {
-        "createdAt": "2026-09-08T09:53:50.194Z",
-        "id": "3f3be7b7-8a73-4c5a-94a2-c158d8ff82b4",
-        "kind": {
-          "role": "user",
-          "status": "observed",
-          "text": "<task-notification>\n<task-id>bwvo050pd</task-id>\n<tool-use-id>toolu_015FxG6GwGpkqSjKwZrXEvxr</tool-use-id>\n<output-file>/tmp/claude/session/0e920c11-b282-4c38-a48d-1af826a485c5/tasks/bwvo050pd.output</output-file>\n<status>completed</status>\n<summary>Background command \"Run ten helper restarts and ten gateway restarts with the phone on the LAN path\" completed (exit code 0)</summary>\n</task-notification>",
-          "type": "message"
-        },
-        "ordinal": 509
+        "ordinal": 504
       },
       {
         "createdAt": "2026-09-08T09:53:59.276Z",
@@ -1949,7 +1960,7 @@
           "summary": "Show the restart-row recoveries and the latest Mac audit · returned 3 lines",
           "type": "tool"
         },
-        "ordinal": 510
+        "ordinal": 505
       },
       {
         "createdAt": "2026-09-08T09:54:19.490Z",
@@ -1960,7 +1971,7 @@
           "summary": "Compute per-restart recovery for the helper and gateway rows · returned 7 lines",
           "type": "tool"
         },
-        "ordinal": 511
+        "ordinal": 506
       },
       {
         "createdAt": "2026-09-08T09:54:33.630Z",
@@ -1971,7 +1982,7 @@
           "summary": "Read the helper restart backoff and its reset rule · returned 9 lines",
           "type": "tool"
         },
-        "ordinal": 512
+        "ordinal": 507
       },
       {
         "createdAt": "2026-09-08T09:55:11.387Z",
@@ -1982,7 +1993,7 @@
           "summary": "Reset the helper restart schedule after a healthy run, with a unit test · returned 3 lines",
           "type": "tool"
         },
-        "ordinal": 513
+        "ordinal": 508
       },
       {
         "createdAt": "2026-09-08T09:55:13.186Z",
@@ -1993,7 +2004,7 @@
           "summary": "Check whether the Railway CLI can restart a service · returned 3 lines",
           "type": "tool"
         },
-        "ordinal": 514
+        "ordinal": 509
       },
       {
         "createdAt": "2026-09-08T09:55:21.805Z",
@@ -2004,7 +2015,7 @@
           "summary": "Show the Desktop build error · returned 4 lines",
           "type": "tool"
         },
-        "ordinal": 515
+        "ordinal": 510
       },
       {
         "createdAt": "2026-09-08T09:55:27.295Z",
@@ -2015,7 +2026,7 @@
           "text": "Fixing the scope of the start timestamp (it must be declared before the `do` block), then rebuilding Desktop and starting the relay-restart row in parallel.",
           "type": "message"
         },
-        "ordinal": 516
+        "ordinal": 511
       },
       {
         "createdAt": "2026-09-08T09:55:42.137Z",
@@ -2026,7 +2037,7 @@
           "summary": "Fix the timestamp scope and run the Desktop suite · returned 3 lines",
           "type": "tool"
         },
-        "ordinal": 517
+        "ordinal": 512
       },
       {
         "createdAt": "2026-09-08T09:55:47.921Z",
@@ -2037,7 +2048,7 @@
           "summary": "Run ten relay restarts with the phone on the relay path · returned 1 line",
           "type": "tool"
         },
-        "ordinal": 518
+        "ordinal": 513
       },
       {
         "createdAt": "2026-09-08T09:55:55.229Z",
@@ -2048,7 +2059,7 @@
           "summary": "Show the remaining Desktop build error · returned 1 line",
           "type": "tool"
         },
-        "ordinal": 519
+        "ordinal": 514
       },
       {
         "createdAt": "2026-09-08T09:56:08.639Z",
@@ -2059,7 +2070,7 @@
           "summary": "Show the Desktop test build error · returned 3 lines",
           "type": "tool"
         },
-        "ordinal": 520
+        "ordinal": 515
       },
       {
         "createdAt": "2026-09-08T09:56:21.633Z",
@@ -2070,7 +2081,7 @@
           "summary": "Mark the schedule test main-actor and rerun the Desktop suite · returned 2 lines",
           "type": "tool"
         },
-        "ordinal": 521
+        "ordinal": 516
       },
       {
         "createdAt": "2026-09-08T09:56:21.636Z",
@@ -2081,7 +2092,7 @@
           "summary": "Check the relay-restart row progress · failed: <tool_use_error>Blocked: sleep 60 followed by: cat /tmp/claude/session/0e920c11-b282-4c38-a48d-1af826a485c5/scratchpad/matrix/relay-restarts.log. To wait for a…",
           "type": "tool"
         },
-        "ordinal": 522
+        "ordinal": 517
       },
       {
         "createdAt": "2026-09-08T09:56:30.574Z",
@@ -2092,7 +2103,7 @@
           "summary": "Build and notarize the Desktop app with the restart-schedule fix · returned 1 line",
           "type": "tool"
         },
-        "ordinal": 523
+        "ordinal": 518
       },
       {
         "createdAt": "2026-09-08T09:56:30.714Z",
@@ -2103,7 +2114,7 @@
           "summary": "Check the relay-restart row progress · returned 1 line",
           "type": "tool"
         },
-        "ordinal": 524
+        "ordinal": 519
       },
       {
         "createdAt": "2026-09-08T09:56:40.700Z",
@@ -2114,7 +2125,7 @@
           "summary": "Check whether the Railway restart command is waiting on a prompt · returned 1 line",
           "type": "tool"
         },
-        "ordinal": 525
+        "ordinal": 520
       },
       {
         "createdAt": "2026-09-08T09:56:52.776Z",
@@ -2125,7 +2136,7 @@
           "summary": "Inspect the relay-restart script's processes · returned 5 lines",
           "type": "tool"
         },
-        "ordinal": 526
+        "ordinal": 521
       },
       {
         "createdAt": "2026-09-08T09:56:55.233Z",
@@ -2136,7 +2147,7 @@
           "summary": "returned 1 line",
           "type": "tool"
         },
-        "ordinal": 527
+        "ordinal": 522
       },
       {
         "createdAt": "2026-09-08T09:57:05.012Z",
@@ -2147,7 +2158,7 @@
           "summary": "Read the relay-restart task output · returned 4 lines",
           "type": "tool"
         },
-        "ordinal": 528
+        "ordinal": 523
       },
       {
         "createdAt": "2026-09-08T09:57:11.836Z",
@@ -2158,7 +2169,7 @@
           "summary": "Try one relay restart from the CLI and time it · returned 3 lines",
           "type": "tool"
         },
-        "ordinal": 529
+        "ordinal": 524
       },
       {
         "createdAt": "2026-09-08T10:07:31.734Z",
@@ -2169,7 +2180,7 @@
           "summary": "Record the restart-schedule defect and wait for the relay-restart row · returned 1 line",
           "type": "tool"
         },
-        "ordinal": 530
+        "ordinal": 525
       },
       {
         "createdAt": "2026-09-08T10:07:37.369Z",
@@ -2180,7 +2191,7 @@
           "summary": "Check the relay-restart row progress and the Desktop build result · returned 4 lines",
           "type": "tool"
         },
-        "ordinal": 531
+        "ordinal": 526
       },
       {
         "createdAt": "2026-09-08T10:07:51.801Z",
@@ -2191,7 +2202,7 @@
           "summary": "Stop the stuck relay-restart script and check the Desktop build output · returned 4 lines",
           "type": "tool"
         },
-        "ordinal": 532
+        "ordinal": 527
       },
       {
         "createdAt": "2026-09-08T10:08:02.468Z",
@@ -2202,7 +2213,7 @@
           "summary": "Rerun the relay-restart row with a non-interactive restart command · returned 1 line",
           "type": "tool"
         },
-        "ordinal": 533
+        "ordinal": 528
       },
       {
         "createdAt": "2026-09-08T10:09:41.578Z",
@@ -2213,7 +2224,7 @@
           "summary": "Confirm the relay restarts are proceeding · returned 3 lines",
           "type": "tool"
         },
-        "ordinal": 534
+        "ordinal": 529
       },
       {
         "createdAt": "2026-09-08T10:19:51.114Z",
@@ -2224,7 +2235,7 @@
           "summary": "Wait for the relay-restart row and show recoveries · returned 1 line",
           "type": "tool"
         },
-        "ordinal": 535
+        "ordinal": 530
       },
       {
         "createdAt": "2026-09-08T10:19:55.586Z",
@@ -2235,7 +2246,7 @@
           "summary": "Check the relay-restart row state · returned 3 lines",
           "type": "tool"
         },
-        "ordinal": 536
+        "ordinal": 531
       },
       {
         "createdAt": "2026-09-08T10:21:28.219Z",
@@ -2246,7 +2257,7 @@
           "summary": "Wait for the relay-restart summary · returned 5 lines",
           "type": "tool"
         },
-        "ordinal": 537
+        "ordinal": 532
       },
       {
         "createdAt": "2026-09-08T10:21:45.614Z",
@@ -2257,7 +2268,7 @@
           "summary": "Install the fixed Desktop, then run helper and gateway restart rows spaced 75 s apart · returned 1 line",
           "type": "tool"
         },
-        "ordinal": 538
+        "ordinal": 533
       },
       {
         "createdAt": "2026-09-08T10:21:51.343Z",
@@ -2268,7 +2279,7 @@
           "text": "The restart rows are running (about 27 minutes; the phone stays busy). Meanwhile, recording the relay-restart result in the field report and committing the Desktop restart-schedule fix.",
           "type": "message"
         },
-        "ordinal": 539
+        "ordinal": 534
       },
       {
         "createdAt": "2026-09-08T10:22:07.598Z",
@@ -2279,7 +2290,7 @@
           "summary": "Record the relay-restart evidence and commit the Desktop fix · returned 2 lines",
           "type": "tool"
         },
-        "ordinal": 540
+        "ordinal": 535
       },
       {
         "createdAt": "2026-09-08T10:22:29.039Z",
@@ -2290,7 +2301,7 @@
           "summary": "Prepare the control-plane outage script and check restart-row progress · returned 5 lines",
           "type": "tool"
         },
-        "ordinal": 541
+        "ordinal": 536
       },
       {
         "createdAt": "2026-09-08T10:32:20.664Z",
@@ -2301,7 +2312,7 @@
           "summary": "Wait for the helper-restart row summary · returned 1 line",
           "type": "tool"
         },
-        "ordinal": 542
+        "ordinal": 537
       },
       {
         "createdAt": "2026-09-08T10:35:17.775Z",
@@ -2312,7 +2323,7 @@
           "summary": "Wait again for the helper-restart row summary · returned 3 lines",
           "type": "tool"
         },
-        "ordinal": 543
+        "ordinal": 538
       },
       {
         "createdAt": "2026-09-08T10:35:29.465Z",
@@ -2323,7 +2334,7 @@
           "summary": "Compute per-restart recovery for the helper row from its own process segment · returned 2 lines",
           "type": "tool"
         },
-        "ordinal": 544
+        "ordinal": 539
       },
       {
         "createdAt": "2026-09-08T10:35:42.314Z",
@@ -2334,7 +2345,7 @@
           "text": "Helper row on the fixed Desktop: recoveries of 3.9–4.3 s, but only 6 losses were registered for 10 kills. Looking at the phone's raw state sequence to see what the other four kills did.",
           "type": "message"
         },
-        "ordinal": 545
+        "ordinal": 540
       },
       {
         "createdAt": "2026-09-08T10:35:48.836Z",
@@ -2345,7 +2356,7 @@
           "summary": "Print the phone's state sequence during the helper-restart row against the kill times · returned 13 lines",
           "type": "tool"
         },
-        "ordinal": 546
+        "ordinal": 541
       },
       {
         "createdAt": "2026-09-08T10:37:04.535Z",
@@ -2356,7 +2367,7 @@
           "summary": "Restrict published LAN addresses to en* interfaces and bound the phone's LAN phase · returned 3 lines",
           "type": "tool"
         },
-        "ordinal": 547
+        "ordinal": 542
       },
       {
         "createdAt": "2026-09-08T10:37:06.189Z",
@@ -2367,7 +2378,7 @@
           "summary": "Record the helper-restart recovery finding in the plan · returned 1 line",
           "type": "tool"
         },
-        "ordinal": 548
+        "ordinal": 543
       },
       {
         "createdAt": "2026-09-08T10:47:06.554Z",
@@ -2378,7 +2389,7 @@
           "summary": "Wait for the gateway-restart row and compute its recoveries · returned 3 lines",
           "type": "tool"
         },
-        "ordinal": 549
+        "ordinal": 544
       },
       {
         "createdAt": "2026-09-08T10:47:26.594Z",
@@ -2389,7 +2400,7 @@
           "text": "Here is where things stand.\n\n**Done and measured (all commits pushed; evidence in `docs/field-runs/`)**\n- Cutover complete: relay and control plane deployed on Railway (one replica each, sleeping off, migration 0007 applied), signed and notarized Mac payload and Desktop installed, phone paired, sessions preserved.\n- Same LAN, both carriers, real attempts over USB: LAN path 30/30 cold opens p95 474 ms and 30/30 reconnect cycles p95 429 ms; relay path 30/30 cold opens p95 1500 ms and 60/60 cycles p95 1030 ms. Both gates hold.\n- Relay restarts: 10/10, recovery p95 1.8 s. Lease renewal observed three times at the 5-minute marks. Helper restart via Desktop swap recovered in 2 s.\n\n**Problems found and fixed today** (each with a regression test where the code allows): revoked-record lookup blocked pairing; enrollment receipt lost at link close on both ends; suspend/resume ordering race; snapshot loop serialized behind a hung request; Bonjour browser discarding the Mac (no TXT record); `.local` target outlasting the LAN bound; racing LAN and relay is unsound because Rust connects cannot be cancelled, so the phone now goes LAN then relay; Desktop's helper restart schedule never resetting after a healthy run; the Mac publishing unreachable bridge addresses.\n\n**Running right now:** the gateway-restart row. Then I reinstall the helper and phone build with the last two fixes and rerun the helper and gateway rows (about 25 minutes). The phone went to background once during the helper row (one gap of four kills unobserved), so please leave it untouched until I say.\n\n**Still to do, in order**\n1. Control-plane outage row (automated, after the restart rows).\n2. Manual subset on this Wi-Fi: you, ~2 minutes when I say \"go\".\n3. Cellular rows: you turn Wi-Fi off; I run 30 cold opens and 30 cycles (~20 min).\n4. 20 Wi-Fi/cellular switches (you toggle, I watch a terminal), 20 long-suspension foreground cycles (I can automate by bringing another app forward for minutes at a time), 10 Mac sleep/wake cycles (you wake the Mac), lease expiry (needs the Mac cut off from the control plane for 10 minutes; I'll need `sudo` for a firewall rule or you to unplug the Mac's network), UDP-blocked hotspot and NAT64 network (I set them up on the Mac, you join from the phone).\n5. APNs: blocked on your Apple developer steps (Xcode sign-in, Push capability on the App ID, an APNs key).\n6. 24-hour soak with resource baselines, then the final notarized coordinated release, retired TURN variable deletion, and the reports and runbooks updated with every number.\n\nContinuing with the restart rows now.",
           "type": "message"
         },
-        "ordinal": 550
+        "ordinal": 545
       },
       {
         "createdAt": "2026-09-08T10:47:43.872Z",
@@ -2400,7 +2411,7 @@
           "summary": "Wait for the gateway row to finish and compute recoveries from its own segment · returned 4 lines",
           "type": "tool"
         },
-        "ordinal": 551
+        "ordinal": 546
       },
       {
         "createdAt": "2026-09-08T10:48:06.042Z",
@@ -2411,7 +2422,7 @@
           "summary": "Install both fixes, rerun helper and gateway restart rows, then the control-plane outage row · returned 1 line",
           "type": "tool"
         },
-        "ordinal": 552
+        "ordinal": 547
       },
       {
         "createdAt": "2026-09-08T10:48:14.364Z",
@@ -2422,7 +2433,7 @@
           "summary": "Commit the LAN address and budget fixes · returned 1 line",
           "type": "tool"
         },
-        "ordinal": 553
+        "ordinal": 548
       },
       {
         "createdAt": "2026-09-08T10:48:38.875Z",
@@ -2433,7 +2444,7 @@
           "summary": "Prepare the long-suspension harness and check CI · returned 4 lines",
           "type": "tool"
         },
-        "ordinal": 554
+        "ordinal": 549
       },
       {
         "createdAt": "2026-09-08T10:48:50.641Z",
@@ -2444,7 +2455,7 @@
           "summary": "Identify why CI fails on main · returned 7 lines",
           "type": "tool"
         },
-        "ordinal": 555
+        "ordinal": 550
       },
       {
         "createdAt": "2026-09-08T10:48:56.950Z",
@@ -2455,7 +2466,7 @@
           "text": "CI fails on a clippy lint in my driver drain loop, and the Mobile client job also failed. Fixing the lint and reading the mobile job failure.",
           "type": "message"
         },
-        "ordinal": 556
+        "ordinal": 551
       },
       {
         "createdAt": "2026-09-08T10:49:16.120Z",
@@ -2466,7 +2477,7 @@
           "summary": "Rewrite the drain as a while-let loop and run clippy · returned 2 lines",
           "type": "tool"
         },
-        "ordinal": 557
+        "ordinal": 552
       },
       {
         "createdAt": "2026-09-08T10:49:19.127Z",
@@ -2477,7 +2488,7 @@
           "summary": "Read the Mobile client CI job failure · returned 2 lines",
           "type": "tool"
         },
-        "ordinal": 558
+        "ordinal": 553
       },
       {
         "createdAt": "2026-09-08T10:49:27.471Z",
@@ -2488,7 +2499,7 @@
           "summary": "Find the actual failing assertion or error in the mobile CI job · returned 3 lines",
           "type": "tool"
         },
-        "ordinal": 559
+        "ordinal": 554
       },
       {
         "createdAt": "2026-09-08T10:49:27.633Z",
@@ -2499,7 +2510,7 @@
           "summary": "Read the mobile CI job steps · returned 8 lines",
           "type": "tool"
         },
-        "ordinal": 560
+        "ordinal": 555
       },
       {
         "createdAt": "2026-09-08T10:49:38.404Z",
@@ -2510,7 +2521,7 @@
           "summary": "Read the test that failed on CI · returned 7 lines",
           "type": "tool"
         },
-        "ordinal": 561
+        "ordinal": 556
       },
       {
         "createdAt": "2026-09-08T10:49:53.367Z",
@@ -2521,7 +2532,7 @@
           "summary": "Run the CI-failing test locally three times · returned 3 lines",
           "type": "tool"
         },
-        "ordinal": 562
+        "ordinal": 557
       },
       {
         "createdAt": "2026-09-08T10:50:20.641Z",
@@ -2532,7 +2543,7 @@
           "summary": "Make the lifecycle tests wait for state, then commit and push with the clippy fix · returned 3 lines",
           "type": "tool"
         },
-        "ordinal": 563
+        "ordinal": 558
       },
       {
         "createdAt": "2026-09-08T10:50:21.012Z",
@@ -2543,7 +2554,7 @@
           "summary": "Check progress of the restart rerun chain · returned 8 lines",
           "type": "tool"
         },
-        "ordinal": 564
+        "ordinal": 559
       },
       {
         "createdAt": "2026-09-08T10:59:51.317Z",
@@ -2554,7 +2565,7 @@
           "summary": "Note restart behaviour in the runbook and wait for the helper row · returned 1 line",
           "type": "tool"
         },
-        "ordinal": 565
+        "ordinal": 560
       },
       {
         "createdAt": "2026-09-08T11:02:52.911Z",
@@ -2565,7 +2576,7 @@
           "summary": "Wait for the helper row rerun and compute its recoveries · returned 4 lines",
           "type": "tool"
         },
-        "ordinal": 566
+        "ordinal": 561
       },
       {
         "createdAt": "2026-09-08T11:03:09.587Z",
@@ -2576,7 +2587,7 @@
           "summary": "Compare the phone's state sequence with the kill times and the Mac's link events · returned 13 lines",
           "type": "tool"
         },
-        "ordinal": 567
+        "ordinal": 562
       },
       {
         "createdAt": "2026-09-08T11:12:46.050Z",
@@ -2587,7 +2598,7 @@
           "summary": "Record the helper-row rerun and wait for the gateway row · returned 1 line",
           "type": "tool"
         },
-        "ordinal": 568
+        "ordinal": 563
       },
       {
         "createdAt": "2026-09-08T11:13:12.765Z",
@@ -2598,7 +2609,7 @@
           "summary": "Build the final coordinated signed, notarized CLI payload and Desktop app · returned 1 line",
           "type": "tool"
         },
-        "ordinal": 569
+        "ordinal": 564
       },
       {
         "createdAt": "2026-09-08T11:19:10.108Z",
@@ -2609,7 +2620,7 @@
           "summary": "Wait for the gateway row and control-plane outage row to finish · returned 6 lines",
           "type": "tool"
         },
-        "ordinal": 570
+        "ordinal": 565
       },
       {
         "createdAt": "2026-09-08T11:19:45.612Z",
@@ -2620,7 +2631,7 @@
           "summary": "Install the final coordinated release on the Mac and relaunch Desktop · returned 10 lines",
           "type": "tool"
         },
-        "ordinal": 571
+        "ordinal": 566
       },
       {
         "createdAt": "2026-09-08T11:20:08.494Z",
@@ -2631,7 +2642,7 @@
           "summary": "Record the restart and lease/outage rows as field runs · returned 1 line",
           "type": "tool"
         },
-        "ordinal": 572
+        "ordinal": 567
       },
       {
         "createdAt": "2026-09-08T11:20:24.581Z",
@@ -2642,7 +2653,7 @@
           "summary": "Finalize the field report identities and the plan's stopping-point record · returned 1 line",
           "type": "tool"
         },
-        "ordinal": 573
+        "ordinal": 568
       },
       {
         "createdAt": "2026-09-08T11:20:27.523Z",
@@ -2653,7 +2664,7 @@
           "text": "Committing everything, tagging the final release, and updating the mission artifact, then I'll post the pause request.",
           "type": "message"
         },
-        "ordinal": 574
+        "ordinal": 569
       },
       {
         "createdAt": "2026-09-08T11:20:40.143Z",
@@ -2664,7 +2675,7 @@
           "summary": "Commit the stopping-point state, push, and tag the final release · returned 2 lines",
           "type": "tool"
         },
-        "ordinal": 575
+        "ordinal": 570
       },
       {
         "createdAt": "2026-09-08T11:20:41.849Z",
@@ -2675,7 +2686,7 @@
           "summary": "Attach the notarized Desktop archive to the final release once the workflow publishes it · returned 2 lines",
           "type": "tool"
         },
-        "ordinal": 576
+        "ordinal": 571
       },
       {
         "createdAt": "2026-09-08T11:20:52.668Z",
@@ -2686,7 +2697,7 @@
           "summary": "Append the stopping-point summary to the mission artifact · returned 1 line",
           "type": "tool"
         },
-        "ordinal": 577
+        "ordinal": 572
       },
       {
         "createdAt": "2026-09-08T11:21:06.086Z",
@@ -2697,7 +2708,7 @@
           "summary": "Post the pause request with the exact help needed · returned 3 lines",
           "type": "tool"
         },
-        "ordinal": 578
+        "ordinal": 573
       },
       {
         "createdAt": "2026-09-08T11:21:17.535Z",
@@ -2708,18 +2719,7 @@
           "text": "Paused. Everything is committed (`636f42b`), the final coordinated release `v0.2609081113.0` is tagged and installed on the Mac (Desktop asset attaches to the GitHub release automatically when the workflow finishes), and the mission artifact and plan carry the stopping-point record.\n\n**State of the system**\n- Deployed: control plane and relay on Railway (one replica each, sleeping off); paired phone; final release installed; latchd sessions preserved across every swap.\n- Measured and passing (real attempts, `docs/field-runs/`): same LAN cold open p95 474 ms over LAN / 1500 ms over relay; explicit recovery p95 429 ms LAN / 1030 ms relay; relay restarts p95 1.8 s; helper restarts p95 2.6 s; gateway restarts p95 2.5 s; lease renewal; pairing 3 s to first served request.\n- Ten defects found by the physical harness and fixed today with regressions (plan section 16).\n\n**When you're back, say \"ok go\" and I'll continue with:**\n1. The manual subset on this Wi-Fi (you: terminal `pwd`, one conversation message/approval, one preview; ~2 minutes).\n2. Cellular rows after you turn Wi-Fi off (~20 minutes, automated over USB; leave the phone alone).\n\n**Not measured yet** (each needs you or a network you set up): network switches, long suspensions, Mac sleep/wake, unrelated Wi-Fi, UDP-blocked hotspot, NAT64, lease expiry, a real control-plane outage, APNs (Apple developer steps), the 24-hour soak, and the retired TURN variable deletion once you accept the cutover. Details are in `docs/REMOTE_ACCESS_FIELD_VERIFICATION.md` under \"Outstanding\" and in the plan's stopping-point record.",
           "type": "message"
         },
-        "ordinal": 579
-      },
-      {
-        "createdAt": "2026-09-08T11:24:53.149Z",
-        "id": "a54eef53-90ac-44a4-a459-c3c083dd78cb",
-        "kind": {
-          "role": "user",
-          "status": "observed",
-          "text": "<task-notification>\n<task-id>bqbrbw9iz</task-id>\n<tool-use-id>toolu_014tCwsa2auDpRdb2NeBRRWc</tool-use-id>\n<output-file>/tmp/claude/session/0e920c11-b282-4c38-a48d-1af826a485c5/tasks/bqbrbw9iz.output</output-file>\n<status>completed</status>\n<summary>Background command \"Attach the notarized Desktop archive to the final release once the workflow publishes it\" completed (exit code 0)</summary>\n</task-notification>",
-          "type": "message"
-        },
-        "ordinal": 580
+        "ordinal": 574
       },
       {
         "createdAt": "2026-09-08T11:24:58.829Z",
@@ -2730,7 +2730,7 @@
           "summary": "Confirm the final release assets · returned 3 lines",
           "type": "tool"
         },
-        "ordinal": 581
+        "ordinal": 575
       },
       {
         "createdAt": "2026-09-08T11:25:03.039Z",
@@ -2741,7 +2741,7 @@
           "text": "The final release `v0.2609081113.0` now has all four assets attached (both CLI archives, the notarized Desktop archive, and checksums). Nothing else is running; I'm paused and waiting for your \"ok go\".",
           "type": "message"
         },
-        "ordinal": 582
+        "ordinal": 576
       },
       {
         "createdAt": "2026-09-08T11:30:19.078Z",
@@ -2752,7 +2752,7 @@
           "text": "ok go",
           "type": "message"
         },
-        "ordinal": 583
+        "ordinal": 577
       },
       {
         "createdAt": "2026-09-08T11:30:26.817Z",
@@ -2763,7 +2763,7 @@
           "text": "Go. Step 1 is yours: on the iPhone, open Latch, open a session's terminal, type `pwd` + Enter and confirm the output; send one conversation message (approve an action if one is offered); open a preview. Then tell me what you saw. I'm making sure the app is in a normal state on the phone and watching the Mac side.",
           "type": "message"
         },
-        "ordinal": 584
+        "ordinal": 578
       },
       {
         "createdAt": "2026-09-08T11:30:33.122Z",
@@ -2774,7 +2774,7 @@
           "summary": "Relaunch the app normally and record a Mac baseline for the manual subset · returned 3 lines",
           "type": "tool"
         },
-        "ordinal": 585
+        "ordinal": 579
       },
       {
         "createdAt": "2026-09-08T11:30:36.836Z",
@@ -2785,7 +2785,7 @@
           "text": "The app is relaunched and a Mac-side baseline is recorded (2001:db8::1 UTC). Whenever you finish the terminal `pwd`, the conversation message/approval, and the preview, tell me what you saw and roughly how long each took, then turn Wi-Fi off and say \"wifi off\".",
           "type": "message"
         },
-        "ordinal": 586
+        "ordinal": 580
       },
       {
         "createdAt": "2026-09-08T11:31:28.492Z",
@@ -2796,7 +2796,7 @@
           "text": "in the terminal view the iphone keyboard appears, but key taps do not arrive at the cursor",
           "type": "message"
         },
-        "ordinal": 587
+        "ordinal": 581
       },
       {
         "createdAt": "2026-09-08T11:31:35.928Z",
@@ -2807,7 +2807,7 @@
           "text": "Let me look at the Mac side for that terminal stream.",
           "type": "message"
         },
-        "ordinal": 588
+        "ordinal": 582
       },
       {
         "createdAt": "2026-09-08T11:31:42.754Z",
@@ -2818,7 +2818,7 @@
           "summary": "Read the Mac audit since the manual test began · returned 11 lines",
           "type": "tool"
         },
-        "ordinal": 589
+        "ordinal": 583
       },
       {
         "createdAt": "2026-09-08T11:31:45.660Z",
@@ -2829,7 +2829,7 @@
           "summary": "returned 1 line",
           "type": "tool"
         },
-        "ordinal": 590
+        "ordinal": 584
       },
       {
         "createdAt": "2026-09-08T11:32:13.016Z",
@@ -2840,7 +2840,7 @@
           "summary": "List sessions and locate the terminal surface rules · returned 7 lines",
           "type": "tool"
         },
-        "ordinal": 591
+        "ordinal": 585
       },
       {
         "createdAt": "2026-09-08T11:32:27.624Z",
@@ -2851,7 +2851,7 @@
           "summary": "Locate how the proxy handles bytes after the request head · returned 7 lines",
           "type": "tool"
         },
-        "ordinal": 592
+        "ordinal": 586
       },
       {
         "createdAt": "2026-09-08T11:32:28.093Z",
@@ -2862,7 +2862,7 @@
           "summary": "Find the proxy stream entry point · returned 2 lines",
           "type": "tool"
         },
-        "ordinal": 593
+        "ordinal": 587
       },
       {
         "createdAt": "2026-09-08T11:32:34.335Z",
@@ -2873,7 +2873,7 @@
           "summary": "Read the proxy's head read, injection, and byte piping · returned 15 lines",
           "type": "tool"
         },
-        "ordinal": 594
+        "ordinal": 588
       },
       {
         "createdAt": "2026-09-08T11:32:34.212Z",
@@ -2884,7 +2884,7 @@
           "summary": "Read the tail of the injection (what happens to bytes after the head) · returned 9 lines",
           "type": "tool"
         },
-        "ordinal": 595
+        "ordinal": 589
       },
       {
         "createdAt": "2026-09-08T11:32:48.268Z",
@@ -2895,7 +2895,7 @@
           "summary": "Locate the loopback adapter's request handling and pumps · returned 8 lines",
           "type": "tool"
         },
-        "ordinal": 596
+        "ordinal": 590
       },
       {
         "createdAt": "2026-09-08T11:32:53.005Z",
@@ -2906,7 +2906,7 @@
           "summary": "Read the adapter's request pump and the loopback receive helper · returned 9 lines",
           "type": "tool"
         },
-        "ordinal": 597
+        "ordinal": 591
       },
       {
         "createdAt": "2026-09-08T11:33:18.318Z",
@@ -2917,7 +2917,7 @@
           "summary": "Read the gateway address and the v2 route table · returned 5 lines",
           "type": "tool"
         },
-        "ordinal": 598
+        "ordinal": 592
       },
       {
         "createdAt": "2026-09-08T11:33:19.000Z",
@@ -2928,7 +2928,7 @@
           "summary": "Find the session creation request contract · returned 8 lines",
           "type": "tool"
         },
-        "ordinal": 599
+        "ordinal": 593
       },
       {
         "createdAt": "2026-09-08T11:33:19.879Z",
@@ -2939,7 +2939,7 @@
           "summary": "See the exact paths and bodies the phone sends for create and terminal · returned 6 lines",
           "type": "tool"
         },
-        "ordinal": 600
+        "ordinal": 594
       },
       {
         "createdAt": "2026-09-08T11:33:31.061Z",
@@ -2950,7 +2950,7 @@
           "summary": "Read the create request contract and check for a WebSocket client library · returned 10 lines",
           "type": "tool"
         },
-        "ordinal": 601
+        "ordinal": 595
       },
       {
         "createdAt": "2026-09-08T11:33:36.782Z",
@@ -2961,7 +2961,7 @@
           "summary": "Create a session through the loopback gateway directly and time it · returned 4 lines",
           "type": "tool"
         },
-        "ordinal": 602
+        "ordinal": 596
       },
       {
         "createdAt": "2026-09-08T11:33:51.143Z",
@@ -2972,7 +2972,7 @@
           "summary": "Read the FFI stream read and write implementations · returned 11 lines",
           "type": "tool"
         },
-        "ordinal": 603
+        "ordinal": 597
       },
       {
         "createdAt": "2026-09-08T11:33:52.817Z",
@@ -2983,7 +2983,7 @@
           "summary": "Check whether the logical stream can be split into read and write halves · returned 7 lines",
           "type": "tool"
         },
-        "ordinal": 604
+        "ordinal": 598
       },
       {
         "createdAt": "2026-09-08T11:34:10.218Z",
@@ -2994,7 +2994,7 @@
           "summary": "Read the existing FFI tests to model a full-duplex regression · returned 12 lines",
           "type": "tool"
         },
-        "ordinal": 605
+        "ordinal": 599
       },
       {
         "createdAt": "2026-09-08T11:34:51.518Z",
@@ -3005,7 +3005,7 @@
           "summary": "Split the FFI stream into independently locked halves and add the full-duplex regression · returned 8 lines",
           "type": "tool"
         },
-        "ordinal": 606
+        "ordinal": 600
       },
       {
         "createdAt": "2026-09-08T11:34:58.727Z",
@@ -3016,7 +3016,7 @@
           "text": "The regression passes with the split halves. Rebuilding the native library and the phone app with it and reinstalling; committing the fix in parallel.",
           "type": "message"
         },
-        "ordinal": 607
+        "ordinal": 601
       },
       {
         "createdAt": "2026-09-08T11:35:08.938Z",
@@ -3027,7 +3027,7 @@
           "summary": "Rebuild the XCFramework and phone app with the stream fix, install, and launch · returned 2 lines",
           "type": "tool"
         },
-        "ordinal": 608
+        "ordinal": 602
       },
       {
         "createdAt": "2026-09-08T11:35:23.912Z",
@@ -3038,7 +3038,7 @@
           "summary": "Record and commit the stream-lock fix · returned 3 lines",
           "type": "tool"
         },
-        "ordinal": 609
+        "ordinal": 603
       },
       {
         "createdAt": "2026-09-08T11:36:19.181Z",
@@ -3049,7 +3049,7 @@
           "summary": "Wait for the phone rebuild and install · returned 6 lines",
           "type": "tool"
         },
-        "ordinal": 610
+        "ordinal": 604
       },
       {
         "createdAt": "2026-09-08T11:36:24.436Z",
@@ -3060,7 +3060,7 @@
           "text": "Found and fixed: the phone's native stream used one lock for reading and writing, and the response reader held it while waiting, so keystrokes and the create request's body could never be sent after the first write (listing and output only ever needed one write). The fix is installed on the phone (build `5c14bf11…`, app relaunched) and committed (`e62e912`).\n\nPlease try again on the iPhone: open a terminal and type `pwd` + Enter, then \"start session here\" for a new session, then a preview and a conversation message. Tell me what you see.",
           "type": "message"
         },
-        "ordinal": 611
+        "ordinal": 605
       },
       {
         "createdAt": "2026-09-08T11:37:07.764Z",
@@ -3071,7 +3071,7 @@
           "text": "that flow worked correctly and printed the correct directory",
           "type": "message"
         },
-        "ordinal": 612
+        "ordinal": 606
       },
       {
         "createdAt": "2026-09-08T11:37:15.898Z",
@@ -3082,7 +3082,7 @@
           "text": "Terminal input and output confirmed over the LAN link. Recording that, then step 2: turn Wi-Fi off on the phone and say \"wifi off\"; I'll run the cellular rows (~20 minutes, leave the phone alone). If you also tried the new session, a preview, or a conversation message, say what happened; otherwise I'll note only the terminal as manually verified.",
           "type": "message"
         },
-        "ordinal": 613
+        "ordinal": 607
       },
       {
         "createdAt": "2026-09-08T11:37:22.837Z",
@@ -3093,7 +3093,7 @@
           "summary": "Record the manual terminal verification for the same-LAN row · returned 2 lines",
           "type": "tool"
         },
-        "ordinal": 614
+        "ordinal": 608
       },
       {
         "createdAt": "2026-09-08T11:37:26.362Z",
@@ -3104,7 +3104,7 @@
           "text": "Recorded. Waiting for \"wifi off\" to start the cellular rows.",
           "type": "message"
         },
-        "ordinal": 615
+        "ordinal": 609
       },
       {
         "createdAt": "2026-09-08T11:38:04.680Z",
@@ -3115,7 +3115,7 @@
           "text": "it also appears to work correctly with wifi off",
           "type": "message"
         },
-        "ordinal": 616
+        "ordinal": 610
       },
       {
         "createdAt": "2026-09-08T11:38:10.425Z",
@@ -3126,7 +3126,7 @@
           "text": "Good, that's the manual cellular check. Starting the automated cellular rows now (30 reconnect cycles, then 30 real cold opens, about 20 minutes); leave the phone alone and Wi-Fi off until I report.",
           "type": "message"
         },
-        "ordinal": 617
+        "ordinal": 611
       },
       {
         "createdAt": "2026-09-08T11:38:18.876Z",
@@ -3137,7 +3137,7 @@
           "summary": "Run the cellular reconnect cycles and cold opens over USB · returned 2 lines",
           "type": "tool"
         },
-        "ordinal": 618
+        "ordinal": 612
       },
       {
         "createdAt": "2026-09-08T11:48:08.787Z",
@@ -3148,7 +3148,7 @@
           "summary": "Wait for the cellular rows · returned 2 lines",
           "type": "tool"
         },
-        "ordinal": 619
+        "ordinal": 613
       },
       {
         "createdAt": "2026-09-08T11:50:46.664Z",
@@ -3159,7 +3159,7 @@
           "summary": "Wait for the cellular cold opens to finish · returned 9 lines",
           "type": "tool"
         },
-        "ordinal": 620
+        "ordinal": 614
       },
       {
         "createdAt": "2026-09-08T11:51:25.141Z",
@@ -3170,7 +3170,7 @@
           "summary": "Record the cellular row, update the report and plan, commit and push · returned 3 lines",
           "type": "tool"
         },
-        "ordinal": 621
+        "ordinal": 615
       },
       {
         "createdAt": "2026-09-08T11:51:42.857Z",
@@ -3181,7 +3181,7 @@
           "summary": "Post progress and update the mission artifact · returned 2 lines",
           "type": "tool"
         },
-        "ordinal": 622
+        "ordinal": 616
       },
       {
         "createdAt": "2026-09-08T11:51:47.930Z",
@@ -3192,7 +3192,7 @@
           "summary": "Post the pause request with the remaining owner steps · returned 3 lines",
           "type": "tool"
         },
-        "ordinal": 623
+        "ordinal": 617
       },
       {
         "createdAt": "2026-09-08T11:51:59.533Z",
@@ -3203,7 +3203,7 @@
           "text": "Paused at the stopping point. You can turn Wi-Fi back on.\n\n**Measured today, all inside the gates** (records in `docs/field-runs/`, report in `docs/REMOTE_ACCESS_FIELD_VERIFICATION.md`, latest commit `ea9a1e4`):\n\n| Row | Result |\n| --- | --- |\n| Same LAN, LAN carrier | 30/30 cold opens p95 474 ms; 30/30 cycles p95 429 ms |\n| Same LAN, relay carrier | 30/30 cold opens p95 1500 ms; 60/60 cycles p95 1030 ms |\n| Cellular, Wi-Fi off | 30/30 cold opens p95 3.8 s (max 4.2 s); 30/30 cycles p95 3.5 s |\n| Relay / helper / gateway restarts | 10 each, recovery p95 1.8 s / 2.6 s / 2.5 s |\n| Lease renewal, pairing, terminal by hand | renewals at the 5-minute marks; 3 s to first served request; `pwd` verified on LAN and cellular |\n\nThe last defect found by your manual check (keystrokes and the create request never reaching the Mac because the phone's native stream held one lock across reads) is fixed with a regression, installed, and verified. Installed release: Mac payload and Desktop 0.2609081113.0; phone build `5c14bf11…` without the push entitlement.\n\n**Open items, each needing you**, listed in the plan's stopping-point record and posted to the mission as the pause request: conversation send/approval and preview checks by hand; 20 Wi-Fi/cellular toggles; 10 Mac sleep/wake cycles; unrelated Wi-Fi, UDP-blocked hotspot, and NAT64 rows; lease expiry (needs the Mac cut off from the control plane for over 10 minutes); APNs (Xcode sign-in, Push capability, an APNs key); the 24-hour soak; then deletion of the retired TURN variables and the Cloudflare key once you accept the cutover. Say \"ok go\" with the item when you want any of them.",
           "type": "message"
         },
-        "ordinal": 624
+        "ordinal": 618
       },
       {
         "createdAt": "2026-09-08T11:54:25.317Z",
@@ -3214,7 +3214,7 @@
           "text": "lets set these as the next objective and deliver this one.",
           "type": "message"
         },
-        "ordinal": 625
+        "ordinal": 619
       },
       {
         "createdAt": "2026-09-08T11:54:31.719Z",
@@ -3225,7 +3225,7 @@
           "text": "Adding the remaining rows as a new objective on the mission, then delivering this one.",
           "type": "message"
         },
-        "ordinal": 626
+        "ordinal": 620
       },
       {
         "createdAt": "2026-09-08T11:54:52.142Z",
@@ -3236,7 +3236,7 @@
           "summary": "Add the remaining matrix work as a new mission objective · returned 2 lines",
           "type": "tool"
         },
-        "ordinal": 627
+        "ordinal": 621
       },
       {
         "createdAt": "2026-09-08T11:54:58.666Z",
@@ -3247,7 +3247,7 @@
           "summary": "Confirm the new objective was added and see its order · returned 1 line",
           "type": "tool"
         },
-        "ordinal": 628
+        "ordinal": 622
       },
       {
         "createdAt": "2026-09-08T11:55:05.716Z",
@@ -3258,7 +3258,7 @@
           "text": "The new objective is `coo:952.503x`, currently ordered after the review objective; I'll try to move it ahead, then deliver.",
           "type": "message"
         },
-        "ordinal": 629
+        "ordinal": 623
       },
       {
         "createdAt": "2026-09-08T11:55:06.627Z",
@@ -3269,7 +3269,7 @@
           "summary": "Check for an objective reorder command · returned 5 lines",
           "type": "tool"
         },
-        "ordinal": 630
+        "ordinal": 624
       },
       {
         "createdAt": "2026-09-08T11:55:14.966Z",
@@ -3280,7 +3280,7 @@
           "summary": "Move the matrix objective ahead of the review objective · returned 2 lines",
           "type": "tool"
         },
-        "ordinal": 631
+        "ordinal": 625
       },
       {
         "createdAt": "2026-09-08T11:55:59.686Z",
@@ -3291,7 +3291,7 @@
           "summary": "Reorder the objectives and deliver this objective · returned 5 lines",
           "type": "tool"
         },
-        "ordinal": 632
+        "ordinal": 626
       },
       {
         "createdAt": "2026-09-08T11:56:09.543Z",
@@ -3302,12 +3302,12 @@
           "text": "Delivered. Objective `coo:952.wfc0` is now in review (delivery `132a8287…`), and the remaining work lives in the new objective `coo:952.503x`.\n\nOne thing I could not do: reordering refused because the review objective `coo:952.18f6` is still a draft rather than a future objective, so `503x` sits after it. When you launch the next step, launch `coo:952.503x` directly (or drag it above the review objective in Overlord).\n\n**What was delivered**\n- Deployed relay and control plane, verified from the Mac; coordinated signed and notarized release 0.2609081113.0 installed; phone re-paired; sessions preserved.\n- Measured inside the gates: same LAN over both carriers, cellular with Wi-Fi off, relay/helper/gateway restarts, lease renewal, terminal by hand on LAN and cellular.\n- Eleven defects found by the physical harness, fixed with regressions, all committed (latest `ea9a1e4`); runbooks, decision, threat model, field report, plan section 16, and the mission artifact updated.\n\n**Carried to `coo:952.503x`**: conversation/preview manual checks, network switches, long suspensions, Mac sleep/wake, unrelated Wi-Fi, UDP-blocked hotspot, NAT64, lease expiry and a real outage, APNs (your Apple developer steps), the 24-hour soak and cost measurements, and deletion of the retired TURN variables and Cloudflare key after you accept the cutover.",
           "type": "message"
         },
-        "ordinal": 633
+        "ordinal": 627
       }
     ],
     "operationEpoch": "fixture",
     "reason": "initial",
-    "revision": 1181,
+    "revision": 1175,
     "state": {
       "connector": {
         "id": "claude",

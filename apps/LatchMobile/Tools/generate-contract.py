@@ -1889,6 +1889,22 @@ public struct ConversationBackgroundWork: Codable, Equatable, Sendable {
     public let kinds: [String]
 }
 
+public struct ConversationRateLimit: Codable, Equatable, Sendable {
+    public let kind: String
+    public let percentUsed: UInt8
+    public var resetsAt: String? = nil
+}
+
+/// The session's context window, rate limits and cost, as the agent last
+/// reported them. Every figure is optional except the (possibly empty) list.
+public struct ConversationUsage: Codable, Equatable, Sendable {
+    public var contextTokens: UInt64? = nil
+    public var contextWindow: UInt64? = nil
+    public var contextPercent: UInt8? = nil
+    public var rateLimits: [ConversationRateLimit] = []
+    public var costCents: UInt64? = nil
+}
+
 public enum ConversationItemKind: Equatable, Sendable, Codable {
     case message(role: String, text: String, status: MessageStatus)
     case tool(name: String, summary: String, status: String, parentMessageId: String?)
@@ -2148,6 +2164,7 @@ public struct ConversationState: Codable, Equatable, Sendable {
     public var model: String? = nil
     public var effort: String? = nil
     public var permissionMode: String? = nil
+    public var usage: ConversationUsage? = nil
 }
 
 public struct ConversationSnapshot: Codable, Equatable, Sendable {

@@ -159,6 +159,64 @@
     "permissionMode": {
       "type": "string",
       "maxLength": 128
+    },
+    "usage": {
+      "description": "The session's context window, rate limits and cost as the agent last reported them.",
+      "type": "object",
+      "required": [
+        "rateLimits"
+      ],
+      "properties": {
+        "contextTokens": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "contextWindow": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "contextPercent": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "rateLimits": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "type": "object",
+            "required": [
+              "kind",
+              "percentUsed"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "percentUsed": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 100
+              },
+              "resetsAt": {
+                "type": "string",
+                "maxLength": 64
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "costCents": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        }
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": false
