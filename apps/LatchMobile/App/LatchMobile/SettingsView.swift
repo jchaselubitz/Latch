@@ -394,6 +394,8 @@ struct SettingsView: View {
         case .conversation: return "Conversation"
         case .browseDirectories: return "Folder browser"
         case .createSession: return "Session creation"
+        case .savedChats: return "Saved chat discovery"
+        case .savedChatResume: return "Saved chat resume"
         case .stopSession: return "Session stop"
         case .attachments: return "Attachments"
         case .agentModels: return "Model choice"

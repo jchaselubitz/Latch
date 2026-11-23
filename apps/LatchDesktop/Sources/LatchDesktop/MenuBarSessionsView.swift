@@ -136,11 +136,21 @@ struct MenuBarSessionsView: View {
     }
 
     private func sessionRow(_ session: SessionSummary) -> some View {
-        let canOpen = store.canOpen(session.state)
+        let canResume = store.canResume(session.id)
+        let canOpen = canResume || (!store.isSavedOnly(session.id) && store.canOpen(session.state))
+        let openHelp = canOpen ? "Open in \(store.preferredTerminal.rawValue)" : session.displaySubtitle
         let hovered = hoveredID == session.id
         return HStack(spacing: 9) {
             Button {
-                dismissThen { Task { await store.open(session.id) } }
+                dismissThen {
+                    Task {
+                        if canResume {
+                            await store.resume(session.id)
+                        } else {
+                            await store.open(session.id)
+                        }
+                    }
+                }
             } label: {
                 HStack(spacing: 9) {
                     AgentLogo(agent: session.agent, size: 16)
@@ -168,7 +178,7 @@ struct MenuBarSessionsView: View {
             }
             .buttonStyle(.plain)
             .disabled(!canOpen)
-            .help(canOpen ? "Open in \(store.preferredTerminal.rawValue)" : session.displaySubtitle)
+            .help(canResume ? "Resume Chat" : openHelp)
             .accessibilityLabel("Open \(session.name)")
 
             if hovered && session.state.isLive {

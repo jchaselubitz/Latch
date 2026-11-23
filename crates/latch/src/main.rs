@@ -10,7 +10,7 @@
 //!
 //! Behaviour behind each arm lives in [`latch::cli`].
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -146,6 +146,23 @@ enum Command {
     /// List sessions, most recently active first.
     List {
         /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Discover saved chats whose most recent terminal has stopped.
+    SavedChats {
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Resume a saved chat by its ID from latch saved-chats.
+    Resume {
+        /// Host-owned chat ID.
+        chat_id: String,
+        /// Reuse this operation UUID to recover an interrupted response.
+        #[arg(long, value_name = "UUID")]
+        request_id: Option<String>,
+        /// Print the new terminal as JSON without attaching.
         #[arg(long)]
         json: bool,
     },
@@ -591,6 +608,50 @@ fn dispatch(command: Option<Command>) -> Result<()> {
                 print_list_human(&report);
             }
             Ok(())
+        }
+        Some(Command::SavedChats { json }) => {
+            let report = create::list_saved_chats(&LatchHome::from_env()?)?;
+            if json {
+                print_json(&report)?;
+            } else if report.chats.is_empty() {
+                println!("No stopped saved chats.");
+            } else {
+                for chat in report.chats {
+                    println!("{}  {}  {}", chat.chat_id, chat.name, chat.cwd);
+                    if let Some(reason) = chat.reason {
+                        println!("  {reason}");
+                    }
+                }
+            }
+            Ok(())
+        }
+        Some(Command::Resume {
+            chat_id,
+            request_id,
+            json,
+        }) => {
+            refuse_nested_create()?;
+            let home = LatchHome::from_env()?;
+            let request_id = match request_id {
+                Some(id) => id,
+                None => new_operation_id()?,
+            };
+            let outcome = create::resume_saved_chat(&home, &chat_id, &request_id)
+                .with_context(|| format!("resume operation {request_id}"))?;
+            if json {
+                print_json(&CreateReport {
+                    protocol_version: PROTOCOL_VERSION,
+                    session: CreatedSession {
+                        id: outcome.id,
+                        name: outcome.name,
+                        state: "running".to_owned(),
+                        created_at: outcome.created_at,
+                    },
+                    reused: Some(outcome.reused),
+                })
+            } else {
+                attach_created_session(&outcome.id)
+            }
         }
         Some(Command::Inspect { session, json }) => {
             let report = manage::inspect(InspectOptions {
@@ -1041,6 +1102,22 @@ fn refuse_nested_create() -> Result<()> {
              run `latch attach` or exit the enclosing session first"
         ),
     }
+}
+
+fn new_operation_id() -> Result<String> {
+    let mut bytes = [0; 16];
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let mut id = String::with_capacity(36);
+    for (index, byte) in bytes.iter().enumerate() {
+        use std::fmt::Write;
+        if matches!(index, 4 | 6 | 8 | 10) {
+            id.push('-');
+        }
+        write!(id, "{byte:02x}")?;
+    }
+    Ok(id)
 }
 
 fn attach_created_session(session: &str) -> Result<()> {

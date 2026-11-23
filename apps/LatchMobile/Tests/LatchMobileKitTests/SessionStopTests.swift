@@ -149,6 +149,50 @@ final class SessionStopTests: XCTestCase {
         )
     }
 
+    func testRemovedSavedChatResumesThroughTheVerifiedTerminal() async throws {
+        StubProtocol.stub(path: "/v2/capabilities", body: Self.capabilities(savedChats: true))
+        StubProtocol.stub(path: "/v2/sessions", body: #"{"sessions":[]}"#)
+        StubProtocol.stub(path: "/v2/saved-chats", body: """
+        {"chats":[{"chatId":"2f1c8a0e-6a1b-4f7e-9d2c-5b8e7a6c4d31","sessionId":"ses_old",
+          "name":"Claude chat","title":null,"createdAt":"2026-09-06T00:00:00Z","cwd":"/Users/person/work",
+          "agent":"claude","canResume":true,"reason":null}]}
+        """)
+        let model = makeModel()
+        await model.connectPairedDevice(pairedRecord(permission: .control))
+        await model.refreshSessions()
+        XCTAssertTrue(model.sessions.isEmpty)
+        let stopped = try XCTUnwrap(model.sessionBrowserSessions.first)
+        XCTAssertEqual(stopped.id, "ses_old")
+        let chat = try XCTUnwrap(model.savedChat(for: stopped))
+        let path = "/v2/saved-chats/\(chat.chatId.uuidString.lowercased())/resume"
+        StubProtocol.stub(method: "POST", path: path, body: """
+        {"protocolVersion":2,"session":{"id":"ses_1","name":"Claude chat","state":"running",
+          "createdAt":"2026-09-06T00:00:00Z"}}
+        """)
+        StubProtocol.stub(method: "GET", path: path, body: """
+        {"target":{"nativeId":"53825e1a-50d3-4af4-9ede-e4600d38be13","cwd":"/Users/person/work",
+          "agent":"claude"},"sessionId":"ses_1","verified":true,"canResume":false,"reason":null}
+        """)
+        StubProtocol.stub(path: "/v2/sessions", body: Self.list(state: "running"))
+        StubProtocol.stub(path: "/v2/saved-chats", body: #"{"chats":[]}"#)
+
+        let resumed = try await model.resumeSavedChat(chat)
+
+        XCTAssertEqual(resumed.id, "ses_1")
+        XCTAssertEqual(model.sessionBrowserSessions.map(\.id), ["ses_1"])
+        XCTAssertEqual(StubProtocol.requests.filter { $0.path == path }.map(\.method), ["POST", "GET"])
+    }
+
+    func testADeviceWithoutControlDoesNotRequestTheSavedChatList() async {
+        StubProtocol.stub(path: "/v2/capabilities", body: Self.capabilities(savedChats: true))
+        let model = makeModel()
+        await model.connectPairedDevice(pairedRecord(permission: .interact))
+        await model.refreshSessions()
+
+        XCTAssertFalse(StubProtocol.requests.contains { $0.path == "/v2/saved-chats" })
+        XCTAssertEqual(model.sessionBrowserSessions, model.sessions)
+    }
+
     private func makeModel() -> AppModel {
         AppModel(
             pairedGatewayFactory: { _ in
@@ -178,13 +222,14 @@ final class SessionStopTests: XCTestCase {
         )
     }
 
-    private static func capabilities(stop: Bool = true) -> String {
+    private static func capabilities(stop: Bool = true, savedChats: Bool = false) -> String {
         """
         {"protocolVersion":2,"productVersion":"2.0.0",
          "capabilities":{"create":true,"openViewer":true,"localAttach":true,
           "cloudAttach":false,"selfUpdate":true,"extensions":[]},
          "endpoints":{"sessions":true,"preview":true,"terminal":true,"conversation":true,
-          "browseDirectories":true,"createSession":true,"stopSession":\(stop)},
+          "browseDirectories":true,"createSession":true,"stopSession":\(stop),
+          "savedChats":\(savedChats),"savedChatResume":\(savedChats)},
          "features":{"exclusiveTerminal":true},"gatewayInstanceId":"gw-a-b",
          "operationRetentionSeconds":600}
         """

@@ -19,6 +19,8 @@ struct SessionsView: View {
     @State private var explainingGrant = false
     /// The row targeted by the shared stop confirmation.
     @State private var stopping: SessionSummary?
+    @State private var restarting: SavedChatSummary?
+    @State private var restartError: String?
     /// Set when Stop was tapped on a Mac that serves the route but has not
     /// granted this phone control, so the reason can be said out loud.
     @State private var explainingStopGrant = false
@@ -98,6 +100,37 @@ struct SessionsView: View {
         } message: {
             Text(model.newSessionUnavailableExplanation ?? "")
         }
+        .alert(
+            "Restart chat?",
+            isPresented: Binding(
+                get: { restarting.map(model.isSavedChatVisible) == true },
+                set: { if !$0 { restarting = nil } }
+            ),
+            presenting: restarting
+        ) { chat in
+            if chat.canResume {
+                Button("Restart") {
+                    Task {
+                        do { select(try await model.resumeSavedChat(chat)) }
+                        catch { restartError = (error as? LatchError)?.message ?? error.localizedDescription }
+                    }
+                }
+            }
+            Button(chat.canResume ? "Cancel" : "OK", role: .cancel) {}
+        } message: { chat in
+            Text(chat.reason ?? "Resume \(chat.title ?? chat.name) on your Mac?")
+        }
+        .alert(
+            "Couldn’t restart chat",
+            isPresented: Binding(
+                get: { restartError != nil },
+                set: { if !$0 { restartError = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(restartError ?? "")
+        }
         .sessionStopPrompts(
             session: stopping,
             confirming: Binding(
@@ -138,9 +171,9 @@ struct SessionsView: View {
         case .linked:
             true
         case .interrupted(_, let capabilities):
-            capabilities != nil && !model.sessions.isEmpty
+            capabilities != nil && !model.sessionBrowserSessions.isEmpty
         case .macOffline(let capabilities):
-            capabilities != nil && !model.sessions.isEmpty
+            capabilities != nil && !model.sessionBrowserSessions.isEmpty
         default:
             false
         }
@@ -195,12 +228,12 @@ struct SessionsView: View {
             } else {
                 ContentUnavailableView {
                     Label(
-                        model.sessions.isEmpty ? "No session open" : "Select a session",
+                        model.sessionBrowserSessions.isEmpty ? "No session open" : "Select a session",
                         systemImage: "rectangle.stack"
                     )
                 } description: {
                     Text(
-                        model.sessions.isEmpty
+                        model.sessionBrowserSessions.isEmpty
                             ? "Sessions on your Mac are listed in the other column."
                             : "Choose a session and it opens here."
                     )
@@ -291,7 +324,7 @@ struct SessionsView: View {
         case .linked:
             sessionList
         case .interrupted(let link, let capabilities):
-            if capabilities != nil, !model.sessions.isEmpty {
+            if capabilities != nil, !model.sessionBrowserSessions.isEmpty {
                 // Cached rows stay readable and are marked stale;
                 // nothing is fetched until the owner reports ready.
                 sessionList
@@ -302,7 +335,7 @@ struct SessionsView: View {
                     detail: Self.interruptedDetail(link)
                 )
             }
-        case .macOffline(let capabilities) where capabilities != nil && !model.sessions.isEmpty:
+        case .macOffline(let capabilities) where capabilities != nil && !model.sessionBrowserSessions.isEmpty:
             // Same bargain as an interrupted link: the last known rows
             // stay readable, and the status line says they are stale.
             sessionList
@@ -515,7 +548,7 @@ struct SessionsView: View {
 
     @ViewBuilder
     private var sessionList: some View {
-        if model.sessions.isEmpty {
+        if model.sessionBrowserSessions.isEmpty {
             MessageView(
                 icon: "moon.zzz",
                 title: "No sessions",
@@ -527,7 +560,7 @@ struct SessionsView: View {
                 await model.refreshSessions()
             }
         } else {
-            let groups = SessionListGroup.grouped(model.sessions, matching: searchQuery)
+            let groups = SessionListGroup.grouped(model.sessionBrowserSessions, matching: searchQuery)
             ScrollViewReader { proxy in
                 List {
                     SessionListHeader(
@@ -595,7 +628,22 @@ struct SessionsView: View {
             isCurrent: isCurrent
         )
         return Group {
-            if browserLayout == .columns {
+            if let chat = model.savedChat(for: session) {
+                Button {
+                    restarting = chat
+                } label: {
+                    HStack {
+                        label
+                        if model.resumingChatIDs.contains(chat.chatId) {
+                            ProgressView()
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(model.resumingChatIDs.contains(chat.chatId))
+            } else if browserLayout == .columns {
                 // Selecting fills the other column. A link here would push a
                 // second copy of the session inside the sidebar.
                 Button {

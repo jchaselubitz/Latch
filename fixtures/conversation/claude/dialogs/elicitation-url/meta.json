@@ -1,0 +1,16 @@
+{
+  "id": "elicitation-url",
+  "dialog": "MCP URL-mode elicitation (engine kinds mcp_elicitation / mcp_url_elicitation)",
+  "files": {
+    "hooks.jsonl": "Elicitation mode url with url and elicitation_id, answered decline by the command hook",
+    "transcript.jsonl": "tool_use and tool_result",
+    "mcp-wire.jsonl": "elicitation/create (mode url, elicitationId) and the decline"
+  },
+  "capture": "Claude Code 2.1.330, headless `claude -p` (haiku) with isolated settings (`--setting-sources local`), capture command hooks for PreToolUse/PostToolUse/PermissionRequest/Notification/Elicitation/ElicitationResult/Stop, a probe MCP stdio server, and a probe hooks module; 2026-11-23",
+  "sanitized": [
+    "session_id, transcript_path and cwd removed from hook records",
+    "work directories rewritten to /work",
+    "home directory rewritten to ~",
+    "transcript records trimmed to type, uuid, parentUuid, timestamp, isSidechain, promptId, message, toolUseResult, attachment"
+  ]
+}

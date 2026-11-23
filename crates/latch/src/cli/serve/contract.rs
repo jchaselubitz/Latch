@@ -1,5 +1,5 @@
 //! Generated from `schemas/remote-access/v2/*.schema.json`; do not edit by hand.
-//! Canonical schema set SHA-256: 3c71880a7b780bffe8d3853438c29643656a2f47cc4b1defa52aaf34c33ad4cd
+//! Canonical schema set SHA-256: b0f90bc11f1f3f0e6f69dbf4c3b03dad8ccf15214f0f5e2061d01b85953ca379
 
 use serde::{Deserialize, Serialize};
 
@@ -91,6 +91,37 @@ pub struct SavedChatStatus {
     pub verified: bool,
     pub can_resume: bool,
     pub reason: Option<String>,
+}
+
+/// Discovery metadata excluding the native identity and transcript path.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedChatSummary {
+    /// Original create operation ID.
+    pub chat_id: String,
+    /// Identifier of the most recent terminal.
+    pub session_id: String,
+    /// Session display name.
+    pub name: String,
+    /// Optional session title.
+    pub title: Option<String>,
+    /// Session display timestamp.
+    pub created_at: String,
+    /// Original working directory.
+    pub cwd: String,
+    /// Harness that owns the native conversation.
+    pub agent: SessionAgent,
+    /// Whether the host currently permits exact resume.
+    pub can_resume: bool,
+    /// Explanation when exact resume is unavailable.
+    pub reason: Option<String>,
+}
+
+/// Saved chats visible within one authority scope.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SavedChatList {
+    /// Stopped chats visible to the caller.
+    pub chats: Vec<SavedChatSummary>,
 }
 
 /// One model a hosted agent can start with.

@@ -1,0 +1,16 @@
+{
+  "id": "permission-suggestions",
+  "dialog": "Permission prompt with a rule-writing option ('Yes, and don't ask again')",
+  "files": {
+    "hooks-unanswered.jsonl": "PermissionRequest with permission_suggestions [addRules Bash(<command>) allow localSettings]; headless denies",
+    "hooks-allow-session.jsonl": "the command hook answered allow + updatedPermissions (the suggestion with destination session); the identical second call raised no PermissionRequest and no settings file was written",
+    "transcript-*.jsonl": "the Bash tool_use/tool_result pairs"
+  },
+  "capture": "Claude Code 2.1.330, headless `claude -p` (haiku) with isolated settings (`--setting-sources local`), capture command hooks for PreToolUse/PostToolUse/PermissionRequest/Notification/Elicitation/ElicitationResult/Stop, a probe MCP stdio server, and a probe hooks module; 2026-11-23",
+  "sanitized": [
+    "session_id, transcript_path and cwd removed from hook records",
+    "work directories rewritten to /work",
+    "home directory rewritten to ~",
+    "transcript records trimmed to type, uuid, parentUuid, timestamp, isSidechain, promptId, message, toolUseResult, attachment"
+  ]
+}

@@ -74,6 +74,8 @@ public final class AppModel {
     var hasPairedLink = false
 
     public internal(set) var sessions: [SessionSummary] = []
+    var savedChatCatalog: (gateway: LatchGateway, pairingID: String, chats: [SavedChatSummary])?
+    public internal(set) var resumingChatIDs: Set<UUID> = []
 
     /// The network path the paired route is running over, once one is open.
     public private(set) var remotePath: RemotePath?

@@ -15,6 +15,7 @@ extension AppModel {
         discoveredGeneration = 0
         gatewayInstanceID = nil
         sessions = []
+        savedChatCatalog = nil
         sessionsStale = false
         sessionsError = nil
         highlightedSessionID = nil

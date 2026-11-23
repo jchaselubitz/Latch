@@ -86,3 +86,14 @@ were sanitized before check-in.
 cargo test --package latch --lib conversation::connectors::jsonl
 swift test --package-path apps/LatchMobile --filter 'ConversationFixtureTests|ConversationProjectionTests|ConversationMarkdownTests'
 ```
+
+## Claude dialogs
+
+`claude/dialogs/<case>/` holds raw captures for each Claude Code dialog type:
+hook payloads, transcript slices, MCP wire and hooks-module events, each with a
+`meta.json`. They are inputs for connector replay tests, not Hub projections, so
+the `claude_cases_match_checked_in_projections` test does not read them. They were
+captured live with Claude Code 2.1.330 using `docs/experiments/claude-dialog-probe`.
+Dialogs that cannot be produced headlessly are documented from the engine in
+`claude/dialogs/terminal-only/`. The classification and answer paths are in
+`planning/CLAUDE_REQUESTS_V2.md`.

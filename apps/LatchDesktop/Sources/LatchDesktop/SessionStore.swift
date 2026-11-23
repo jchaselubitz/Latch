@@ -6,6 +6,10 @@ import AppKit
 final class SessionStore: ObservableObject {
     @Published private(set) var sessions: [SessionSummary] = []
     @Published private(set) var details: InspectReport?
+    @Published private(set) var savedChats: [String: SavedChatSummary] = [:]
+    @Published private(set) var resumingSessionIDs = Set<String>()
+    private var retainedSessionIDs = Set<String>()
+    private var resumeRequests: [String: UUID] = [:]
     @Published var selection = Set<String>()
     @Published var search = ""
     @Published var filter: SessionFilter = .all
@@ -157,6 +161,23 @@ final class SessionStore: ObservableObject {
     /// Whether a session in `state` can be opened in a terminal right now.
     func canOpen(_ state: SessionState) -> Bool { state.isAttachable && canAttachSessions }
 
+    func isSavedOnly(_ id: String) -> Bool {
+        savedChats[id] != nil && !retainedSessionIDs.contains(id)
+    }
+
+    func canResume(_ id: String) -> Bool {
+        savedChats[id]?.canResume == true && canAttachSessions && !resumingSessionIDs.contains(id)
+    }
+
+    func resumeExplanation(_ id: String) -> String {
+        if let reason = savedChats[id]?.reason { return reason }
+        if cliCapabilities?.capabilities.extensions.contains("saved-chats") != true {
+            return "Update the Latch CLI to resume saved chats."
+        }
+        if savedChats[id] == nil { return "This session has no verified saved conversation." }
+        return "Resume the saved conversation and open its terminal."
+    }
+
     /// Live sessions in the current sidebar selection, in list order.
     var selectedLiveSessionIDs: [String] {
         sessions
@@ -237,6 +258,8 @@ final class SessionStore: ObservableObject {
         pollingTask?.cancel()
         pollingTask = nil
         cliCapabilities = nil
+        savedChats = [:]
+        resumeRequests = [:]
         cliDoctorReport = nil
         cliUpdateReport = nil
         syncChrome()
@@ -262,7 +285,15 @@ final class SessionStore: ObservableObject {
             refreshRequested = false
             do {
                 let report = try await client.list()
-                applySessionList(report.sessions)
+                let catalog = if cliCapabilities?.capabilities.extensions.contains("saved-chats") == true {
+                    try await client.savedChats().chats
+                } else {
+                    [SavedChatSummary]()
+                }
+                retainedSessionIDs = Set(report.sessions.map(\.id))
+                let nextChats = Dictionary(catalog.map { ($0.sessionId, $0) }, uniquingKeysWith: { first, _ in first })
+                if nextChats != savedChats { savedChats = nextChats }
+                applySessionList(report.sessions + catalog.filter { isSavedOnly($0.sessionId) }.map(\.session))
                 consecutiveRefreshFailures = 0
                 clearError()
                 await loadDetails()
@@ -277,7 +308,7 @@ final class SessionStore: ObservableObject {
     }
 
     func loadDetails() async {
-        guard selection.count == 1, let id = selection.first else {
+        guard selection.count == 1, let id = selection.first, !isSavedOnly(id) else {
             if details != nil {
                 details = nil
             }
@@ -308,6 +339,27 @@ final class SessionStore: ObservableObject {
             selection = [report.session.id]
             await refresh()
             if openAfterCreation { await open(report.session.id) }
+        }
+    }
+
+    func resume(_ sessionID: String) async {
+        guard canResume(sessionID), let chat = savedChats[sessionID] else { return }
+        let operation = resumeRequests[chat.chatId] ?? UUID()
+        resumeRequests[chat.chatId] = operation
+        resumingSessionIDs.insert(sessionID)
+        defer { resumingSessionIDs.remove(sessionID) }
+        do {
+            let report = try await client.resume(chat.chatId, requestID: operation)
+            resumeRequests[chat.chatId] = nil
+            await refresh()
+            selection = [report.session.id]
+            await open(report.session.id)
+        } catch let error as LatchClientError {
+            // A lost process response can be retried with the same operation.
+            if case .commandFailed = error { resumeRequests[chat.chatId] = nil }
+            report(error)
+        } catch {
+            report(error)
         }
     }
 

@@ -1,0 +1,184 @@
+{
+  "source": "Read from the installed Claude Code 2.1.330 engine (Bun binary, strings) on 2026-11-23: the dialog registry (`Df`), each dialog's `ds({kind, result})` definition, the notification sender, and the session-status writer. Not a live capture; see planning/CLAUDE_REQUESTS_V2.md.",
+  "notification": {
+    "sender": "Each registry entry with a `notification` raises the Notification hook (hooks run before any terminal channel, regardless of preferredNotifChannel) once the dialog has been shown and the person has not touched the terminal for 6000 ms. A missing `type` defaults to `permission_prompt`.",
+    "idleThresholdMs": 6000,
+    "defaultType": "permission_prompt",
+    "observedLive": [
+      {
+        "hook_event_name": "Notification",
+        "notification_type": "elicitation_response",
+        "message": "Elicitation response for server \"probe\": cancel"
+      }
+    ]
+  },
+  "sessionStatusFile": {
+    "path": "~/.claude/sessions/<claude pid>.json",
+    "fields": {
+      "status": "busy | idle | waiting",
+      "waitingFor": "registry waitingFor of the top dialog, else 'permission prompt'; 'input needed' for an MCP elicitation; 'sandbox request'; 'worker request'; 'dialog open' for a local JSX command"
+    },
+    "timing": "Written as the top dialog changes, with no idle delay (statusUpdatedAt stamps it)."
+  },
+  "dialogs": [
+    {
+      "kind": "computer_use_approval",
+      "raisedBy": "mcp__computer-use__request_access tool body (requestDialog)",
+      "hooks": "none (no PermissionRequest; PreToolUse/tool.call see the tool call only)",
+      "result": "{granted[], denied[], flags}",
+      "headlessDefault": "{granted: [], denied: []}",
+      "notification": {
+        "text": "Claude needs your permission",
+        "type": "permission_prompt"
+      },
+      "waitingFor": "permission prompt",
+      "needs": "choose: allow or deny the computer-use action"
+    },
+    {
+      "kind": "permission_exit_plan_mode_v2",
+      "raisedBy": "ExitPlanMode permission ask",
+      "hooks": "PreToolUse, PermissionRequest (tool.call and classic.PermissionRequest in a mod)",
+      "result": "options yes-accept-edits | yes-auto-clear-context | yes-bypass-permissions (clear context), yes-accept-edits-keep-context | yes-resume-auto-mode, yes-default-keep-context, ultraplan, no (+ feedback)",
+      "notification": {
+        "text": "Claude Code needs your approval for the plan",
+        "type": "permission_prompt"
+      },
+      "layout": "modal"
+    },
+    {
+      "kind": "mcp_elicitation",
+      "raisedBy": "MCP elicitation/create after Elicitation hooks returned nothing",
+      "hooks": "Elicitation (before the dialog), ElicitationResult + Notification elicitation_response (after a dialog answer)",
+      "result": "{action: accept|decline|cancel, content?}",
+      "notification": {
+        "text": "Claude Code needs your input",
+        "type": "elicitation_dialog | elicitation_url_dialog (url mode)"
+      },
+      "waitingFor": "input needed"
+    },
+    {
+      "kind": "mcp_url_elicitation",
+      "notification": {
+        "text": "An MCP server needs your input",
+        "type": "elicitation_url_dialog"
+      },
+      "waitingFor": "input needed",
+      "needs": "MCP input: open link"
+    },
+    {
+      "kind": "mcp_elicitation_waiting",
+      "result": "dismiss | retry | cancel",
+      "notification": {
+        "text": "Claude Code needs your input",
+        "type": "elicitation_url_dialog"
+      },
+      "waitingFor": "input needed"
+    },
+    {
+      "kind": "refusal_fallback_prompt",
+      "raisedBy": "an API refusal with a fallback model offer",
+      "hooks": "none for the choice (PreModelSwitch fires only if the person picks the fallback model)",
+      "payload": "originalModel, fallbackModel, apiRefusalCategory?, guidanceText?",
+      "result": "retry_fallback | edit_prompt | cancelled",
+      "notification": {
+        "text": "Session paused",
+        "type": "permission_prompt"
+      },
+      "waitingFor": "dialog open",
+      "needs": "choose: retry on fallback model or edit prompt"
+    },
+    {
+      "kind": "fable_overage_consent_prompt",
+      "raisedBy": "Fable plan/seat usage exhausted, usage credits available",
+      "hooks": "none",
+      "payload": "overagesEnabled, modelName?, leftOutOf plan|seat, endedOn?, balanceCents?, currency?",
+      "result": "consent | switch_default | request_admin | cancelled",
+      "notification": {
+        "text": "Session paused",
+        "type": "permission_prompt"
+      },
+      "waitingFor": "dialog open",
+      "needs": "choose: continue on usage credits or switch models"
+    },
+    {
+      "kind": "sandbox_network_access",
+      "hooks": "none",
+      "result": "{allow, persistToSettings} | cancelled",
+      "notification": {
+        "text": "A sandboxed command needs network access",
+        "type": "permission_prompt"
+      },
+      "waitingFor": "sandbox request"
+    },
+    {
+      "kind": "permission_browser",
+      "notification": {
+        "text": "Claude needs your permission",
+        "type": "permission_prompt"
+      },
+      "waitingFor": "permission prompt"
+    },
+    {
+      "kind": "chrome_install_upsell",
+      "result": "install | not_now | dont_ask_again | cancelled",
+      "notification": {
+        "text": "Claude wants to use your browser",
+        "type": "permission_prompt"
+      }
+    },
+    {
+      "kind": "permission_enter_plan_mode",
+      "notification": {
+        "text": "Claude Code wants to enter plan mode",
+        "type": "permission_prompt"
+      }
+    },
+    {
+      "kind": "goal_proposal",
+      "result": "{approved, explicit?}",
+      "notification": {
+        "text": "Claude proposed a session goal",
+        "type": "permission_prompt"
+      },
+      "waitingFor": "goal proposal"
+    },
+    {
+      "kind": "peer_inbound_approval",
+      "result": "approve | deny | cancelled",
+      "notification": {
+        "text": "A message from another session needs your approval",
+        "type": "permission_prompt"
+      }
+    },
+    {
+      "kind": "auto_mode_server_fallback",
+      "result": "continue | interrupt | cancelled",
+      "notification": {
+        "text": "Auto mode has a classifier billing notice to acknowledge",
+        "type": "agent_needs_input"
+      },
+      "waitingFor": "dialog open"
+    },
+    {
+      "kind": "auto_mode_end_offer",
+      "result": "stay | switch | interrupt | cancelled",
+      "notification": {
+        "text": "Auto mode can't check actions in this session and needs your choice",
+        "type": "agent_needs_input"
+      },
+      "waitingFor": "dialog open"
+    },
+    {
+      "kind": "managed_settings_security",
+      "notification": {
+        "text": "Managed settings need your review before they apply",
+        "type": "permission_prompt"
+      },
+      "waitingFor": "dialog open"
+    }
+  ],
+  "notDialogs": {
+    "mcp_oauth_sign_in": "Model-mediated: an MCP server that needs auth exposes mcp__<server>__authenticate (and complete_authentication for remote sessions). Its tool result carries {status, authUrl, message}; the callback is a loopback listener on the Mac. In a local session a pasted URL cannot finish the sign-in; /mcp (a local JSX command, waitingFor 'dialog open') is the terminal path. Headless (-p) sessions do not offer the authenticate tool.",
+    "workspace_trust": "Shown before the session starts; no hook, mod or session status exists yet."
+  }
+}

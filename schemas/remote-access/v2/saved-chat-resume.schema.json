@@ -21,6 +21,76 @@
         "agent": {"enum": ["claude", "codex"], "type": "string"}
       }
     },
+    "SavedChatSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "chatId",
+        "sessionId",
+        "name",
+        "title",
+        "createdAt",
+        "cwd",
+        "agent",
+        "canResume",
+        "reason"
+      ],
+      "properties": {
+        "chatId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "createdAt": {
+          "type": "string"
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "agent": {
+          "enum": [
+            "claude",
+            "codex"
+          ],
+          "type": "string"
+        },
+        "canResume": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "SavedChatList": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "chats"
+      ],
+      "properties": {
+        "chats": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SavedChatSummary"
+          }
+        }
+      }
+    },
     "SavedChatStatus": {
       "type": "object",
       "additionalProperties": false,

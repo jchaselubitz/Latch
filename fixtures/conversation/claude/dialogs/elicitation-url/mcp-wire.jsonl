@@ -1,0 +1,5 @@
+{"dir": "client->server", "msg": {"method": "initialize", "params": {"capabilities": {"roots": {"listChanged": true}, "elicitation": {"form": {}, "url": {}}}}}}
+{"dir": "client->server", "msg": {"method": "tools/call", "params": {"name": "ask_url", "arguments": {}, "_meta": {"claudecode/toolUseId": "toolu_01E6ewJqD2XGYDDQ1Tvkzrdd", "progressToken": 2}}, "jsonrpc": "2.0", "id": 2}}
+{"dir": "server->client", "msg": {"jsonrpc": "2.0", "id": 1000, "method": "elicitation/create", "params": {"mode": "url", "message": "Latch probe: sign in to the example service.", "url": "https://example.com/latch-probe/authorize?state=probe", "elicitationId": "latch-probe-url-1"}}}
+{"dir": "client->server", "msg": {"result": {"action": "decline"}, "jsonrpc": "2.0", "id": 1000}}
+{"dir": "server->client", "msg": {"jsonrpc": "2.0", "id": 2, "result": {"content": [{"type": "text", "text": "elicitation reply: {\"action\":\"decline\"}"}]}}}

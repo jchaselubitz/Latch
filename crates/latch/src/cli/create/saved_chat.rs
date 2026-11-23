@@ -2,7 +2,8 @@
 //! Only the launch observer can establish a native binding. The gateway never
 //! takes a native ID, path, or executable from the caller.
 use super::*;
-use crate::cli::serve::{SavedChatStatus, SavedChatTarget};
+use crate::cli::serve::{SavedChatStatus, SavedChatSummary, SavedChatTarget};
+use std::collections::HashMap;
 use std::fs;
 use std::os::unix::fs::MetadataExt;
 
@@ -16,7 +17,33 @@ struct Chat {
     inode: u64,
     agent: SessionAgent,
     original: Option<String>,
+    #[serde(default)]
+    display: Option<ChatDisplay>,
     attempts: Vec<Attempt>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ChatDisplay {
+    name: String,
+    title: Option<String>,
+    created_at: String,
+}
+
+// Only in-process CLI callers can select host authority. A gateway request
+// without an authenticated pairing is never translated to this scope.
+#[derive(Clone, Copy)]
+pub(crate) enum Scope<'a> {
+    Host,
+    Pairing(&'a str),
+}
+
+impl Scope<'_> {
+    fn owns(self, chat: &Chat) -> bool {
+        match self {
+            Self::Host => true,
+            Self::Pairing(device) => device == chat.device,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -136,6 +163,7 @@ pub(super) fn register(request: &RemoteSessionRequest, cwd: &Path) -> anyhow::Re
             inode: directory.ino(),
             agent,
             original: None,
+            display: None,
             attempts: Vec::new(),
         },
     )
@@ -149,7 +177,14 @@ pub(super) fn record_original(
     let path = chat_path(home, request_id)?;
     if let Some(mut chat) = read::<Chat>(&path)? {
         if chat.original.is_none() {
+            let id = SessionId::parse(session_id)?;
+            let metadata = meta::read(&home.session(&id))?;
             chat.original = Some(session_id.to_owned());
+            chat.display = Some(ChatDisplay {
+                name: metadata.name,
+                title: metadata.title,
+                created_at: metadata.created_at,
+            });
             write(&path, &chat)?;
         }
     }
@@ -373,40 +408,149 @@ fn qualified_program(agent: SessionAgent) -> Option<PathBuf> {
 fn owned_chat(
     home: &LatchHome,
     id: &str,
-    device: Option<&str>,
+    scope: Scope<'_>,
 ) -> Result<(PathBuf, Chat), ResumeError> {
-    let Some(device) = device else {
-        return Err(ResumeError::Unknown);
-    };
     let path = chat_path(home, id)?;
     let Some(chat) = read::<Chat>(&path)? else {
         return Err(ResumeError::Unknown);
     };
-    if chat.device != device {
+    if !scope.owns(&chat) {
         return Err(ResumeError::Unknown);
     }
     Ok((path, chat))
 }
 
-fn ended(home: &LatchHome, id: &str) -> anyhow::Result<bool> {
+fn ended(
+    home: &LatchHome,
+    id: &str,
+    states: &HashMap<String, engine::SessionState>,
+) -> anyhow::Result<bool> {
     let id = SessionId::parse(id)?;
-    // The kernel list must answer successfully. Lost state with metadata
-    // retained is unconfirmed; a removed session with no kernel entry ended.
-    let state = engine::list(home)?
-        .into_iter()
-        .find(|entry| entry.id == id.as_str());
-    Ok(match state {
-        Some(entry) => entry.state == engine::SessionState::Exited,
+    // Lost state with metadata retained is unconfirmed. A removed terminal
+    // with no kernel entry has ended.
+    Ok(match states.get(id.as_str()) {
+        Some(state) => *state == engine::SessionState::Exited,
         None => !home.session(&id).meta().exists(),
     })
+}
+
+fn terminal_states(home: &LatchHome) -> anyhow::Result<HashMap<String, engine::SessionState>> {
+    Ok(engine::list(home)?
+        .into_iter()
+        .map(|entry| (entry.id, entry.state))
+        .collect())
+}
+
+fn unavailable_reason(
+    chat: &Chat,
+    binding: &Binding,
+    has_program: impl FnOnce() -> bool,
+) -> Option<&'static str> {
+    if chat.attempts.len() >= MAX_ATTEMPTS {
+        Some("This saved chat has reached its resume limit.")
+    } else if !original_directory(chat) {
+        Some("Restore the original working directory or worktree on the host.")
+    } else if !history_available(chat.agent, binding) {
+        Some("The original native history is unavailable. Check it on the host.")
+    } else if !has_program() {
+        Some("This host does not have a verified resume version for this harness.")
+    } else {
+        None
+    }
+}
+
+pub(crate) fn list(home: &LatchHome, scope: Scope<'_>) -> anyhow::Result<Vec<SavedChatSummary>> {
+    let dir = home.root().join("saved-chats").join("records");
+    let records = match fs::read_dir(&dir) {
+        Ok(records) => records,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    let states = terminal_states(home)?;
+    let mut programs = HashMap::new();
+    let mut chats = Vec::new();
+    for record in records {
+        let record = record?;
+        let path = record.path();
+        let Some(id) = path.file_stem().and_then(OsStr::to_str) else {
+            continue;
+        };
+        if path.extension().and_then(OsStr::to_str) != Some("json") || !is_request_id(id) {
+            continue;
+        }
+        let Some(chat) = read::<Chat>(&path)? else {
+            continue;
+        };
+        if !scope.owns(&chat) {
+            continue;
+        }
+        // A partially written launch receipt can block the individual chat.
+        // Keep discovering other saved chats even when this one cannot resume.
+        let Ok(Some(session_id)) = latest_session(home, &chat, id) else {
+            continue;
+        };
+        if !ended(home, &session_id, &states)? {
+            continue;
+        }
+        let Some(binding) = original_binding(home, &chat, id)? else {
+            continue;
+        };
+        let reason = unavailable_reason(&chat, &binding, || {
+            *programs
+                .entry(chat.agent.harness())
+                .or_insert_with(|| qualified_program(chat.agent).is_some())
+        });
+        let session = SessionId::parse(&session_id)?;
+        let display = meta::read(&home.session(&session))
+            .ok()
+            .map(|metadata| ChatDisplay {
+                name: metadata.name,
+                title: metadata.title,
+                created_at: metadata.created_at,
+            })
+            .or(chat.display)
+            .unwrap_or_else(|| ChatDisplay {
+                name: format!(
+                    "{} chat",
+                    if chat.agent == SessionAgent::Claude {
+                        "Claude"
+                    } else {
+                        "Codex"
+                    }
+                ),
+                title: None,
+                created_at: record
+                    .metadata()
+                    .and_then(|metadata| metadata.modified())
+                    .map(engine::format_rfc3339)
+                    .unwrap_or_default(),
+            });
+        chats.push(SavedChatSummary {
+            chat_id: id.to_owned(),
+            session_id,
+            name: display.name,
+            title: display.title,
+            created_at: display.created_at,
+            cwd: chat.cwd.to_string_lossy().into_owned(),
+            agent: chat.agent,
+            can_resume: reason.is_none(),
+            reason: reason.map(str::to_owned),
+        });
+    }
+    chats.sort_by(|a, b| {
+        b.created_at
+            .cmp(&a.created_at)
+            .then(a.chat_id.cmp(&b.chat_id))
+    });
+    Ok(chats)
 }
 
 pub(crate) fn status(
     home: &LatchHome,
     id: &str,
-    device: Option<&str>,
+    scope: Scope<'_>,
 ) -> Result<SavedChatStatus, ResumeError> {
-    let (_, chat) = owned_chat(home, id, device)?;
+    let (_, chat) = owned_chat(home, id, scope)?;
     let session_id = latest_session(home, &chat, id)?;
     let mut result = SavedChatStatus {
         target: None,
@@ -427,18 +571,11 @@ pub(crate) fn status(
     if let Some(Observation::Bound(actual)) = observation(home, session_id)? {
         result.verified = actual == original;
     }
-    if ended(home, session_id)? {
-        result.reason = if !original_directory(&chat) {
-            Some("Restore the original working directory or worktree on the host.")
-        } else if !history_available(chat.agent, &original) {
-            Some("The original native history is unavailable. Check it on the host.")
-        } else if qualified_program(chat.agent).is_none() {
-            Some("This host does not have a verified resume version for this harness.")
-        } else {
-            result.can_resume = true;
-            None
-        }
-        .map(str::to_owned);
+    if ended(home, session_id, &terminal_states(home)?)? {
+        result.reason =
+            unavailable_reason(&chat, &original, || qualified_program(chat.agent).is_some())
+                .map(str::to_owned);
+        result.can_resume = result.reason.is_none();
     }
     result.target = Some(SavedChatTarget {
         native_id: original.native_id,
@@ -456,10 +593,10 @@ pub(crate) fn resume(
     home: &LatchHome,
     id: &str,
     request_id: &str,
-    device: Option<&str>,
+    scope: Scope<'_>,
 ) -> Result<RemoteSessionOutcome, ResumeError> {
     let _lock = CreationLock::acquire(home)?;
-    let (path, mut chat) = owned_chat(home, id, device)?;
+    let (path, mut chat) = owned_chat(home, id, scope)?;
     if let Some(attempt) = chat.attempts.iter().find(|a| a.request_id == request_id) {
         return match find_remote_session(home, request_id)? {
             Some(session) => Ok(RemoteSessionOutcome {
@@ -477,6 +614,7 @@ pub(crate) fn resume(
     }
     if request_id == id
         || chat.attempts.len() >= MAX_ATTEMPTS
+        || chat_path(home, request_id)?.exists()
         || request_reserved(home, request_id)?
         || read_receipt(home, request_id)?.is_some()
         || find_remote_session(home, request_id)?.is_some()
@@ -488,7 +626,7 @@ pub(crate) fn resume(
     let Some(session) = latest_session(home, &chat, id)? else {
         return Err(ResumeError::Unknown);
     };
-    if !ended(home, &session)? {
+    if !ended(home, &session, &terminal_states(home)?)? {
         return Err(ResumeError::Unavailable(
             "The previous terminal has not confirmed it ended. Check it on the host.",
         ));
@@ -514,6 +652,11 @@ pub(crate) fn resume(
             cwd: chat.cwd.clone(),
             size: REMOTE_INITIAL_SIZE,
             display: DisplayMetadata {
+                name: chat.display.as_ref().map(|display| display.name.clone()),
+                title: chat
+                    .display
+                    .as_ref()
+                    .and_then(|display| display.title.clone()),
                 source: crate::session::manifest::SourceInfo {
                     kind: MOBILE_SOURCE_KIND.to_owned(),
                     external_run_id: Some(request_id.to_owned()),
@@ -559,6 +702,46 @@ pub(crate) fn resume(
                 write(&path, &chat)?;
             }
             Err(ResumeError::Failed(error))
+        }
+    }
+}
+
+pub(super) fn resume_local(
+    home: &LatchHome,
+    id: &str,
+    request_id: &str,
+) -> anyhow::Result<RemoteSessionOutcome> {
+    let scope = Scope::Host;
+    let map_error = |error| match error {
+        ResumeError::Unknown => anyhow::anyhow!("saved chat could not be found"),
+        ResumeError::Unavailable(reason) => anyhow::anyhow!("{reason}"),
+        ResumeError::Failed(error) => error,
+    };
+    anyhow::ensure!(
+        is_request_id(id) && is_request_id(request_id),
+        "saved chat and operation identifiers must be UUIDs"
+    );
+    let id = id.to_ascii_lowercase();
+    let request_id = request_id.to_ascii_lowercase();
+    let outcome = resume(home, &id, &request_id, scope).map_err(map_error)?;
+    let (_, chat) = owned_chat(home, &id, scope).map_err(map_error)?;
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let expected =
+        original_binding(home, &chat, &id)?.context("original binding is no longer available")?;
+    loop {
+        match observation(home, &outcome.id)? {
+            Some(Observation::Bound(actual)) if actual == expected => {
+                anyhow::ensure!(
+                    terminal_states(home)?.get(&outcome.id) == Some(&engine::SessionState::Running),
+                    "the verified terminal has already stopped"
+                );
+                return Ok(outcome);
+            }
+            Some(_) => {
+                anyhow::bail!("the relaunched terminal did not verify the saved chat identity")
+            }
+            None if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(200)),
+            None => anyhow::bail!("still waiting to verify the relaunched chat identity"),
         }
     }
 }

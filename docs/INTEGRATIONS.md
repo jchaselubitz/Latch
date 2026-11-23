@@ -128,9 +128,20 @@ the original gateway create request ID.
 operation. Both methods require the original device and control grant. Use
 the same operation ID after a lost response. Latch records the acceptance
 before dispatch and refuses a second launch while an accepted outcome is
-unresolved. The client checks `verified` against its saved target and waits
+unresolved. Overlord Compose checks `verified` against its saved target and waits
 for restored Hub history before it exposes the replacement terminal as the
 same chat. Native identity metadata contains no transcript content.
+
+Latch Desktop and the host CLI discover stopped chats even after their terminal
+records are removed. Run `latch saved-chats` to find a chat ID, then
+`latch resume <chat-id>` to resume it and attach to the new terminal. For
+automation, `--json` returns the verified replacement terminal and
+`--request-id <uuid>` lets the caller recover the same operation.
+
+A paired client that discovers `endpoints.savedChats` can use
+`GET /v2/saved-chats` to list stopped chats from its own control-grant pairing.
+The list includes display metadata and availability without the native ID or
+transcript path. Latch Mobile asks before restarting a saved chat.
 
 #### Claude Code
 

@@ -151,12 +151,16 @@ struct SessionsView: View {
             .tag(session.id)
             .contentShape(Rectangle())
             .simultaneousGesture(TapGesture(count: 2).onEnded {
-                guard store.canOpen(session.state) else { return }
+                guard !store.isSavedOnly(session.id), store.canOpen(session.state) else { return }
                 Task { await store.open(session.id) }
             })
             .contextMenu {
-                let canOpen = store.canOpen(session.state)
+                let canOpen = !store.isSavedOnly(session.id) && store.canOpen(session.state)
                 let otherLiveIDs = store.otherLiveSessionIDs(keeping: session.id)
+                if !session.state.isLive {
+                    Button("Resume Chat") { Task { await store.resume(session.id) } }
+                        .disabled(!store.canResume(session.id))
+                }
                 Button("Open in \(store.preferredTerminal.rawValue)") {
                     Task { await store.open(session.id) }
                 }
@@ -171,6 +175,7 @@ struct SessionsView: View {
                 Button("Copy Attach Command") {
                     Task { await store.copyAttachCommand(session.id) }
                 }
+                .disabled(store.isSavedOnly(session.id))
                 Divider()
                 if session.state.isLive {
                     Button("Stop…", role: .destructive) {
@@ -199,6 +204,18 @@ struct SessionsView: View {
     @ViewBuilder private var inspectorContent: some View {
         if store.selection.count > 1 {
             MultiSessionSelectionView(store: store)
+        } else if store.selection.count == 1,
+                  let id = store.selection.first,
+                  store.isSavedOnly(id),
+                  let chat = store.savedChats[id] {
+            VStack(alignment: .leading, spacing: 16) {
+                Text(chat.title ?? chat.name).font(.title3.bold())
+                ResumeSessionButton(store: store, sessionID: id)
+                DetailRow(label: "Directory", value: chat.cwd, monospaced: true, isLast: true)
+                    .latchCard()
+            }
+            .padding(16)
+            .frame(maxHeight: .infinity, alignment: .top)
         } else if store.selection.count == 1,
                   let selectedID = store.selection.first,
                   let details = store.details,

@@ -27,6 +27,22 @@ use anyhow::{bail, Context};
 
 pub(crate) mod saved_chat;
 
+/// Local discovery for chats whose most recent terminal has ended.
+pub fn list_saved_chats(home: &LatchHome) -> anyhow::Result<crate::cli::serve::SavedChatList> {
+    Ok(crate::cli::serve::SavedChatList {
+        chats: saved_chat::list(home, saved_chat::Scope::Host)?,
+    })
+}
+
+/// Starts a saved chat as the host user and waits for the native identity.
+pub fn resume_saved_chat(
+    home: &LatchHome,
+    chat_id: &str,
+    request_id: &str,
+) -> anyhow::Result<RemoteSessionOutcome> {
+    saved_chat::resume_local(home, chat_id, request_id)
+}
+
 /// Provenance recorded for a session the phone asked for.
 pub const MOBILE_SOURCE_KIND: &str = "mobile";
 
@@ -1222,6 +1238,56 @@ mod tests {
     }
 
     #[test]
+    fn removed_saved_chat_is_discoverable_on_host_and_by_its_pairing() {
+        let (_temp, home, cwd) = home();
+        let mut original = claude_request(&home, &cwd);
+        original.device = Some("original-phone".to_owned());
+        let launched = create_remote_session_with(
+            original.clone(),
+            |agent| Some(PathBuf::from(agent.harness())),
+            stub_launch,
+        )
+        .unwrap();
+        let session = SessionId::parse(&launched.id).unwrap();
+        let native_id = "2f1c8a0e-6a1b-4f7e-9d2c-5b8e7a6c4d31";
+        let unavailable_history = cwd.join(format!("{native_id}.jsonl"));
+        assert!(saved_chat::observe(
+            &home,
+            &session,
+            "claude",
+            Some(native_id),
+            &unavailable_history
+        )
+        .unwrap());
+
+        // The stub launched no kernel. Retained metadata without kernel state
+        // cannot establish that a terminal has stopped.
+        assert!(list_saved_chats(&home).unwrap().chats.is_empty());
+        home.session(&session).remove().unwrap();
+
+        let local = list_saved_chats(&home).unwrap().chats;
+        assert_eq!(local.len(), 1);
+        assert_eq!(local[0].chat_id, original.request_id);
+        assert_eq!(local[0].session_id, launched.id);
+        assert_eq!(local[0].name, launched.name);
+        assert!(!local[0].can_resume);
+        assert!(local[0]
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("native history"));
+        assert_eq!(
+            saved_chat::list(&home, saved_chat::Scope::Pairing("original-phone")).unwrap(),
+            local,
+        );
+        assert!(
+            saved_chat::list(&home, saved_chat::Scope::Pairing("different-phone"))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn saved_chat_binding_survives_terminal_removal_and_rejects_ambiguity() {
         let (_temp, home, cwd) = home();
         let mut original = claude_request(&home, &cwd);
@@ -1243,11 +1309,19 @@ mod tests {
 
         assert!(saved_chat::observe(&home, &session, "claude", Some(native_id), &source).unwrap());
         assert!(matches!(
-            saved_chat::status(&home, &original.request_id, Some("different-phone")),
+            saved_chat::status(
+                &home,
+                &original.request_id,
+                saved_chat::Scope::Pairing("different-phone")
+            ),
             Err(saved_chat::ResumeError::Unknown)
         ));
-        let status =
-            saved_chat::status(&home, &original.request_id, Some("original-phone")).unwrap();
+        let status = saved_chat::status(
+            &home,
+            &original.request_id,
+            saved_chat::Scope::Pairing("original-phone"),
+        )
+        .unwrap();
         assert_eq!(status.target.unwrap().native_id, native_id);
 
         assert!(saved_chat::observe(
@@ -1259,8 +1333,12 @@ mod tests {
         )
         .unwrap());
         assert!(saved_chat::observe(&home, &session, "claude", Some(native_id), &source).unwrap());
-        let status =
-            saved_chat::status(&home, &original.request_id, Some("original-phone")).unwrap();
+        let status = saved_chat::status(
+            &home,
+            &original.request_id,
+            saved_chat::Scope::Pairing("original-phone"),
+        )
+        .unwrap();
         assert!(status.target.is_none());
         assert!(!status.can_resume);
 

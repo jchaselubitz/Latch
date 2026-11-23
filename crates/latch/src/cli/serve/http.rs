@@ -202,6 +202,7 @@ fn register(router: Router<AppState>, spec: RouteSpec) -> Router<AppState> {
         RouteId::Capabilities => router.route(spec.pattern, get(gateway_capabilities)),
         RouteId::Sessions => router.route(spec.pattern, get(list_sessions)),
         RouteId::CreateSession => router.route(spec.pattern, post(create_session)),
+        RouteId::SavedChats => router.route(spec.pattern, get(saved_chats)),
         RouteId::SavedChatStatus => router.route(spec.pattern, get(saved_chat_status)),
         RouteId::ResumeSavedChat => router.route(spec.pattern, post(resume_saved_chat)),
         RouteId::Directories => router.route(spec.pattern, get(browse_directories)),
@@ -275,6 +276,7 @@ struct GatewayEndpoints {
     conversation: bool,
     browse_directories: bool,
     create_session: bool,
+    saved_chats: bool,
     saved_chat_resume: bool,
     stop_session: bool,
     attachments: bool,
@@ -315,6 +317,7 @@ async fn gateway_capabilities(State(state): State<AppState>) -> Response {
             conversation: true,
             browse_directories: true,
             create_session: true,
+            saved_chats: true,
             saved_chat_resume: true,
             stop_session: true,
             attachments: true,
@@ -650,6 +653,32 @@ async fn create_session(
     .into_response())
 }
 
+fn saved_chat_scope(
+    device: &DeviceContext,
+) -> Result<create::saved_chat::Scope<'_>, create::saved_chat::ResumeError> {
+    device
+        .0
+        .as_deref()
+        .map(create::saved_chat::Scope::Pairing)
+        .ok_or(create::saved_chat::ResumeError::Unknown)
+}
+
+async fn saved_chats(
+    State(state): State<AppState>,
+    Extension(device): Extension<DeviceContext>,
+) -> Result<Response, ApiError> {
+    let chats = tokio::task::spawn_blocking(move || {
+        Ok::<_, create::saved_chat::ResumeError>(create::saved_chat::list(
+            &state.home,
+            saved_chat_scope(&device)?,
+        )?)
+    })
+    .await
+    .map_err(|_| internal("list saved chats"))?
+    .map_err(map_saved_chat_error)?;
+    Ok(Json(super::SavedChatList { chats }).into_response())
+}
+
 async fn saved_chat_status(
     State(state): State<AppState>,
     Extension(device): Extension<DeviceContext>,
@@ -660,7 +689,7 @@ async fn saved_chat_status(
         create::saved_chat::status(
             &state.home,
             &chat_id.to_ascii_lowercase(),
-            device.0.as_deref(),
+            saved_chat_scope(&device)?,
         )
     })
     .await
@@ -696,7 +725,7 @@ async fn resume_saved_chat(
             &state.home,
             &chat_id.to_ascii_lowercase(),
             &request.request_id.to_ascii_lowercase(),
-            device.0.as_deref(),
+            saved_chat_scope(&device)?,
         )
     })
     .await

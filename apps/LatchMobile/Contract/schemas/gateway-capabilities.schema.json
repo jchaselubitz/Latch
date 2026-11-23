@@ -84,6 +84,10 @@
           "type": "boolean",
           "description": "Create a standard host shell at the control grant. Absence means unavailable."
         },
+        "savedChats": {
+          "type": "boolean",
+          "description": "Discover stopped saved chats owned by the active control-grant pairing. Absence means unavailable."
+        },
         "savedChatResume": {
           "type": "boolean",
           "description": "Read device-owned saved chat status and request exact resume at the control grant. Per-chat canResume requires a qualified installed harness and verified history."

@@ -19,11 +19,15 @@ struct SessionDetailView: View {
             VStack(alignment: .leading, spacing: 16) {
                 header
 
-                OpenSessionButton(
-                    store: store,
-                    sessionID: session.id,
-                    isEnabled: store.canOpen(session.state)
-                )
+                if session.state.isLive {
+                    OpenSessionButton(
+                        store: store,
+                        sessionID: session.id,
+                        isEnabled: store.canOpen(session.state)
+                    )
+                } else {
+                    ResumeSessionButton(store: store, sessionID: session.id)
+                }
 
                 HStack(alignment: .top, spacing: 4) {
                     CaptionedIconButton(title: "Rename", systemImage: "pencil") {

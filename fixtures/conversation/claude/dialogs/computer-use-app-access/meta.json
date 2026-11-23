@@ -1,0 +1,11 @@
+{
+  "id": "computer-use-app-access",
+  "dialog": "Computer use per-app approval (engine kind computer_use_approval)",
+  "files": {
+    "transcript.jsonl": "SYNTHETIC, shape-faithful: request_access tool_use and the granted tool_result 2 min 44 s later, modelled on a real interactive Latch-hosted session from 2026-10-26 (ids, app and text replaced). No hook or module event exists for the dialog itself; see terminal-only/engine-dialogs-2.1.330.json."
+  },
+  "capture": "Not reproducible headlessly (computer use needs an interactive session); transcript shape from a real session, dialog behaviour from the engine.",
+  "sanitized": [
+    "synthetic or engine-derived; no personal data"
+  ]
+}

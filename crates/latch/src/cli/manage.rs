@@ -524,6 +524,7 @@ pub fn capabilities() -> CapabilitiesReport {
             extensions: vec![
                 AGENT_LAUNCH_EXTENSION.to_owned(),
                 CREATE_REQUEST_ID_EXTENSION.to_owned(),
+                "saved-chats".to_owned(),
             ],
         },
     }

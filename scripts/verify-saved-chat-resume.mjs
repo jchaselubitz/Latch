@@ -20,7 +20,7 @@ for (const key of ['LATCH_SESSION_ID', 'CLAUDECODE', 'OVERLORD_MISSION_ID', 'OVE
 execFileSync('git', ['init', '-q', cwd]);
 const latch = resolve(binary);
 const sessionIDs = new Set();
-const tmux = ['-L', 'latch-resume-fixture-' + process.pid];
+const tmux = ['-f', '/dev/null', '-L', 'latch-resume-fixture-' + process.pid];
 const oldReply = 'LATCH_OLD_' + randomUUID().slice(0, 8);
 const newReply = 'LATCH_NEW_' + randomUUID().slice(0, 8);
 const tokenFile = resolve(root, 'token');
@@ -28,6 +28,10 @@ const readyFile = resolve(root, 'ready');
 let gateway;
 let origin;
 let token;
+
+function local(...args) {
+  return JSON.parse(execFileSync(latch, args, { env, cwd, encoding: 'utf8' }));
+}
 
 function launchGateway() {
   rmSync(readyFile, { force: true });
@@ -72,30 +76,43 @@ async function until(fn, label, seconds = 45) {
 }
 async function trustEmptyWorkspace(session) {
   const pane = 'fixture';
-  const command = 'env LATCH_HOME=' + quote(env.LATCH_HOME) + ' ' + quote(latch) + ' attach ' + session;
-  execFileSync('tmux', [...tmux, 'new-session', '-d', '-s', pane, '-x', '100', '-y', '25', command]);
-  try {
-    const trust = await until(() => {
-      const output = execFileSync('tmux', [...tmux, 'capture-pane', '-p', '-t', pane], { encoding: 'utf8' });
-      if (output.includes('Quick safety check') && output.includes('No, exit')) return 'claude';
-      if (output.includes('Do you trust')) return 'codex';
-      if (output.includes('Ask Codex') || output.includes('Claude Code v')) return 'ready';
-      return null;
-    }, 'native startup');
-    if (trust === 'claude') {
-      execFileSync('tmux', [...tmux, 'send-keys', '-t', pane, 'Down']);
-      await sleep(300);
+  const attachError = resolve(root, 'attach-error');
+  const command = 'env LATCH_HOME=' + quote(env.LATCH_HOME) + ' ' + quote(latch) +
+    ' attach ' + session + ' 2>' + quote(attachError);
+  execFileSync('tmux', [...tmux, 'new-session', '-d', '-s', pane, '-c', cwd, '-x', '100', '-y', '25', command]);
+  const screen = () => execFileSync('tmux', [...tmux, 'capture-pane', '-p', '-t', pane], { encoding: 'utf8' });
+  const trustState = () => {
+    const output = screen();
+    if (output.includes('Quick safety check') && output.includes('No, exit')) {
+      return /❯\s*Yes, I trust this folder/.test(output) ? 'claude-confirm' : 'claude-select';
     }
-    if (trust !== 'ready') {
-      execFileSync('tmux', [...tmux, 'send-keys', '-t', pane, 'Enter']);
-      await until(() => {
-        const output = execFileSync('tmux', [...tmux, 'capture-pane', '-p', '-t', pane], { encoding: 'utf8' });
-        return !output.includes('No, exit') && !output.includes('Do you trust') &&
-          (output.includes('Claude Code v') || output.includes('Ask Codex'));
+    if (output.includes('Do you trust')) return 'codex';
+    if (output.includes('Ask Codex') || output.includes('Claude Code v')) return 'ready';
+    return null;
+  };
+  const press = (key) => execFileSync('tmux', [...tmux, 'send-keys', '-t', pane, key]);
+  try {
+    let trust = await until(trustState, 'native startup');
+    for (let confirmation = 0; confirmation < 3 && trust !== 'ready'; confirmation++) {
+      if (trust === 'claude-select') {
+        press('Down');
+        await until(() => trustState() === 'claude-confirm', 'selected scratch workspace trust', 5);
+      }
+      press('Enter');
+      trust = await until(() => {
+        const next = trustState();
+        return next === 'ready' || (trust.startsWith('claude-') && next === 'claude-select') ? next : null;
       }, 'accepted scratch workspace');
     }
+    assert.equal(trust, 'ready', 'The scratch workspace trust prompt kept reopening.');
+  } catch (error) {
+    if (existsSync(attachError)) console.error(readFileSync(attachError, 'utf8'));
+    try {
+      console.error(screen());
+    } catch {}
+    throw error;
   } finally {
-    execFileSync('tmux', [...tmux, 'kill-server']);
+    try { execFileSync('tmux', [...tmux, 'kill-server'], { stdio: 'ignore' }); } catch {}
   }
 }
 function quote(value) {
@@ -165,6 +182,7 @@ try {
   assert.equal(originalState.target.agent, agent);
   assert.equal(originalState.target.cwd, cwd);
   assert.equal(originalState.canResume, false);
+  assert.deepEqual((await request("/v2/saved-chats")).chats, []);
   await request(path, { grant: 'interact', status: 403 });
   await request(path, { device: 'another-phone', status: 404 });
   await request(path, { body: { requestId: randomUUID() }, status: 409 });
@@ -177,6 +195,16 @@ try {
   const ended = await request(path);
   assert.equal(ended.canResume, true, ended.reason);
   assert.deepEqual(ended.target, originalState.target);
+  const catalog = '/v2/saved-chats';
+  const [saved] = (await request(catalog)).chats;
+  assert.equal(saved.chatId, chatId);
+  assert.equal(saved.sessionId, original);
+  assert.equal(saved.canResume, true);
+  assert.equal(saved.nativeId, undefined);
+  assert.deepEqual(local('saved-chats', '--json').chats, [saved]);
+  assert.deepEqual((await request(catalog, { device: 'another-phone' })).chats, []);
+  await request(catalog, { grant: 'interact', status: 403 });
+  await request(catalog, { device: null, status: 404 });
   // Rename only the freshly created fixture's transcript. Restore it even
   // if the assertion fails, so the host's native store stays consistent.
   const observation = JSON.parse(readFileSync(resolve(env.LATCH_HOME, 'saved-chats', 'observations', original + '.json')));
@@ -185,6 +213,7 @@ try {
   renameSync(history, hiddenHistory);
   try {
     assert.equal((await request(path)).canResume, false);
+    assert.equal((await request(catalog)).chats[0].canResume, false);
     await request(path, { body: { requestId: randomUUID() }, status: 409 });
   } finally {
     renameSync(hiddenHistory, history);
@@ -200,6 +229,10 @@ try {
   assert.equal(replies[1].session.id, resumed);
   assert.notEqual(resumed, original);
   assert.deepEqual(replies.map(reply => reply.reused).sort(), [false, true]);
+  assert.deepEqual((await request(catalog)).chats, []);
+  const replay = local('resume', chatId, '--request-id', operation, '--json');
+  assert.equal(replay.session.id, resumed);
+  assert.equal(replay.reused, true);
   sessionIDs.add(resumed);
   await request(path, { body: { requestId: randomUUID() }, status: 409 });
   const resumedState = await until(async () => {
@@ -212,6 +245,20 @@ try {
     await until(() => next.sawReply(oldReply), 'restored Hub assistant message');
     await next.reply(newReply);
   } finally { next.close(); }
+  // Launch from the CLI after removing a second generation, then recover
+  // the same operation over the original remote pairing.
+  await request('/v2/sessions/' + resumed + '/stop', { body: {} });
+  execFileSync(latch, ['remove', resumed], { env, cwd });
+  assert.equal(local('saved-chats', '--json').chats[0].sessionId, resumed);
+  const localOperation = randomUUID();
+  const restored = local('resume', chatId, '--request-id', localOperation, '--json');
+  assert.equal(restored.reused, false);
+  sessionIDs.add(restored.session.id);
+  assert.notEqual(restored.session.id, resumed);
+  const remoteReplay = await request(path, { body: { requestId: localOperation } });
+  assert.equal(remoteReplay.session.id, restored.session.id);
+  assert.equal(remoteReplay.reused, true);
+  assert.deepEqual((await request(path)).target, originalState.target);
   const display = execFileSync(agent === 'claude' ? 'claude' : 'codex', ['--version'], { encoding: 'utf8', env });
   const version = display.match(/\b\d+\.\d+\.\d+\b/)[0];
   console.log(JSON.stringify({

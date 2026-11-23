@@ -4,7 +4,7 @@ use axum::http::header;
 
 #[test]
 fn every_registered_handler_comes_from_the_shared_route_table() {
-    assert_eq!(ROUTES.len(), 37);
+    assert_eq!(ROUTES.len(), 38);
     let mut ids = ROUTES.iter().map(|route| route.id).collect::<Vec<_>>();
     ids.sort_by_key(|id| *id as u8);
     ids.dedup();
@@ -31,6 +31,21 @@ async fn saved_chat_resume_requires_control_and_an_original_pairing() {
     )
     .await;
     assert_eq!(bad_input, 400);
+}
+
+#[tokio::test]
+async fn saved_chat_discovery_requires_a_control_grant_and_pairing() {
+    let harness = harness().await;
+    let path = "/v2/saved-chats";
+    for grant in ["observe", "interact"] {
+        let (status, _) = send(&harness, "GET", path, Some(grant), "").await;
+        assert_eq!(status, 403);
+    }
+    let (unpaired, _) = send(&harness, "GET", path, Some("control"), "").await;
+    assert_eq!(unpaired, 404);
+    let (status, result) = send_as_device(&harness, "GET", path, "original-phone", "").await;
+    assert_eq!(status, 200);
+    assert_eq!(result["chats"], serde_json::json!([]));
 }
 
 #[tokio::test]
@@ -69,6 +84,7 @@ fn current_capabilities_advertise_browsing_and_creation() {
         conversation: true,
         browse_directories: true,
         create_session: true,
+        saved_chats: true,
         saved_chat_resume: true,
         stop_session: true,
         attachments: true,
@@ -126,6 +142,7 @@ fn current_capabilities_advertise_browsing_and_creation() {
         assert_eq!(value[name], true, "{name}");
     }
     assert_eq!(value["gitCommitMessage"], true);
+    assert_eq!(value["savedChats"], true);
     assert_eq!(value["savedChatResume"], true);
     assert!(ROUTES
         .iter()

@@ -143,6 +143,7 @@ public struct GatewayEndpoints: Codable, Equatable, Sendable {
     public var conversation: Bool
     public var browseDirectories: Bool
     public var createSession: Bool
+    public var savedChats: Bool
     public var savedChatResume: Bool
     public var stopSession: Bool
     /// Upload one file into the session's working directory at the interact
@@ -195,6 +196,7 @@ public struct GatewayEndpoints: Codable, Equatable, Sendable {
         conversation: Bool = false,
         browseDirectories: Bool = false,
         createSession: Bool = false,
+        savedChats: Bool = false,
         savedChatResume: Bool = false,
         stopSession: Bool = false,
         attachments: Bool = false,
@@ -230,6 +232,7 @@ public struct GatewayEndpoints: Codable, Equatable, Sendable {
         self.conversation = conversation
         self.browseDirectories = browseDirectories
         self.createSession = createSession
+        self.savedChats = savedChats
         self.savedChatResume = savedChatResume
         self.stopSession = stopSession
         self.attachments = attachments
@@ -272,6 +275,7 @@ public struct GatewayEndpoints: Codable, Equatable, Sendable {
         conversation = try container.decode(Bool.self, forKey: .conversation)
         browseDirectories = try container.decodeIfPresent(Bool.self, forKey: .browseDirectories) ?? false
         createSession = try container.decodeIfPresent(Bool.self, forKey: .createSession) ?? false
+        savedChats = try container.decodeIfPresent(Bool.self, forKey: .savedChats) ?? false
         savedChatResume = try container.decodeIfPresent(Bool.self, forKey: .savedChatResume) ?? false
         stopSession = try container.decodeIfPresent(Bool.self, forKey: .stopSession) ?? false
         attachments = try container.decodeIfPresent(Bool.self, forKey: .attachments) ?? false
@@ -310,6 +314,7 @@ public enum GatewayEndpointsName: String, CaseIterable, Sendable {
     case conversation
     case browseDirectories
     case createSession
+    case savedChats
     case savedChatResume
     case stopSession
     case attachments
@@ -349,6 +354,7 @@ public extension GatewayEndpoints {
         case .conversation: return conversation
         case .browseDirectories: return browseDirectories
         case .createSession: return createSession
+        case .savedChats: return savedChats
         case .savedChatResume: return savedChatResume
         case .stopSession: return stopSession
         case .attachments: return attachments
@@ -1530,6 +1536,22 @@ public struct SavedChatTarget: Codable, Equatable, Sendable {
         self.cwd = cwd
         self.agent = agent
     }
+}
+
+public struct SavedChatList: Decodable, Equatable, Sendable {
+    public let chats: [SavedChatSummary]
+}
+
+public struct SavedChatSummary: Decodable, Equatable, Sendable {
+    public let chatId: UUID
+    public let sessionId: String
+    public let name: String
+    public let title: String?
+    public let createdAt: String
+    public let cwd: String
+    public let agent: SessionAgent
+    public let canResume: Bool
+    public let reason: String?
 }
 
 public struct SavedChatStatus: Codable, Equatable, Sendable {

@@ -86,6 +86,13 @@ actor LatchClient {
     }
 
     func list() throws -> ListReport { try request(["list", "--json"]) }
+    func savedChats() throws -> SavedChatList { try request(["saved-chats", "--json"]) }
+    func resume(_ chatID: String, requestID: UUID) throws -> CreateReport {
+        try request(
+            ["resume", chatID, "--request-id", requestID.uuidString.lowercased(), "--json"],
+            timeout: 35
+        )
+    }
     func inspect(_ id: String) throws -> InspectReport { try request(["inspect", id, "--json"]) }
     func stop(_ id: String, force: Bool) throws -> StopReport {
         try request(["stop", id] + (force ? ["--force"] : []) + ["--json"])

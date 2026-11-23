@@ -132,12 +132,96 @@ extension AppModel {
         }
     }
 
+    private var savedChatPairingID: String? {
+        guard linkedSupports(.savedChats), linkedSupports(.savedChatResume),
+              let pairedDevice, pairedDevice.isActive, pairedDevice.permission.permits(.control) else { return nil }
+        return pairedDevice.deviceId
+    }
+
+    private var visibleSavedChats: [SavedChatSummary] {
+        guard let catalog = savedChatCatalog, catalog.gateway === gateway,
+              catalog.pairingID == savedChatPairingID else { return [] }
+        return catalog.chats
+    }
+
+    public func isSavedChatVisible(_ chat: SavedChatSummary) -> Bool {
+        visibleSavedChats.contains { $0.chatId == chat.chatId && $0.sessionId == chat.sessionId }
+    }
+
+    public var sessionBrowserSessions: [SessionSummary] {
+        let retained = Set(sessions.map(\.id))
+        return sessions + visibleSavedChats.filter { !retained.contains($0.sessionId) }.map { chat in
+            SessionSummary(
+                id: chat.sessionId, name: chat.name, title: chat.title, state: "exited",
+                cwd: chat.cwd, commandLabel: chat.agent.rawValue, createdAt: chat.createdAt,
+                connector: .named(chat.agent.rawValue)
+            )
+        }
+    }
+
+    public func savedChat(for session: SessionSummary) -> SavedChatSummary? {
+        guard !session.isRunning else { return nil }
+        return visibleSavedChats.first { $0.sessionId == session.id }
+    }
+
+    /// Confirms the new terminal's native identity before navigating to it.
+    public func resumeSavedChat(_ chat: SavedChatSummary) async throws -> SessionSummary {
+        let unavailable = LatchError.refused("This saved chat is no longer available on this connection.")
+        guard let gateway, let pairingID = savedChatPairingID, chat.canResume,
+              visibleSavedChats.contains(chat) else { throw unavailable }
+        guard resumingChatIDs.insert(chat.chatId).inserted else {
+            throw LatchError.refused("This chat is already resuming.")
+        }
+        defer { resumingChatIDs.remove(chat.chatId) }
+
+        let operation = UUID()
+        let report: CreateReport
+        do {
+            report = try await gateway.resumeSavedChat(chatID: chat.chatId, requestID: operation)
+        } catch LatchError.transport {
+            guard self.gateway === gateway, pairingID == savedChatPairingID else { throw unavailable }
+            // A lost response may already have launched the terminal.
+            report = try await gateway.resumeSavedChat(chatID: chat.chatId, requestID: operation)
+        }
+
+        let clock = ContinuousClock()
+        let deadline = clock.now + .seconds(20)
+        repeat {
+            guard self.gateway === gateway, pairingID == savedChatPairingID else { throw unavailable }
+            let status = try await gateway.savedChatStatus(chatID: chat.chatId)
+            if status.sessionId == report.session.id, status.verified, !status.canResume,
+               status.reason == nil, status.target?.agent == chat.agent, status.target?.cwd == chat.cwd {
+                await refreshSessions()
+                guard self.gateway === gateway, pairingID == savedChatPairingID else { throw unavailable }
+                if let session = sessions.first(where: { $0.id == report.session.id && $0.isRunning }) {
+                    return session
+                }
+            }
+            try await Task.sleep(for: .milliseconds(400))
+        } while clock.now < deadline
+        throw LatchError.refused("The Mac did not confirm the resumed chat. Refresh Sessions to check its terminal.")
+    }
+
+    private func refreshSavedChats(from gateway: LatchGateway) async {
+        guard let pairingID = savedChatPairingID else {
+            savedChatCatalog = nil
+            return
+        }
+        let result = try? await gateway.savedChats()
+        guard self.gateway === gateway, pairingID == savedChatPairingID else { return }
+        savedChatCatalog = (gateway, pairingID, result?.chats ?? [])
+    }
+
     /// Reloads the session list.
     public func refreshSessions() async {
         guard let gateway, linkState.isUsable else { return }
         do {
             let started = Date()
-            sessions = try await gateway.listSessions()
+            let next = try await gateway.listSessions()
+            guard self.gateway === gateway else { return }
+            sessions = next
+            await refreshSavedChats(from: gateway)
+            guard self.gateway === gateway else { return }
             record(LinkStageSample(stage: .sessionList, milliseconds: Self.millis(since: started)))
             sessionsStale = false
             sessionsError = nil

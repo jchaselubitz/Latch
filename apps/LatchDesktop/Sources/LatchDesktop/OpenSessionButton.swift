@@ -25,6 +25,27 @@ struct OpenSessionButton: View {
     }
 }
 
+struct ResumeSessionButton: View {
+    @ObservedObject var store: SessionStore
+    let sessionID: String
+
+    var body: some View {
+        Button {
+            Task { await store.resume(sessionID) }
+        } label: {
+            Label(
+                store.resumingSessionIDs.contains(sessionID) ? "Resuming…" : "Resume Chat",
+                systemImage: "arrow.clockwise"
+            )
+            .frame(maxWidth: .infinity)
+        }
+        .latchProminentButtonStyle()
+        .controlSize(.large)
+        .disabled(!store.canResume(sessionID))
+        .help(store.resumeExplanation(sessionID))
+    }
+}
+
 /// The launch shapes offered by every Open control. Unavailable shapes stay visible
 /// with the reason attached rather than disappearing.
 struct OpenBehaviorMenuItems: View {

@@ -88,6 +88,29 @@ struct ListReport: Codable, Sendable {
     let sessions: [SessionSummary]
 }
 
+struct SavedChatList: Decodable, Sendable {
+    let chats: [SavedChatSummary]
+}
+
+struct SavedChatSummary: Decodable, Equatable, Sendable {
+    let chatId: String
+    let sessionId: String
+    let name: String
+    let title: String?
+    let createdAt: String
+    let cwd: String
+    let agent: String
+    let canResume: Bool
+    let reason: String?
+
+    var session: SessionSummary {
+        SessionSummary(
+            id: sessionId, name: name, title: title, state: .exited, cwd: cwd,
+            commandLabel: agent, createdAt: createdAt, lastActivityAt: nil, idleMs: nil
+        )
+    }
+}
+
 struct TerminalSize: Codable, Hashable, Sendable {
     let cols: UInt16
     let rows: UInt16

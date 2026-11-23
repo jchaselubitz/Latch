@@ -1,0 +1,17 @@
+{
+  "id": "plan-approval",
+  "dialog": "ExitPlanMode plan approval (engine kind permission_exit_plan_mode_v2)",
+  "files": {
+    "hooks.jsonl": "PreToolUse, PermissionRequest (tool_input.plan + planFilePath, no permission_suggestions) and PostToolUse after a PermissionRequest command hook answered allow + updatedInput + updatedPermissions [setMode acceptEdits, session]; permission_mode moves plan -> acceptEdits",
+    "transcript-approved-by-hook.jsonl": "tool_use (input {} in this record: the plan is only in the hook/mod input and the plan file), attachment hook_permission_decision, tool_result 'User has approved your plan...', attachment plan_mode_exit",
+    "transcript-rejected.jsonl": "tool_use with plan, tool_result is_error with the denial message",
+    "mod-events.jsonl": "the same approval made by a hooks module's classic.PermissionRequest; the command hooks beneath never ran"
+  },
+  "capture": "Claude Code 2.1.330, headless `claude -p` (haiku) with isolated settings (`--setting-sources local`), capture command hooks for PreToolUse/PostToolUse/PermissionRequest/Notification/Elicitation/ElicitationResult/Stop, a probe MCP stdio server, and a probe hooks module; 2026-11-23. ExitPlanMode is removed in plain -p mode; `--permission-prompt-tool` (an MCP tool delayed 8 s so the hook could win the race) made it available.",
+  "sanitized": [
+    "session_id, transcript_path and cwd removed from hook records",
+    "work directories rewritten to /work",
+    "home directory rewritten to ~",
+    "transcript records trimmed to type, uuid, parentUuid, timestamp, isSidechain, promptId, message, toolUseResult, attachment"
+  ]
+}

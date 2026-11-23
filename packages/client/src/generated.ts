@@ -1,5 +1,5 @@
 // Generated from schemas/remote-access/v2/*.schema.json; do not edit by hand.
-// Canonical schema set SHA-256: 3c71880a7b780bffe8d3853438c29643656a2f47cc4b1defa52aaf34c33ad4cd
+// Canonical schema set SHA-256: b0f90bc11f1f3f0e6f69dbf4c3b03dad8ccf15214f0f5e2061d01b85953ca379
 
 
 export type TerminalCloseReason =
@@ -347,6 +347,7 @@ export type GatewayEndpoints = {
   conversation: boolean;
   browseDirectories?: boolean;
   createSession?: boolean;
+  savedChats?: boolean;
   savedChatResume?: boolean;
   stopSession?: boolean;
   attachments?: boolean;
@@ -376,7 +377,7 @@ export type GatewayEndpoints = {
   gitPushReconcile?: boolean;
   gitCommitMessage?: boolean;
 };
-export type GatewayEndpointName = 'sessions' | 'preview' | 'terminal' | 'conversation' | 'browseDirectories' | 'createSession' | 'savedChatResume' | 'stopSession' | 'attachments' | 'agentModels' | 'notificationKey' | 'gitRepositories' | 'gitResolve' | 'gitStatus' | 'gitDiff' | 'gitBranches' | 'gitStage' | 'gitUnstage' | 'gitCommit' | 'gitCreateBranch' | 'gitSwitchBranch' | 'gitReceipts' | 'gitSync' | 'gitFetch' | 'gitFastForward' | 'gitMerge' | 'gitRebase' | 'gitContinue' | 'gitAbort' | 'gitStageResolved' | 'gitPushPreview' | 'gitPush' | 'gitPushReconcile' | 'gitCommitMessage';
+export type GatewayEndpointName = 'sessions' | 'preview' | 'terminal' | 'conversation' | 'browseDirectories' | 'createSession' | 'savedChats' | 'savedChatResume' | 'stopSession' | 'attachments' | 'agentModels' | 'notificationKey' | 'gitRepositories' | 'gitResolve' | 'gitStatus' | 'gitDiff' | 'gitBranches' | 'gitStage' | 'gitUnstage' | 'gitCommit' | 'gitCreateBranch' | 'gitSwitchBranch' | 'gitReceipts' | 'gitSync' | 'gitFetch' | 'gitFastForward' | 'gitMerge' | 'gitRebase' | 'gitContinue' | 'gitAbort' | 'gitStageResolved' | 'gitPushPreview' | 'gitPush' | 'gitPushReconcile' | 'gitCommitMessage';
 
 export type ConversationItem = { id: string; ordinal: number; createdAt: string; kind: { type: "message"; role: "user" | "assistant"; text: string; status: "submitted" | "queued" | "observed" | "partial" | "complete" | "failed"; } | { type: "tool"; name: string; summary: string; status: "running" | "succeeded" | "failed"; parentMessageId?: string | null; } | { type: "request"; requestId: string; requestType: "permission" | "question"; prompt: string; choices: Array<string>; questions?: Array<{ question: string; header?: string; multiSelect: boolean; options: Array<{ label: string; description: string; }>; }>; status: "pending" | "resolved" | "dismissed"; requestKind?: string; details?: { command?: string; cwd?: string; sandbox?: string; reason?: string; paths?: Array<string>; diff?: string; changes?: Array<{ path: string; diff?: string; summary?: string; }>; host?: string; fileSystemScope?: Array<string>; networkScope?: Array<string>; server?: string; tool?: string; argumentsSummary?: string; appName?: string; scope?: string; origin?: string; url?: string; action?: string; planMarkdown?: string; planPath?: string; message?: string; schema?: Record<string, unknown>; service?: string; }; options?: Array<{ id: string; label: string; requiresText?: boolean; }>; answerable?: boolean; reason?: string; resolvedBy?: "phone" | "terminal" | "policy" | "hook" | "timeout"; decision?: string; } | { type: "subagent"; subagentId: string; agentType: string; status: string; summary: string; parentToolId?: string; } | { type: "task_list"; tasks: Array<{ id: string; title: string; status: string; }>; } | { type: "plan_update"; steps: Array<{ id: string; title: string; status: string; }>; } | { type: "reasoning_summary"; text: string; } | { type: "notice"; noticeKind: string; text: string; } | { type: "file_change"; path: string; diffSummary: string; toolItemId?: string; }; parentSubagentId?: string; };
 export type ConversationState = { phase: "starting" | "idle" | "working" | "awaiting_input" | "exited" | "unavailable"; sendMessage: { enabled: boolean; reason?: string | null; }; resolveRequest: { enabled: boolean; reason?: string | null; }; cancelTurn?: { enabled: boolean; reason?: string | null; }; turnOutcome?: "answer" | "aborted" | "refusal" | "error" | null; commands?: Array<{ name: string; description: string; source?: string; }>; pendingRequest: string | null; connector: null | { id: string; version: string; }; backgroundWork?: { count: number; kinds: Array<string>; }; model?: string; effort?: string; permissionMode?: string; };

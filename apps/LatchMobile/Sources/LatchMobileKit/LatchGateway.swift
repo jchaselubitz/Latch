@@ -178,6 +178,12 @@ public actor LatchGateway {
         return try await request(method: "POST", path: "/v2/sessions", body: body)
     }
 
+    /// Discovers stopped chats owned by this control-grant pairing.
+    public func savedChats() async throws -> SavedChatList {
+        try await require(.savedChats)
+        return try await get(path: "/v2/saved-chats")
+    }
+
     /// Reads the host-owned target and current terminal for a chat started
     /// by this paired device. Older gateways do not serve this endpoint.
     public func savedChatStatus(chatID: UUID) async throws -> SavedChatStatus {

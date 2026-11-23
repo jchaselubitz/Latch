@@ -1,0 +1,11 @@
+{
+  "id": "terminal-only",
+  "dialog": "Dialogs with no answer hook: computer use, MCP OAuth sign-in, refusal fallback (model choice), Fable usage-credit consent, sandbox network access, trust and others",
+  "files": {
+    "engine-dialogs-2.1.330.json": "engine extract: kind, result options, notification text/type, waitingFor/needs, the 6 s Notification rule and the ~/.claude/sessions/<pid>.json status writer"
+  },
+  "capture": "Read from the engine; not live.",
+  "sanitized": [
+    "synthetic or engine-derived; no personal data"
+  ]
+}

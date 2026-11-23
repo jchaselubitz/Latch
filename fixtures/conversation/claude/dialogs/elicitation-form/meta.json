@@ -1,0 +1,18 @@
+{
+  "id": "elicitation-form",
+  "dialog": "MCP form elicitation (engine kind mcp_elicitation)",
+  "files": {
+    "hooks-answered-by-hook.jsonl": "Elicitation (mcp_server_name, message, mode form, requested_schema; no elicitation_id, no tool_use_id) answered by the command hook with accept + content; no ElicitationResult follows",
+    "hooks-unanswered.jsonl": "Elicitation with no answer, then ElicitationResult action cancel and Notification elicitation_response (headless cancels instead of drawing a dialog)",
+    "transcript-*.jsonl": "the MCP tool_use and its tool_result carrying the server's reply",
+    "mcp-wire.jsonl": "client capabilities (elicitation form + url), tools/call with _meta claudecode/toolUseId, elicitation/create and the client's reply",
+    "mod-events.jsonl": "a hooks module's view: tool.call for the MCP tool (with tool_use_id), classic.Elicitation, and next(e) resolving to {} (a module can observe or block, not accept)"
+  },
+  "capture": "Claude Code 2.1.330, headless `claude -p` (haiku) with isolated settings (`--setting-sources local`), capture command hooks for PreToolUse/PostToolUse/PermissionRequest/Notification/Elicitation/ElicitationResult/Stop, a probe MCP stdio server, and a probe hooks module; 2026-11-23",
+  "sanitized": [
+    "session_id, transcript_path and cwd removed from hook records",
+    "work directories rewritten to /work",
+    "home directory rewritten to ~",
+    "transcript records trimmed to type, uuid, parentUuid, timestamp, isSidechain, promptId, message, toolUseResult, attachment"
+  ]
+}
