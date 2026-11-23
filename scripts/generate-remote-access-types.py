@@ -22,6 +22,7 @@ SCHEMA_NAMES = (
     "session-list.schema.json",
     "create-session-request.schema.json",
     "create-session-response.schema.json",
+    "saved-chat-resume.schema.json",
     "agent-model-catalog.schema.json",
     "conversation-item.schema.json",
     "conversation-state.schema.json",
@@ -95,6 +96,9 @@ pub struct CreateSessionRequest {
     /// with `agent`, and only an id the gateway lists for that agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Explicit effort, when this model advertises it in its reasoning options.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
     /// Orientation the agent receives as system-level instructions, never as
     /// a user message. Valid only with an agent the gateway lists in
     /// `features.session_instructions`.
@@ -124,6 +128,32 @@ impl SessionAgent {
     }
 }
 
+/// Device-owned resume uses an operation id and the chat id in the path.
+/// The original environment and native id come only from the host.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResumeSavedChatRequest {
+    pub request_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedChatTarget {
+    pub native_id: String,
+    pub cwd: String,
+    pub agent: SessionAgent,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedChatStatus {
+    pub target: Option<SavedChatTarget>,
+    pub session_id: Option<String>,
+    pub verified: bool,
+    pub can_resume: bool,
+    pub reason: Option<String>,
+}
+
 /// One model a hosted agent can start with.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentModel {
@@ -134,6 +164,9 @@ pub struct AgentModel {
     /// The agent's one-line description, when it gives one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Explicit thinking levels accepted at creation for this model.
+    #[serde(default, skip_serializing_if = "Vec::is_empty", rename = "reasoningOptions")]
+    pub reasoning_options: Vec<String>,
 }
 
 /// Models one hosted agent can start with, read fresh from the agent's own
@@ -744,6 +777,10 @@ pub struct GatewayFeatures {
     /// gateway serves that route; an older gateway omits the key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attachment_max_bytes: Option<u64>,
+    /// True when session rows expose stored source and gateway creates stamp it.
+    /// Legacy rows may omit source. Absence means support is unadvertised.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_provenance: Option<bool>,
     /// Present exactly when the create route accepts `instructions`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_instructions: Option<SessionInstructionsSupport>,
@@ -1095,11 +1132,13 @@ export type CreateSessionRequest = {
   agent?: SessionAgent;
   /** Only with `agent`, and only an id the gateway lists for it. */
   model?: string;
+  /** One of the named model's advertised reasoning options. */
+  reasoningEffort?: string;
   /** System-level orientation for the agent; only with an agent listed in
    * `features.sessionInstructions.agents`, never sent to an older gateway. */
   instructions?: string;
 };
-export type AgentModel = { id: string; name: string; description?: string };
+export type AgentModel = { id: string; name: string; description?: string; reasoningOptions?: string[] };
 /** `GET /v2/agents/{agent}/models`, served when `endpoints.agentModels` is true. */
 export type AgentModelCatalog = {
   agent: SessionAgent;
@@ -1122,6 +1161,9 @@ export type GatewayFeatures = {
   exclusiveTerminal: boolean;
   sessionAgents?: SessionAgent[];
   attachmentMaxBytes?: number;
+  /** Whether session rows expose stored source and gateway creates stamp it.
+   * Legacy rows may omit source. Absence means support is unadvertised. */
+  sessionProvenance?: boolean;
   sessionInstructions?: SessionInstructionsSupport;
   overlord?: OverlordReadiness;
   gitCommitMessage?: GitDraftReadiness;

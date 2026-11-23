@@ -22,8 +22,9 @@ mod uploads;
 use super::attention::AttentionWatcher;
 use super::auth::selected_subprotocol;
 use super::contract::{
-    AgentModelCatalog, CreateSessionRequest, GatewayFeatures, GatewayReadiness, SessionAgent,
-    SessionInstructionsSupport, OPERATION_RETENTION_SECONDS, REMOTE_ACCESS_SCHEMA_VERSION,
+    AgentModelCatalog, CreateSessionRequest, GatewayFeatures, GatewayReadiness,
+    ResumeSavedChatRequest, SessionAgent, SessionInstructionsSupport, OPERATION_RETENTION_SECONDS,
+    REMOTE_ACCESS_SCHEMA_VERSION,
 };
 use super::conversation::{self, ConversationConnect, ConversationQuery};
 use super::directory::{self, BrowseError};
@@ -201,6 +202,8 @@ fn register(router: Router<AppState>, spec: RouteSpec) -> Router<AppState> {
         RouteId::Capabilities => router.route(spec.pattern, get(gateway_capabilities)),
         RouteId::Sessions => router.route(spec.pattern, get(list_sessions)),
         RouteId::CreateSession => router.route(spec.pattern, post(create_session)),
+        RouteId::SavedChatStatus => router.route(spec.pattern, get(saved_chat_status)),
+        RouteId::ResumeSavedChat => router.route(spec.pattern, post(resume_saved_chat)),
         RouteId::Directories => router.route(spec.pattern, get(browse_directories)),
         RouteId::Session => router.route(spec.pattern, get(inspect_session)),
         RouteId::Preview => router.route(spec.pattern, get(preview_session)),
@@ -272,6 +275,7 @@ struct GatewayEndpoints {
     conversation: bool,
     browse_directories: bool,
     create_session: bool,
+    saved_chat_resume: bool,
     stop_session: bool,
     attachments: bool,
     agent_models: bool,
@@ -311,6 +315,7 @@ async fn gateway_capabilities(State(state): State<AppState>) -> Response {
             conversation: true,
             browse_directories: true,
             create_session: true,
+            saved_chat_resume: true,
             stop_session: true,
             attachments: true,
             agent_models: true,
@@ -344,6 +349,7 @@ async fn gateway_capabilities(State(state): State<AppState>) -> Response {
             exclusive_terminal: true,
             session_agents: SESSION_AGENTS.to_vec(),
             attachment_max_bytes: Some(ATTACHMENT_MAX_BYTES),
+            session_provenance: Some(true),
             session_instructions: Some(SessionInstructionsSupport {
                 agents: create::INSTRUCTION_AGENTS
                     .iter()
@@ -564,6 +570,15 @@ async fn create_session(
             ));
         }
     }
+    if let Some(effort) = &request.reasoning_effort {
+        if request.model.is_none() || !agent_models::is_reasoning_effort(effort) {
+            return Err(ApiError::coded(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "reasoningEffort needs an agent and an explicit model",
+            ));
+        }
+    }
     if let Some(instructions) = &request.instructions {
         // Instructions orient an agent; a shell has nothing to give them to,
         // and an agent without a system-level mechanism would have to see
@@ -593,12 +608,18 @@ async fn create_session(
         // Only a model the agent lists today is launched: the phone chose
         // from this same catalog, and anything else is a stale or forged id.
         if let (Some(agent), Some(model)) = (request.agent, request.model.as_deref()) {
-            if !agent_models::catalog(agent)
+            let catalog = agent_models::catalog(agent);
+            let listed = catalog
                 .models
                 .iter()
-                .any(|listed| listed.id == model)
+                .find(|listed| listed.id == model)
+                .ok_or(RemoteSessionError::ModelUnavailable(agent))?;
+            if request
+                .reasoning_effort
+                .as_ref()
+                .is_some_and(|effort| !listed.reasoning_options.contains(effort))
             {
-                return Err(RemoteSessionError::ModelUnavailable(agent));
+                return Err(RemoteSessionError::ReasoningEffortUnavailable(agent));
             }
         }
         create::create_remote_session(RemoteSessionRequest {
@@ -607,6 +628,7 @@ async fn create_session(
             cwd,
             agent: request.agent,
             model: request.model,
+            reasoning_effort: request.reasoning_effort,
             instructions: request.instructions,
             device: device.0,
         })
@@ -626,6 +648,101 @@ async fn create_session(
         reused: None,
     })
     .into_response())
+}
+
+async fn saved_chat_status(
+    State(state): State<AppState>,
+    Extension(device): Extension<DeviceContext>,
+    Path(chat_id): Path<String>,
+) -> Result<Response, ApiError> {
+    validate_saved_chat_id(&chat_id)?;
+    let result = tokio::task::spawn_blocking(move || {
+        create::saved_chat::status(
+            &state.home,
+            &chat_id.to_ascii_lowercase(),
+            device.0.as_deref(),
+        )
+    })
+    .await
+    .map_err(|_| internal("read saved chat"))?
+    .map_err(map_saved_chat_error)?;
+    Ok(Json(result).into_response())
+}
+
+async fn resume_saved_chat(
+    State(state): State<AppState>,
+    Extension(device): Extension<DeviceContext>,
+    Path(chat_id): Path<String>,
+    body: axum::body::Bytes,
+) -> Result<Response, ApiError> {
+    validate_saved_chat_id(&chat_id)?;
+    if body.len() > 256 {
+        return Err(ApiError::coded(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "invalid_request",
+            "resume request is too large",
+        ));
+    }
+    let request: ResumeSavedChatRequest = serde_json::from_slice(&body).map_err(|_| {
+        ApiError::coded(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "resume request is malformed",
+        )
+    })?;
+    validate_saved_chat_id(&request.request_id)?;
+    let outcome = tokio::task::spawn_blocking(move || {
+        create::saved_chat::resume(
+            &state.home,
+            &chat_id.to_ascii_lowercase(),
+            &request.request_id.to_ascii_lowercase(),
+            device.0.as_deref(),
+        )
+    })
+    .await
+    .map_err(|_| internal("resume saved chat"))?
+    .map_err(map_saved_chat_error)?;
+    Ok(Json(CreateReport {
+        protocol_version: crate::engine::PROTOCOL_VERSION,
+        session: CreatedSession {
+            id: outcome.id,
+            name: outcome.name,
+            state: "running".to_owned(),
+            created_at: outcome.created_at,
+        },
+        reused: Some(outcome.reused),
+    })
+    .into_response())
+}
+
+fn validate_saved_chat_id(value: &str) -> Result<(), ApiError> {
+    if is_request_id(value) {
+        Ok(())
+    } else {
+        Err(ApiError::coded(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "saved chat and operation identifiers must be UUIDs",
+        ))
+    }
+}
+
+fn map_saved_chat_error(error: create::saved_chat::ResumeError) -> ApiError {
+    use create::saved_chat::ResumeError;
+    match error {
+        ResumeError::Unknown => ApiError::coded(
+            StatusCode::NOT_FOUND,
+            "saved_chat_unavailable",
+            "This saved chat could not be found for this pairing.",
+        ),
+        ResumeError::Unavailable(reason) => {
+            ApiError::coded(StatusCode::CONFLICT, "saved_chat_unavailable", reason)
+        }
+        ResumeError::Failed(error) => {
+            eprintln!("latch serve: saved chat recovery failed: {error}");
+            internal("recover saved chat")
+        }
+    }
 }
 
 /// Accepts only a canonical hyphenated UUID, the one shape the contract
@@ -665,6 +782,14 @@ fn map_remote_session_error(error: RemoteSessionError) -> ApiError {
             "model_unavailable",
             format!(
                 "{} on this Mac no longer offers that model; choose another",
+                agent_display_name(agent)
+            ),
+        ),
+        RemoteSessionError::ReasoningEffortUnavailable(agent) => ApiError::coded(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "reasoning_effort_unavailable",
+            format!(
+                "{} on this Mac doesn't offer that thinking level for this model",
                 agent_display_name(agent)
             ),
         ),

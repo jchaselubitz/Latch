@@ -25,6 +25,8 @@ use crate::session::meta;
 use crate::session::paths::{LatchHome, SessionId, SessionPaths, FILE_MODE};
 use anyhow::{bail, Context};
 
+pub(crate) mod saved_chat;
+
 /// Provenance recorded for a session the phone asked for.
 pub const MOBILE_SOURCE_KIND: &str = "mobile";
 
@@ -130,6 +132,8 @@ pub struct RemoteSessionRequest {
     /// agent on its own configured default. The caller has already checked it
     /// against the agent's catalog; it is never set without `agent`.
     pub model: Option<String>,
+    /// Explicit effort validated against the agent and model catalog.
+    pub reasoning_effort: Option<String>,
     /// Orientation the agent receives through its own system-level
     /// instruction mechanism, never as a user message. The caller has
     /// already checked it with [`is_valid_instructions`] for an agent in
@@ -152,6 +156,8 @@ pub enum RemoteSessionError {
     AgentUnavailable(SessionAgent),
     /// The requested model is not one the agent lists on this Mac.
     ModelUnavailable(SessionAgent),
+    /// The requested model does not offer that effort on this Mac.
+    ReasoningEffortUnavailable(SessionAgent),
     /// Creation itself failed.
     Failed(anyhow::Error),
 }
@@ -178,6 +184,9 @@ pub struct CreationReceipt {
     /// receipts written before a model could be chosen, which named none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Explicit effort from the original request; older receipts omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
     /// SHA-256 of the orientation the request carried, so a retry with other
     /// text conflicts instead of reusing a session oriented differently. The
     /// text itself is never written here. Absent when none was sent.
@@ -365,6 +374,9 @@ fn create_remote_session_with(
     // The receipt is the device- and payload-scoped owner of this id. Only
     // the device that first used the id may reuse it, and only for the same
     // directory and agent; anything else is a conflict, never a second launch.
+    if saved_chat::request_reserved(&request.home, &request.request_id).map_err(failed)? {
+        return Err(RemoteSessionError::RequestIdConflict);
+    }
     let receipt = read_receipt(&request.home, &request.request_id).map_err(failed)?;
     if let Some(receipt) = &receipt {
         if receipt.device != request.device {
@@ -373,6 +385,7 @@ fn create_remote_session_with(
         if receipt.cwd != cwd
             || receipt.agent != harness
             || receipt.model != request.model
+            || receipt.reasoning_effort != request.reasoning_effort
             || receipt.instructions_digest != instructions_digest
         {
             return Err(RemoteSessionError::RequestIdConflict);
@@ -385,12 +398,18 @@ fn create_remote_session_with(
         if existing.cwd != cwd || existing.harness != harness {
             return Err(RemoteSessionError::RequestIdConflict);
         }
+        saved_chat::record_original(&request.home, &request.request_id, &existing.id)
+            .map_err(failed)?;
         return Ok(RemoteSessionOutcome {
             id: existing.id,
             name: existing.name,
             created_at: existing.created_at,
             reused: true,
         });
+    }
+
+    if saved_chat::has_original(&request.home, &request.request_id).map_err(failed)? {
+        return Err(RemoteSessionError::RequestIdConflict);
     }
 
     // An agent that cannot be found is answered before anything is accepted:
@@ -411,6 +430,7 @@ fn create_remote_session_with(
         cwd: cwd.clone(),
         agent: harness,
         model: request.model.clone(),
+        reasoning_effort: request.reasoning_effort.clone(),
         instructions_digest,
         launch_digest: None,
         status: CreationReceiptStatus::Accepted,
@@ -418,6 +438,7 @@ fn create_remote_session_with(
         accepted_at: crate::engine::format_rfc3339(std::time::SystemTime::now()),
     };
     write_receipt(&request.home, &receipt).map_err(failed)?;
+    saved_chat::register(&request, &cwd).map_err(failed)?;
 
     let options = ManifestOptions {
         cwd,
@@ -425,7 +446,7 @@ fn create_remote_session_with(
         display: DisplayMetadata {
             source: crate::session::manifest::SourceInfo {
                 kind: MOBILE_SOURCE_KIND.to_owned(),
-                external_run_id: Some(request.request_id),
+                external_run_id: Some(request.request_id.clone()),
                 request_id: None,
             },
             ..DisplayMetadata::default()
@@ -445,11 +466,13 @@ fn create_remote_session_with(
             if let Some(model) = request.model {
                 argv.extend(["--model".to_owned(), model]);
             }
+            if let (Some(agent), Some(effort)) =
+                (request.agent, request.reasoning_effort.as_deref())
+            {
+                argv.extend(reasoning_arguments(agent, effort));
+            }
             let mut manifest = run_manifest(argv, options);
-            manifest.launch.agent = request.agent.map(|agent| match agent {
-                SessionAgent::Claude => AgentKind::Claude,
-                SessionAgent::Codex => AgentKind::Codex,
-            });
+            manifest.launch.agent = request.agent.map(hosted_agent_kind);
             manifest.launch.login_shell = Some(LoginShell {
                 path: login_shell_path(),
                 prelude: None,
@@ -475,6 +498,8 @@ fn create_remote_session_with(
     receipt.status = CreationReceiptStatus::Created;
     receipt.session_id = Some(outcome.id.to_string());
     let _ = write_receipt(&request.home, &receipt);
+    saved_chat::record_original(&request.home, &request.request_id, outcome.id.as_str())
+        .map_err(failed)?;
     let meta = meta::read(&outcome.paths).map_err(failed)?;
     Ok(RemoteSessionOutcome {
         id: outcome.id.to_string(),
@@ -482,6 +507,13 @@ fn create_remote_session_with(
         created_at: meta.created_at,
         reused: false,
     })
+}
+
+fn hosted_agent_kind(agent: SessionAgent) -> AgentKind {
+    match agent {
+        SessionAgent::Claude => AgentKind::Claude,
+        SessionAgent::Codex => AgentKind::Codex,
+    }
 }
 
 /// Largest orientation, in UTF-8 bytes, a phone may ask an agent to start
@@ -527,6 +559,19 @@ fn instruction_arguments(agent: SessionAgent, text: &str) -> Vec<String> {
             format!(
                 "developer_instructions={}",
                 serde_json::Value::String(text.to_owned())
+            ),
+        ],
+    }
+}
+
+fn reasoning_arguments(agent: SessionAgent, effort: &str) -> [String; 2] {
+    match agent {
+        SessionAgent::Claude => ["--effort".to_owned(), effort.to_owned()],
+        SessionAgent::Codex => [
+            "-c".to_owned(),
+            format!(
+                "model_reasoning_effort={}",
+                serde_json::Value::String(effort.to_owned())
             ),
         ],
     }
@@ -900,6 +945,7 @@ fn create_local_session_with(
         cwd: binding.cwd.clone(),
         agent: Some(binding.program.clone()),
         model: None,
+        reasoning_effort: None,
         instructions_digest: None,
         launch_digest: Some(binding.digest.clone()),
         status: CreationReceiptStatus::Accepted,
@@ -1134,6 +1180,7 @@ mod tests {
             cwd: cwd.to_owned(),
             agent: None,
             model: None,
+            reasoning_effort: None,
             instructions: None,
             device: Some("phone-a".to_owned()),
         }
@@ -1172,6 +1219,61 @@ mod tests {
         launch: impl FnOnce(CreateOptions) -> anyhow::Result<CreateOutcome>,
     ) -> Result<RemoteSessionOutcome, RemoteSessionError> {
         create_remote_session_with(request, no_agent, launch)
+    }
+
+    #[test]
+    fn saved_chat_binding_survives_terminal_removal_and_rejects_ambiguity() {
+        let (_temp, home, cwd) = home();
+        let mut original = claude_request(&home, &cwd);
+        original.device = Some("original-phone".to_owned());
+        let launched = create_remote_session_with(
+            original.clone(),
+            |agent| Some(PathBuf::from(agent.harness())),
+            stub_launch,
+        )
+        .unwrap();
+        let session = SessionId::parse(&launched.id).unwrap();
+        let native_id = "2f1c8a0e-6a1b-4f7e-9d2c-5b8e7a6c4d31";
+        let source = cwd.join(format!("{native_id}.jsonl"));
+        std::fs::write(
+            &source,
+            serde_json::json!({"type":"user","sessionId": native_id}).to_string() + "\n",
+        )
+        .unwrap();
+
+        assert!(saved_chat::observe(&home, &session, "claude", Some(native_id), &source).unwrap());
+        assert!(matches!(
+            saved_chat::status(&home, &original.request_id, Some("different-phone")),
+            Err(saved_chat::ResumeError::Unknown)
+        ));
+        let status =
+            saved_chat::status(&home, &original.request_id, Some("original-phone")).unwrap();
+        assert_eq!(status.target.unwrap().native_id, native_id);
+
+        assert!(saved_chat::observe(
+            &home,
+            &session,
+            "claude",
+            Some("8b104e11-1317-4fa3-b890-0aebe2d5b300"),
+            &source,
+        )
+        .unwrap());
+        assert!(saved_chat::observe(&home, &session, "claude", Some(native_id), &source).unwrap());
+        let status =
+            saved_chat::status(&home, &original.request_id, Some("original-phone")).unwrap();
+        assert!(status.target.is_none());
+        assert!(!status.can_resume);
+
+        home.session(&session).remove().unwrap();
+        let repeated = create_remote_session_with(
+            original,
+            |agent| Some(PathBuf::from(agent.harness())),
+            |_| panic!("must not launch"),
+        );
+        assert!(matches!(
+            repeated,
+            Err(RemoteSessionError::RequestIdConflict)
+        ));
     }
 
     #[test]
@@ -1455,6 +1557,51 @@ mod tests {
             conflict,
             Err(RemoteSessionError::RequestIdConflict)
         ));
+    }
+
+    #[test]
+    fn reasoning_effort_reaches_both_harnesses_and_is_frozen_on_retry() {
+        for (agent, resolve, expected) in [
+            (
+                SessionAgent::Claude,
+                fake_claude as fn(SessionAgent) -> Option<PathBuf>,
+                ["--effort", "high"],
+            ),
+            (
+                SessionAgent::Codex,
+                fake_codex,
+                ["-c", r#"model_reasoning_effort="high""#],
+            ),
+        ] {
+            let (_temp, home, cwd) = home();
+            let request = RemoteSessionRequest {
+                agent: Some(agent),
+                model: Some("model".to_owned()),
+                reasoning_effort: Some("high".to_owned()),
+                ..request(&home, &cwd)
+            };
+            let original = create_remote_session_with(request.clone(), resolve, |options| {
+                assert_eq!(options.manifest.launch.argv[3..], expected);
+                stub_launch(options)
+            })
+            .unwrap();
+            let retry = create_remote_session_with(request.clone(), resolve, |_| {
+                panic!("matching retry must reuse the original session")
+            })
+            .unwrap();
+            assert_eq!(retry.id, original.id);
+
+            let changed = RemoteSessionRequest {
+                reasoning_effort: Some("medium".to_owned()),
+                ..request
+            };
+            assert!(matches!(
+                create_remote_session_with(changed, resolve, |_| panic!(
+                    "changed request must conflict"
+                )),
+                Err(RemoteSessionError::RequestIdConflict)
+            ));
+        }
     }
 
     #[test]

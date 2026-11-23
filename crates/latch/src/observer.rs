@@ -203,8 +203,20 @@ pub fn prepare_codex_launch(manifest: &mut LaunchManifest) -> anyhow::Result<()>
         "hooks.SessionStart=[{{hooks=[{{type=\"command\",command={}}}]}}]",
         serde_json::to_string(&command)?
     );
+    // Resume has its own CLI argument parser. Put its config and hook flags
+    // after the subcommand, where they configure the resumed TUI.
+    let flags_at = if manifest
+        .launch
+        .argv
+        .get(1)
+        .is_some_and(|arg| arg == "resume")
+    {
+        2
+    } else {
+        1
+    };
     manifest.launch.argv.splice(
-        1..1,
+        flags_at..flags_at,
         [
             // Codex otherwise pauses at a terminal-only hook review prompt
             // before its first message. This flag also affects other hooks
@@ -375,6 +387,10 @@ fn capture_record(
             .or_else(|| object.get("sessionId"))
             .or_else(|| object.get("conversation_id"))
             .and_then(Value::as_str);
+        if !crate::cli::create::saved_chat::observe(home, id, connector, agent_session_id, &source)?
+        {
+            return Ok(());
+        }
         write_private(PrivateWrite {
             path: &paths.conversation_source_binding(),
             contents: &serde_json::to_vec(&serde_json::json!({

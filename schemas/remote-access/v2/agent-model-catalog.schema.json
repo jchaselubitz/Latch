@@ -17,7 +17,14 @@
         "properties": {
           "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@\\[\\]-]*$" },
           "name": { "type": "string", "minLength": 1, "maxLength": 64 },
-          "description": { "type": "string", "maxLength": 160 }
+          "description": { "type": "string", "maxLength": 160 },
+          "reasoningOptions": {
+            "type": "array",
+            "items": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{0,31}$" },
+            "maxItems": 16,
+            "uniqueItems": true,
+            "description": "Thinking levels this gateway accepts at creation for this agent and model. Omitted when unavailable."
+          }
         },
         "additionalProperties": false
       }

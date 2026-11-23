@@ -18,6 +18,7 @@ NAMES = (
     "session-list.schema.json",
     "create-session-request.schema.json",
     "create-session-response.schema.json",
+    "saved-chat-resume.schema.json",
     "agent-model-catalog.schema.json",
     "conversation-item.schema.json",
     "conversation-state.schema.json",
@@ -142,6 +143,7 @@ public struct GatewayEndpoints: Codable, Equatable, Sendable {
     public var conversation: Bool
     public var browseDirectories: Bool
     public var createSession: Bool
+    public var savedChatResume: Bool
     public var stopSession: Bool
     /// Upload one file into the session's working directory at the interact
     /// grant. Absent on a Mac that predates the route.
@@ -193,6 +195,7 @@ public struct GatewayEndpoints: Codable, Equatable, Sendable {
         conversation: Bool = false,
         browseDirectories: Bool = false,
         createSession: Bool = false,
+        savedChatResume: Bool = false,
         stopSession: Bool = false,
         attachments: Bool = false,
         agentModels: Bool = false,
@@ -227,6 +230,7 @@ public struct GatewayEndpoints: Codable, Equatable, Sendable {
         self.conversation = conversation
         self.browseDirectories = browseDirectories
         self.createSession = createSession
+        self.savedChatResume = savedChatResume
         self.stopSession = stopSession
         self.attachments = attachments
         self.agentModels = agentModels
@@ -268,6 +272,7 @@ public struct GatewayEndpoints: Codable, Equatable, Sendable {
         conversation = try container.decode(Bool.self, forKey: .conversation)
         browseDirectories = try container.decodeIfPresent(Bool.self, forKey: .browseDirectories) ?? false
         createSession = try container.decodeIfPresent(Bool.self, forKey: .createSession) ?? false
+        savedChatResume = try container.decodeIfPresent(Bool.self, forKey: .savedChatResume) ?? false
         stopSession = try container.decodeIfPresent(Bool.self, forKey: .stopSession) ?? false
         attachments = try container.decodeIfPresent(Bool.self, forKey: .attachments) ?? false
         agentModels = try container.decodeIfPresent(Bool.self, forKey: .agentModels) ?? false
@@ -305,6 +310,7 @@ public enum GatewayEndpointsName: String, CaseIterable, Sendable {
     case conversation
     case browseDirectories
     case createSession
+    case savedChatResume
     case stopSession
     case attachments
     case agentModels
@@ -343,6 +349,7 @@ public extension GatewayEndpoints {
         case .conversation: return conversation
         case .browseDirectories: return browseDirectories
         case .createSession: return createSession
+        case .savedChatResume: return savedChatResume
         case .stopSession: return stopSession
         case .attachments: return attachments
         case .agentModels: return agentModels
@@ -1464,6 +1471,8 @@ public struct CreateSessionRequest: Codable, Equatable, Sendable {
     /// listed for it, and omitted on the wire when absent for the same reason
     /// `agent` is.
     public var model: String?
+    /// Explicit effort from the named model’s advertised options.
+    public var reasoningEffort: String?
     /// Orientation the agent receives as system-level instructions, never as
     /// a message in the thread. Only with `agent`, only when the Mac lists that
     /// agent in `GatewayFeatures.sessionInstructions`, and omitted on the wire
@@ -1475,17 +1484,19 @@ public struct CreateSessionRequest: Codable, Equatable, Sendable {
         cwd: String,
         agent: SessionAgent? = nil,
         model: String? = nil,
+        reasoningEffort: String? = nil,
         instructions: String? = nil
     ) {
         self.requestId = requestId
         self.cwd = cwd
         self.agent = agent
         self.model = model
+        self.reasoningEffort = reasoningEffort
         self.instructions = instructions
     }
 
     private enum CodingKeys: String, CodingKey {
-        case requestId, cwd, agent, model, instructions
+        case requestId, cwd, agent, model, reasoningEffort, instructions
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -1494,12 +1505,41 @@ public struct CreateSessionRequest: Codable, Equatable, Sendable {
         try container.encode(cwd, forKey: .cwd)
         try container.encodeIfPresent(agent, forKey: .agent)
         try container.encodeIfPresent(model, forKey: .model)
+        try container.encodeIfPresent(reasoningEffort, forKey: .reasoningEffort)
         try container.encodeIfPresent(instructions, forKey: .instructions)
     }
 }
 
 /// Which agents the create route can give `instructions` to, and the largest
 /// value it accepts in UTF-8 bytes.
+public struct ResumeSavedChatRequest: Codable, Equatable, Sendable {
+    public let requestId: UUID
+
+    public init(requestId: UUID) {
+        self.requestId = requestId
+    }
+}
+
+public struct SavedChatTarget: Codable, Equatable, Sendable {
+    public let nativeId: UUID
+    public let cwd: String
+    public let agent: SessionAgent
+
+    public init(nativeId: UUID, cwd: String, agent: SessionAgent) {
+        self.nativeId = nativeId
+        self.cwd = cwd
+        self.agent = agent
+    }
+}
+
+public struct SavedChatStatus: Codable, Equatable, Sendable {
+    public let target: SavedChatTarget?
+    public let sessionId: String?
+    public let verified: Bool
+    public let canResume: Bool
+    public let reason: String?
+}
+
 public struct SessionInstructionsSupport: Codable, Equatable, Sendable {
     public var agents: [SessionAgent]
     public var maxBytes: Int
@@ -1567,10 +1607,14 @@ public struct AgentModel: Codable, Equatable, Hashable, Sendable {
     public var name: String
     public var description: String?
 
-    public init(id: String, name: String, description: String? = nil) {
+    /// Omitted by gateways without explicit effort support for this model.
+    public var reasoningOptions: [String]?
+
+    public init(id: String, name: String, description: String? = nil, reasoningOptions: [String]? = nil) {
         self.id = id
         self.name = name
         self.description = description
+        self.reasoningOptions = reasoningOptions
     }
 }
 
@@ -1614,6 +1658,9 @@ public struct GatewayFeatures: Codable, Equatable, Sendable {
     /// Largest body the attachments route accepts, in bytes. `nil` on a Mac
     /// that does not serve the route.
     public var attachmentMaxBytes: Int?
+    /// True when session rows expose stored source and gateway creates stamp it.
+    /// Legacy rows may omit source. Nil means support is unadvertised.
+    public var sessionProvenance: Bool?
     /// Which agents creation can orient with `instructions`. `nil` on a Mac
     /// that predates the field: create without instructions there.
     public var sessionInstructions: SessionInstructionsSupport?
@@ -1626,6 +1673,7 @@ public struct GatewayFeatures: Codable, Equatable, Sendable {
         exclusiveTerminal: Bool = false,
         sessionAgents: [SessionAgent] = [],
         attachmentMaxBytes: Int? = nil,
+        sessionProvenance: Bool? = nil,
         sessionInstructions: SessionInstructionsSupport? = nil,
         overlord: OverlordReadiness? = nil,
         gitCommitMessage: GitDraftReadiness? = nil
@@ -1633,13 +1681,14 @@ public struct GatewayFeatures: Codable, Equatable, Sendable {
         self.exclusiveTerminal = exclusiveTerminal
         self.sessionAgents = sessionAgents
         self.attachmentMaxBytes = attachmentMaxBytes
+        self.sessionProvenance = sessionProvenance
         self.sessionInstructions = sessionInstructions
         self.overlord = overlord
         self.gitCommitMessage = gitCommitMessage
     }
 
     private enum CodingKeys: String, CodingKey {
-        case exclusiveTerminal, sessionAgents, attachmentMaxBytes, sessionInstructions, overlord, gitCommitMessage
+        case exclusiveTerminal, sessionAgents, attachmentMaxBytes, sessionProvenance, sessionInstructions, overlord, gitCommitMessage
     }
 
     public init(from decoder: Decoder) throws {
@@ -1648,6 +1697,7 @@ public struct GatewayFeatures: Codable, Equatable, Sendable {
         let names = try container.decodeIfPresent([String].self, forKey: .sessionAgents) ?? []
         sessionAgents = names.compactMap(SessionAgent.init(rawValue:))
         attachmentMaxBytes = try? container.decodeIfPresent(Int.self, forKey: .attachmentMaxBytes)
+        sessionProvenance = try? container.decodeIfPresent(Bool.self, forKey: .sessionProvenance)
         sessionInstructions = try? container.decodeIfPresent(SessionInstructionsSupport.self, forKey: .sessionInstructions)
         overlord = try? container.decodeIfPresent(OverlordReadiness.self, forKey: .overlord)
         gitCommitMessage = try? container.decodeIfPresent(GitDraftReadiness.self, forKey: .gitCommitMessage)

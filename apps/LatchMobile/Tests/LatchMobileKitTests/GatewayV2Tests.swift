@@ -283,6 +283,39 @@ final class GatewayV2Tests: XCTestCase {
         XCTAssertEqual(Set(shellBody.keys), ["requestId", "cwd"])
     }
 
+    func testExplicitEffortUsesOnlyOptionsAdvertisedByTheHost() async throws {
+        StubProtocol.stub(
+            path: "/v2/capabilities",
+            body: capabilities(agents: ["codex"], agentModels: true)
+        )
+        StubProtocol.stub(path: "/v2/agents/codex/models", body: """
+        {"agent":"codex","models":[{"id":"modern","name":"Modern","reasoningOptions":["high"]},
+        {"id":"legacy","name":"Legacy"}],"defaultModel":null}
+        """)
+        StubProtocol.stub(path: "/v2/sessions", body: """
+        {"protocolVersion":2,"session":{"id":"ses_new","name":"codex",
+        "state":"running","createdAt":"2026-09-06T00:00:00Z"}}
+        """)
+        let gateway = makeGateway()
+        let requestID = UUID()
+        _ = try await gateway.createSession(
+            requestID: requestID, cwd: "/tmp/a", agent: .codex, model: "modern", reasoningEffort: "high"
+        )
+        let post = try XCTUnwrap(StubProtocol.requests.last)
+        let decoded = try JSONDecoder().decode(CreateSessionRequest.self, from: Data(post.body.utf8))
+        XCTAssertEqual(decoded.model, "modern")
+        XCTAssertEqual(decoded.reasoningEffort, "high")
+
+        do {
+            _ = try await gateway.createSession(
+                requestID: UUID(), cwd: "/tmp/a", agent: .codex, model: "legacy", reasoningEffort: "high"
+            )
+            XCTFail("A model without advertised thinking levels must refuse an explicit effort")
+        } catch LatchError.refused {
+            XCTAssertEqual(StubProtocol.requests.filter { $0.method == "POST" }.count, 1)
+        }
+    }
+
     /// Orientation travels only to a Mac that lists the agent under
     /// `sessionInstructions`. Every other Mac gets the ordinary request, so a
     /// chat still starts there, just without injected text.
@@ -353,6 +386,18 @@ final class GatewayV2Tests: XCTestCase {
             }
         }
         XCTAssertEqual(StubProtocol.requests.count, sent)
+    }
+
+    func testSessionProvenanceDiscoveryDistinguishesSupportedUnsupportedAndAbsent() async throws {
+        for advertised in [true, false, nil] as [Bool?] {
+            StubProtocol.reset()
+            StubProtocol.stub(path: "/v2/capabilities", body: capabilities(
+                agents: ["claude"],
+                extraFeatures: advertised.map { #""sessionProvenance":\#($0)"# } ?? ""
+            ))
+            let discovery = try await makeGateway().discover()
+            XCTAssertEqual(discovery.features.sessionProvenance, advertised)
+        }
     }
 
     /// The Mac's Overlord readiness decodes when present, is nil on an older

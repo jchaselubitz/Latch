@@ -84,6 +84,10 @@
           "type": "boolean",
           "description": "Create a standard host shell at the control grant. Absence means unavailable."
         },
+        "savedChatResume": {
+          "type": "boolean",
+          "description": "Read device-owned saved chat status and request exact resume at the control grant. Per-chat canResume requires a qualified installed harness and verified history."
+        },
         "stopSession": {
           "type": "boolean",
           "description": "Stop one running session at the control grant. Absence means unavailable."
@@ -220,6 +224,10 @@
           "type": "integer",
           "minimum": 1,
           "description": "Largest file body the attachments route accepts, in bytes. Present exactly when `endpoints.attachments` is true."
+        },
+        "sessionProvenance": {
+          "type": "boolean",
+          "description": "True when session rows expose stored provenance in source and gateway-created sessions stamp it. Legacy rows may omit source. Absence means the gateway does not advertise support."
         },
         "sessionInstructions": {
           "type": "object",

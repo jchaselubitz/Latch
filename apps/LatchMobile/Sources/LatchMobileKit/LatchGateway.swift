@@ -125,6 +125,7 @@ public actor LatchGateway {
         cwd: String,
         agent: SessionAgent? = nil,
         model: String? = nil,
+        reasoningEffort: String? = nil,
         instructions: String? = nil
     ) async throws -> CreateReport {
         try await require(.createSession)
@@ -151,6 +152,14 @@ public actor LatchGateway {
         if model != nil {
             try await require(.agentModels)
         }
+        if let reasoningEffort {
+            guard let agent, let model,
+                  try await agentModels(for: agent).models.contains(where: {
+                      $0.id == model && $0.reasoningOptions?.contains(reasoningEffort) == true
+                  }) else {
+                throw LatchError.refused("The host doesn't offer that thinking level for this model.")
+            }
+        }
         let body: Data
         do {
             body = try JSONEncoder().encode(
@@ -159,6 +168,7 @@ public actor LatchGateway {
                     cwd: cwd,
                     agent: agent,
                     model: model,
+                    reasoningEffort: reasoningEffort,
                     instructions: instructions
                 )
             )
@@ -166,6 +176,23 @@ public actor LatchGateway {
             throw LatchError.malformedResponse(String(describing: error))
         }
         return try await request(method: "POST", path: "/v2/sessions", body: body)
+    }
+
+    /// Reads the host-owned target and current terminal for a chat started
+    /// by this paired device. Older gateways do not serve this endpoint.
+    public func savedChatStatus(chatID: UUID) async throws -> SavedChatStatus {
+        try await require(.savedChatResume)
+        return try await get(path: "/v2/saved-chats/\(chatID.uuidString.lowercased())/resume")
+    }
+
+    /// Ask the original host to resume the exact saved conversation.
+    /// The caller persists requestID before sending it and reuses it when
+    /// a response is lost. A successful create still requires verification
+    /// through savedChatStatus before opening the new terminal's Hub.
+    public func resumeSavedChat(chatID: UUID, requestID: UUID) async throws -> CreateReport {
+        try await require(.savedChatResume)
+        let body = try JSONEncoder().encode(ResumeSavedChatRequest(requestId: requestID))
+        return try await request(method: "POST", path: "/v2/saved-chats/\(chatID.uuidString.lowercased())/resume", body: body)
     }
 
     /// Whether ``createSession(requestID:cwd:agent:model:instructions:)``
@@ -654,6 +681,9 @@ public actor LatchGateway {
         // reloads the diff) without parsing the words.
         if path.hasPrefix("/v2/git/"), let code, status != 401, status != 403 || code == "unreadable_directory" {
             return .git(code: code, reason: reason.isEmpty ? "Git on your Mac could not answer." : reason)
+        }
+        if code == "saved_chat_unavailable" {
+            return .refused(reason.isEmpty ? "The host could not recover this chat." : reason)
         }
         if status == 401 || (status == 403 && code != "unreadable_directory") {
             return .unauthorized

@@ -58,6 +58,8 @@ pub(crate) enum RouteId {
     Capabilities,
     Sessions,
     CreateSession,
+    SavedChatStatus,
+    ResumeSavedChat,
     Directories,
     Session,
     Preview,
@@ -113,6 +115,20 @@ pub(crate) struct RouteSpec {
 pub const ATTACHMENT_MAX_BYTES: u64 = 25 * 1024 * 1024;
 
 pub(crate) const ROUTES: &[RouteSpec] = &[
+    RouteSpec {
+        id: RouteId::SavedChatStatus,
+        pattern: "/v2/saved-chats/{chat_id}/resume",
+        method: "GET",
+        required_grant: Grant::Control,
+        streamed_body_limit: None,
+    },
+    RouteSpec {
+        id: RouteId::ResumeSavedChat,
+        pattern: "/v2/saved-chats/{chat_id}/resume",
+        method: "POST",
+        required_grant: Grant::Control,
+        streamed_body_limit: None,
+    },
     RouteSpec {
         id: RouteId::GitCommitMessage,
         pattern: "/v2/git/commit-message",

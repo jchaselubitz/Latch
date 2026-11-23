@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://latch.cooperativ.dev/schemas/remote-access/v2/saved-chat-resume.schema.json",
+  "title": "Device-owned saved freeform chat resume",
+  "$defs": {
+    "ResumeSavedChatRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requestId"],
+      "properties": {
+        "requestId": {"type": "string", "format": "uuid"}
+      }
+    },
+    "SavedChatTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["nativeId", "cwd", "agent"],
+      "properties": {
+        "nativeId": {"type": "string", "format": "uuid"},
+        "cwd": {"type": "string", "pattern": "^/"},
+        "agent": {"enum": ["claude", "codex"], "type": "string"}
+      }
+    },
+    "SavedChatStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target", "sessionId", "verified", "canResume", "reason"],
+      "properties": {
+        "target": {"oneOf": [{"$ref": "#/$defs/SavedChatTarget"}, {"type": "null"}]},
+        "sessionId": {"type": ["string", "null"]},
+        "verified": {"type": "boolean"},
+        "canResume": {"type": "boolean"},
+        "reason": {"type": ["string", "null"]}
+      }
+    }
+  }
+}

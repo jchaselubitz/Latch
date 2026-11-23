@@ -4,11 +4,33 @@ use axum::http::header;
 
 #[test]
 fn every_registered_handler_comes_from_the_shared_route_table() {
-    assert_eq!(ROUTES.len(), 35);
+    assert_eq!(ROUTES.len(), 37);
     let mut ids = ROUTES.iter().map(|route| route.id).collect::<Vec<_>>();
     ids.sort_by_key(|id| *id as u8);
     ids.dedup();
     assert_eq!(ids.len(), ROUTES.len());
+}
+
+#[tokio::test]
+async fn saved_chat_resume_requires_control_and_an_original_pairing() {
+    let harness = harness().await;
+    let path = "/v2/saved-chats/2f1c8a0e-6a1b-4f7e-9d2c-5b8e7a6c4d31/resume";
+    for method in ["GET", "POST"] {
+        let (denied, _) = send(&harness, method, path, Some("interact"), "").await;
+        assert_eq!(denied, 403);
+    }
+    let (missing, result) = send_as_device(&harness, "GET", path, "other-phone", "").await;
+    assert_eq!(missing, 404);
+    assert_eq!(result["error"], "saved_chat_unavailable");
+    let (bad_input, _) = send_as_device(
+        &harness,
+        "POST",
+        path,
+        "other-phone",
+        r#"{"requestId":"2f1c8a0e-6a1b-4f7e-9d2c-5b8e7a6c4d31","cwd":"/tmp"}"#,
+    )
+    .await;
+    assert_eq!(bad_input, 400);
 }
 
 #[tokio::test]
@@ -47,6 +69,7 @@ fn current_capabilities_advertise_browsing_and_creation() {
         conversation: true,
         browse_directories: true,
         create_session: true,
+        saved_chat_resume: true,
         stop_session: true,
         attachments: true,
         agent_models: true,
@@ -103,6 +126,7 @@ fn current_capabilities_advertise_browsing_and_creation() {
         assert_eq!(value[name], true, "{name}");
     }
     assert_eq!(value["gitCommitMessage"], true);
+    assert_eq!(value["savedChatResume"], true);
     assert!(ROUTES
         .iter()
         .any(|route| route.pattern == "/v2/git/commit-message"
@@ -123,6 +147,7 @@ fn current_capabilities_advertise_supported_session_agents() {
         exclusive_terminal: true,
         session_agents: SESSION_AGENTS.to_vec(),
         attachment_max_bytes: None,
+        session_provenance: None,
         session_instructions: None,
         overlord: None,
     })
@@ -138,12 +163,20 @@ fn current_capabilities_advertise_supported_session_agents() {
         exclusive_terminal: true,
         session_agents: Vec::new(),
         attachment_max_bytes: None,
+        session_provenance: None,
         session_instructions: None,
         overlord: None,
     })
     .unwrap();
     assert!(none.get("sessionAgents").is_none());
     assert!(none.get("attachmentMaxBytes").is_none());
+    assert!(none.get("sessionProvenance").is_none());
+    assert_eq!(
+        serde_json::from_value::<GatewayFeatures>(none)
+            .unwrap()
+            .session_provenance,
+        None
+    );
 }
 
 /// Orientation and Overlord readiness are optional keys: a gateway without
@@ -157,6 +190,7 @@ fn instruction_and_overlord_features_are_absent_unless_served() {
         exclusive_terminal: true,
         session_agents: SESSION_AGENTS.to_vec(),
         attachment_max_bytes: None,
+        session_provenance: None,
         session_instructions: None,
         overlord: None,
     })
@@ -168,6 +202,7 @@ fn instruction_and_overlord_features_are_absent_unless_served() {
         exclusive_terminal: true,
         session_agents: SESSION_AGENTS.to_vec(),
         attachment_max_bytes: None,
+        session_provenance: None,
         session_instructions: Some(SessionInstructionsSupport {
             agents: vec![SessionAgent::Claude],
             max_bytes: 8192,
@@ -616,10 +651,11 @@ async fn creation_is_refused_below_control_and_oversized_bodies_are_bounded() {
 /// the create route launches is listed with the byte limit, and the Mac's
 /// Overlord readiness is always present (its values depend on the Mac).
 #[tokio::test]
-async fn capabilities_advertise_instructions_and_overlord_readiness() {
+async fn capabilities_advertise_provenance_instructions_and_overlord_readiness() {
     let harness = harness().await;
     let (status, value) = send(&harness, "GET", "/v2/capabilities", Some("observe"), "").await;
     assert_eq!(status, 200);
+    assert_eq!(value["features"]["sessionProvenance"], true);
     assert_eq!(
         value["features"]["sessionInstructions"],
         serde_json::json!({
@@ -992,6 +1028,7 @@ fn current_capabilities_advertise_attachments_with_their_limit() {
         exclusive_terminal: true,
         session_agents: Vec::new(),
         attachment_max_bytes: Some(ATTACHMENT_MAX_BYTES),
+        session_provenance: None,
         session_instructions: None,
         overlord: None,
     })

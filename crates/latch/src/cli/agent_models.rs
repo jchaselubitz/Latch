@@ -122,6 +122,7 @@ fn claude_cached_models(root: &Path) -> Option<Vec<AgentModel>> {
                 model["id"].as_str(),
                 model["name"].as_str(),
                 model["description"].as_str(),
+                reasoning_options(&model["thinking"]["effort_options"], "id"),
             )
         }));
         if parsed.is_empty() {
@@ -160,6 +161,7 @@ fn codex_cached_models(root: &Path) -> Option<Vec<AgentModel>> {
             model["slug"].as_str(),
             model["display_name"].as_str(),
             model["description"].as_str(),
+            reasoning_options(&model["supported_reasoning_levels"], "effort"),
         )
     })))
 }
@@ -197,10 +199,17 @@ fn codex_default_model(root: &Path) -> Option<String> {
 }
 
 fn collect_models<'a>(
-    entries: impl Iterator<Item = (Option<&'a str>, Option<&'a str>, Option<&'a str>)>,
+    entries: impl Iterator<
+        Item = (
+            Option<&'a str>,
+            Option<&'a str>,
+            Option<&'a str>,
+            Vec<String>,
+        ),
+    >,
 ) -> Vec<AgentModel> {
     let mut models: Vec<AgentModel> = Vec::new();
-    for (id, name, description) in entries {
+    for (id, name, description, reasoning_options) in entries {
         let Some(id) = id.map(str::trim).filter(|id| is_model_id(id)) else {
             continue;
         };
@@ -218,12 +227,43 @@ fn collect_models<'a>(
             id: id.to_owned(),
             name,
             description,
+            reasoning_options,
         });
         if models.len() == MAX_MODELS {
             break;
         }
     }
     models
+}
+
+/// Keep values within the wire format and safe as a single CLI value.
+pub fn is_reasoning_effort(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 32
+        && bytes[0].is_ascii_lowercase()
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"_-".contains(byte))
+}
+
+fn reasoning_options(entries: &Value, key: &str) -> Vec<String> {
+    let mut options = Vec::new();
+    for value in entries
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry[key].as_str())
+        .filter(|value| is_reasoning_effort(value))
+    {
+        if !options.iter().any(|option| option == value) {
+            options.push(value.to_owned());
+        }
+        if options.len() == 16 {
+            break;
+        }
+    }
+    options
 }
 
 /// One line of display text: control characters dropped, whitespace folded,
@@ -272,6 +312,9 @@ fn bundled(agent: SessionAgent) -> Vec<AgentModel> {
             id: (*id).to_owned(),
             name: (*name).to_owned(),
             description: None,
+            // Bundled model IDs predate any local cache. Use the agent's
+            // configured effort until its catalog confirms valid overrides.
+            reasoning_options: Vec::new(),
         })
         .collect()
 }

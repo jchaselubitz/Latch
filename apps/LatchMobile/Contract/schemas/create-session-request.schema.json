@@ -20,6 +20,11 @@
       "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@\\[\\]-]*$",
       "description": "Model the agent starts with, passed to it as `--model`. Only valid with `agent`, and only an id the gateway lists for that agent at GET /v2/agents/{agent}/models. Absent means the agent's own configured default on the Mac."
     },
+    "reasoningEffort": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,31}$",
+      "description": "Thinking level for the named agent and explicit model. Send only a value in that model's reasoningOptions, as advertised by this host. Absent uses the agent's configured effort."
+    },
     "instructions": {
       "type": "string",
       "minLength": 1,
@@ -27,5 +32,6 @@
       "description": "Orientation text the agent receives through its own system-level instruction mechanism (Claude Code: --append-system-prompt; Codex: developer_instructions), never as a user message. Only valid with `agent`, only for an agent listed in features.sessionInstructions.agents, and at most features.sessionInstructions.maxBytes UTF-8 bytes. Tab and newline are the only control characters accepted. Absent means the agent starts with no injected text; a gateway that predates the field refuses the key, so a caller sends it only when advertised."
     }
   },
+  "dependentRequired": { "reasoningEffort": ["agent", "model"] },
   "additionalProperties": false
 }

@@ -3,7 +3,7 @@
   "generator": "Tools/generate-contract.py",
   "generated": {
     "path": "Sources/LatchMobileKit/Generated/LatchContract.swift",
-    "sha256": "096844f53fa351ef93cae97bcceed1f8d50a3f37fa6f307481a9e22f1a75b81f"
+    "sha256": "577d5930a8073fde6de280661386424c9d8d3602fb6c89ecbf1cf9dad293eabe"
   },
   "schemas": [
     {
@@ -12,15 +12,19 @@
     },
     {
       "source": "schemas/remote-access/v2/create-session-request.schema.json",
-      "sha256": "71f441c0080435ca03d1edaa696cdf1270643688f12a07a8ed36e48a36ec676e"
+      "sha256": "433c120f8a1c091767a4a22f6b48f85518a4399096c19d0d73bca1ca28c4ff28"
     },
     {
       "source": "schemas/remote-access/v2/create-session-response.schema.json",
       "sha256": "06ac670e2736e8ce07d25998f0ae520acd0f30b1acd4f7b93aad2568cf2a272a"
     },
     {
+      "source": "schemas/remote-access/v2/saved-chat-resume.schema.json",
+      "sha256": "5d7ae50043dc0e2b9d19f751d89f85856fbc5968e913f98c4459b62c4c91954a"
+    },
+    {
       "source": "schemas/remote-access/v2/agent-model-catalog.schema.json",
-      "sha256": "00bb304a09ea1bd5cefc459d8421acdbc779e532f206388e78a9cbe8c59cbb77"
+      "sha256": "9d4cedd9b20eda331a8599f8ed38e25d86c292e33e8a89ea1663266884e4f3bd"
     },
     {
       "source": "schemas/remote-access/v2/conversation-item.schema.json",
@@ -36,7 +40,7 @@
     },
     {
       "source": "schemas/remote-access/v2/gateway-capabilities.schema.json",
-      "sha256": "8984c6f8c956da49b73a63adf9395830dc9937efc1b827f6d237d3896c7c8427"
+      "sha256": "c8e0a0ea33a643216a2ece1056336582c5746ad1279ebfbd03fcfca1b9b54c29"
     },
     {
       "source": "schemas/remote-access/v2/directory-page.schema.json",

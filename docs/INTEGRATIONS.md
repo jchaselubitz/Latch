@@ -103,6 +103,75 @@ PATH, declare it and let Latch build the shell wrapper:
   `capabilities.extensions` before sending these fields. Older builds ignore
   them and would run the agent argv directly, with no identity.
 
+### Saved freeform chat resume
+
+A native harness joining the paired freeform chat surface declares its resume
+status and evidence. To advertise support, prove all of the following using the
+installed version:
+
+- Capture an exact native ID and transcript source from the launched process.
+  Record ambiguity if that terminal later witnesses another identity.
+- Use adapter-owned argv to resume that exact ID in the original working
+  directory. A missing path, replaced worktree, missing transcript or unknown
+  identity must refuse the request.
+- Pass the close-and-resume fixture. End and remove the first terminal, restart
+  the gateway/client, confirm the same native ID in the new terminal, restore
+  the old message through the Hub and observe a new response.
+
+A paired client discovers `endpoints.savedChatResume`. When available,
+`GET /v2/saved-chats/{chatId}/resume` returns the owning device's original
+target and current terminal. `canResume` is true only for an ended terminal
+with recoverable history and a qualified installed version. The chat ID is
+the original gateway create request ID.
+
+`POST /v2/saved-chats/{chatId}/resume` accepts only a UUID `requestId` for the
+operation. Both methods require the original device and control grant. Use
+the same operation ID after a lost response. Latch records the acceptance
+before dispatch and refuses a second launch while an accepted outcome is
+unresolved. The client checks `verified` against its saved target and waits
+for restored Hub history before it exposes the replacement terminal as the
+same chat. Native identity metadata contains no transcript content.
+
+#### Claude Code
+
+Supported on Claude Code 2.1.330. The launch-scoped observer supplies the
+SessionStart native ID and transcript path. The adapter uses
+`claude --resume <session-id>`. The fixture exercised a fresh paired-device
+launch, exact resume after removing the old terminal and restarting the
+gateway, restored Hub history, and a Hub follow-up.
+
+#### Codex CLI
+
+Unverified for saved freeform chat. Codex 0.171.0 accepted
+`codex resume <thread-id>` and displayed prior terminal history. Qualification
+could not confirm the resumed observer binding and a complete Hub round trip
+on this version. The gateway does not offer Codex resume.
+
+#### Cursor
+
+Unavailable through the paired gateway. Cursor 2026.09.23-86fc751 accepts
+`agent --resume=<chat-id>`; Latch observes locally launched Cursor terminals.
+The paired gateway has no Cursor launch path or close-and-resume evidence.
+
+#### Antigravity
+
+Unavailable through the paired gateway. Antigravity 1.0.4 exposes
+`agy --conversation <conversation-id>` in its CLI help. Latch has no paired
+launch path or Conversation Hub observer for this harness.
+
+#### Other harnesses
+
+Pi, OpenCode and Codex app-server have no paired Latch freeform launch
+adapter. Their independent integration capabilities do not qualify resume.
+
+Run the installed-harness fixture with Node 22 or newer and an authenticated
+agent. It uses an empty scratch checkout and two short model requests.
+
+```sh
+cargo build -p latch -p latchd
+node scripts/verify-saved-chat-resume.mjs claude target/debug/latch "$OVERLORD_TMPDIR"
+```
+
 ### Create at most once: `--request-id`
 
 A caller that retries after a crash, or after losing the report, can pass an
