@@ -120,16 +120,22 @@ extension AppModel {
         defer { LinkTrace.shared.mark("app.discovery.end") }
         guard let gateway, pairedDevice != nil else { return }
         let generation = pairedConnectionGeneration
+        let linkGeneration = linkSnapshot.generation
+        func isCurrent() -> Bool {
+            generation == pairedConnectionGeneration && gateway === self.gateway
+                && linkSnapshot.state == .ready && linkSnapshot.generation == linkGeneration
+        }
         do {
             let started = Date()
             let capabilities = try await gateway.discover()
             record(LinkStageSample(stage: .discovery, milliseconds: Self.millis(since: started)))
-            guard generation == pairedConnectionGeneration else { return }
+            guard isCurrent() else { return }
             let instanceChanged = gatewayInstanceID != nil && gatewayInstanceID != capabilities.gatewayInstanceId
             gatewayInstanceID = capabilities.gatewayInstanceId
             // Permission refreshes can arrive while discovery is in flight.
             // Keep the current record rather than restoring a pre-await grant.
             hasPairedLink = true
+            scopedReadReadyGeneration = linkGeneration
             linkState = .linked(capabilities)
             if let timings = linkSnapshot.timings {
                 record(LinkStageSample(
@@ -149,8 +155,10 @@ extension AppModel {
             registerNotificationKey(using: gateway, capabilities: capabilities)
             await refreshSessions()
         } catch let error as LatchError {
+            guard isCurrent() else { return }
             linkState = Self.linkFailure(error)
         } catch {
+            guard isCurrent() else { return }
             linkState = .failed(error.localizedDescription)
         }
     }

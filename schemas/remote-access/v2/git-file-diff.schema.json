@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://latch.cooperativ.dev/schemas/remote-access/v2/git-file-diff.schema.json",
   "title": "LatchGitFileDiffV2",
-  "description": "One page of one changed file's diff (GET /v2/git/diff?path=&file=&area=&cursor=, control grant). The file must be listed by the current status in that area. Pages are bounded well under the phone's 512 KiB response limit; nextCursor asks for the hunks that follow. Binary, oversized, submodule and untracked-folder entries answer with no hunks and a kind that says why.",
+  "description": "One page of one changed file's diff (Control grant). Use GET /v2/git/diff?path=&file=&area=&cursor= or paired GET /v2/git/worktree/diff?worktreeRef=&file=&area=&cursor=. The file must be listed by the current status in that area. Pages are bounded below the phone's 512 KiB response limit. Send nextCursor on the next request for the same file and area. Scoped cursors also require the same worktree reference. Binary, oversized, submodule and untracked-folder entries answer with no hunks and a kind that says why.",
   "type": "object",
   "required": ["root", "path", "pathKey", "origPath", "area", "kind", "additions", "deletions", "hunks", "totalHunks", "nextCursor", "notes"],
   "properties": {

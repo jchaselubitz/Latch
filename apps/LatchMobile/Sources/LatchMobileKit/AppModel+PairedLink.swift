@@ -32,17 +32,21 @@ extension AppModel {
     /// the owner's snapshots drive discovery and every later state.
     public func connectPairedDevice(_ record: PairedDeviceRecord?) async {
         guard let record, record.isActive else {
-            if hasPairedLink { unlink() }
+            if pairedDevice != nil || hasPairedLink { unlink() }
             return
         }
         // Keep the paired identity even if the current network route cannot
         // be established. It is the authority to retry on foreground, while
         // the listener and Noise sockets themselves are strictly ephemeral.
+        coordinatorObservation?.cancel()
+        coordinatorObservation = nil
+        linkState = .connecting
         pairedDevice = record
-        await settleSuspension()
+        gateway = nil
         pairedConnectionGeneration &+= 1
         let generation = pairedConnectionGeneration
-        linkState = .connecting
+        await settleSuspension()
+        guard generation == pairedConnectionGeneration else { return }
         await coordinator.setOptions(diagnosticsOptions)
         await coordinator.setProbe { [weak self] in
             await self?.probeGateway() ?? false
@@ -66,8 +70,10 @@ extension AppModel {
             linkState = .failed(error.localizedDescription)
             return
         }
-        observeCoordinator()
+        guard generation == pairedConnectionGeneration else { return }
         await coordinator.start(record: record)
+        guard generation == pairedConnectionGeneration else { return }
+        observeCoordinator()
         // Callers get a settled answer: linked, or a typed reason it is not.
         // Later changes keep arriving through the owner's snapshots.
         await waitUntilSettled()

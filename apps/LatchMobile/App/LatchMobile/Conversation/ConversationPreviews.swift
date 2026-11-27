@@ -64,6 +64,10 @@ enum ConversationPreviewFixtures {
             items: items, state: state, operations: operations, resolveAttempts: attempts
         )
         return ConversationScreenContent(
+            queued: viewState == .working ? [
+                ConversationQueuedMessage(id: "q-1", text: "Also run the migration tests once that passes."),
+                ConversationQueuedMessage(id: "q-2", text: "Then open a PR."),
+            ] : [],
             viewState: viewState,
             transcript: transcript,
             statusLine: viewState.statusLine(in: transcript),

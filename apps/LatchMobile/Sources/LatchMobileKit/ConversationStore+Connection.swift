@@ -61,6 +61,10 @@ extension ConversationStore {
             decodeDiagnostics = decodeDiagnostics + diagnostics
             LinkTrace.shared.mark("conversation-degraded")
         }
+        // Any of these may be what lets the oldest queued message go: the
+        // socket reopening, the host reporting it is ready, or the previous
+        // send reaching the transcript.
+        flushQueuedMessages()
     }
 
     private func apply(_ message: ConversationServerMessage) {

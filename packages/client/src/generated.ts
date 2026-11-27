@@ -1,5 +1,5 @@
 // Generated from schemas/remote-access/v2/*.schema.json; do not edit by hand.
-// Canonical schema set SHA-256: 2e0d81057e1752479bc27353d51be05e0443ac7eb787aaedf4d0bfd6c6bde3ef
+// Canonical schema set SHA-256: 1c0abe12a660bd8143d4280f85a2ea0cd849b9dfad812d1e2fdbf49c8e84ea3f
 
 
 export type TerminalCloseReason =
@@ -17,6 +17,19 @@ export const TERMINAL_CLOSE_CODES = {
   kernel_error: 4500,
   resume_refused: 4411
 } as const satisfies Record<TerminalCloseReason, number>;
+export type SharedRoot = { rootId: string; name: string };
+export type SharedRoots = { roots: SharedRoot[] };
+export type SharedDirectoryEntry = { name: string; kind: 'directory' | 'file' };
+export type SharedDirectoryPage = {
+  path: string;
+  entries: SharedDirectoryEntry[];
+  nextCursor: string | null;
+};
+export type SharedFilePreview =
+  | { kind: 'text'; text: string }
+  | { kind: 'truncated'; text: string }
+  | { kind: 'binary' };
+
 export type SessionAgent = 'claude' | 'codex';
 export type CreateSessionRequest = {
   requestId: string;
@@ -65,6 +78,24 @@ export type GatewayFeatures = {
  * hex-encoded exact bytes the diff route takes. */
 export type GitWorktreeKind = 'repository' | 'linked_worktree' | 'submodule';
 export type GitRepository = { root: string; name: string; kind: GitWorktreeKind };
+export type GitWorktreeOpen = { worktreeRef: string; repository: GitRepository };
+export type GitWorktreeSummary = {
+  branch: string | null;
+  ahead: number | null;
+  behind: number | null;
+  staged: number;
+  unstaged: number;
+  conflicted: number;
+  untracked: number;
+  changesComplete: boolean;
+};
+export type GitWorktreeSummaryError =
+  | 'invalid_request' | 'stale_worktree_ref' | 'worktree_access_denied'
+  | 'git_timeout' | 'git_unavailable' | 'git_failed';
+export type GitWorktreeSummaryOutcome =
+  | { outcome: 'ok'; summary: GitWorktreeSummary }
+  | { outcome: 'error'; error: GitWorktreeSummaryError };
+export type GitWorktreeSummaries = { results: GitWorktreeSummaryOutcome[] };
 export type GitSessionRef = {
   id: string;
   name: string;
@@ -346,6 +377,7 @@ export type GatewayEndpoints = {
   terminal: boolean;
   conversation: boolean;
   browseDirectories?: boolean;
+  sharedFiles?: boolean;
   createSession?: boolean;
   savedChats?: boolean;
   savedChatResume?: boolean;
@@ -355,6 +387,10 @@ export type GatewayEndpoints = {
   notificationKey?: boolean;
   gitRepositories?: boolean;
   gitResolve?: boolean;
+  gitWorktreeReads?: boolean;
+  gitWorktreeSummaries?: boolean;
+  gitWorktreePreviews?: boolean;
+  gitWorktreeWrites?: boolean;
   gitStatus?: boolean;
   gitDiff?: boolean;
   gitBranches?: boolean;
@@ -377,7 +413,7 @@ export type GatewayEndpoints = {
   gitPushReconcile?: boolean;
   gitCommitMessage?: boolean;
 };
-export type GatewayEndpointName = 'sessions' | 'preview' | 'terminal' | 'conversation' | 'browseDirectories' | 'createSession' | 'savedChats' | 'savedChatResume' | 'stopSession' | 'attachments' | 'agentModels' | 'notificationKey' | 'gitRepositories' | 'gitResolve' | 'gitStatus' | 'gitDiff' | 'gitBranches' | 'gitStage' | 'gitUnstage' | 'gitCommit' | 'gitCreateBranch' | 'gitSwitchBranch' | 'gitReceipts' | 'gitSync' | 'gitFetch' | 'gitFastForward' | 'gitMerge' | 'gitRebase' | 'gitContinue' | 'gitAbort' | 'gitStageResolved' | 'gitPushPreview' | 'gitPush' | 'gitPushReconcile' | 'gitCommitMessage';
+export type GatewayEndpointName = 'sessions' | 'preview' | 'terminal' | 'conversation' | 'browseDirectories' | 'sharedFiles' | 'createSession' | 'savedChats' | 'savedChatResume' | 'stopSession' | 'attachments' | 'agentModels' | 'notificationKey' | 'gitRepositories' | 'gitResolve' | 'gitWorktreeReads' | 'gitWorktreeSummaries' | 'gitWorktreePreviews' | 'gitWorktreeWrites' | 'gitStatus' | 'gitDiff' | 'gitBranches' | 'gitStage' | 'gitUnstage' | 'gitCommit' | 'gitCreateBranch' | 'gitSwitchBranch' | 'gitReceipts' | 'gitSync' | 'gitFetch' | 'gitFastForward' | 'gitMerge' | 'gitRebase' | 'gitContinue' | 'gitAbort' | 'gitStageResolved' | 'gitPushPreview' | 'gitPush' | 'gitPushReconcile' | 'gitCommitMessage';
 
 export type ConversationItem = { id: string; ordinal: number; createdAt: string; kind: { type: "message"; role: "user" | "assistant"; text: string; status: "submitted" | "queued" | "observed" | "partial" | "complete" | "failed"; } | { type: "tool"; name: string; summary: string; status: "running" | "succeeded" | "failed"; parentMessageId?: string | null; } | { type: "request"; requestId: string; requestType: "permission" | "question"; prompt: string; choices: Array<string>; questions?: Array<{ question: string; header?: string; multiSelect: boolean; options: Array<{ label: string; description: string; }>; }>; status: "pending" | "resolved" | "dismissed"; requestKind?: string; details?: { command?: string; cwd?: string; sandbox?: string; reason?: string; paths?: Array<string>; diff?: string; changes?: Array<{ path: string; diff?: string; summary?: string; }>; host?: string; fileSystemScope?: Array<string>; networkScope?: Array<string>; server?: string; tool?: string; argumentsSummary?: string; appName?: string; scope?: string; origin?: string; url?: string; action?: string; planMarkdown?: string; planPath?: string; message?: string; schema?: Record<string, unknown>; service?: string; }; options?: Array<{ id: string; label: string; requiresText?: boolean; }>; answerable?: boolean; reason?: string; resolvedBy?: "phone" | "terminal" | "policy" | "hook" | "timeout"; decision?: string; } | { type: "subagent"; subagentId: string; agentType: string; status: string; summary: string; parentToolId?: string; } | { type: "task_list"; tasks: Array<{ id: string; title: string; status: string; }>; } | { type: "plan_update"; steps: Array<{ id: string; title: string; status: string; }>; } | { type: "reasoning_summary"; text: string; } | { type: "notice"; noticeKind: string; text: string; } | { type: "file_change"; path: string; diffSummary: string; toolItemId?: string; }; parentSubagentId?: string; };
 export type ConversationState = { phase: "starting" | "idle" | "working" | "awaiting_input" | "exited" | "unavailable"; sendMessage: { enabled: boolean; reason?: string | null; }; resolveRequest: { enabled: boolean; reason?: string | null; }; cancelTurn?: { enabled: boolean; reason?: string | null; }; turnOutcome?: "answer" | "aborted" | "refusal" | "error" | null; commands?: Array<{ name: string; description: string; source?: string; }>; pendingRequest: string | null; connector: null | { id: string; version: string; }; backgroundWork?: { count: number; kinds: Array<string>; }; model?: string; effort?: string; permissionMode?: string; usage?: { contextTokens?: number; contextWindow?: number; contextPercent?: number; rateLimits: Array<{ kind: string; percentUsed: number; resetsAt?: string; }>; costCents?: number; }; };

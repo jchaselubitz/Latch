@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://latch.cooperativ.dev/schemas/remote-access/v2/git-worktree-open.schema.json",
+  "title": "LatchGitWorktreeOpenV2",
+  "description": "GET /v2/git/worktree/open?path= requires an active paired device with Control access. The absolute source path must canonically resolve to the worktree root. Root aliases and linked worktrees are accepted. Nested folders return worktree_root_required and bare repositories return bare_repository.",
+  "type": "object",
+  "required": ["worktreeRef", "repository"],
+  "properties": {
+    "worktreeRef": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "Opaque reference scoped to the current host gateway, paired device, Control grant revision and exact worktree. Use it for GET /v2/git/worktree/status?worktreeRef= and GET /v2/git/worktree/diff?worktreeRef=&file=&area=&cursor=. References expire after 30 minutes and may be evicted sooner. A stale, foreign or unknown reference returns 409 stale_worktree_ref. Lost Control access returns 403. Reopen on the authenticated host when needed."
+    },
+    "repository": { "$ref": "git-repository.schema.json" }
+  },
+  "additionalProperties": false
+}

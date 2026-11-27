@@ -6,12 +6,11 @@ provider boundary, launch manifest, and Overlord example, start with
 
 Latch protocol major 2 deliberately has a small TypeScript surface:
 
-- `@latch/client` discovers sessions and opens a terminal WebSocket.
+- `@latch/client` discovers sessions, opens a terminal WebSocket, and reads explicitly shared files over a paired connection.
 - `@latch/terminal-react` renders a terminal handle through an embedder-supplied
   xterm renderer.
 
-Both packages are private workspaces. Today they are terminal integrations, not
-a conversation SDK. The only currently supported conversation client is the
+Both packages are private workspaces. The only currently supported conversation client is the
 native mobile client, which speaks the canonical v2 conversation socket
 directly. A headless TypeScript conversation client and optional React renderer
 are proposed in the
@@ -112,6 +111,55 @@ returns no file names, no file contents, no metadata, and no search. Every
 path failure — missing, unreadable, not a directory, outside what the gateway
 will serve — is one stable error, so the route cannot be used to probe the
 filesystem.
+
+## Shared Files
+
+Gate the Files client on `endpoints.sharedFiles`. Every request requires the
+authenticated paired device's current Control grant and an explicit host-owner
+share. The [host CLI](CLI.md) creates or revokes shares. Latch stores shares on
+the host, bound to the pairing's grant revision and to the selected directory
+identity. The root ID is opaque and remains usable across gateway restarts
+while those bindings hold. Clients associate the root ID with their own
+project authorization and authenticated host identity.
+
+| Route | Response |
+| --- | --- |
+| `GET /v2/files/roots` | Up to 128 available shares for the current pairing, each with a `rootId` and directory display name. |
+| `GET /v2/files/directory?rootId=&path=&cursor=` | One page of up to 64 direct child names and their kinds. An omitted or empty path opens the root. |
+| `GET /v2/files/preview?rootId=&path=` | `text` or `truncated` with UTF-8 text, or `binary` with no text. |
+
+Paths are UTF-8, slash-separated and root-relative. Use returned names with
+their original spelling. Absolute paths, traversal components, symlinks,
+hard-linked files, special files, and entries on a different filesystem are
+outside the Files scope. Directory pages omit hidden entries, Git metadata,
+common credential and secret names, and private key or credential-file
+extensions. Direct access applies the same checks to every relative component.
+The owner cannot share Latch state or protected system directories, or select
+a root that contains either. A share
+should contain only material intended for the selected device.
+
+Directory cursors are opaque and gateway-local. They expire after five minutes
+and may be evicted sooner. Reload the first page on `409 stale_cursor`. A
+directory with more than 8,192 entries returns `shared_directory_too_large`.
+Previews read at most 64 KiB plus one byte. Truncation may end the returned
+text early at a UTF-8 scalar boundary. Binary classification examines only
+that prefix and treats unsupported encodings and control bytes other than tab,
+newline, and carriage return as binary. The gateway verifies that the opened
+objects remain at their authorized paths and rechecks the pairing and share
+before returning data. Scope or filesystem changes can yield
+`shared_root_unavailable`, `shared_entry_unavailable`, or `shared_entry_changed`.
+The Linux gateway needs kernel support for `openat2` and a mounted `/proc`
+to advertise Files.
+
+Swift consumers start a `SharedFilesReadInteraction` via
+`AppModel.beginSharedFilesRead()`. The interaction verifies the current
+paired host, uses one bounded device-owner unlock, and discards responses
+from an invalidated link or interaction. Keep visible content in memory,
+clear it on root or project access loss, and call `invalidate()` when leaving
+the scope. Refresh root availability when rechecking visibility since share
+revocation is enforced on reads.
+
+## Remote session creation
 
 Creation takes two fields, and optionally an agent, its model and an orientation:
 

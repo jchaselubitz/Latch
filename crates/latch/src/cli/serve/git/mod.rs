@@ -7,9 +7,8 @@
 //! Reads never touch the network. Only an explicit fetch, push, or check of
 //! an uncertain push contacts a remote, with the Mac's own credentials. The
 //! phone names a folder, a file by its exact bytes, an area, a branch or a
-//! remote; every Git argument is chosen by this module, and every call
-//! resolves the folder again, so the target is revalidated each time rather
-//! than trusted from a previous answer.
+//! remote; every Git argument is chosen by this module. Scoped reads also
+//! accept a gateway-issued reference and verify its exact worktree and grant.
 
 mod branches;
 mod command;
@@ -22,6 +21,7 @@ mod ops;
 mod push;
 mod receipts;
 mod recent;
+mod scoped;
 mod session;
 mod snapshot;
 mod status;
@@ -43,20 +43,23 @@ use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-pub(crate) use branches::branches;
+pub(crate) use branches::{branches, worktree_branches};
 use command::args;
 pub(crate) use integrate::is_plausible_remote_name;
-pub(crate) use mutation::{check_push, receipt, submit, MutationError, PushCheckError, Submitted};
+pub(crate) use mutation::{
+    check_push, receipt, submit, MutationError, PushCheckError, Submitted, Target,
+};
 pub(crate) use ops::{is_plausible_branch_name, FileTarget, Mutation, Selection};
-pub(crate) use push::{is_plausible_destination, preview as push_preview};
+pub(crate) use push::{is_plausible_destination, preview as push_preview, worktree_push};
+pub(crate) use scoped::{control_revision, WorktreeReferences};
 pub(crate) use session::refresh_directories;
 pub(crate) use status::{hex as status_hex, unhex as status_unhex};
-pub(crate) use sync::sync;
+pub(crate) use sync::{sync, worktree_sync};
 pub(crate) use worktree::Worktree;
 
 use super::contract::{
     GitChangeArea, GitDiffKind, GitFileDiff, GitRepository, GitRepositoryList,
-    GitRepositorySummary, GitSessionRef, GitStatus,
+    GitRepositorySummary, GitSessionRef, GitStatus, GitWorktreeSummary,
 };
 use crate::cli::json::SessionSummary;
 use crate::session::paths::LatchHome;
@@ -88,6 +91,9 @@ pub(crate) enum GitError {
     /// The file is not listed in that area by the current status.
     FileNotChanged,
     StaleCursor,
+    WorktreeRootRequired,
+    StaleWorktreeReference,
+    WorktreeAccessDenied,
 }
 
 /// `GET /v2/git/resolve`.
@@ -104,11 +110,47 @@ pub(crate) async fn status(
     sessions: &[SessionSummary],
 ) -> Result<GitStatus, GitError> {
     let worktree = worktree::resolve(path).await?;
-    let mut status = read_status(&worktree).await?;
-    status.sessions = sessions_in(&worktree.root, sessions).await;
+    let status = worktree_status(&worktree, sessions).await?;
     // The list is a convenience; failing to write it does not fail the read.
     let _ = recent::record(home, worktree.root_str(), SystemTime::now());
     Ok(status)
+}
+
+pub(crate) async fn worktree_status(
+    worktree: &Worktree,
+    sessions: &[SessionSummary],
+) -> Result<GitStatus, GitError> {
+    let mut status = read_status(worktree).await?;
+    status.sessions = sessions_in(&worktree.root, sessions).await;
+    Ok(status)
+}
+
+/// Read just the porcelain headers and change counts for a list row.
+pub(crate) async fn worktree_summary(worktree: &Worktree) -> Result<GitWorktreeSummary, GitError> {
+    let output = command::run_with_extras(
+        &worktree.root,
+        &args([
+            "status",
+            "--porcelain=v2",
+            "-z",
+            "--branch",
+            "--ahead-behind",
+            "--untracked-files=normal",
+            "--find-renames",
+        ]),
+        None,
+        256 * 1024,
+        command::GIT_TIMEOUT,
+        command::Extras {
+            no_lazy_fetch: true,
+            ..command::Extras::default()
+        },
+    )
+    .await?;
+    if !output.succeeded() && !output.truncated {
+        return Err(GitError::Failed);
+    }
+    status::summarize(&output.stdout, !output.truncated)
 }
 
 /// One porcelain listing of the working tree, read exactly as the status
@@ -344,12 +386,41 @@ pub(crate) async fn file_diff(
     area: GitChangeArea,
     cursor: Option<&str>,
 ) -> Result<GitFileDiff, GitError> {
+    let file = diff_file_key(file_key)?;
+    let worktree = worktree::resolve(path).await?;
+    worktree_diff(&worktree, file, area, cursor, None).await
+}
+
+pub(crate) async fn scoped_diff(
+    worktree: &Worktree,
+    reference: &str,
+    file_key: &str,
+    area: GitChangeArea,
+    cursor: Option<&str>,
+) -> Result<GitFileDiff, GitError> {
+    let file = diff_file_key(file_key)?;
+    let diff = worktree_diff(worktree, file, area, cursor, Some(reference)).await?;
+    if cursor.is_some() && diff.kind != GitDiffKind::Text {
+        return Err(GitError::StaleCursor);
+    }
+    Ok(diff)
+}
+
+fn diff_file_key(file_key: &str) -> Result<Vec<u8>, GitError> {
     let file = status::unhex(file_key).ok_or(GitError::InvalidRequest)?;
     if !is_relative_path(&file) {
         return Err(GitError::InvalidRequest);
     }
-    let worktree = worktree::resolve(path).await?;
+    Ok(file)
+}
 
+async fn worktree_diff(
+    worktree: &Worktree,
+    file: Vec<u8>,
+    area: GitChangeArea,
+    cursor: Option<&str>,
+    reference: Option<&str>,
+) -> Result<GitFileDiff, GitError> {
     // The file must be one the current status lists in this area. That is
     // what keeps the diff inside this working tree: the phone can only name
     // a change Git itself reported.
@@ -429,7 +500,10 @@ pub(crate) async fn file_diff(
         result.kind = GitDiffKind::Binary;
         return Ok(result);
     }
-    let fingerprint = diff::fingerprint(&output.stdout);
+    let fingerprint = match reference {
+        Some(reference) => diff::scoped_fingerprint(reference, &file, area, &output.stdout),
+        None => diff::fingerprint(&output.stdout),
+    };
     let start = match cursor {
         None => 0,
         Some(cursor) => diff::parse_cursor(cursor, &fingerprint, parsed.hunks.len())

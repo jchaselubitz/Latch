@@ -4,7 +4,7 @@ use axum::http::header;
 
 #[test]
 fn every_registered_handler_comes_from_the_shared_route_table() {
-    assert_eq!(ROUTES.len(), 38);
+    assert_eq!(ROUTES.len(), 45);
     let mut ids = ROUTES.iter().map(|route| route.id).collect::<Vec<_>>();
     ids.sort_by_key(|id| *id as u8);
     ids.dedup();
@@ -83,6 +83,7 @@ fn current_capabilities_advertise_browsing_and_creation() {
         terminal: true,
         conversation: true,
         browse_directories: true,
+        shared_files: true,
         create_session: true,
         saved_chats: true,
         saved_chat_resume: true,
@@ -92,6 +93,10 @@ fn current_capabilities_advertise_browsing_and_creation() {
         notification_key: true,
         git_repositories: true,
         git_resolve: true,
+        git_worktree_reads: true,
+        git_worktree_summaries: true,
+        git_worktree_writes: true,
+        git_worktree_previews: true,
         git_status: true,
         git_diff: true,
         git_branches: true,
@@ -118,6 +123,10 @@ fn current_capabilities_advertise_browsing_and_creation() {
     for name in [
         "gitRepositories",
         "gitResolve",
+        "gitWorktreeReads",
+        "gitWorktreeSummaries",
+        "gitWorktreeWrites",
+        "gitWorktreePreviews",
         "gitStatus",
         "gitDiff",
         "gitBranches",
@@ -150,6 +159,7 @@ fn current_capabilities_advertise_browsing_and_creation() {
             && route.required_grant == Grant::Control));
     assert_eq!(value["notificationKey"], true);
     assert_eq!(value["browseDirectories"], true);
+    assert_eq!(value["sharedFiles"], true);
     assert_eq!(value["createSession"], true);
     assert_eq!(value["stopSession"], true);
     assert_eq!(value["agentModels"], true);
@@ -266,10 +276,20 @@ async fn harness() -> Harness {
     home.ensure().expect("home");
     let work = dir.path().join("work");
     std::fs::create_dir(&work).expect("work");
-    let token_file = dir.path().join("serve.token");
+    let address = start_harness_router(dir.path(), &home).await;
+    Harness {
+        _dir: dir,
+        address,
+        home,
+        work,
+    }
+}
+
+async fn start_harness_router(dir: &std::path::Path, home: &LatchHome) -> SocketAddr {
+    let token_file = dir.join("serve.token");
     std::fs::write(&token_file, "gateway-token").expect("token");
-    let hub = crate::conversation::ConversationHub::new(dir.path().join("hub")).expect("hub");
-    let app = test_router(home.clone(), token_file, hub, dir.path().join("stub-latch"));
+    let hub = crate::conversation::ConversationHub::new(dir.join("hub")).expect("hub");
+    let app = test_router(home.clone(), token_file, hub, dir.join("stub-latch"));
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let address = listener.local_addr().expect("addr");
     tokio::spawn(async move {
@@ -279,12 +299,7 @@ async fn harness() -> Harness {
         )
         .await;
     });
-    Harness {
-        _dir: dir,
-        address,
-        home,
-        work,
-    }
+    address
 }
 
 async fn post_create(
@@ -1223,6 +1238,581 @@ fn harness_repository(harness: &Harness) -> String {
     fixture_git(&root, &["commit", "-q", "-m", "initial"]);
     std::fs::write(root.join("README.md"), "two\n").unwrap();
     root.to_str().unwrap().to_owned()
+}
+
+fn enroll_git_phone(harness: &Harness, fixture: char) -> String {
+    remote_access::set_enabled(&harness.home, true).unwrap();
+    remote_access::authorize_enrollment(
+        &harness.home,
+        &format!("enr_{}", fixture.to_string().repeat(32)),
+        &fixture.to_string().repeat(64),
+        "Git test phone",
+        Grant::Control,
+        &format!("dev_{}", fixture.to_string().repeat(32)),
+    )
+    .unwrap()
+    .device_id
+}
+
+#[tokio::test]
+async fn shared_files_are_device_scoped_and_leave_the_legacy_picker_available() {
+    let harness = harness().await;
+    let owner = enroll_git_phone(&harness, 'a');
+    let other = enroll_git_phone(&harness, 'b');
+    let roots = "/v2/files/roots";
+    for permission in ["observe", "interact", "control"] {
+        assert_eq!(
+            send(&harness, "GET", roots, Some(permission), "").await.0,
+            403
+        );
+    }
+
+    let work = harness_repository(&harness);
+    fixture_git(std::path::Path::new(&work), &["restore", "README.md"]);
+    assert!(fixture_git(std::path::Path::new(&work), &["status", "--porcelain"]).is_empty());
+    let grant = remote_access::share_root(&harness.home, &owner, &harness.work).unwrap();
+    let other_roots = send_as_device(&harness, "GET", roots, &other, "").await;
+    assert_eq!(other_roots, (200, serde_json::json!({"roots": []})));
+    let visible = send_as_device(&harness, "GET", roots, &owner, "").await;
+    assert_eq!(
+        visible,
+        (
+            200,
+            serde_json::json!({"roots": [{"rootId": grant.root_id, "name": "work"}]})
+        )
+    );
+    let read = format!("/v2/files/preview?rootId={}&path=README.md", grant.root_id);
+    assert_eq!(
+        send_as_device(&harness, "GET", &read, &owner, "").await,
+        (200, serde_json::json!({"kind": "text", "text": "one\n"}))
+    );
+    let path = format!("/v2/files/directory?rootId={}", grant.root_id);
+    let (status, page) = send_as_device(&harness, "GET", &path, &owner, "").await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        page,
+        serde_json::json!({
+            "path": "", "entries": [{"name": "README.md", "kind": "file"}], "nextCursor": null
+        })
+    );
+    assert_eq!(
+        send_as_device(&harness, "GET", &read, &other, "").await.0,
+        404
+    );
+    remote_access::revoke_shared_root(&harness.home, &grant.root_id).unwrap();
+    assert_eq!(
+        send_as_device(&harness, "GET", &read, &owner, "").await.0,
+        404
+    );
+    let mut picker = reqwest::Url::parse("http://gateway/v2/directories").unwrap();
+    picker.query_pairs_mut().append_pair("path", &work);
+    let picker = format!("{}?{}", picker.path(), picker.query().unwrap());
+    let (status, page) = send_as_device(&harness, "GET", &picker, &owner, "").await;
+    assert_eq!(status, 200);
+    assert_eq!(page["path"], work);
+}
+
+async fn open_worktree(
+    harness: &Harness,
+    device: &str,
+    path: &std::path::Path,
+) -> (u16, serde_json::Value) {
+    let mut target = reqwest::Url::parse("http://gateway/v2/git/worktree/open").unwrap();
+    target
+        .query_pairs_mut()
+        .append_pair("path", path.to_str().unwrap());
+    send_as_device(
+        harness,
+        "GET",
+        &format!("{}?{}", target.path(), target.query().unwrap()),
+        device,
+        "",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn git_worktree_open_requires_an_exact_root_and_accepts_aliases_and_linked_worktrees() {
+    use std::path::Path;
+
+    let harness = harness().await;
+    let root = harness_repository(&harness);
+    let root = Path::new(&root);
+    let device = enroll_git_phone(&harness, 'a');
+    let nested = root.join("nested");
+    std::fs::create_dir(&nested).unwrap();
+    let bare = root.with_file_name("bare.git");
+    std::fs::create_dir(&bare).unwrap();
+    fixture_git(&bare, &["init", "--bare", "-q"]);
+    let alias = root.with_file_name("source alias");
+    std::os::unix::fs::symlink(root, &alias).unwrap();
+    let linked = root.with_file_name("linked");
+    fixture_git(
+        root,
+        &[
+            "worktree",
+            "add",
+            "-qb",
+            "secondary",
+            linked.to_str().unwrap(),
+        ],
+    );
+
+    for (path, code) in [
+        (nested.as_path(), "worktree_root_required"),
+        (alias.join("nested").as_path(), "worktree_root_required"),
+        (bare.as_path(), "bare_repository"),
+    ] {
+        let (status, reply) = open_worktree(&harness, &device, path).await;
+        assert_eq!((status, reply["error"].as_str()), (422, Some(code)));
+    }
+    let legacy_path = nested.to_str().unwrap().replace('/', "%2F");
+    let (status, reply) = send(
+        &harness,
+        "GET",
+        &format!("/v2/git/status?path={legacy_path}"),
+        Some("control"),
+        "",
+    )
+    .await;
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["root"], root.to_str().unwrap());
+
+    for (source, expected_root, kind, branch) in [
+        (&alias, root, "repository", "main"),
+        (&linked, linked.as_path(), "linked_worktree", "secondary"),
+    ] {
+        let (status, opened) = open_worktree(&harness, &device, source).await;
+        assert_eq!(status, 200, "{opened}");
+        assert_eq!(
+            opened["repository"]["root"],
+            expected_root.to_str().unwrap()
+        );
+        assert_eq!(opened["repository"]["kind"], kind);
+        let reference = opened["worktreeRef"].as_str().unwrap();
+        let target = format!("/v2/git/worktree/status?worktreeRef={reference}");
+        let (status, reply) = send_as_device(&harness, "GET", &target, &device, "").await;
+        assert_eq!(status, 200, "{reply}");
+        assert_eq!(reply["root"], expected_root.to_str().unwrap());
+        assert_eq!(reply["head"]["branch"], branch);
+        if source == &alias {
+            std::fs::remove_file(&alias).unwrap();
+            std::os::unix::fs::symlink(&linked, &alias).unwrap();
+            let (status, reply) = send_as_device(&harness, "GET", &target, &device, "").await;
+            assert_eq!(status, 409, "{reply}");
+            assert_eq!(reply["error"], "stale_worktree_ref");
+        }
+    }
+}
+
+#[tokio::test]
+async fn git_worktree_pages_recheck_checkout_device_host_and_grant() {
+    use std::path::Path;
+
+    let harness = harness().await;
+    let other_host = self::harness().await;
+    let root = harness_repository(&harness);
+    let root = Path::new(&root);
+    let device = enroll_git_phone(&harness, 'a');
+    let other_device = enroll_git_phone(&harness, 'b');
+    // Even the same local pairing ID cannot move a reference across gateways.
+    remote_access::set_enabled(&other_host.home, true).unwrap();
+    let devices_file = "remote-access/devices.json";
+    std::fs::copy(
+        harness.home.root().join(devices_file),
+        other_host.home.root().join(devices_file),
+    )
+    .unwrap();
+
+    let text = |edited: bool| {
+        (0..1800)
+            .map(|line| {
+                let prefix = if edited && line % 12 == 0 {
+                    "new"
+                } else {
+                    "old"
+                };
+                format!("{prefix} {line} {}\n", "x".repeat(512))
+            })
+            .collect::<String>()
+    };
+    let file = root.join("README.md");
+    std::fs::write(&file, text(false)).unwrap();
+    fixture_git(root, &["commit", "-qam", "large diff base"]);
+    std::fs::write(&file, text(true)).unwrap();
+
+    let (status, opened) = open_worktree(&harness, &device, root).await;
+    assert_eq!(status, 200, "{opened}");
+    let reference = opened["worktreeRef"].as_str().unwrap();
+    let diff = |reference: &str| {
+        format!(
+            "/v2/git/worktree/diff?worktreeRef={reference}&file=524541444d452e6d64&area=unstaged"
+        )
+    };
+    let first = diff(reference);
+    for grant in ["observe", "interact", "control"] {
+        let (status, _) = send(&harness, "GET", &first, Some(grant), "").await;
+        assert_eq!(status, 403);
+    }
+    let (status, page) = send_as_device(&harness, "GET", &first, &device, "").await;
+    assert_eq!(status, 200, "{page}");
+    let cursor = page["nextCursor"].as_str().expect("second page");
+    let next = format!("{first}&cursor={cursor}");
+    let (status, page) = send_as_device(&harness, "GET", &next, &device, "").await;
+    assert_eq!(status, 200, "{page}");
+    assert!(page["hunks"][0]["index"].as_u64().unwrap() > 0);
+    for (host, phone) in [(&harness, &other_device), (&other_host, &device)] {
+        let (status, reply) = send_as_device(host, "GET", &next, phone, "").await;
+        assert_eq!(status, 409, "{reply}");
+        assert_eq!(reply["error"], "stale_worktree_ref");
+    }
+
+    let (status, reopened) = open_worktree(&harness, &device, root).await;
+    assert_eq!(status, 200, "{reopened}");
+    let new_first = diff(reopened["worktreeRef"].as_str().unwrap());
+    let (status, reply) = send_as_device(
+        &harness,
+        "GET",
+        &format!("{new_first}&cursor={cursor}"),
+        &device,
+        "",
+    )
+    .await;
+    assert_eq!(status, 409, "{reply}");
+    assert_eq!(reply["error"], "stale_cursor");
+
+    remote_access::grant(&harness.home, &device, Grant::Observe).unwrap();
+    let (status, reply) = send_as_device(&harness, "GET", &next, &device, "").await;
+    assert_eq!(status, 403, "{reply}");
+    remote_access::grant(&harness.home, &device, Grant::Control).unwrap();
+    let (status, reply) = send_as_device(&harness, "GET", &next, &device, "").await;
+    assert_eq!(status, 409, "{reply}");
+    assert_eq!(reply["error"], "stale_worktree_ref");
+
+    let (status, reopened) = open_worktree(&harness, &device, root).await;
+    assert_eq!(status, 200, "{reopened}");
+    let reference = reopened["worktreeRef"].as_str().unwrap();
+    let before = root.with_file_name("original");
+    std::fs::rename(root, &before).unwrap();
+    std::fs::create_dir(root).unwrap();
+    fixture_git(root, &["init", "-qb", "replacement"]);
+    for target in [
+        diff(reference),
+        format!("/v2/git/worktree/status?worktreeRef={reference}"),
+    ] {
+        let (status, reply) = send_as_device(&harness, "GET", &target, &device, "").await;
+        assert_eq!(status, 409, "{reply}");
+        assert_eq!(reply["error"], "stale_worktree_ref");
+    }
+    let (status, replacement) = open_worktree(&harness, &device, root).await;
+    assert_eq!(status, 200, "{replacement}");
+    let reference = replacement["worktreeRef"].as_str().unwrap();
+    remote_access::revoke(&harness.home, &device).unwrap();
+    let (status, reply) = send_as_device(&harness, "GET", &diff(reference), &device, "").await;
+    assert_eq!(status, 403, "{reply}");
+    assert_eq!(reply["error"], "worktree_access_denied");
+    let (status, reply) = open_worktree(&harness, &device, root).await;
+    assert_eq!(status, 403, "{reply}");
+    assert_eq!(reply["error"], "worktree_access_denied");
+}
+
+#[tokio::test]
+async fn remote_reviews_require_the_original_paired_worktree() {
+    let harness = harness().await;
+    let root = harness_repository(&harness);
+    let root = std::path::Path::new(&root);
+    let device = enroll_git_phone(&harness, 'a');
+    let other = enroll_git_phone(&harness, 'b');
+    let (_, opened) = open_worktree(&harness, &device, root).await;
+    let reference = opened["worktreeRef"].as_str().unwrap();
+    for route in ["/v2/git/branches", "/v2/git/sync", "/v2/git/push/preview"] {
+        let target = format!("{route}?worktreeRef={reference}");
+        let (status, data) = send_as_device(&harness, "GET", &target, &device, "").await;
+        assert_eq!(status, 200, "{data}");
+        assert_eq!(data["root"], root.canonicalize().unwrap().to_str().unwrap());
+        assert!(data["preconditions"].is_object());
+        let (status, data) = send_as_device(&harness, "GET", &target, &other, "").await;
+        assert_eq!(status, 409, "{data}");
+        assert_eq!(data["error"], "stale_worktree_ref");
+        let (status, _) = send(&harness, "GET", &target, Some("control"), "").await;
+        assert_eq!(status, 403);
+        let (status, _) =
+            send_as_device(&harness, "GET", &format!("{target}&path=/tmp"), &device, "").await;
+        assert_eq!(status, 400);
+    }
+    let target = format!(
+        "/v2/git/sync?worktreeRef={reference}&cursor={}:v2",
+        "0".repeat(64)
+    );
+    let (status, data) = send_as_device(&harness, "GET", &target, &device, "").await;
+    assert_eq!(status, 409);
+    assert_eq!(data["error"], "stale_cursor");
+    std::fs::rename(root, root.with_file_name("original")).unwrap();
+    std::fs::create_dir(root).unwrap();
+    fixture_git(root, &["init", "-qb", "replacement"]);
+    let target = format!("/v2/git/push/preview?worktreeRef={reference}");
+    let (status, data) = send_as_device(&harness, "GET", &target, &device, "").await;
+    assert_eq!(status, 409, "{data}");
+    assert_eq!(data["error"], "stale_worktree_ref");
+}
+
+#[tokio::test]
+async fn scoped_push_review_reaches_only_the_reviewed_disposable_remote_branch() {
+    let harness = harness().await;
+    let root = harness_repository(&harness);
+    let root = std::path::Path::new(&root);
+    let remote = root.with_file_name("disposable-remote.git");
+    std::fs::create_dir(&remote).unwrap();
+    fixture_git(&remote, &["init", "--bare", "-qb", "main"]);
+    fixture_git(root, &["remote", "add", "origin", remote.to_str().unwrap()]);
+    let device = enroll_git_phone(&harness, 'a');
+    let (_, opened) = open_worktree(&harness, &device, root).await;
+    let reference = opened["worktreeRef"].as_str().unwrap();
+    let preview_route = format!(
+        "/v2/git/push/preview?worktreeRef={reference}&remote=origin&destination=review%2Btest"
+    );
+    let (status, preview) = send_as_device(&harness, "GET", &preview_route, &device, "").await;
+    assert_eq!(status, 200, "{preview}");
+    assert!(preview["blockedReason"].is_null(), "{preview}");
+    assert_eq!(preview["source"]["branch"], "main");
+    assert_eq!(
+        preview["target"]["destinationRef"],
+        "refs/heads/review+test"
+    );
+    assert!(!remote.join("refs/heads/review+test").exists());
+    let id = "0b7c2f4e-9a7d-4a8e-9c1e-2f3a4b5c6d7e";
+    let body = serde_json::json!({
+        "requestId": id,
+        "path": format!("worktree:{reference}"),
+        "expected": preview["preconditions"],
+        "remote": preview["target"]["remote"],
+        "remoteUrl": preview["target"]["remoteUrl"],
+        "destination": preview["target"]["destination"],
+        "sourceBranch": preview["source"]["branch"],
+        "sourceOid": preview["source"]["oid"],
+        "destinationOid": preview["target"]["destinationOid"],
+    });
+    let (status, mut receipt) =
+        send_as_device(&harness, "POST", "/v2/git/push", &device, &body.to_string()).await;
+    assert!(matches!(status, 200 | 202), "{receipt}");
+    let lookup = format!("/v2/git/receipts/{id}?worktreeRef={reference}");
+    for _ in 0..100 {
+        if receipt["state"] != "pending" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let (status, next) = send_as_device(&harness, "GET", &lookup, &device, "").await;
+        assert!(matches!(status, 200 | 202), "{next}");
+        receipt = next;
+    }
+    assert_eq!(receipt["state"], "completed", "{receipt}");
+    let written = std::fs::read_to_string(remote.join("refs/heads/review+test")).unwrap();
+    assert_eq!(written.trim(), preview["source"]["oid"].as_str().unwrap());
+    assert!(!remote.join("refs/heads/main").exists());
+}
+
+#[tokio::test]
+async fn scoped_write_receipts_survive_a_new_gateway_without_reopening_or_replaying_git() {
+    use std::path::Path;
+
+    let mut harness = harness().await;
+    let root = harness_repository(&harness);
+    let root = Path::new(&root);
+    let device = enroll_git_phone(&harness, 'a');
+    let other = enroll_git_phone(&harness, 'b');
+    let (_, opened) = open_worktree(&harness, &device, root).await;
+    let reference = opened["worktreeRef"].as_str().unwrap();
+    let status_route = format!("/v2/git/worktree/status?worktreeRef={reference}");
+    let (_, status) = send_as_device(&harness, "GET", &status_route, &device, "").await;
+    let request_id = "00000000-0000-4000-8000-000000000001";
+    let body = serde_json::json!({
+        "requestId": request_id,
+        "path": format!("worktree:{reference}"),
+        "expected": status["preconditions"],
+        "all": ["unstaged"]
+    });
+    let stage = "/v2/git/stage";
+    let (status, reply) = send_as_device(&harness, "POST", stage, &other, &body.to_string()).await;
+    assert_eq!(status, 409, "{reply}");
+    assert_eq!(reply["error"], "stale_worktree_ref");
+    // The caller loses the initial response after the host accepts it.
+    let (status, accepted) =
+        send_as_device(&harness, "POST", stage, &device, &body.to_string()).await;
+    assert_eq!(status, 200, "{accepted}");
+    assert_eq!(accepted["state"], "completed");
+
+    let restarted = harness._dir.path().join("restarted-gateway");
+    std::fs::create_dir(&restarted).unwrap();
+    harness.address = start_harness_router(&restarted, &harness.home).await;
+    let (status, _) = send_as_device(&harness, "GET", &status_route, &device, "").await;
+    assert_eq!(status, 409, "read reference is instance-ephemeral");
+    let receipt = format!("/v2/git/receipts/{request_id}");
+    let scoped_receipt = format!("{receipt}?worktreeRef={reference}");
+    let (status, recovered) = send_as_device(&harness, "GET", &scoped_receipt, &device, "").await;
+    assert_eq!((status, recovered), (200, accepted.clone()));
+    let (status, _) = send_as_device(&harness, "GET", &scoped_receipt, &other, "").await;
+    assert_eq!(status, 404);
+    let (status, _) = send_as_device(&harness, "GET", &receipt, &device, "").await;
+    assert_eq!(status, 409);
+
+    // Both a different worktree reference and changed preconditions conflict.
+    let (_, reopened) = open_worktree(&harness, &device, root).await;
+    let mut changed = body.clone();
+    changed["path"] = format!("worktree:{}", reopened["worktreeRef"].as_str().unwrap()).into();
+    let (status, reply) =
+        send_as_device(&harness, "POST", stage, &device, &changed.to_string()).await;
+    assert_eq!(status, 409);
+    assert_eq!(reply["error"], "request_id_conflict");
+    changed = body.clone();
+    changed["expected"]["index"] = "f".repeat(64).into();
+    let (status, reply) =
+        send_as_device(&harness, "POST", stage, &device, &changed.to_string()).await;
+    assert_eq!(status, 409);
+    assert_eq!(reply["error"], "request_id_conflict");
+
+    fixture_git(root, &["reset", "-q", "HEAD"]);
+    let (status, replay) =
+        send_as_device(&harness, "POST", stage, &device, &body.to_string()).await;
+    assert_eq!((status, replay), (200, accepted));
+    assert!(fixture_git(root, &["diff", "--cached", "--name-only"]).is_empty());
+
+    std::fs::rename(root, root.with_file_name("original-worktree")).unwrap();
+    std::fs::create_dir(root).unwrap();
+    fixture_git(root, &["init", "-qb", "replacement"]);
+    changed = body.clone();
+    changed["requestId"] = "00000000-0000-4000-8000-000000000002".into();
+    changed["path"] = format!("worktree:{}", reopened["worktreeRef"].as_str().unwrap()).into();
+    let (status, reply) =
+        send_as_device(&harness, "POST", stage, &device, &changed.to_string()).await;
+    assert_eq!(status, 409);
+    assert_eq!(reply["error"], "stale_worktree_ref");
+    let (status, recovered) = send_as_device(&harness, "GET", &scoped_receipt, &device, "").await;
+    assert_eq!(
+        (status, recovered["state"].as_str()),
+        (200, Some("completed"))
+    );
+
+    remote_access::grant(&harness.home, &device, Grant::Observe).unwrap();
+    let (status, _) = send_as_device(&harness, "GET", &scoped_receipt, &device, "").await;
+    assert_eq!(status, 403);
+    remote_access::grant(&harness.home, &device, Grant::Control).unwrap();
+    let (status, _) = send_as_device(&harness, "GET", &scoped_receipt, &device, "").await;
+    assert_eq!(status, 409);
+}
+
+#[tokio::test]
+async fn git_worktree_summaries_keep_available_rows_and_leave_recents_unchanged() {
+    use std::path::Path;
+
+    let harness = harness().await;
+    let root = harness_repository(&harness);
+    let device = enroll_git_phone(&harness, 'a');
+    let other_device = enroll_git_phone(&harness, 'b');
+    let root = Path::new(&root);
+    let linked = root.with_file_name("linked");
+    fixture_git(
+        root,
+        &["worktree", "add", "--detach", linked.to_str().unwrap()],
+    );
+    fixture_git(root, &["branch", "tracking"]);
+    fixture_git(root, &["branch", "--set-upstream-to", "tracking", "main"]);
+    fixture_git(root, &["commit", "--allow-empty", "-qm", "ahead"]);
+    fixture_git(root, &["add", "README.md"]);
+    std::fs::write(root.join("README.md"), "three\n").unwrap();
+    std::fs::write(root.join("private-file"), "").unwrap();
+    let recent = harness.home.root().join("git/recent-repositories.json");
+    std::fs::create_dir_all(recent.parent().unwrap()).unwrap();
+    let saved = br#"{"formatVersion":1,"repositories":[]}"#;
+    std::fs::write(&recent, saved).unwrap();
+
+    let (status, opened) = open_worktree(&harness, &device, root).await;
+    assert_eq!(status, 200, "{opened}");
+    let valid = opened["worktreeRef"].as_str().unwrap();
+    let (status, opened) = open_worktree(&harness, &device, &linked).await;
+    assert_eq!(status, 200, "{opened}");
+    let unavailable = opened["worktreeRef"].as_str().unwrap();
+    let (status, opened) = open_worktree(&harness, &other_device, root).await;
+    assert_eq!(status, 200, "{opened}");
+    let foreign = opened["worktreeRef"].as_str().unwrap();
+    let clean_target = format!("/v2/git/worktree/summaries?worktreeRefs={unavailable}");
+    let (status, reply) = send_as_device(&harness, "GET", &clean_target, &device, "").await;
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(
+        reply["results"][0]["summary"],
+        serde_json::json!({
+            "branch": null, "ahead": null, "behind": null, "staged": 0,
+            "unstaged": 0, "conflicted": 0, "untracked": 0, "changesComplete": true
+        })
+    );
+    std::fs::remove_dir_all(&linked).unwrap();
+
+    let target = format!(
+        "/v2/git/worktree/summaries?worktreeRefs={unavailable},{valid},bad,{foreign},{valid}"
+    );
+    let (status, reply) = send_as_device(&harness, "GET", &target, &device, "").await;
+    assert_eq!(status, 200, "{reply}");
+    let ok = serde_json::json!({"outcome": "ok", "summary": {
+        "branch": "main", "ahead": 1, "behind": 0, "staged": 1, "unstaged": 1,
+        "conflicted": 0, "untracked": 1, "changesComplete": true
+    }});
+    let stale = serde_json::json!({"outcome": "error", "error": "stale_worktree_ref"});
+    assert_eq!(
+        reply["results"],
+        serde_json::json!([
+            stale, ok, {"outcome": "error", "error": "invalid_request"}, stale, ok
+        ])
+    );
+    assert_eq!(std::fs::read(&recent).unwrap(), saved);
+
+    let (status, _) = send(&harness, "GET", &target, Some("control"), "").await;
+    assert_eq!(
+        status, 403,
+        "a local control token has no paired-device identity"
+    );
+    remote_access::grant(&harness.home, &device, Grant::Observe).unwrap();
+    let (status, _) = send_as_device(&harness, "GET", &target, &device, "").await;
+    assert_eq!(status, 403);
+}
+
+#[tokio::test]
+async fn git_worktree_summaries_bound_the_batch_and_report_partial_change_counts() {
+    use std::path::Path;
+
+    let harness = harness().await;
+    let root = harness_repository(&harness);
+    let root = Path::new(&root);
+    // With the existing unstaged edit, this makes exactly 1,000 records.
+    for index in 0..999 {
+        std::fs::write(root.join(format!("untracked-{index:04}")), "").unwrap();
+    }
+    let device = enroll_git_phone(&harness, 'a');
+    let (status, opened) = open_worktree(&harness, &device, root).await;
+    assert_eq!(status, 200, "{opened}");
+    let reference = opened["worktreeRef"].as_str().unwrap();
+    let base = "/v2/git/worktree/summaries?worktreeRefs=";
+    for refs in [String::new(), [reference; 9].join(",")] {
+        let (status, reply) =
+            send_as_device(&harness, "GET", &format!("{base}{refs}"), &device, "").await;
+        assert_eq!(status, 400, "{reply}");
+        assert_eq!(reply["error"], "invalid_request");
+    }
+    let refs = [reference; 8].join(",");
+    let target = format!("{base}{refs}");
+    let (status, reply) = send_as_device(&harness, "GET", &target, &device, "").await;
+    assert_eq!(status, 200, "{reply}");
+    let results = reply["results"].as_array().unwrap();
+    assert_eq!(results.len(), 8);
+    for result in results {
+        assert_eq!(result["summary"]["changesComplete"], true);
+        assert_eq!(result["summary"]["untracked"], 999);
+    }
+
+    std::fs::write(root.join("extra"), "").unwrap();
+    let target = format!("{base}{reference}");
+    let (status, reply) = send_as_device(&harness, "GET", &target, &device, "").await;
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["results"][0]["summary"]["changesComplete"], false);
+    assert_eq!(reply["results"][0]["summary"]["untracked"], 999);
 }
 
 const GIT_MUTATIONS: [&str; 13] = [

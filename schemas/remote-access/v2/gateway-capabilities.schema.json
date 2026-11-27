@@ -80,6 +80,10 @@
           "type": "boolean",
           "description": "Browse canonical host directories at the control grant. Absence means unavailable."
         },
+        "sharedFiles": {
+          "type": "boolean",
+          "description": "Paired Control devices can discover owner-shared roots, list scoped directories and read bounded text previews. Absence means unavailable."
+        },
         "createSession": {
           "type": "boolean",
           "description": "Create a standard host shell at the control grant. Absence means unavailable."
@@ -115,6 +119,22 @@
         "gitResolve": {
           "type": "boolean",
           "description": "Resolve a folder to its working tree root (GET /v2/git/resolve) at the control grant."
+        },
+        "gitWorktreeReads": {
+          "type": "boolean",
+          "description": "Exact-root worktree open and reference-scoped status and diff under /v2/git/worktree, for active paired devices with the Control grant. Absence means scoped reads are unavailable."
+        },
+        "gitWorktreeSummaries": {
+          "type": "boolean",
+          "description": "Bounded summaries of explicit worktree references for active paired devices with the Control grant (GET /v2/git/worktree/summaries). Absence means batch summaries are unavailable."
+        },
+        "gitWorktreePreviews": {
+          "type": "boolean",
+          "description": "Git branch, sync and push preview routes accept worktreeRef instead of path for an active Control pairing. Scoped cursors belong to the original worktree reference."
+        },
+        "gitWorktreeWrites": {
+          "type": "boolean",
+          "description": "Git mutation routes accept worktree:<worktreeRef> as path for Control pairings. Scoped receipt reads and push reconciliation require the original worktreeRef query parameter and remain available after gateway restart."
         },
         "gitStatus": {
           "type": "boolean",

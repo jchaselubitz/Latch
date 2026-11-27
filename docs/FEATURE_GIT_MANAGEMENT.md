@@ -15,6 +15,27 @@ repository does not attach to or take control of a terminal. A session's working
 directory can provide a shortcut to its repository, while the existing folder
 browser can locate one when no session is open.
 
+## Scoped Swift SDK
+
+`AppModel.beginScopedGitRead()` authorizes a read-only interaction with the
+currently authenticated paired Mac. The caller supplies exact roots from its
+own authorized scope. Check `advertisesScopedGitReads` for open, status and
+paged diff support, and `advertisesScopedGitSummaries` for ordered batches of
+one to eight worktrees. A summary batch keeps successful rows and individual
+errors in input order. Status supplies the file key and change area for the
+first diff page. Later pages use the preceding page's cursor.
+
+Each interaction uses the existing device-owner check and its original grace
+deadline. Keep worktree handles, status and diff pages in memory for the
+interaction. Observe `isValid` and clear that data when it becomes false. Call
+`invalidate()` when the view closes or account, project or resource access
+changes. Cancel a pending `beginScopedGitRead()` when its caller's scope
+changes during the owner check. A reconnect or grant loss invalidates current
+interactions and discards late responses. Start a new interaction and reopen
+the roots after access is restored. On a stale-worktree error, clear that
+worktree's data and reopen it. On a stale-cursor error, discard that file's
+pages and restart the diff.
+
 ## Experience
 
 The repository screen shows the canonical worktree path, current branch,

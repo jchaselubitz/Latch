@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://latch.cooperativ.dev/schemas/remote-access/v2/shared-directory-page.schema.json",
+  "title": "LatchSharedDirectoryPageV2",
+  "description": "GET /v2/files/directory?rootId=&path=&cursor= lists up to 64 immediate entries. Omit path or pass an empty string for the root. Opaque cursors expire after five minutes, may be evicted, and are scoped to the root and unchanged listing. A large directory returns shared_directory_too_large.",
+  "type": "object",
+  "required": [
+    "path",
+    "entries",
+    "nextCursor"
+  ],
+  "properties": {
+    "path": {
+      "type": "string",
+      "maxLength": 4096
+    },
+    "entries": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "kind"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "kind": {
+            "enum": [
+              "directory",
+              "file"
+            ]
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "nextCursor": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "additionalProperties": false
+}

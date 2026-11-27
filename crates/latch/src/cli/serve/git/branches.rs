@@ -20,7 +20,13 @@ const FORMAT: &str = "--format=%(refname)%00%(objectname)%00%(HEAD)%00%(upstream
 
 pub(crate) async fn branches(path: &str) -> Result<GitBranchList, GitError> {
     let worktree = worktree::resolve(path).await?;
-    let observed = observe(&worktree).await?;
+    worktree_branches(&worktree).await
+}
+
+pub(crate) async fn worktree_branches(
+    worktree: &worktree::Worktree,
+) -> Result<GitBranchList, GitError> {
+    let observed = observe(worktree).await?;
     let output = command::run(
         &worktree.root,
         &args([

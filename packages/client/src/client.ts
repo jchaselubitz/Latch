@@ -1,3 +1,4 @@
+import type { SharedDirectoryPage, SharedFilePreview, SharedRoots } from './generated.ts';
 import { attachTerminal } from './terminal.ts';
 import { defaultRetryPolicy } from './reconnect.ts';
 import type {
@@ -14,6 +15,7 @@ import type {
 export const GATEWAY_ERROR_REQUEST_FAILED = 'request_failed';
 /** Refused by this client: the gateway does not advertise `endpoints.stopSession`. */
 export const GATEWAY_ERROR_STOP_UNSUPPORTED = 'stop_unsupported';
+export const GATEWAY_ERROR_SHARED_FILES_UNSUPPORTED = 'shared_files_unsupported';
 
 export class LatchGatewayError extends Error {
   readonly status: number;
@@ -84,7 +86,28 @@ export function createLatchClient(options: LatchClientOptions): LatchClient {
     return (await response.json()) as T;
   }
 
+  async function sharedFiles<T>(path: string, query?: URLSearchParams): Promise<T> {
+    const capabilities = await requestJson<GatewayCapabilities>({ path: '/v2/capabilities' });
+    if (capabilities.endpoints?.sharedFiles !== true) {
+      throw new LatchGatewayError({
+        status: 0,
+        path,
+        code: GATEWAY_ERROR_SHARED_FILES_UNSUPPORTED,
+        reason: 'this gateway does not serve shared files'
+      });
+    }
+    return requestJson<T>({ path: query ? `${path}?${query}` : path });
+  }
+
   return {
+    sharedRoots: () => sharedFiles<SharedRoots>('/v2/files/roots'),
+    sharedDirectory: ({ rootId, path = '', cursor }) => {
+      const query = new URLSearchParams({ rootId, path });
+      if (cursor !== undefined) query.set('cursor', cursor);
+      return sharedFiles<SharedDirectoryPage>('/v2/files/directory', query);
+    },
+    sharedFilePreview: ({ rootId, path }) =>
+      sharedFiles<SharedFilePreview>('/v2/files/preview', new URLSearchParams({ rootId, path })),
     listSessions: () => requestJson<ListReport>({ path: '/v2/sessions' }),
     inspectSession: ({ sessionId }) =>
       requestJson<InspectReport>({ path: `/v2/sessions/${encodeURIComponent(sessionId)}` }),

@@ -1,5 +1,5 @@
 //! Generated from `schemas/remote-access/v2/*.schema.json`; do not edit by hand.
-//! Canonical schema set SHA-256: 2e0d81057e1752479bc27353d51be05e0443ac7eb787aaedf4d0bfd6c6bde3ef
+//! Canonical schema set SHA-256: 1c0abe12a660bd8143d4280f85a2ea0cd849b9dfad812d1e2fdbf49c8e84ea3f
 
 use serde::{Deserialize, Serialize};
 
@@ -19,6 +19,47 @@ pub struct DirectoryPage {
     pub parent: Option<String>,
     pub entries: Vec<DirectoryEntry>,
     pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedRoot {
+    pub root_id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SharedRoots {
+    pub roots: Vec<SharedRoot>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SharedFileKind {
+    Directory,
+    File,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SharedDirectoryEntry {
+    pub name: String,
+    pub kind: SharedFileKind,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedDirectoryPage {
+    pub path: String,
+    pub entries: Vec<SharedDirectoryEntry>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum SharedFilePreview {
+    Text { text: String },
+    Truncated { text: String },
+    Binary,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -172,6 +213,53 @@ pub struct GitRepository {
     pub root: String,
     pub name: String,
     pub kind: GitWorktreeKind,
+}
+
+/// Exact-root Git worktree opened by an authenticated paired device.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GitWorktreeOpen {
+    /// Gateway-local reference bound to the device, grant and exact checkout.
+    pub worktree_ref: String,
+    /// Canonical root and display metadata for the opened checkout.
+    pub repository: GitRepository,
+}
+
+/// Counts from a bounded porcelain status scan of one exact worktree.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GitWorktreeSummary {
+    pub branch: Option<String>,
+    pub ahead: Option<u64>,
+    pub behind: Option<u64>,
+    pub staged: u32,
+    pub unstaged: u32,
+    pub conflicted: u32,
+    pub untracked: u32,
+    pub changes_complete: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GitWorktreeSummaryError {
+    InvalidRequest,
+    StaleWorktreeRef,
+    WorktreeAccessDenied,
+    GitTimeout,
+    GitUnavailable,
+    GitFailed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum GitWorktreeSummaryOutcome {
+    Ok { summary: GitWorktreeSummary },
+    Error { error: GitWorktreeSummaryError },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GitWorktreeSummaries {
+    pub results: Vec<GitWorktreeSummaryOutcome>,
 }
 
 /// A running Latch session whose folder resolves to a working tree.

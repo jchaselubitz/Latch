@@ -581,6 +581,15 @@ async fn draft_stream_closes_when_control_is_revoked() {
     .await;
 }
 
+#[tokio::test]
+async fn scoped_diff_stream_closes_when_control_is_revoked() {
+    assert_live_grant_change_closes_stream(
+        b"GET /v2/git/worktree/diff?worktreeRef=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef&file=61&area=unstaged HTTP/1.1\r\nHost: latch\r\n\r\n",
+        true,
+    )
+    .await;
+}
+
 async fn assert_live_grant_change_closes_stream(request: &[u8], revoke_device: bool) {
     let (_directory, home, key) = enrolled_home(DevicePermission::Control);
     let device_id = list_devices(&home).unwrap().remove(0).device_id;

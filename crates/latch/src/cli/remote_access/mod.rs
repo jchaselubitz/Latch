@@ -8,6 +8,9 @@
 mod devices;
 mod framing;
 mod gateway;
+pub(crate) mod shared_roots;
+
+pub(crate) use devices::{control_grant_revision, random_hex};
 
 pub use crate::cli::serve::routes::Grant as DevicePermission;
 pub use devices::{
@@ -19,3 +22,5 @@ pub use devices::{
 #[cfg(feature = "remote-link-test")]
 pub use gateway::proxy_authenticated_stream_for_test;
 pub use gateway::{AuthenticatedGateway, SharedGatewayOwner, PROXY_IDLE_TIMEOUT};
+
+pub use shared_roots::{list_shared_roots, revoke_shared_root, share_root, SharedRootGrant};

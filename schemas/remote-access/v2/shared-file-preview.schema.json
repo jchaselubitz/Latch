@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://latch.cooperativ.dev/schemas/remote-access/v2/shared-file-preview.schema.json",
+  "title": "LatchSharedFilePreviewV2",
+  "description": "GET /v2/files/preview?rootId=&path= previews a regular file through a shared root. At most 65536 bytes of UTF-8 text are returned, ending at a scalar boundary. Binary means the inspected prefix is unsupported text and carries no bytes.",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": [
+        "kind",
+        "text"
+      ],
+      "properties": {
+        "kind": {
+          "const": "text"
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 65536
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "kind",
+        "text"
+      ],
+      "properties": {
+        "kind": {
+          "const": "truncated"
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 65536
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "kind"
+      ],
+      "properties": {
+        "kind": {
+          "const": "binary"
+        }
+      },
+      "additionalProperties": false
+    }
+  ]
+}

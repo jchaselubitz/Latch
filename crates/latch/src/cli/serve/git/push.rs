@@ -207,10 +207,18 @@ pub(crate) async fn preview(
     cursor: Option<&str>,
 ) -> Result<GitPushPreview, GitError> {
     let worktree = worktree::resolve(path).await?;
-    let observed = observe(&worktree).await?;
+    worktree_push(&worktree, chosen, cursor).await
+}
+
+pub(crate) async fn worktree_push(
+    worktree: &worktree::Worktree,
+    chosen: Option<(&str, &str)>,
+    cursor: Option<&str>,
+) -> Result<GitPushPreview, GitError> {
+    let observed = observe(worktree).await?;
     let head = status::head(&observed.porcelain.branch);
     let preconditions = observed.snapshot.preconditions.clone();
-    let remotes = integrate::remotes(&worktree)
+    let remotes = integrate::remotes(worktree)
         .await?
         .into_iter()
         .map(|(name, url)| GitRemote { name, url })
@@ -238,7 +246,7 @@ pub(crate) async fn preview(
                 None
             }
         }
-        (None, Some(source)) => match upstream_destination(&worktree, &source.branch).await {
+        (None, Some(source)) => match upstream_destination(worktree, &source.branch).await {
             Some((remote, destination)) if remotes.iter().any(|known| known.name == remote) => {
                 Some((remote, destination, GitPushSelectedBy::Upstream))
             }
@@ -266,14 +274,14 @@ pub(crate) async fn preview(
 
     let target = match selected {
         Some((remote, destination, selected_by)) => {
-            let tracking = tracking_ref(&worktree, &remote, &destination).await;
+            let tracking = tracking_ref(worktree, &remote, &destination).await;
             let destination_oid = match &tracking {
-                Some(reference) => integrate::ref_oid(&worktree, reference).await,
+                Some(reference) => integrate::ref_oid(worktree, reference).await,
                 None => None,
             };
-            let default = default_branch(&worktree, &remote).await;
+            let default = default_branch(worktree, &remote).await;
             Some(GitPushTarget {
-                remote_url: push_url(&worktree, &remote).await,
+                remote_url: push_url(worktree, &remote).await,
                 destination_ref: format!("refs/heads/{destination}"),
                 tracking_ref: tracking,
                 new_branch: destination_oid.is_none(),
@@ -292,7 +300,7 @@ pub(crate) async fn preview(
     let (ahead, behind) = match (&source, &target) {
         (Some(source), Some(target)) => {
             let ahead = count_outgoing(
-                &worktree,
+                worktree,
                 &source.oid,
                 target.destination_oid.as_deref(),
                 &target.remote,
@@ -300,7 +308,7 @@ pub(crate) async fn preview(
             .await;
             let behind = match &target.destination_oid {
                 Some(destination) => {
-                    count_outgoing(&worktree, destination, Some(&source.oid), &target.remote).await
+                    count_outgoing(worktree, destination, Some(&source.oid), &target.remote).await
                 }
                 None => None,
             };
@@ -352,7 +360,7 @@ pub(crate) async fn preview(
                     parse_cursor(cursor, &source.oid, destination).ok_or(GitError::StaleCursor)?
                 }
             };
-            page(&worktree, &source.oid, destination, &target.remote, skip).await?
+            page(worktree, &source.oid, destination, &target.remote, skip).await?
         }
         _ if cursor.is_some() => return Err(GitError::StaleCursor),
         _ => (Vec::new(), None),
@@ -371,7 +379,7 @@ pub(crate) async fn preview(
             None
         },
         suggestion: if selection_required { suggestion } else { None },
-        last_fetched_at: last_fetched_at(&worktree),
+        last_fetched_at: last_fetched_at(worktree),
         ahead,
         behind,
         blocked_reason,

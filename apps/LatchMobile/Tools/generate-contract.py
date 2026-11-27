@@ -25,8 +25,13 @@ NAMES = (
     "conversation-protocol.schema.json",
     "gateway-capabilities.schema.json",
     "directory-page.schema.json",
+    "shared-roots.schema.json",
+    "shared-directory-page.schema.json",
+    "shared-file-preview.schema.json",
     "terminal-connection.schema.json",
     "git-repository.schema.json",
+    "git-worktree-open.schema.json",
+    "git-worktree-summaries.schema.json",
     "git-repository-list.schema.json",
     "git-status.schema.json",
     "git-file-diff.schema.json",
@@ -142,6 +147,7 @@ public struct GatewayEndpoints: Codable, Equatable, Sendable {
     public var terminal: Bool
     public var conversation: Bool
     public var browseDirectories: Bool
+    public var sharedFiles: Bool
     public var createSession: Bool
     public var savedChats: Bool
     public var savedChatResume: Bool
@@ -161,6 +167,10 @@ public struct GatewayEndpoints: Codable, Equatable, Sendable {
     /// repository entry point at all.
     public var gitRepositories: Bool
     public var gitResolve: Bool
+    public var gitWorktreeReads: Bool
+    public var gitWorktreeSummaries: Bool
+    public var gitWorktreeWrites: Bool
+    public var gitWorktreePreviews: Bool
     public var gitStatus: Bool
     public var gitDiff: Bool
     /// Slice-2 Git routes, each advertised on its own so a phone shows only
@@ -195,6 +205,7 @@ public struct GatewayEndpoints: Codable, Equatable, Sendable {
         terminal: Bool = false,
         conversation: Bool = false,
         browseDirectories: Bool = false,
+        sharedFiles: Bool = false,
         createSession: Bool = false,
         savedChats: Bool = false,
         savedChatResume: Bool = false,
@@ -204,6 +215,10 @@ public struct GatewayEndpoints: Codable, Equatable, Sendable {
         notificationKey: Bool = false,
         gitRepositories: Bool = false,
         gitResolve: Bool = false,
+        gitWorktreeReads: Bool = false,
+        gitWorktreeSummaries: Bool = false,
+        gitWorktreeWrites: Bool = false,
+        gitWorktreePreviews: Bool = false,
         gitStatus: Bool = false,
         gitDiff: Bool = false,
         gitBranches: Bool = false,
@@ -231,6 +246,7 @@ public struct GatewayEndpoints: Codable, Equatable, Sendable {
         self.terminal = terminal
         self.conversation = conversation
         self.browseDirectories = browseDirectories
+        self.sharedFiles = sharedFiles
         self.createSession = createSession
         self.savedChats = savedChats
         self.savedChatResume = savedChatResume
@@ -240,6 +256,10 @@ public struct GatewayEndpoints: Codable, Equatable, Sendable {
         self.notificationKey = notificationKey
         self.gitRepositories = gitRepositories
         self.gitResolve = gitResolve
+        self.gitWorktreeReads = gitWorktreeReads
+        self.gitWorktreeSummaries = gitWorktreeSummaries
+        self.gitWorktreeWrites = gitWorktreeWrites
+        self.gitWorktreePreviews = gitWorktreePreviews
         self.gitStatus = gitStatus
         self.gitDiff = gitDiff
         self.gitBranches = gitBranches
@@ -274,6 +294,7 @@ public struct GatewayEndpoints: Codable, Equatable, Sendable {
         terminal = try container.decode(Bool.self, forKey: .terminal)
         conversation = try container.decode(Bool.self, forKey: .conversation)
         browseDirectories = try container.decodeIfPresent(Bool.self, forKey: .browseDirectories) ?? false
+        sharedFiles = try container.decodeIfPresent(Bool.self, forKey: .sharedFiles) ?? false
         createSession = try container.decodeIfPresent(Bool.self, forKey: .createSession) ?? false
         savedChats = try container.decodeIfPresent(Bool.self, forKey: .savedChats) ?? false
         savedChatResume = try container.decodeIfPresent(Bool.self, forKey: .savedChatResume) ?? false
@@ -283,6 +304,10 @@ public struct GatewayEndpoints: Codable, Equatable, Sendable {
         notificationKey = try container.decodeIfPresent(Bool.self, forKey: .notificationKey) ?? false
         gitRepositories = try container.decodeIfPresent(Bool.self, forKey: .gitRepositories) ?? false
         gitResolve = try container.decodeIfPresent(Bool.self, forKey: .gitResolve) ?? false
+        gitWorktreeReads = try container.decodeIfPresent(Bool.self, forKey: .gitWorktreeReads) ?? false
+        gitWorktreeSummaries = try container.decodeIfPresent(Bool.self, forKey: .gitWorktreeSummaries) ?? false
+        gitWorktreeWrites = try container.decodeIfPresent(Bool.self, forKey: .gitWorktreeWrites) ?? false
+        gitWorktreePreviews = try container.decodeIfPresent(Bool.self, forKey: .gitWorktreePreviews) ?? false
         gitStatus = try container.decodeIfPresent(Bool.self, forKey: .gitStatus) ?? false
         gitDiff = try container.decodeIfPresent(Bool.self, forKey: .gitDiff) ?? false
         gitBranches = try container.decodeIfPresent(Bool.self, forKey: .gitBranches) ?? false
@@ -313,6 +338,7 @@ public enum GatewayEndpointsName: String, CaseIterable, Sendable {
     case terminal
     case conversation
     case browseDirectories
+    case sharedFiles
     case createSession
     case savedChats
     case savedChatResume
@@ -322,6 +348,10 @@ public enum GatewayEndpointsName: String, CaseIterable, Sendable {
     case notificationKey
     case gitRepositories
     case gitResolve
+    case gitWorktreeReads
+    case gitWorktreeSummaries
+    case gitWorktreeWrites
+    case gitWorktreePreviews
     case gitStatus
     case gitDiff
     case gitBranches
@@ -353,6 +383,7 @@ public extension GatewayEndpoints {
         case .terminal: return terminal
         case .conversation: return conversation
         case .browseDirectories: return browseDirectories
+        case .sharedFiles: return sharedFiles
         case .createSession: return createSession
         case .savedChats: return savedChats
         case .savedChatResume: return savedChatResume
@@ -362,6 +393,10 @@ public extension GatewayEndpoints {
         case .notificationKey: return notificationKey
         case .gitRepositories: return gitRepositories
         case .gitResolve: return gitResolve
+        case .gitWorktreeReads: return gitWorktreeReads
+        case .gitWorktreeSummaries: return gitWorktreeSummaries
+        case .gitWorktreeWrites: return gitWorktreeWrites
+        case .gitWorktreePreviews: return gitWorktreePreviews
         case .gitStatus: return gitStatus
         case .gitDiff: return gitDiff
         case .gitBranches: return gitBranches
@@ -399,6 +434,50 @@ public struct DirectoryPage: Codable, Equatable, Sendable {
     public var nextCursor: String?
 }
 
+public struct SharedRoot: Decodable, Equatable, Sendable, Identifiable {
+    public let rootId: String
+    public let name: String
+    public var id: String { rootId }
+}
+
+public struct SharedRoots: Decodable, Equatable, Sendable {
+    public let roots: [SharedRoot]
+}
+
+public enum SharedFileKind: String, Decodable, Sendable {
+    case directory
+    case file
+}
+
+public struct SharedDirectoryEntry: Decodable, Equatable, Sendable {
+    public let name: String
+    public let kind: SharedFileKind
+}
+
+public struct SharedDirectoryPage: Decodable, Equatable, Sendable {
+    public let path: String
+    public let entries: [SharedDirectoryEntry]
+    public let nextCursor: String?
+}
+
+public enum SharedFilePreview: Decodable, Equatable, Sendable {
+    case text(String)
+    case truncated(String)
+    case binary
+
+    private enum Key: String, CodingKey { case kind, text }
+    private enum Kind: String, Decodable { case text, truncated, binary }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: Key.self)
+        switch try container.decode(Kind.self, forKey: .kind) {
+        case .text: self = .text(try container.decode(String.self, forKey: .text))
+        case .truncated: self = .truncated(try container.decode(String.self, forKey: .text))
+        case .binary: self = .binary
+        }
+    }
+}
+
 // MARK: - Git
 
 /// Decodes a wire enum, reading a value this build does not know as
@@ -431,6 +510,52 @@ public struct GitRepository: Codable, Equatable, Hashable, Sendable {
         self.name = name
         self.kind = kind
     }
+}
+
+/// Exact-root Git worktree opened by an authenticated paired device.
+public struct GitWorktreeOpen: Codable, Equatable, Sendable {
+    public let worktreeRef: String
+    public let repository: GitRepository
+}
+
+public struct GitWorktreeSummary: Decodable, Equatable, Sendable {
+    public let branch: String?
+    public let ahead: UInt64?
+    public let behind: UInt64?
+    public let staged: UInt32
+    public let unstaged: UInt32
+    public let conflicted: UInt32
+    public let untracked: UInt32
+    public let changesComplete: Bool
+}
+
+public enum GitWorktreeSummaryError: String, Decodable, Error, Sendable {
+    case invalidRequest = "invalid_request"
+    case staleWorktreeRef = "stale_worktree_ref"
+    case worktreeAccessDenied = "worktree_access_denied"
+    case gitTimeout = "git_timeout"
+    case gitUnavailable = "git_unavailable"
+    case gitFailed = "git_failed"
+}
+
+public enum GitWorktreeSummaryOutcome: Decodable, Equatable, Sendable {
+    case ok(GitWorktreeSummary)
+    case error(GitWorktreeSummaryError)
+
+    private enum CodingKeys: String, CodingKey { case outcome, summary, error }
+    private enum Outcome: String, Decodable { case ok, error }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        switch try container.decode(Outcome.self, forKey: .outcome) {
+        case .ok: self = .ok(try container.decode(GitWorktreeSummary.self, forKey: .summary))
+        case .error: self = .error(try container.decode(GitWorktreeSummaryError.self, forKey: .error))
+        }
+    }
+}
+
+public struct GitWorktreeSummaries: Decodable, Equatable, Sendable {
+    public let results: [GitWorktreeSummaryOutcome]
 }
 
 /// A running Latch session whose folder resolves to a working tree.

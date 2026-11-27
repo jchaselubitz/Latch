@@ -338,6 +338,56 @@ provide the gateway and React terminal seams for repository development. Their
 scope, limits, and v2 protocol details are in [REMOTE_SDK.md](REMOTE_SDK.md).
 They are not published SDKs.
 
+For scoped Git reads, check `endpoints.gitWorktreeReads` and use the
+authenticated paired connection with Control access. Open the configured
+absolute root using `GET /v2/git/worktree/open?path=`. A root alias can open
+the same checkout, while a nested folder is refused. Pass the returned
+`worktreeRef` to `GET /v2/git/worktree/status` and `/v2/git/worktree/diff`.
+Diff requests also take `file`, `area` and an optional `cursor`. Continue a
+diff using the same reference, file and area.
+
+For list rows, check the separate `endpoints.gitWorktreeSummaries` capability
+and call `GET /v2/git/worktree/summaries?worktreeRefs=` with one to eight
+comma-separated references. Results match input order, including duplicates.
+A stale or unavailable checkout has its own error result. A successful row
+includes branch, nullable ahead/behind counts against the locally known
+upstream, and counts by change area. The gateway tallies at most 1,000 status
+records from at most 256 KiB of Git output. When `changesComplete` is false, the counts are lower
+bounds. Untracked directories count as one entry and a tracked file can count
+in both staged and unstaged. The scan runs under a five-second deadline per
+row, performs no fetch, and leaves the host's recent repository list alone.
+See the [summary schema](../schemas/remote-access/v2/git-worktree-summaries.schema.json).
+
+References belong to the issuing Mac gateway instance and pairing grant
+revision. They expire after 30 minutes or earlier eviction. Reopen on the
+authenticated host after `stale_worktree_ref`, including after a checkout is
+replaced, its source alias is retargeted or the gateway restarts. A revoked or
+downgraded device loses access. Gateways without the capability still support
+their existing path-based routes, which do not enforce exact-root identity.
+
+For scoped previews, check `endpoints.gitWorktreePreviews` and the individual
+branch, sync or push preview capability. Pass `worktreeRef` instead of `path`
+to the same GET route. A scoped cursor is usable only with the original worktree
+reference. Previews use local Git data and do not contact the remote.
+
+For scoped writes, check `endpoints.gitWorktreeWrites`, `gitReceipts` and
+the capability for the specific action. Submit through the existing mutation
+route with `path` set to `worktree:<worktreeRef>`. The caller supplies the
+preconditions from its review. The gateway checks the exact checkout and active
+Control grant again under a host worktree lock before running Git. If the
+previous gateway stopped but its Git process is still alive, it keeps the lock
+and receipt readers see the operation as pending.
+
+Persist the request ID and original worktree reference before sending.
+Recover through `GET /v2/git/receipts/{requestId}?worktreeRef=...` on the same
+authenticated pairing. Scope checks use the original reference even after
+gateway restart. An accepted request replays the same receipt only with its
+original arguments. Use the same query parameter on `POST /v2/git/push/reconcile`
+to check an uncertain push on its remote. Missing and uncertain receipts do
+not authorize a fresh submission. The Swift SDK exposes this flow through
+`AppModel.beginScopedGitWrite()`, including saved pending references, receipt
+lookup and acknowledgment of completed or rejected outcomes.
+
 The conversation socket is a different integration: use the canonical schemas
 under [`schemas/remote-access/v2/`](../schemas/remote-access/v2/) and let the
 Conversation Hub own ordering, pending requests, and action durability. Do not

@@ -126,6 +126,20 @@ latch remote-access audit --json
 latch remote-access disable
 ```
 
+The host owner can give one paired Control device read access to a specific
+directory. Use the device ID from `devices --json` and an absolute path.
+
+```bash
+latch remote-access share-root DEVICE_ID /absolute/path/to/project
+latch remote-access shared-roots --json
+latch remote-access revoke-root ROOT_ID
+```
+
+The share persists across gateway restarts. Repeating the same share for the
+same directory and pairing returns its existing ID. Revoking the share or
+changing the device grant invalidates the ID. Sharing again creates a new ID.
+See [the shared Files contract](REMOTE_SDK.md#shared-files).
+
 Permissions form a ladder: `observe`, `interact`, then `control`. Opening a
 terminal requires `control` and takes the session's exclusive terminal
 surface. Enrollment, relay admission, WSS, authenticated LAN discovery, and

@@ -24,22 +24,29 @@ const CURSOR_PREFIX: &str = "v2";
 
 pub(crate) async fn sync(path: &str, cursor: Option<&str>) -> Result<GitSyncPreview, GitError> {
     let worktree = worktree::resolve(path).await?;
-    let observed = observe(&worktree).await?;
+    worktree_sync(&worktree, cursor).await
+}
+
+pub(crate) async fn worktree_sync(
+    worktree: &worktree::Worktree,
+    cursor: Option<&str>,
+) -> Result<GitSyncPreview, GitError> {
+    let observed = observe(worktree).await?;
     let head = status::head(&observed.porcelain.branch);
     let preconditions = observed.snapshot.preconditions.clone();
-    let remotes = remotes(&worktree)
+    let remotes = remotes(worktree)
         .await?
         .into_iter()
         .map(|(name, url)| GitRemote { name, url })
         .collect::<Vec<_>>();
 
     let upstream = match preconditions.branch.as_deref() {
-        Some(branch) => upstream_of(&worktree, branch).await,
+        Some(branch) => upstream_of(worktree, branch).await,
         None => None,
     };
     let upstream = match upstream {
         Some(found) => {
-            let oid = integrate::ref_oid(&worktree, &found.reference).await;
+            let oid = integrate::ref_oid(worktree, &found.reference).await;
             let remote_url = found.remote.as_ref().and_then(|remote| {
                 remotes
                     .iter()
@@ -59,7 +66,7 @@ pub(crate) async fn sync(path: &str, cursor: Option<&str>) -> Result<GitSyncPrev
     };
 
     let (ahead, behind) = match (&upstream, &preconditions.head) {
-        (Some(GitSyncUpstream { oid: Some(oid), .. }), Some(_)) => counts(&worktree, oid).await,
+        (Some(GitSyncUpstream { oid: Some(oid), .. }), Some(_)) => counts(worktree, oid).await,
         _ => (None, None),
     };
     let relation = if head.detached {
@@ -125,7 +132,7 @@ pub(crate) async fn sync(path: &str, cursor: Option<&str>) -> Result<GitSyncPrev
                 Some(cursor) => parse_cursor(cursor, preconditions.head.as_deref().unwrap(), oid)
                     .ok_or(GitError::StaleCursor)?,
             };
-            page(&worktree, preconditions.head.as_deref().unwrap(), oid, skip).await?
+            page(worktree, preconditions.head.as_deref().unwrap(), oid, skip).await?
         }
         _ if cursor.is_some() => return Err(GitError::StaleCursor),
         _ => (Vec::new(), None),
@@ -136,7 +143,7 @@ pub(crate) async fn sync(path: &str, cursor: Option<&str>) -> Result<GitSyncPrev
         head,
         upstream,
         remotes,
-        last_fetched_at: last_fetched_at(&worktree),
+        last_fetched_at: last_fetched_at(worktree),
         relation,
         ahead,
         behind,

@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://latch.cooperativ.dev/schemas/remote-access/v2/git-worktree-summaries.schema.json",
+  "title": "LatchGitWorktreeSummariesV2",
+  "description": "GET /v2/git/worktree/summaries?worktreeRefs= takes one to eight comma-separated worktree references. The response has one result per input in order, including duplicates. Empty or oversized batches return 400. An active paired device with Control is required for all results. A stale, foreign, or unknown reference produces stale_worktree_ref. A malformed individual reference produces invalid_request.",
+  "type": "object",
+  "required": ["results"],
+  "properties": {
+    "results": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 8,
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": ["outcome", "summary"],
+            "properties": {
+              "outcome": { "const": "ok" },
+              "summary": { "$ref": "#/$defs/summary" }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": ["outcome", "error"],
+            "properties": {
+              "outcome": { "const": "error" },
+              "error": {
+                "enum": ["invalid_request", "stale_worktree_ref", "worktree_access_denied", "git_timeout", "git_unavailable", "git_failed"]
+              }
+            },
+            "additionalProperties": false
+          }
+        ]
+      }
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "summary": {
+      "type": "object",
+      "required": ["branch", "ahead", "behind", "staged", "unstaged", "conflicted", "untracked", "changesComplete"],
+      "properties": {
+        "branch": { "type": ["string", "null"], "description": "Current branch, or null for detached HEAD." },
+        "ahead": { "type": ["integer", "null"], "minimum": 0, "description": "Commits ahead of the locally known upstream, or null if Git cannot determine the count." },
+        "behind": { "type": ["integer", "null"], "minimum": 0, "description": "Commits behind the locally known upstream, or null if Git cannot determine the count." },
+        "staged": { "type": "integer", "minimum": 0, "maximum": 1000 },
+        "unstaged": { "type": "integer", "minimum": 0, "maximum": 1000 },
+        "conflicted": { "type": "integer", "minimum": 0, "maximum": 1000 },
+        "untracked": { "type": "integer", "minimum": 0, "maximum": 1000, "description": "Git's normal untracked entries, which may represent directories." },
+        "changesComplete": { "type": "boolean", "description": "False when the status scan reached its record or byte limit or encountered an unfamiliar record. Counts are then lower bounds. A tracked path can count in both staged and unstaged." }
+      },
+      "additionalProperties": false
+    }
+  }
+}

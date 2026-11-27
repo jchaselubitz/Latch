@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://latch.cooperativ.dev/schemas/remote-access/v2/shared-roots.schema.json",
+  "title": "LatchSharedRootsV2",
+  "description": "GET /v2/files/roots returns only available roots explicitly shared with this active Control pairing. Root IDs are opaque, host-local and grant-revision scoped. Absolute host paths are never returned.",
+  "type": "object",
+  "required": [
+    "roots"
+  ],
+  "properties": {
+    "roots": {
+      "type": "array",
+      "maxItems": 128,
+      "items": {
+        "type": "object",
+        "required": [
+          "rootId",
+          "name"
+        ],
+        "properties": {
+          "rootId": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

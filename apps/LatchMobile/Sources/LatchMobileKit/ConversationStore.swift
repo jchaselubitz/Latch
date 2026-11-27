@@ -39,6 +39,10 @@ public final class ConversationStore {
     /// reconnect. It is deliberately not written to disk.
     public var draft = ""
 
+    /// Messages sent while the host could not take one, oldest first. In
+    /// memory only, like the draft; see `ConversationQueuedMessage`.
+    public internal(set) var queuedMessages: [ConversationQueuedMessage] = []
+
     /// The latest answer this phone gave to each request, oldest first. Kept
     /// in memory only: the Hub's state remains the authority on what is
     /// pending, and these only explain what happened to an answer.

@@ -3,6 +3,61 @@ import Foundation
 // MARK: - Git
 
 extension AppModel {
+    /// The latest discovery advertised exact-worktree open, status and diff.
+    public var advertisesScopedGitReads: Bool {
+        GatewayCompatibility.supports(endpoint: .gitWorktreeReads, capabilities: linkState.cachedCapabilities)
+    }
+
+    /// The latest discovery additionally advertised bounded summary batches.
+    public var advertisesScopedGitSummaries: Bool {
+        advertisesScopedGitReads
+            && GatewayCompatibility.supports(endpoint: .gitWorktreeSummaries, capabilities: linkState.cachedCapabilities)
+    }
+
+    /// Authorizes one bounded interaction without reading any repository data.
+    /// Callers decide which exact roots the authenticated Mac may supply for
+    /// their own scope before passing paths to the interaction.
+    public func beginScopedGitRead() async throws -> ScopedGitReadInteraction {
+        do {
+            let access = try await authorizeScopedRead(
+                endpoint: .gitWorktreeReads, reason: "Read Git changes on your Mac."
+            )
+            return ScopedGitReadInteraction(access: access)
+        } catch let error as ScopedReadAccessError {
+            throw ScopedGitReadError(accessError: error)
+        }
+    }
+
+    /// The latest discovery advertised exact-worktree writes and receipts.
+    public var advertisesScopedGitWrites: Bool {
+        advertisesScopedGitReads && linkState.cachedCapabilities?.endpoints.gitReceipts == true
+            && GatewayCompatibility.supports(endpoint: .gitWorktreeWrites, capabilities: linkState.cachedCapabilities)
+    }
+
+    public var advertisesScopedGitPreviews: Bool {
+        advertisesScopedGitReads
+            && GatewayCompatibility.supports(endpoint: .gitWorktreePreviews, capabilities: linkState.cachedCapabilities)
+    }
+
+    /// Authorizes exact-worktree writes and recovery on the current pairing.
+    public func beginScopedGitWrite() async throws -> ScopedGitWriteInteraction {
+        try await beginScopedGitWrite(store: .application)
+    }
+
+    func beginScopedGitWrite(store: PendingGitWriteStore) async throws -> ScopedGitWriteInteraction {
+        do {
+            let access = try await authorizeScopedRead(
+                endpoint: .gitWorktreeWrites, reason: "Manage Git changes on your Mac."
+            )
+            _ = try access.currentGateway(for: .gitWorktreeReads)
+            _ = try access.currentGateway(for: .gitReceipts)
+            guard let pairing = pairedDevice else { throw ScopedReadAccessError.accessDenied }
+            return ScopedGitWriteInteraction(access: access, pairing: pairing, store: store)
+        } catch let error as ScopedReadAccessError {
+            throw ScopedGitReadError(accessError: error)
+        }
+    }
+
     /// Whether the linked Mac serves the Git routes, independent of this
     /// phone's grant. A Mac that predates them advertises none, and no
     /// repository entry point appears. The last discovery counts while the

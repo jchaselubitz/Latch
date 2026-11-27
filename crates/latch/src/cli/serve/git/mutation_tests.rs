@@ -54,7 +54,7 @@ async fn run_as(
         &home(fixture),
         device.map(str::to_owned),
         &id(request),
-        fixture.path(),
+        super::mutation::Target::Path(fixture.path()),
         expected.clone(),
         mutation,
     )
@@ -702,7 +702,7 @@ async fn a_repeated_request_id_returns_the_first_receipt_without_running_git_aga
         &home(&fixture),
         Some("phone-a".to_owned()),
         &id(7),
-        fixture.path(),
+        super::mutation::Target::Path(fixture.path()),
         before.preconditions.clone(),
         commit("Twice"),
     )
@@ -711,7 +711,7 @@ async fn a_repeated_request_id_returns_the_first_receipt_without_running_git_aga
     assert_eq!(head(&fixture), committed);
 
     // The receipt is there to look up afterwards.
-    let looked_up = receipt(&home(&fixture), Some("phone-a"), &id(7))
+    let looked_up = receipt(&home(&fixture), Some("phone-a"), &id(7), None)
         .await
         .unwrap();
     assert_eq!(looked_up, Some(first));
@@ -720,6 +720,7 @@ async fn a_repeated_request_id_returns_the_first_receipt_without_running_git_aga
         &home(&fixture),
         Some("phone-a"),
         &id(7).to_ascii_uppercase(),
+        None,
     )
     .await
     .unwrap();
@@ -743,9 +744,12 @@ async fn receipts_belong_to_the_device_that_made_them() {
     assert_eq!(code(&receipt_a), "staged");
 
     let home = home(&fixture);
-    assert_eq!(receipt(&home, Some("phone-b"), &id(1)).await.unwrap(), None);
-    assert_eq!(receipt(&home, None, &id(1)).await.unwrap(), None);
-    assert!(receipt(&home, Some("phone-a"), &id(1))
+    assert_eq!(
+        receipt(&home, Some("phone-b"), &id(1), None).await.unwrap(),
+        None
+    );
+    assert_eq!(receipt(&home, None, &id(1), None).await.unwrap(), None);
+    assert!(receipt(&home, Some("phone-a"), &id(1), None)
         .await
         .unwrap()
         .is_some());
@@ -764,7 +768,7 @@ async fn receipts_belong_to_the_device_that_made_them() {
     .await;
     assert_eq!(code(&receipt_b), "unstaged");
     assert_eq!(
-        receipt(&home, Some("phone-a"), &id(1)).await.unwrap(),
+        receipt(&home, Some("phone-a"), &id(1), None).await.unwrap(),
         Some(receipt_a)
     );
 }
@@ -783,7 +787,7 @@ async fn concurrent_commits_from_two_phones_run_one_after_the_other() {
             &home,
             Some("phone-a".into()),
             &first,
-            fixture.path(),
+            super::mutation::Target::Path(fixture.path()),
             before.preconditions.clone(),
             commit("From A")
         ),
@@ -791,7 +795,7 @@ async fn concurrent_commits_from_two_phones_run_one_after_the_other() {
             &home,
             Some("phone-b".into()),
             &second,
-            fixture.path(),
+            super::mutation::Target::Path(fixture.path()),
             before.preconditions.clone(),
             commit("From B")
         ),
@@ -878,7 +882,7 @@ async fn receipts_left_pending_by_a_restart_are_reconciled_from_the_repository()
 
     // Accepted, but the gateway stopped before Git started.
     abandoned(&fixture, 1, commit("Never ran"), None);
-    let settled = receipt(&home, Some("phone-a"), &id(1))
+    let settled = receipt(&home, Some("phone-a"), &id(1), None)
         .await
         .unwrap()
         .unwrap();
@@ -887,7 +891,7 @@ async fn receipts_left_pending_by_a_restart_are_reconciled_from_the_repository()
 
     // Git started; the branch did not move, so no commit was made.
     abandoned(&fixture, 2, commit("Did not finish"), at(&parent));
-    let settled = receipt(&home, Some("phone-a"), &id(2))
+    let settled = receipt(&home, Some("phone-a"), &id(2), None)
         .await
         .unwrap()
         .unwrap();
@@ -900,7 +904,7 @@ async fn receipts_left_pending_by_a_restart_are_reconciled_from_the_repository()
     git(&fixture.root, &["config", "user.name", "Latch Test"]);
     abandoned(&fixture, 3, commit("Made it"), at(&parent));
     git(&fixture.root, &["commit", "-q", "-m", "Made it"]);
-    let settled = receipt(&home, Some("phone-a"), &id(3))
+    let settled = receipt(&home, Some("phone-a"), &id(3), None)
         .await
         .unwrap()
         .unwrap();
@@ -916,7 +920,7 @@ async fn receipts_left_pending_by_a_restart_are_reconciled_from_the_repository()
         &fixture.root,
         &["commit", "-q", "--allow-empty", "-m", "unrelated"],
     );
-    let settled = receipt(&home, Some("phone-a"), &id(4))
+    let settled = receipt(&home, Some("phone-a"), &id(4), None)
         .await
         .unwrap()
         .unwrap();
@@ -925,7 +929,7 @@ async fn receipts_left_pending_by_a_restart_are_reconciled_from_the_repository()
     // A Git still holding the index lock settles nothing.
     abandoned(&fixture, 5, commit("Locked"), at(&head(&fixture)));
     fs::write(fixture.root.join(".git/index.lock"), "").unwrap();
-    let settled = receipt(&home, Some("phone-a"), &id(5))
+    let settled = receipt(&home, Some("phone-a"), &id(5), None)
         .await
         .unwrap()
         .unwrap();
@@ -933,7 +937,7 @@ async fn receipts_left_pending_by_a_restart_are_reconciled_from_the_repository()
     fs::remove_file(fixture.root.join(".git/index.lock")).unwrap();
 
     // Once settled, the receipt stays as decided.
-    let again = receipt(&home, Some("phone-a"), &id(4))
+    let again = receipt(&home, Some("phone-a"), &id(4), None)
         .await
         .unwrap()
         .unwrap();
@@ -960,7 +964,7 @@ async fn an_interrupted_stage_is_completed_or_uncertain_never_not_applied() {
         ..Before::default()
     });
     abandoned(&fixture, 1, stage(vec![file.clone()]), state.clone());
-    let settled = receipt(&home(&fixture), Some("phone-a"), &id(1))
+    let settled = receipt(&home(&fixture), Some("phone-a"), &id(1), None)
         .await
         .unwrap()
         .unwrap();
@@ -968,7 +972,7 @@ async fn an_interrupted_stage_is_completed_or_uncertain_never_not_applied() {
 
     git(&fixture.root, &["add", "README.md"]);
     abandoned(&fixture, 2, stage(vec![file]), state);
-    let settled = receipt(&home(&fixture), Some("phone-a"), &id(2))
+    let settled = receipt(&home(&fixture), Some("phone-a"), &id(2), None)
         .await
         .unwrap()
         .unwrap();
@@ -985,7 +989,7 @@ async fn a_folder_that_is_not_a_repository_is_refused_before_anything_is_accepte
         &home(&fixture),
         Some("phone-a".into()),
         &id(1),
-        plain.to_str().unwrap(),
+        super::mutation::Target::Path(plain.to_str().unwrap()),
         before.preconditions,
         commit("x"),
     )
@@ -994,7 +998,7 @@ async fn a_folder_that_is_not_a_repository_is_refused_before_anything_is_accepte
         result.unwrap_err(),
         MutationError::Git(GitError::NotARepository)
     );
-    assert!(receipt(&home(&fixture), Some("phone-a"), &id(1))
+    assert!(receipt(&home(&fixture), Some("phone-a"), &id(1), None)
         .await
         .unwrap()
         .is_none());
@@ -1275,4 +1279,101 @@ fn path_of_round_trips_bytes() {
     let bytes = b"a\xffb";
     assert_eq!(path_of(bytes).as_os_str().as_encoded_bytes(), bytes);
     let _ = Path::new("unused");
+}
+
+#[tokio::test]
+async fn mutation_gateway_child_fixture() {
+    let Some(root) = std::env::var_os("LATCH_TEST_MUTATION_ROOT") else {
+        return;
+    };
+    let root = Path::new(&root);
+    let home = LatchHome::new(root.parent().unwrap().join("latch-home"));
+    let path = root.to_str().unwrap();
+    let expected = status(&home, path, &[]).await.unwrap().preconditions;
+    submit(
+        &home,
+        Some("phone-a".into()),
+        &id(1),
+        Target::Path(path),
+        expected,
+        commit("Gateway A"),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn surviving_git_excludes_another_gateway_and_keeps_original_receipt_pending() {
+    let fixture = workspace();
+    let home = home(&fixture);
+    fs::write(fixture.root.join("README.md"), "reviewed change\n").unwrap();
+    git(&fixture.root, &["add", "README.md"]);
+    let expected = read(&fixture).await.preconditions;
+    let before = head(&fixture);
+    hook(
+        &fixture,
+        "pre-commit",
+        "#!/bin/sh\ntouch .git/hook-started\nfor i in $(seq 1 200); do\n  test ! -f .git/release-hook || exit 0\n  sleep 0.05\ndone\nexit 1\n",
+    );
+    let child_test = format!(
+        "{}::mutation_gateway_child_fixture",
+        module_path!().split_once("::").unwrap().1
+    );
+    let mut gateway_a = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", &child_test])
+        .env("LATCH_TEST_MUTATION_ROOT", &fixture.root)
+        .spawn()
+        .unwrap();
+    let started = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !fixture.root.join(".git/hook-started").exists() {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    gateway_a.kill().unwrap();
+    gateway_a.wait().unwrap();
+    started.expect("Git reached the hook before gateway A stopped");
+
+    let running = receipt(&home, Some("phone-a"), &id(1), None)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(running.state, GitReceiptState::Pending);
+    assert!(receipts::try_worktree_lock(&home, &fixture.root)
+        .unwrap()
+        .is_none());
+    let competing_id = id(2);
+    let mut competing = Box::pin(submit(
+        &home,
+        Some("phone-b".into()),
+        &competing_id,
+        Target::Path(fixture.path()),
+        expected,
+        commit("Gateway B"),
+    ));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(150), &mut competing)
+            .await
+            .is_err()
+    );
+    assert!(receipts::load(&home, Some("phone-b"), &id(2))
+        .unwrap()
+        .is_none());
+    assert_eq!(head(&fixture), before);
+
+    fs::write(fixture.root.join(".git/release-hook"), "").unwrap();
+    let second = competing.await.unwrap();
+    let Submitted::Settled(second) = second else {
+        panic!("expected a settled second write")
+    };
+    assert_eq!(code(&second), "refresh_required");
+    let first = receipt(&home, Some("phone-a"), &id(1), None)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.state, GitReceiptState::Completed, "{first:?}");
+    assert_eq!(
+        git(&fixture.root, &["log", "-1", "--format=%s"]).trim(),
+        "Gateway A"
+    );
 }

@@ -28,10 +28,15 @@ SCHEMA_NAMES = (
     "conversation-state.schema.json",
     "conversation-protocol.schema.json",
     "directory-page.schema.json",
+    "shared-roots.schema.json",
+    "shared-directory-page.schema.json",
+    "shared-file-preview.schema.json",
     "gateway-capabilities.schema.json",
     "gateway-readiness.schema.json",
     "terminal-connection.schema.json",
     "git-repository.schema.json",
+    "git-worktree-open.schema.json",
+    "git-worktree-summaries.schema.json",
     "git-repository-list.schema.json",
     "git-status.schema.json",
     "git-file-diff.schema.json",
@@ -80,6 +85,47 @@ pub struct DirectoryPage {
     pub parent: Option<String>,
     pub entries: Vec<DirectoryEntry>,
     pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedRoot {
+    pub root_id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SharedRoots {
+    pub roots: Vec<SharedRoot>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SharedFileKind {
+    Directory,
+    File,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SharedDirectoryEntry {
+    pub name: String,
+    pub kind: SharedFileKind,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedDirectoryPage {
+    pub path: String,
+    pub entries: Vec<SharedDirectoryEntry>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum SharedFilePreview {
+    Text { text: String },
+    Truncated { text: String },
+    Binary,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -229,6 +275,53 @@ pub struct GitRepository {
     pub root: String,
     pub name: String,
     pub kind: GitWorktreeKind,
+}
+
+/// Exact-root Git worktree opened by an authenticated paired device.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GitWorktreeOpen {
+    /// Gateway-local reference bound to the device, grant and exact checkout.
+    pub worktree_ref: String,
+    /// Canonical root and display metadata for the opened checkout.
+    pub repository: GitRepository,
+}
+
+/// Counts from a bounded porcelain status scan of one exact worktree.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GitWorktreeSummary {
+    pub branch: Option<String>,
+    pub ahead: Option<u64>,
+    pub behind: Option<u64>,
+    pub staged: u32,
+    pub unstaged: u32,
+    pub conflicted: u32,
+    pub untracked: u32,
+    pub changes_complete: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GitWorktreeSummaryError {
+    InvalidRequest,
+    StaleWorktreeRef,
+    WorktreeAccessDenied,
+    GitTimeout,
+    GitUnavailable,
+    GitFailed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum GitWorktreeSummaryOutcome {
+    Ok { summary: GitWorktreeSummary },
+    Error { error: GitWorktreeSummaryError },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GitWorktreeSummaries {
+    pub results: Vec<GitWorktreeSummaryOutcome>,
 }
 
 /// A running Latch session whose folder resolves to a working tree.
@@ -1159,6 +1252,19 @@ export const TERMINAL_CLOSE_CODES = {
   kernel_error: 4500,
   resume_refused: 4411
 } as const satisfies Record<TerminalCloseReason, number>;
+export type SharedRoot = { rootId: string; name: string };
+export type SharedRoots = { roots: SharedRoot[] };
+export type SharedDirectoryEntry = { name: string; kind: 'directory' | 'file' };
+export type SharedDirectoryPage = {
+  path: string;
+  entries: SharedDirectoryEntry[];
+  nextCursor: string | null;
+};
+export type SharedFilePreview =
+  | { kind: 'text'; text: string }
+  | { kind: 'truncated'; text: string }
+  | { kind: 'binary' };
+
 export type SessionAgent = 'claude' | 'codex';
 export type CreateSessionRequest = {
   requestId: string;
@@ -1207,6 +1313,24 @@ export type GatewayFeatures = {
  * hex-encoded exact bytes the diff route takes. */
 export type GitWorktreeKind = 'repository' | 'linked_worktree' | 'submodule';
 export type GitRepository = { root: string; name: string; kind: GitWorktreeKind };
+export type GitWorktreeOpen = { worktreeRef: string; repository: GitRepository };
+export type GitWorktreeSummary = {
+  branch: string | null;
+  ahead: number | null;
+  behind: number | null;
+  staged: number;
+  unstaged: number;
+  conflicted: number;
+  untracked: number;
+  changesComplete: boolean;
+};
+export type GitWorktreeSummaryError =
+  | 'invalid_request' | 'stale_worktree_ref' | 'worktree_access_denied'
+  | 'git_timeout' | 'git_unavailable' | 'git_failed';
+export type GitWorktreeSummaryOutcome =
+  | { outcome: 'ok'; summary: GitWorktreeSummary }
+  | { outcome: 'error'; error: GitWorktreeSummaryError };
+export type GitWorktreeSummaries = { results: GitWorktreeSummaryOutcome[] };
 export type GitSessionRef = {
   id: string;
   name: string;

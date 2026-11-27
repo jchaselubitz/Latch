@@ -102,14 +102,19 @@ public struct ConversationSendNotice: Equatable, Sendable {
     }
 }
 
-/// The ordinary composer. The draft stays editable in every state; only
-/// sending follows the host.
+/// The ordinary composer. The draft stays editable in every state. When the
+/// host cannot take a message, the send button queues it instead: it waits
+/// on the phone and goes out by itself once the host is ready.
 public struct ConversationComposerPresentation: Equatable, Sendable {
     public let canSend: Bool
+    /// Whether the button queues rather than sends. Only while sending is
+    /// off; files and slash commands are never queued.
+    public let canQueue: Bool
     public let notice: ConversationSendNotice?
 
-    public init(canSend: Bool, notice: ConversationSendNotice?) {
+    public init(canSend: Bool, canQueue: Bool = false, notice: ConversationSendNotice?) {
         self.canSend = canSend
+        self.canQueue = canQueue && !canSend
         self.notice = notice
     }
 
@@ -126,7 +131,7 @@ public struct ConversationComposerPresentation: Equatable, Sendable {
             // The last pushed state may still say sending is enabled; it is
             // stale until the socket is back.
             return blocked(.connection, "Offline", connectionError.map(ConversationSentence.make)
-                ?? "Reconnecting to the Mac. Your draft is kept.")
+                ?? "Reconnecting to the Mac. Messages you send now are queued.")
         case .loading:
             return blocked(.connection, "Connecting", hostReason)
         case .failed:
@@ -144,7 +149,7 @@ public struct ConversationComposerPresentation: Equatable, Sendable {
             return blocked(.agentState, "Waiting for your answer", "Answer the pending request to continue.")
         }
         if viewState == .working {
-            return blocked(.agentState, "The agent is working", "You can send when the host reports it is ready for input.")
+            return blocked(.agentState, "The agent is working", "Messages you send now are queued and go out when it is ready.")
         }
         if viewState == .interrupted {
             return blocked(.agentState, "The agent has exited", hostReason)
@@ -153,7 +158,7 @@ public struct ConversationComposerPresentation: Equatable, Sendable {
     }
 
     private static func blocked(_ kind: ConversationSendNotice.Kind, _ title: String, _ detail: String?) -> Self {
-        ConversationComposerPresentation(canSend: false, notice: ConversationSendNotice(kind: kind, title: title, detail: detail))
+        ConversationComposerPresentation(canSend: false, canQueue: true, notice: ConversationSendNotice(kind: kind, title: title, detail: detail))
     }
 }
 

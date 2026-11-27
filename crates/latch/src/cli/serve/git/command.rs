@@ -110,9 +110,11 @@ pub(super) async fn run_with_timeout(
 /// terminated), as text.
 pub(crate) type ProgressSink = Arc<dyn Fn(&str) + Send + Sync>;
 
-/// How a long-running mutation is run, beyond the plain invocation.
+/// Options beyond the plain invocation.
 #[derive(Clone, Default)]
 pub(super) struct Extras {
+    /// Disable on-demand object downloads in a partial clone.
+    pub no_lazy_fetch: bool,
     pub index_file: Option<PathBuf>,
     pub commit_review: Option<Arc<super::commit_review::Review>>,
     /// Accept the message Git prepared (Continue) instead of failing on the
@@ -122,12 +124,14 @@ pub(super) struct Extras {
     pub progress: Option<ProgressSink>,
     /// Called with Git's process id (also its process group) once started.
     pub on_spawn: Option<Arc<dyn Fn(u32) + Send + Sync>>,
+    pub worktree_lock: Option<Arc<std::fs::File>>,
 }
 
 impl std::fmt::Debug for Extras {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("Extras")
+            .field("no_lazy_fetch", &self.no_lazy_fetch)
             .field("accept_default_message", &self.accept_default_message)
             .field("progress", &self.progress.is_some())
             .field("on_spawn", &self.on_spawn.is_some())
@@ -188,7 +192,23 @@ pub(super) async fn run_with_extras(
             Ok(())
         });
     }
+    if let Some(lock) = extras.worktree_lock {
+        use std::os::fd::AsRawFd;
+        // SAFETY: fcntl is async-signal-safe. Only clear close-on-exec in the
+        // child so unrelated gateway subprocesses never inherit the lock.
+        unsafe {
+            command.pre_exec(move || {
+                if libc::fcntl(lock.as_raw_fd(), libc::F_SETFD, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
     apply_environment(&mut command);
+    if extras.no_lazy_fetch {
+        command.env("GIT_NO_LAZY_FETCH", "1");
+    }
     if let Some(path) = &extras.index_file {
         command.env("GIT_INDEX_FILE", path);
     }

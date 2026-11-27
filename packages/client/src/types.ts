@@ -1,4 +1,6 @@
-import type { GatewayEndpoints, GatewayFeatures, TerminalCloseReason } from './generated.ts';
+import type {
+  GatewayEndpoints, GatewayFeatures, SharedDirectoryPage, SharedFilePreview, SharedRoots, TerminalCloseReason
+} from './generated.ts';
 import { TERMINAL_CLOSE_CODES } from './generated.ts';
 
 export type {
@@ -110,6 +112,9 @@ export type LatchClient = {
   listSessions(): Promise<ListReport>;
   inspectSession(options: { sessionId: string }): Promise<InspectReport>;
   gatewayCapabilities(): Promise<GatewayCapabilities>;
+  sharedRoots(): Promise<SharedRoots>;
+  sharedDirectory(options: { rootId: string; path?: string; cursor?: string }): Promise<SharedDirectoryPage>;
+  sharedFilePreview(options: { rootId: string; path: string }): Promise<SharedFilePreview>;
   /**
    * Ends one session's hosted process, leaving its record and dead pane in
    * place. This is `latch stop` reached through the gateway: the same graceful

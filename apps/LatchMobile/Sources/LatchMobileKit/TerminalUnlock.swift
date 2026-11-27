@@ -1,4 +1,5 @@
 import Foundation
+import Observation
 #if canImport(LocalAuthentication)
 import LocalAuthentication
 #endif
@@ -68,6 +69,7 @@ public struct LocalDeviceOwnerAuthenticator: DeviceOwnerAuthenticating {
 /// is held behind the device owner, with a short grace window so a person
 /// working in a session is not asked on every reattach.
 @MainActor
+@Observable
 public final class TerminalUnlock {
     /// How long one successful check lasts. Short enough that a phone left on
     /// a desk does not stay open to a terminal, long enough that attaching,
@@ -77,7 +79,8 @@ public final class TerminalUnlock {
     private let authenticator: any DeviceOwnerAuthenticating
     private let grace: TimeInterval
     private let now: @Sendable () -> Date
-    private var unlockedUntil: Date?
+    private(set) var unlockedUntil: Date?
+    private(set) var lockGeneration = 0
     /// Why the last check did not open the terminal, when it is worth saying.
     /// A cancelled prompt leaves this nil: the person already knows.
     public private(set) var failure: String?
@@ -104,6 +107,14 @@ public final class TerminalUnlock {
         return now() < unlockedUntil
     }
 
+    func isCurrent(deadline: Date, generation: Int) -> Bool {
+        lockGeneration == generation && now() < deadline
+    }
+
+    func timeRemaining(until deadline: Date) -> Duration {
+        .seconds(max(0, deadline.timeIntervalSince(now())))
+    }
+
     /// Passes the owner check, or reports why the terminal stays shut.
     ///
     /// Inside the grace window this answers immediately without a prompt.
@@ -116,12 +127,16 @@ public final class TerminalUnlock {
             failure = "Set a passcode on this device to open a terminal."
             return false
         }
+        let generation = lockGeneration
         do {
-            guard try await authenticator.authenticate(reason: reason) else {
+            let authenticated = try await authenticator.authenticate(reason: reason)
+            guard generation == lockGeneration else { return false }
+            guard authenticated else {
                 failure = nil
                 return false
             }
         } catch {
+            guard generation == lockGeneration else { return false }
             failure = "This device could not confirm it is you, so the terminal stayed closed."
             return false
         }
@@ -133,6 +148,7 @@ public final class TerminalUnlock {
     /// Ends the grace window. Used when the link itself goes away, so a phone
     /// relinked to another Mac starts from a fresh check.
     public func lock() {
+        lockGeneration &+= 1
         unlockedUntil = nil
         failure = nil
     }

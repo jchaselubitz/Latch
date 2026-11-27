@@ -12,6 +12,23 @@ use crate::cli::serve::contract::{
     GitChangeKind, GitDiffLineKind, GitOperationKind, GitWorktreeKind,
 };
 
+#[test]
+fn worktree_summary_drops_partial_records_and_rename_paths() {
+    let porcelain = b"# branch.head main\0# branch.ab +2 -3\0\
+                     2 RM rename target\0? original path\0u UU conflict\0\
+                     ? visible\0? cut off";
+    let summary = status::summarize(porcelain, false).unwrap();
+    assert_eq!(summary.branch.as_deref(), Some("main"));
+    assert_eq!((summary.ahead, summary.behind), (Some(2), Some(3)));
+    assert_eq!((summary.staged, summary.unstaged), (1, 1));
+    assert_eq!((summary.conflicted, summary.untracked), (1, 1));
+    assert!(!summary.changes_complete);
+
+    let summary = status::summarize(b"2 RM target\0original cut off", false).unwrap();
+    assert_eq!((summary.staged, summary.unstaged), (0, 0));
+    assert!(!summary.changes_complete);
+}
+
 pub(super) fn git(dir: &Path, words: &[&str]) -> String {
     let output = std::process::Command::new("git")
         .current_dir(dir)

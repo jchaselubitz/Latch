@@ -102,7 +102,7 @@ pub(super) async fn submit_now(
         &home(fixture),
         Some("phone-a".to_owned()),
         &id(request),
-        fixture.path(),
+        super::mutation::Target::Path(fixture.path()),
         expected.clone(),
         mutation,
     )
@@ -125,7 +125,7 @@ pub(super) async fn run(
 
 pub(super) async fn settled(fixture: &Fixture, request: u32) -> GitMutationReceipt {
     for _ in 0..300 {
-        let receipt = receipt(&home(fixture), Some("phone-a"), &id(request))
+        let receipt = receipt(&home(fixture), Some("phone-a"), &id(request), None)
             .await
             .unwrap()
             .expect("receipt");
@@ -361,7 +361,7 @@ async fn a_hanging_fetch_answers_early_reports_progress_and_times_out_uncertain(
     // Git's progress, and not claimed to have stopped.
     let mut progress = None;
     for _ in 0..50 {
-        let again = receipt(&home(&remote.fixture), Some("phone-a"), &id(1))
+        let again = receipt(&home(&remote.fixture), Some("phone-a"), &id(1), None)
             .await
             .unwrap()
             .unwrap();
@@ -1117,7 +1117,7 @@ async fn a_repeated_update_returns_the_first_receipt_and_never_runs_twice() {
         &home(&remote.fixture),
         Some("phone-a".to_owned()),
         &id(2),
-        remote.fixture.path(),
+        super::mutation::Target::Path(remote.fixture.path()),
         sync.preconditions.clone(),
         update("rebase", &sync),
     )
@@ -1125,7 +1125,7 @@ async fn a_repeated_update_returns_the_first_receipt_and_never_runs_twice() {
     assert_eq!(conflict.err(), Some(MutationError::RequestIdConflict));
     // And another device cannot see it.
     assert_eq!(
-        receipt(&home(&remote.fixture), Some("phone-b"), &id(2))
+        receipt(&home(&remote.fixture), Some("phone-b"), &id(2), None)
             .await
             .unwrap(),
         None
@@ -1181,7 +1181,7 @@ async fn updates_left_pending_by_a_restart_are_reconciled_from_the_repository() 
     let lookup = |request: u32| {
         let home = home(&remote.fixture);
         async move {
-            receipt(&home, Some("phone-a"), &id(request))
+            receipt(&home, Some("phone-a"), &id(request), None)
                 .await
                 .unwrap()
                 .unwrap()
@@ -1245,7 +1245,7 @@ async fn a_merge_left_in_progress_by_a_restart_stays_uncertain() {
     git(&root, &["merge", "--no-edit", &upstream_oid]);
     assert!(root.join(".git/MERGE_HEAD").exists());
     abandoned(&remote.fixture, 20, update("merge", &sync), Some(before));
-    let settled = receipt(&home(&remote.fixture), Some("phone-a"), &id(20))
+    let settled = receipt(&home(&remote.fixture), Some("phone-a"), &id(20), None)
         .await
         .unwrap()
         .unwrap();
@@ -1261,7 +1261,7 @@ async fn a_fetch_left_pending_is_settled_by_the_fetch_time() {
         ..Before::default()
     };
     abandoned(&remote.fixture, 30, fetch(), Some(before.clone()));
-    let unsure = receipt(&home(&remote.fixture), Some("phone-a"), &id(30))
+    let unsure = receipt(&home(&remote.fixture), Some("phone-a"), &id(30), None)
         .await
         .unwrap()
         .unwrap();
@@ -1272,7 +1272,7 @@ async fn a_fetch_left_pending_is_settled_by_the_fetch_time() {
     // still uncertain.
     fs::write(remote.fixture.root.join(".git/FETCH_HEAD"), "").unwrap();
     abandoned(&remote.fixture, 31, fetch(), Some(before.clone()));
-    let unsure = receipt(&home(&remote.fixture), Some("phone-a"), &id(31))
+    let unsure = receipt(&home(&remote.fixture), Some("phone-a"), &id(31), None)
         .await
         .unwrap()
         .unwrap();
@@ -1280,7 +1280,7 @@ async fn a_fetch_left_pending_is_settled_by_the_fetch_time() {
 
     git(&remote.fixture.root, &["fetch", "-q", "origin"]);
     abandoned(&remote.fixture, 32, fetch(), Some(before));
-    let done = receipt(&home(&remote.fixture), Some("phone-a"), &id(32))
+    let done = receipt(&home(&remote.fixture), Some("phone-a"), &id(32), None)
         .await
         .unwrap()
         .unwrap();
@@ -1316,7 +1316,7 @@ async fn a_receipt_from_before_slice_three_still_reads() {
         serde_json::to_vec(&stored).unwrap(),
     )
     .unwrap();
-    let read = receipt(&home(&remote.fixture), Some("phone-a"), &id(40))
+    let read = receipt(&home(&remote.fixture), Some("phone-a"), &id(40), None)
         .await
         .unwrap()
         .unwrap();

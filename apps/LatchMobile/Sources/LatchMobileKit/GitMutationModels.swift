@@ -36,6 +36,19 @@ public enum GitMutationAction: Equatable, Sendable {
         }
     }
 
+    var path: String {
+        switch self {
+        case .stage(let request), .unstage(let request): request.path
+        case .commit(let request): request.path
+        case .createBranch(let request): request.path
+        case .switchBranch(let request): request.path
+        case .fetch(let request): request.path
+        case .fastForward(let request), .merge(let request), .rebase(let request): request.path
+        case .continueOperation(let request), .abortOperation(let request): request.path
+        case .push(let request): request.path
+        }
+    }
+
     public var kind: GitMutationKind {
         switch self {
         case .stage: .stage

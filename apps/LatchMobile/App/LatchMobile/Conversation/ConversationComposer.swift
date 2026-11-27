@@ -20,9 +20,9 @@ struct ConversationSessionActions {
 
 /// The ordinary composer, and the one thing the chat screen is built around.
 ///
-/// The field stays editable whatever the host says, including while offline;
-/// only the send button follows availability, and the reason it is off reads
-/// as a quiet line above the field, not an error.
+/// The field stays editable whatever the host says, including while offline.
+/// While the host cannot take a message the send button queues it instead,
+/// and the reason reads as a quiet line above the field, not an error.
 struct ConversationComposer: View {
     @Binding var draft: String
     @FocusState.Binding var focused: Bool
@@ -230,7 +230,7 @@ struct ConversationComposer: View {
                 if attachments.isUploading {
                     ProgressView()
                 } else {
-                    FloatingControlGlyph(systemImage: "arrow.up")
+                    FloatingControlGlyph(systemImage: queues ? "clock.arrow.circlepath" : "arrow.up")
                 }
             }
             .foregroundStyle(canSubmit ? Color.white : Color.secondary)
@@ -238,7 +238,7 @@ struct ConversationComposer: View {
         .buttonStyle(.plain)
         .disabled(!canSubmit)
         .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: canSubmit)
-        .accessibilityLabel(attachments.isUploading ? "Sending attachments" : "Send")
+        .accessibilityLabel(attachments.isUploading ? "Sending attachments" : queues ? "Queue message" : "Send")
         .accessibilityHint(presentation.notice?.title ?? "")
         .accessibilityIdentifier("conversation.composer.send")
     }
@@ -259,9 +259,15 @@ struct ConversationComposer: View {
         !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.items.isEmpty
     }
 
+    /// Whether the button queues the message rather than sending it now.
+    /// Files are never queued, so with any attached the button waits.
+    private var queues: Bool {
+        !presentation.canSend && presentation.canQueue && attachments.items.isEmpty
+    }
+
     /// A file alone is a message; text is not required alongside it.
     private var canSubmit: Bool {
-        presentation.canSend
+        (presentation.canSend || queues)
             && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("/") || canUseSlashCommands)
             && !attachments.isUploading
             && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.items.isEmpty)

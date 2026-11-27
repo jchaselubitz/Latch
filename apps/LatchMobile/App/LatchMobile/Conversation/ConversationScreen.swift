@@ -6,6 +6,8 @@ import SwiftUI
 /// Components below take these values and plain closures rather than the
 /// store, so each one can be previewed in any state without a connection.
 struct ConversationScreenContent {
+    /// Messages waiting on this phone for the host to take them, oldest first.
+    var queued: [ConversationQueuedMessage] = []
     var commands: [AdvertisedCommand] = []
     var canUseSlashCommands = false
     var canCancelTurn = false
@@ -48,6 +50,9 @@ struct ConversationScreenActions {
     /// Returns an operation's text to the draft.
     var edit: (String) -> Void = { _ in }
     var dismiss: (String) -> Void = { _ in }
+    /// Returns a queued message's text to the draft.
+    var editQueued: (String) -> Void = { _ in }
+    var removeQueued: (String) -> Void = { _ in }
     var resolve: (_ requestID: String, _ choice: String) -> Void = { _, _ in }
     var resolveOption: (String, String, String?, [String: ConversationJSONValue]?) -> Void = { _, _, _, _ in }
     var resolveQuestions: (_ requestID: String, _ answers: [String: String]) -> Void = { _, _ in }
@@ -89,6 +94,7 @@ extension ConversationScreenContent {
             connectionError: store.connectionError,
             skippedUpdates: diagnostics.droppedItems + diagnostics.undecodableFrames
         )
+        queued = store.queuedMessages
         backgroundTaskCount = store.state?.backgroundWork?.count ?? 0
         sessionFacts = ConversationSessionFacts.line(store.state)
         canCancelTurn = store.canCancelTurn
@@ -131,6 +137,8 @@ extension ConversationScreenActions {
             retry: { store.retry($0) },
             edit: { store.editOperation($0) },
             dismiss: { store.dismissOperation($0) },
+            editQueued: { store.editQueuedMessage($0) },
+            removeQueued: { store.removeQueuedMessage($0) },
             resolve: { store.resolve(requestID: $0, choice: $1) },
             resolveOption: { store.resolve(requestID: $0, optionID: $1, text: $2, form: $3) },
             resolveQuestions: { store.resolve(requestID: $0, answers: $1) }
@@ -221,6 +229,11 @@ struct ConversationScreen: View {
             }
             if !content.operations.isEmpty {
                 ConversationOperationRows(operations: content.operations, actions: actions)
+            }
+            if !content.queued.isEmpty {
+                ConversationQueuedRows(messages: content.queued, actions: actions)
+                    .frame(maxWidth: ConversationTranscript.maxColumnWidth)
+                    .frame(maxWidth: .infinity)
             }
             if let request = content.transcript.pendingRequest {
                 ConversationRequestControls(

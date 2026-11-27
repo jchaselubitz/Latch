@@ -9,6 +9,7 @@ use std::collections::HashMap;
 
 use crate::cli::serve::contract::{
     GitChangeArea, GitChangeKind, GitHead, GitOperation, GitStatusEntry, GitUpstream,
+    GitWorktreeSummary,
 };
 
 /// Most entries one status response carries. Past this the phone is told how
@@ -156,6 +157,61 @@ fn parse_header(field: &[u8], branch: &mut Branch) {
         }
         _ => {}
     }
+}
+
+pub(super) fn summarize(
+    output: &[u8],
+    complete: bool,
+) -> Result<GitWorktreeSummary, super::GitError> {
+    const MAX_RECORDS: usize = 1000;
+    let mut summary = GitWorktreeSummary {
+        changes_complete: complete,
+        ..GitWorktreeSummary::default()
+    };
+    let mut branch = Branch::default();
+    let mut records = 0;
+    let mut fields = output
+        .split_inclusive(|byte| *byte == 0)
+        .map_while(|field| field.strip_suffix(&[0]));
+    while let Some(field) = fields.next() {
+        if field.starts_with(b"# ") {
+            parse_header(field, &mut branch);
+            continue;
+        }
+        if records == MAX_RECORDS {
+            summary.changes_complete = false;
+            break;
+        }
+        records += 1;
+        match field {
+            [kind @ (b'1' | b'2'), b' ', x, y, b' ', ..] => {
+                // A rename/copy also carries a NUL-terminated original path.
+                if *kind == b'2' && fields.next().is_none() {
+                    summary.changes_complete = false;
+                    break;
+                }
+                let staged = change_kind(*x).is_some();
+                let unstaged = change_kind(*y).is_some();
+                summary.staged += u32::from(staged);
+                summary.unstaged += u32::from(unstaged);
+                if (*x != b'.' && !staged) || (*y != b'.' && !unstaged) {
+                    summary.changes_complete = false;
+                }
+            }
+            [b'u', b' ', ..] => summary.conflicted += 1,
+            [b'?', b' ', ..] => summary.untracked += 1,
+            _ => summary.changes_complete = false,
+        }
+    }
+    if branch.head.as_ref().is_some_and(|name| name.len() > 4096) {
+        return Err(super::GitError::Failed);
+    }
+    summary.branch = branch.head;
+    if let Some((ahead, behind)) = branch.ahead_behind {
+        summary.ahead = Some(ahead);
+        summary.behind = Some(behind);
+    }
+    Ok(summary)
 }
 
 fn is_object_id(value: &str) -> bool {

@@ -280,6 +280,17 @@ pub fn list_devices(home: &LatchHome) -> anyhow::Result<Vec<DeviceSummary>> {
     Ok(store.devices.iter().map(summary).collect())
 }
 
+/// Recheck the stored authority for a scoped read at the loopback gateway.
+pub(crate) fn control_grant_revision(home: &LatchHome, device_id: &str) -> Option<u64> {
+    ensure_enabled(&Paths::new(home)).ok()?;
+    list_devices(home).ok()?.into_iter().find_map(|device| {
+        (device.device_id == device_id
+            && !device.revoked
+            && device.permission == DevicePermission::Control)
+            .then_some(device.grant_revision)
+    })
+}
+
 /// Changes a controller grant and advances its revision.
 pub fn grant(
     home: &LatchHome,
@@ -560,7 +571,7 @@ fn read_private_bytes(path: &Path) -> anyhow::Result<Vec<u8>> {
     fs::read(path).with_context(|| format!("cannot read {}", path.display()))
 }
 
-fn read_json_or_default<T: for<'de> Deserialize<'de> + Default>(path: &Path) -> anyhow::Result<T> {
+pub(super) fn read_json_or_default<T: for<'de> Deserialize<'de> + Default>(path: &Path) -> anyhow::Result<T> {
     if path.exists() {
         read_json(path)
     } else {
@@ -568,7 +579,7 @@ fn read_json_or_default<T: for<'de> Deserialize<'de> + Default>(path: &Path) -> 
     }
 }
 
-fn write_json<T: Serialize>(path: &Path, value: &T) -> anyhow::Result<()> {
+pub(super) fn write_json<T: Serialize>(path: &Path, value: &T) -> anyhow::Result<()> {
     let mut bytes = serde_json::to_vec_pretty(value)?;
     bytes.push(b'\n');
     write_bytes_atomic(path, &bytes)
@@ -693,7 +704,7 @@ fn fill_random(bytes: &mut [u8]) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn random_hex(bytes: usize) -> anyhow::Result<String> {
+pub(crate) fn random_hex(bytes: usize) -> anyhow::Result<String> {
     let mut data = vec![0_u8; bytes];
     fill_random(&mut data)?;
     Ok(crate::hex::encode(&data))

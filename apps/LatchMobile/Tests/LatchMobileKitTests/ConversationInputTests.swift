@@ -290,6 +290,82 @@ final class ConversationInputTests: XCTestCase {
         XCTAssertTrue(store.operations.isEmpty)
     }
 
+    // MARK: Queue
+
+    private func userMessage(_ id: String, ordinal: UInt64, text: String) -> ConversationItem {
+        ConversationItem(id: id, ordinal: ordinal, createdAt: "2026-09-21T00:00:00Z", kind: .message(role: "user", text: text, status: .observed))
+    }
+
+    func testMessagesSentWhileTheAgentWorksAreQueuedAndGoOutOneAtATime() throws {
+        let store = try store(state: state(phase: "working", canSend: false, sendReason: "agent is working"))
+        store.send(text: "first")
+        store.send(text: "  second  ")
+        XCTAssertEqual(store.queuedMessages.map(\.text), ["first", "second"])
+        XCTAssertTrue(store.operations.isEmpty, "nothing reaches the host while it cannot take a message")
+
+        store.receive(.message(.stateChanged(generation: "g", revision: 2, state: state())))
+        XCTAssertEqual(store.operations.map(\.text), ["first"])
+        XCTAssertEqual(store.queuedMessages.map(\.text), ["second"], "the next waits for the first to land")
+
+        let first = try XCTUnwrap(store.operations.first)
+        store.receive(.message(.operationResult(operationId: first.id, status: "accepted", itemId: "u1", reason: nil)))
+        XCTAssertEqual(store.queuedMessages.map(\.text), ["second"])
+
+        store.receive(.message(.itemsUpserted(generation: "g", revision: 3, items: [userMessage("u1", ordinal: 1, text: "first")])))
+        XCTAssertEqual(store.operations.map(\.text), ["second"])
+        XCTAssertTrue(store.queuedMessages.isEmpty)
+    }
+
+    func testASendBehindAQueueJoinsItsBack() throws {
+        let store = try store(state: state(phase: "working", canSend: false, sendReason: "agent is working"))
+        store.send(text: "first")
+        store.receive(.state(.reconnecting(attempt: 1)))
+        store.receive(.message(.stateChanged(generation: "g", revision: 2, state: state())))
+        XCTAssertEqual(store.queuedMessages.map(\.text), ["first"], "a reconnecting socket holds the queue")
+
+        store.send(text: "second")
+        XCTAssertEqual(store.queuedMessages.map(\.text), ["first", "second"])
+
+        store.receive(.state(.open))
+        XCTAssertEqual(store.operations.map(\.text), ["first"])
+        XCTAssertEqual(store.queuedMessages.map(\.text), ["second"])
+    }
+
+    func testQueuedMessagesCanBeEditedOrRemoved() throws {
+        let store = try store(state: state(phase: "working", canSend: false, sendReason: "agent is working"))
+        store.send(text: "keep")
+        store.send(text: "fix me")
+        store.send(text: "drop")
+        let ids = store.queuedMessages.map(\.id)
+
+        store.draft = "typed"
+        store.editQueuedMessage(ids[1])
+        XCTAssertEqual(store.draft, "typed\n\nfix me")
+        store.removeQueuedMessage(ids[2])
+        XCTAssertEqual(store.queuedMessages.map(\.text), ["keep"])
+
+        store.draft = ""
+        store.editQueuedMessage(ids[0])
+        XCTAssertEqual(store.draft, "keep")
+        XCTAssertTrue(store.queuedMessages.isEmpty)
+    }
+
+    func testBlockedComposerQueuesAndAReadyOneSends() {
+        let working = ConversationComposerPresentation.derive(
+            viewState: .working, state: state(phase: "working", canSend: false, sendReason: "agent is working"),
+            canSend: false, sendReason: "agent is working", connectionError: nil
+        )
+        XCTAssertTrue(working.canQueue)
+        let offline = ConversationComposerPresentation.derive(
+            viewState: .disconnected, state: state(), canSend: true, sendReason: nil, connectionError: nil
+        )
+        XCTAssertTrue(offline.canQueue)
+        let ready = ConversationComposerPresentation.derive(
+            viewState: .ready, state: state(), canSend: true, sendReason: nil, connectionError: nil
+        )
+        XCTAssertFalse(ready.canQueue)
+    }
+
     // MARK: Draft
 
     func testTheDraftSurvivesAReconnect() throws {

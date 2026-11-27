@@ -43,6 +43,20 @@ public struct ConversationOperation: Codable, Equatable, Identifiable, Sendable 
     public var optimisticItemID: String { "operation:\(id)" }
 }
 
+/// A message the person sent while the agent could not take one. It waits on
+/// this phone, where it can still be edited or removed, and goes out by
+/// itself, oldest first, once the host can take a message again. Like the
+/// draft it is kept in memory only: nothing has reached the host yet.
+public struct ConversationQueuedMessage: Equatable, Identifiable, Sendable {
+    public let id: String
+    public let text: String
+
+    public init(id: String = UUID().uuidString, text: String) {
+        self.id = id
+        self.text = text
+    }
+}
+
 public enum ConversationResolveStatus: Equatable, Sendable {
     /// Sent; the host has not answered yet.
     case sending

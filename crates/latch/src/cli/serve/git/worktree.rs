@@ -49,12 +49,15 @@ pub(crate) fn display_name(root: &Path) -> String {
 
 /// Resolves a caller-supplied absolute folder to its working tree.
 pub(crate) async fn resolve(path: &str) -> Result<Worktree, GitError> {
-    let folder = directory::canonical_directory_from_str(path).map_err(|error| match error {
+    resolve_canonical(&canonical_folder(path)?).await
+}
+
+pub(super) fn canonical_folder(path: &str) -> Result<PathBuf, GitError> {
+    directory::canonical_directory_from_str(path).map_err(|error| match error {
         BrowseError::UnavailablePath => GitError::UnavailablePath,
         BrowseError::UnreadableDirectory => GitError::UnreadableDirectory,
         _ => GitError::InvalidPath,
-    })?;
-    resolve_canonical(&folder).await
+    })
 }
 
 /// Resolves an already-canonical directory.

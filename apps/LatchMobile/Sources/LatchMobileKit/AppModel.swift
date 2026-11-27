@@ -55,10 +55,30 @@ public final class AppModel {
 
     // MARK: - Observable state
 
-    public internal(set) var linkState: LinkState = .unlinked
+    public internal(set) var linkState: LinkState = .unlinked {
+        didSet {
+            guard case .linked(let previous) = oldValue, previous.endpoints.gitWorktreeReads else { return }
+            if case .linked(let current) = linkState,
+               previous.gatewayInstanceId == current.gatewayInstanceId,
+               current.endpoints.gitWorktreeReads,
+               !previous.endpoints.gitWorktreeSummaries || current.endpoints.gitWorktreeSummaries,
+               !previous.endpoints.gitWorktreeWrites || current.endpoints.gitWorktreeWrites,
+               !previous.endpoints.gitWorktreePreviews || current.endpoints.gitWorktreePreviews {
+                return
+            }
+            scopedReadGeneration &+= 1
+        }
+    }
 
     /// The link owner's latest immutable snapshot, for Settings.
-    public internal(set) var linkSnapshot = RemoteLinkSnapshot()
+    public internal(set) var linkSnapshot = RemoteLinkSnapshot() {
+        didSet {
+            if oldValue.state == .ready,
+               linkSnapshot.state != .ready || oldValue.generation != linkSnapshot.generation {
+                scopedReadGeneration &+= 1
+            }
+        }
+    }
 
     /// The session list is from before the current interruption.
     public internal(set) var sessionsStale = false
@@ -67,7 +87,14 @@ public final class AppModel {
     /// newest last, bounded.
     public internal(set) var recentStages: [LinkStageSample] = []
 
-    public internal(set) var gateway: LatchGateway?
+    public internal(set) var gateway: LatchGateway? {
+        didSet {
+            if oldValue !== gateway {
+                scopedReadReadyGeneration = nil
+                scopedReadGeneration &+= 1
+            }
+        }
+    }
 
     /// Whether a gateway has been built for the paired computer since the
     /// last unlink. It stays set across a suspension, when `gateway` is nil.
@@ -189,7 +216,26 @@ public final class AppModel {
 
     var coordinatorObservation: Task<Void, Never>?
 
-    var pairedDevice: PairedDeviceRecord?
+    var pairedDevice: PairedDeviceRecord? {
+        didSet {
+            guard let previous = oldValue, previous.isActive, previous.permission == .control else { return }
+            if let current = pairedDevice, current.isActive, current.permission == .control,
+               previous.deviceId == current.deviceId,
+               previous.devicePublicKey == current.devicePublicKey,
+               previous.mac.deviceId == current.mac.deviceId,
+               previous.mac.publicKey == current.mac.publicKey,
+               previous.pairedAt == current.pairedAt {
+                return
+            }
+            scopedReadGeneration &+= 1
+            terminalUnlock.lock()
+        }
+    }
+
+    /// A scoped read interaction's replies are valid only in the generation
+    /// in which the SDK issued them.
+    var scopedReadGeneration = 0
+    var scopedReadReadyGeneration: Int?
 
     /// Which link generation discovery last ran for. Discovery runs once per
     /// new authenticated link, never per screen.

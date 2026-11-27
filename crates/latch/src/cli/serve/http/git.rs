@@ -11,7 +11,8 @@ use crate::cli::json::SessionSummary;
 use crate::cli::serve::contract::{
     GitChangeArea, GitCommitRequest, GitCreateBranchRequest, GitFetchRequest, GitIndexRequest,
     GitOperationControlRequest, GitPreconditions, GitPushReconcileRequest, GitPushReconciliation,
-    GitPushRequest, GitSwitchBranchRequest, GitUpdateRequest,
+    GitPushRequest, GitSwitchBranchRequest, GitUpdateRequest, GitWorktreeSummaries,
+    GitWorktreeSummaryError, GitWorktreeSummaryOutcome,
 };
 use crate::cli::serve::git::{
     self, FileTarget, GitError, Mutation, MutationError, Selection, Submitted,
@@ -58,12 +59,16 @@ pub(super) struct FolderQuery {
 #[derive(serde::Deserialize)]
 pub(super) struct SyncQuery {
     path: Option<String>,
+    #[serde(rename = "worktreeRef")]
+    worktree_ref: Option<String>,
     cursor: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
 pub(super) struct PushQuery {
     path: Option<String>,
+    #[serde(rename = "worktreeRef")]
+    worktree_ref: Option<String>,
     remote: Option<String>,
     destination: Option<String>,
     cursor: Option<String>,
@@ -72,6 +77,27 @@ pub(super) struct PushQuery {
 #[derive(serde::Deserialize)]
 pub(super) struct DiffQuery {
     path: Option<String>,
+    file: Option<String>,
+    area: Option<String>,
+    cursor: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct WorktreeQuery {
+    worktree_ref: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct WorktreeSummariesQuery {
+    worktree_refs: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct WorktreeDiffQuery {
+    worktree_ref: Option<String>,
     file: Option<String>,
     area: Option<String>,
     cursor: Option<String>,
@@ -126,23 +152,177 @@ pub(super) async fn git_status(
 pub(super) async fn git_diff(Query(query): Query<DiffQuery>) -> Result<Response, ApiError> {
     let path = required(query.path, "path")?;
     let file = required(query.file, "file")?;
-    let area = match required(query.area, "area")?.as_str() {
-        "conflicted" => GitChangeArea::Conflicted,
-        "staged" => GitChangeArea::Staged,
-        "unstaged" => GitChangeArea::Unstaged,
-        "untracked" => GitChangeArea::Untracked,
-        _ => {
-            return Err(ApiError::coded(
-                StatusCode::BAD_REQUEST,
-                "invalid_request",
-                "area must be conflicted, staged, unstaged, or untracked",
-            ))
-        }
-    };
+    let area = diff_area(query.area)?;
     let diff = git::file_diff(&path, &file, area, query.cursor.as_deref())
         .await
         .map_err(map_git_error)?;
     bounded_json(StatusCode::OK, diff)
+}
+
+fn diff_area(area: Option<String>) -> Result<GitChangeArea, ApiError> {
+    match required(area, "area")?.as_str() {
+        "conflicted" => Ok(GitChangeArea::Conflicted),
+        "staged" => Ok(GitChangeArea::Staged),
+        "unstaged" => Ok(GitChangeArea::Unstaged),
+        "untracked" => Ok(GitChangeArea::Untracked),
+        _ => Err(invalid(
+            "area must be conflicted, staged, unstaged, or untracked",
+        )),
+    }
+}
+
+fn paired_device(device: &DeviceContext) -> Result<&str, ApiError> {
+    device
+        .0
+        .as_deref()
+        .ok_or_else(|| map_git_error(GitError::WorktreeAccessDenied))
+}
+
+fn worktree_reference(value: Option<String>) -> Result<String, ApiError> {
+    let reference = required(value, "worktreeRef")?;
+    if !is_hex(&reference, 64..=64) {
+        return Err(invalid("worktreeRef is malformed"));
+    }
+    Ok(reference)
+}
+
+fn scoped_json(value: impl serde::Serialize) -> Result<Response, ApiError> {
+    let mut response = bounded_json(StatusCode::OK, value)?;
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    Ok(response)
+}
+
+pub(super) async fn git_worktree_open(
+    State(state): State<AppState>,
+    Extension(device): Extension<DeviceContext>,
+    Query(query): Query<FolderQuery>,
+) -> Result<Response, ApiError> {
+    let path = required(query.path, "path")?;
+    let opened = state
+        .worktrees
+        .open(&state.home, paired_device(&device)?, path)
+        .await
+        .map_err(map_git_error)?;
+    scoped_json(opened)
+}
+
+pub(super) async fn git_worktree_status(
+    State(state): State<AppState>,
+    Extension(device): Extension<DeviceContext>,
+    Query(query): Query<WorktreeQuery>,
+) -> Result<Response, ApiError> {
+    let reference = worktree_reference(query.worktree_ref)?;
+    let binding = state
+        .worktrees
+        .resolve(&state.home, paired_device(&device)?, &reference)
+        .await
+        .map_err(map_git_error)?;
+    let sessions = running_sessions(&state).await?;
+    let status = git::worktree_status(&binding.worktree, &sessions).await;
+    binding.validate(&state.home).await.map_err(map_git_error)?;
+    scoped_json(status.map_err(map_git_error)?)
+}
+
+pub(super) async fn git_worktree_summaries(
+    State(state): State<AppState>,
+    Extension(device): Extension<DeviceContext>,
+    Query(query): Query<WorktreeSummariesQuery>,
+) -> Result<Response, ApiError> {
+    use GitWorktreeSummaryError as Error;
+    use GitWorktreeSummaryOutcome as Outcome;
+
+    const MAX_REFERENCES: usize = 8;
+    // The deadline includes both identity checks and the status scan.
+    const ITEM_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+
+    let device = paired_device(&device)?;
+    let references = required(query.worktree_refs, "worktreeRefs")?;
+    let references: Vec<_> = references.split(',').take(MAX_REFERENCES + 1).collect();
+    if references.len() > MAX_REFERENCES {
+        return Err(invalid("worktreeRefs accepts at most 8 references"));
+    }
+    let revision = git::control_revision(&state.home, device)
+        .await
+        .map_err(map_git_error)?;
+    let mut results = vec![
+        Outcome::Error {
+            error: Error::InvalidRequest
+        };
+        references.len()
+    ];
+    let mut reads = tokio::task::JoinSet::new();
+    for (index, reference) in references.into_iter().enumerate() {
+        if !is_hex(reference, 64..=64) {
+            continue;
+        }
+        let reference = reference.to_owned();
+        let device = device.to_owned();
+        let home = state.home.clone();
+        let worktrees = state.worktrees.clone();
+        reads.spawn(async move {
+            let read = async {
+                let binding = worktrees.resolve(&home, &device, &reference).await?;
+                let summary = git::worktree_summary(&binding.worktree).await;
+                binding.validate(&home).await?;
+                summary
+            };
+            let result = match tokio::time::timeout(ITEM_DEADLINE, read).await {
+                Ok(Ok(summary)) => Outcome::Ok { summary },
+                result => {
+                    let error = match result {
+                        Err(_) | Ok(Err(GitError::TimedOut)) => Error::GitTimeout,
+                        Ok(Err(GitError::StaleWorktreeReference)) => Error::StaleWorktreeRef,
+                        Ok(Err(GitError::WorktreeAccessDenied)) => Error::WorktreeAccessDenied,
+                        Ok(Err(GitError::GitUnavailable)) => Error::GitUnavailable,
+                        _ => Error::GitFailed,
+                    };
+                    Outcome::Error { error }
+                }
+            };
+            (index, result)
+        });
+    }
+    while let Some(result) = reads.join_next().await {
+        let (index, result) = result.map_err(|_| super::internal("read worktree summaries"))?;
+        results[index] = result;
+    }
+    // A grant change while any row is in flight invalidates the entire response.
+    if git::control_revision(&state.home, device)
+        .await
+        .map_err(map_git_error)?
+        != revision
+    {
+        return Err(map_git_error(GitError::WorktreeAccessDenied));
+    }
+    scoped_json(GitWorktreeSummaries { results })
+}
+
+pub(super) async fn git_worktree_diff(
+    State(state): State<AppState>,
+    Extension(device): Extension<DeviceContext>,
+    Query(query): Query<WorktreeDiffQuery>,
+) -> Result<Response, ApiError> {
+    let reference = worktree_reference(query.worktree_ref)?;
+    let file = required(query.file, "file")?;
+    let area = diff_area(query.area)?;
+    let binding = state
+        .worktrees
+        .resolve(&state.home, paired_device(&device)?, &reference)
+        .await
+        .map_err(map_git_error)?;
+    let diff = git::scoped_diff(
+        &binding.worktree,
+        &reference,
+        &file,
+        area,
+        query.cursor.as_deref(),
+    )
+    .await;
+    binding.validate(&state.home).await.map_err(map_git_error)?;
+    scoped_json(diff.map_err(map_git_error)?)
 }
 
 /// Stable codes and sentences the phone can show. None of them names a path
@@ -210,11 +390,85 @@ pub(super) fn map_git_error(error: GitError) -> ApiError {
             "stale_cursor",
             "The file changed while you were reading it. Reload the diff.",
         ),
+        GitError::WorktreeRootRequired => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "worktree_root_required",
+            "Choose the root of the Git working tree.",
+        ),
+        GitError::StaleWorktreeReference => (
+            StatusCode::CONFLICT,
+            "stale_worktree_ref",
+            "This worktree reference is no longer valid. Open the worktree again.",
+        ),
+        GitError::WorktreeAccessDenied => (
+            StatusCode::FORBIDDEN,
+            "worktree_access_denied",
+            "An active paired device with Control access is required.",
+        ),
     };
     ApiError::coded(status, code, message)
 }
 
-pub(super) async fn git_branches(Query(query): Query<FolderQuery>) -> Result<Response, ApiError> {
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct BranchQuery {
+    path: Option<String>,
+    worktree_ref: Option<String>,
+}
+
+fn preview_reference(
+    path: &Option<String>,
+    reference: Option<String>,
+) -> Result<Option<String>, ApiError> {
+    match (path, reference) {
+        (Some(_), Some(_)) => Err(invalid("give path or worktreeRef, not both")),
+        (None, Some(reference)) => worktree_reference(Some(reference)).map(Some),
+        (_, None) => Ok(None),
+    }
+}
+
+// A scoped page cursor is valid only with the reference that issued it.
+fn preview_cursor<'a>(
+    reference: Option<&str>,
+    cursor: Option<&'a str>,
+    maximum: usize,
+) -> Result<Option<&'a str>, ApiError> {
+    let Some(cursor) = cursor else {
+        return Ok(None);
+    };
+    let cursor = match reference {
+        Some(reference) => {
+            let (owner, cursor) = cursor
+                .split_once(':')
+                .ok_or_else(|| map_git_error(GitError::StaleCursor))?;
+            if owner != reference {
+                return Err(map_git_error(GitError::StaleCursor));
+            }
+            cursor
+        }
+        None => cursor,
+    };
+    if cursor.len() > maximum {
+        return Err(invalid("cursor is malformed"));
+    }
+    Ok(Some(cursor))
+}
+
+pub(super) async fn git_branches(
+    State(state): State<AppState>,
+    Extension(device): Extension<DeviceContext>,
+    Query(query): Query<BranchQuery>,
+) -> Result<Response, ApiError> {
+    if let Some(reference) = preview_reference(&query.path, query.worktree_ref)? {
+        let binding = state
+            .worktrees
+            .resolve(&state.home, paired_device(&device)?, &reference)
+            .await
+            .map_err(map_git_error)?;
+        let list = git::worktree_branches(&binding.worktree).await;
+        binding.validate(&state.home).await.map_err(map_git_error)?;
+        return scoped_json(list.map_err(map_git_error)?);
+    }
     let path = required(query.path, "path")?;
     let list = git::branches(&path).await.map_err(map_git_error)?;
     bounded_json(StatusCode::OK, list)
@@ -248,6 +502,16 @@ fn is_hex(value: &str, lengths: std::ops::RangeInclusive<usize>) -> bool {
 
 fn is_oid(value: &str) -> bool {
     is_hex(value, 40..=64)
+}
+
+fn mutation_target<'a>(state: &'a AppState, path: &'a str) -> Result<git::Target<'a>, ApiError> {
+    match path.strip_prefix("worktree:") {
+        Some(reference) if is_hex(reference, 64..=64) => {
+            Ok(git::Target::Scoped(&state.worktrees, reference))
+        }
+        Some(_) => Err(invalid("worktreeRef is malformed")),
+        None => Ok(git::Target::Path(path)),
+    }
 }
 
 /// Shape checks shared by every mutation. Nothing here decides whether the
@@ -347,6 +611,11 @@ fn map_mutation_error(error: MutationError) -> ApiError {
             "request_id_conflict",
             "This request id was already used for a different Git action.",
         ),
+        MutationError::Busy => ApiError::coded(
+            StatusCode::CONFLICT,
+            "worktree_busy",
+            "Another change is running in this repository on your Mac. Check again in a moment.",
+        ),
         MutationError::Storage => ApiError::coded(
             StatusCode::INTERNAL_SERVER_ERROR,
             "receipt_unavailable",
@@ -380,7 +649,7 @@ async fn index_change(
             &state.home,
             device.0,
             &request.request_id,
-            &request.path,
+            mutation_target(&state, &request.path)?,
             request.expected,
             mutation,
         )
@@ -433,7 +702,7 @@ pub(super) async fn git_commit(
             &state.home,
             device.0,
             &request.request_id,
-            &request.path,
+            mutation_target(&state, &request.path)?,
             request.expected,
             mutation,
         )
@@ -468,7 +737,7 @@ pub(super) async fn git_create_branch(
             &state.home,
             device.0,
             &request.request_id,
-            &request.path,
+            mutation_target(&state, &request.path)?,
             request.expected,
             mutation,
         )
@@ -498,7 +767,7 @@ pub(super) async fn git_switch_branch(
             &state.home,
             device.0,
             &request.request_id,
-            &request.path,
+            mutation_target(&state, &request.path)?,
             request.expected,
             mutation,
         )
@@ -512,11 +781,23 @@ pub(super) async fn git_receipt(
     State(state): State<AppState>,
     Extension(device): Extension<DeviceContext>,
     Path(request_id): Path<String>,
+    Query(query): Query<WorktreeQuery>,
 ) -> Result<Response, ApiError> {
     if !is_request_id(&request_id) {
         return Err(invalid("requestId must be a UUID"));
     }
-    match git::receipt(&state.home, device.0.as_deref(), &request_id).await {
+    let reference = query
+        .worktree_ref
+        .map(|value| worktree_reference(Some(value)))
+        .transpose()?;
+    match git::receipt(
+        &state.home,
+        device.0.as_deref(),
+        &request_id,
+        reference.as_deref(),
+    )
+    .await
+    {
         Ok(Some(receipt))
             if receipt.state == crate::cli::serve::contract::GitReceiptState::Pending =>
         {
@@ -532,18 +813,29 @@ pub(super) async fn git_receipt(
     }
 }
 
-pub(super) async fn git_sync(Query(query): Query<SyncQuery>) -> Result<Response, ApiError> {
-    let path = required(query.path, "path")?;
-    if query
-        .cursor
-        .as_ref()
-        .is_some_and(|cursor| cursor.len() > 256)
-    {
-        return Err(invalid("cursor is malformed"));
+pub(super) async fn git_sync(
+    State(state): State<AppState>,
+    Extension(device): Extension<DeviceContext>,
+    Query(query): Query<SyncQuery>,
+) -> Result<Response, ApiError> {
+    let reference = preview_reference(&query.path, query.worktree_ref)?;
+    let cursor = preview_cursor(reference.as_deref(), query.cursor.as_deref(), 256)?;
+    if let Some(reference) = reference {
+        let binding = state
+            .worktrees
+            .resolve(&state.home, paired_device(&device)?, &reference)
+            .await
+            .map_err(map_git_error)?;
+        let preview = git::worktree_sync(&binding.worktree, cursor).await;
+        binding.validate(&state.home).await.map_err(map_git_error)?;
+        let mut preview = preview.map_err(map_git_error)?;
+        preview.next_cursor = preview
+            .next_cursor
+            .map(|cursor| format!("{reference}:{cursor}"));
+        return scoped_json(preview);
     }
-    let preview = git::sync(&path, query.cursor.as_deref())
-        .await
-        .map_err(map_git_error)?;
+    let path = required(query.path, "path")?;
+    let preview = git::sync(&path, cursor).await.map_err(map_git_error)?;
     bounded_json(StatusCode::OK, preview)
 }
 
@@ -565,7 +857,7 @@ pub(super) async fn git_fetch(
             &state.home,
             device.0,
             &request.request_id,
-            &request.path,
+            mutation_target(&state, &request.path)?,
             request.expected,
             mutation,
         )
@@ -620,7 +912,7 @@ async fn update(
             &state.home,
             device.0,
             &request.request_id,
-            &request.path,
+            mutation_target(&state, &request.path)?,
             request.expected,
             mutation,
         )
@@ -681,7 +973,7 @@ async fn control(
             &state.home,
             device.0,
             &request.request_id,
-            &request.path,
+            mutation_target(&state, &request.path)?,
             request.expected,
             mutation,
         )
@@ -707,15 +999,13 @@ pub(super) async fn git_abort(
 
 /// `GET /v2/git/push/preview`: what a push would send, as last fetched.
 /// Never contacts the remote.
-pub(super) async fn git_push_preview(Query(query): Query<PushQuery>) -> Result<Response, ApiError> {
-    let path = required(query.path, "path")?;
-    if query
-        .cursor
-        .as_ref()
-        .is_some_and(|cursor| cursor.len() > 512)
-    {
-        return Err(invalid("cursor is malformed"));
-    }
+pub(super) async fn git_push_preview(
+    State(state): State<AppState>,
+    Extension(device): Extension<DeviceContext>,
+    Query(query): Query<PushQuery>,
+) -> Result<Response, ApiError> {
+    let reference = preview_reference(&query.path, query.worktree_ref)?;
+    let cursor = preview_cursor(reference.as_deref(), query.cursor.as_deref(), 512)?;
     let chosen = match (query.remote.as_deref(), query.destination.as_deref()) {
         (None, None) => None,
         (Some(remote), Some(destination)) => {
@@ -729,7 +1019,22 @@ pub(super) async fn git_push_preview(Query(query): Query<PushQuery>) -> Result<R
         }
         _ => return Err(invalid("give remote and destination together")),
     };
-    let preview = git::push_preview(&path, chosen, query.cursor.as_deref())
+    if let Some(reference) = reference {
+        let binding = state
+            .worktrees
+            .resolve(&state.home, paired_device(&device)?, &reference)
+            .await
+            .map_err(map_git_error)?;
+        let preview = git::worktree_push(&binding.worktree, chosen, cursor).await;
+        binding.validate(&state.home).await.map_err(map_git_error)?;
+        let mut preview = preview.map_err(map_git_error)?;
+        preview.next_cursor = preview
+            .next_cursor
+            .map(|cursor| format!("{reference}:{cursor}"));
+        return scoped_json(preview);
+    }
+    let path = required(query.path, "path")?;
+    let preview = git::push_preview(&path, chosen, cursor)
         .await
         .map_err(map_git_error)?;
     bounded_json(StatusCode::OK, preview)
@@ -776,7 +1081,7 @@ pub(super) async fn git_push(
             &state.home,
             device.0,
             &request.request_id,
-            &request.path,
+            mutation_target(&state, &request.path)?,
             request.expected,
             mutation,
         )
@@ -789,13 +1094,25 @@ pub(super) async fn git_push(
 pub(super) async fn git_push_reconcile(
     State(state): State<AppState>,
     Extension(device): Extension<DeviceContext>,
+    Query(query): Query<WorktreeQuery>,
     body: axum::body::Bytes,
 ) -> Result<Response, ApiError> {
     let request: GitPushReconcileRequest = parse_body(&body)?;
     if !is_request_id(&request.request_id) {
         return Err(invalid("requestId must be a UUID"));
     }
-    match git::check_push(&state.home, device.0.as_deref(), &request.request_id).await {
+    let reference = query
+        .worktree_ref
+        .map(|value| worktree_reference(Some(value)))
+        .transpose()?;
+    match git::check_push(
+        &state.home,
+        device.0.as_deref(),
+        &request.request_id,
+        reference.as_deref(),
+    )
+    .await
+    {
         Ok(check) => bounded_json(
             StatusCode::OK,
             GitPushReconciliation {
@@ -825,6 +1142,7 @@ pub(super) async fn git_push_reconcile(
             "worktree_busy",
             "Another change is running in this repository on your Mac. Check again in a moment.",
         )),
+        Err(git::PushCheckError::Scope(error)) => Err(map_mutation_error(error)),
         Err(git::PushCheckError::Storage) => Err(map_mutation_error(MutationError::Storage)),
     }
 }

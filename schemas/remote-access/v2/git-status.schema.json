@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://latch.cooperativ.dev/schemas/remote-access/v2/git-status.schema.json",
   "title": "LatchGitStatusV2",
-  "description": "The Git state of one working tree on the gateway host (GET /v2/git/status?path=, control grant), parsed from `git status --porcelain=v2 -z --branch`. Reading it records the repository on the host's recent list. It never fetches: ahead/behind are against the remote-tracking ref as last fetched, and lastFetchedAt says when that was.",
+  "description": "The Git state of one working tree on the gateway host (Control grant), parsed from `git status --porcelain=v2 -z --branch`. GET /v2/git/status?path= records the repository on the host's recent list. GET /v2/git/worktree/status?worktreeRef= checks an exact worktree reference from the paired device and leaves recents alone. Neither route fetches: ahead/behind are against the remote-tracking ref as last fetched, and lastFetchedAt says when that was.",
   "$defs": {
     "entry": {
       "type": "object",

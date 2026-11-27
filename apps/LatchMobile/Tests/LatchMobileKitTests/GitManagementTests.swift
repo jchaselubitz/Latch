@@ -6,16 +6,22 @@ import XCTest
 /// diffs. Every response here has the shape the Mac's gateway sends.
 @MainActor
 final class GitManagementTests: XCTestCase {
-    private static func capabilities(git: Bool) -> String {
+    private static func capabilities(
+        git: Bool, scoped: Bool = false, summaries: Bool = false, sharedFiles: Bool = false, writes: Bool = false
+    ) -> String {
         let gitKeys = git
             ? #","gitRepositories":true,"gitResolve":true,"gitStatus":true,"gitDiff":true"#
             : ""
+        let scopedKey = scoped ? #","gitWorktreeReads":true"# : ""
+        let summariesKey = summaries ? #","gitWorktreeSummaries":true"# : ""
+        let filesKey = sharedFiles ? #","sharedFiles":true"# : ""
+        let writesKey = writes ? #","gitWorktreeWrites":true,"gitReceipts":true,"gitCommit":true"# : ""
         return """
         {"protocolVersion":2,"productVersion":"2.0.0",
          "capabilities":{"create":true,"openViewer":true,"localAttach":true,
           "cloudAttach":false,"selfUpdate":true,"extensions":[]},
          "endpoints":{"sessions":true,"preview":true,"terminal":true,"conversation":true,
-          "browseDirectories":true,"createSession":true\(gitKeys)},
+          "browseDirectories":true,"createSession":true\(gitKeys)\(scopedKey)\(summariesKey)\(filesKey)\(writesKey)},
          "features":{"exclusiveTerminal":true},"gatewayInstanceId":"gw-a-b",
          "operationRetentionSeconds":600}
         """
@@ -342,6 +348,434 @@ final class GitManagementTests: XCTestCase {
         XCTAssertEqual(query, "path=/Users/person/src/my%20repo&file=2e2e2f&area=staged&cursor=v1-ab-1")
     }
 
+    func testScopedReadsRequireDiscoveryAndCarryOnlyTheWorktreeReferenceAfterOpen() async throws {
+        let link = try GatewayLink(address: "https://mac.local:8787", token: "token")
+        let olderGateway = LatchGateway(link: link, session: StubProtocol.session())
+        do {
+            _ = try await olderGateway.openGitWorktree(path: "/Users/person/my repo")
+            XCTFail("A gateway with only path-based Git must refuse a scoped read")
+        } catch {
+            XCTAssertEqual(error as? LatchError, .endpointUnavailable(.gitWorktreeReads))
+        }
+        XCTAssertFalse(StubProtocol.requestQueries.contains { $0.0.hasPrefix("/v2/git/") })
+
+        StubProtocol.stub(path: "/v2/capabilities", body: Self.capabilities(git: true, scoped: true))
+        let reference = String(repeating: "a", count: 64)
+        StubProtocol.stub(path: "/v2/git/worktree/open", body: """
+        {"worktreeRef":"\(reference)","repository":{"root":"/Users/person/my repo","name":"my repo","kind":"linked_worktree"}}
+        """)
+        StubProtocol.stub(path: "/v2/git/worktree/status", body: Self.status)
+        StubProtocol.stub(path: "/v2/git/worktree/diff", body: Self.diffPage(hunks: [1], total: 2, next: nil))
+        let gateway = LatchGateway(link: link, session: StubProtocol.session())
+        let opened = try await gateway.openGitWorktree(path: "/Users/person/my repo")
+        XCTAssertEqual(opened.repository.kind, .linkedWorktree)
+        XCTAssertEqual(opened.worktreeRef, reference)
+        _ = try await gateway.gitStatus(worktreeRef: opened.worktreeRef)
+        _ = try await gateway.gitDiff(worktreeRef: opened.worktreeRef, fileKey: "77", area: .unstaged, cursor: "v1-ab-1")
+        XCTAssertEqual(StubProtocol.requestQueries.last { $0.0 == "/v2/git/worktree/open" }?.1,
+                       "path=/Users/person/my%20repo")
+        XCTAssertEqual(StubProtocol.requestQueries.last { $0.0 == "/v2/git/worktree/status" }?.1,
+                       "worktreeRef=\(reference)")
+        XCTAssertEqual(StubProtocol.requestQueries.last { $0.0 == "/v2/git/worktree/diff" }?.1,
+                       "worktreeRef=\(reference)&file=77&area=unstaged&cursor=v1-ab-1")
+    }
+
+    func testWorktreeSummariesNegotiateSeparatelyAndDecodeMixedResults() async throws {
+        let link = try GatewayLink(address: "https://mac.local:8787", token: "token")
+        let path = "/v2/git/worktree/summaries"
+        let valid = String(repeating: "a", count: 64)
+        let stale = String(repeating: "b", count: 64)
+        StubProtocol.stub(path: "/v2/capabilities", body: Self.capabilities(git: true, scoped: true))
+        let older = LatchGateway(link: link, session: StubProtocol.session())
+        do {
+            _ = try await older.gitWorktreeSummaries(worktreeRefs: [valid])
+            XCTFail("Scoped reads alone do not advertise summaries")
+        } catch {
+            XCTAssertEqual(error as? LatchError, .endpointUnavailable(.gitWorktreeSummaries))
+        }
+        XCTAssertFalse(StubProtocol.requestQueries.contains { $0.0 == path })
+
+        StubProtocol.stub(path: "/v2/capabilities", body: Self.capabilities(git: true, scoped: true, summaries: true))
+        StubProtocol.stub(path: path, body: """
+        {"results":[
+          {"outcome":"error","error":"stale_worktree_ref"},
+          {"outcome":"ok","summary":{"branch":"main","ahead":null,"behind":null,
+            "staged":1,"unstaged":1,"conflicted":0,"untracked":999,"changesComplete":false}}
+        ]}
+        """)
+        let gateway = LatchGateway(link: link, session: StubProtocol.session())
+        let response = try await gateway.gitWorktreeSummaries(worktreeRefs: [stale, valid])
+        XCTAssertEqual(response.results.count, 2)
+        XCTAssertEqual(response.results.first, .error(.staleWorktreeRef))
+        guard case .ok(let summary) = response.results.last else {
+            return XCTFail("Expected a summary")
+        }
+        XCTAssertEqual(summary.branch, "main")
+        XCTAssertNil(summary.ahead)
+        XCTAssertNil(summary.behind)
+        XCTAssertEqual(summary.untracked, 999)
+        XCTAssertFalse(summary.changesComplete)
+        let query = StubProtocol.requestQueries.last { $0.0 == path }?.1
+        XCTAssertEqual(query?.removingPercentEncoding, "worktreeRefs=\(stale),\(valid)")
+    }
+
+    // MARK: Scoped reads
+
+    func testScopedInteractionNegotiatesBeforePromptingAndKeepsSummariesOptional() async throws {
+        let authenticator = StubDeviceOwnerAuthenticator(approves: false)
+        let model = makePairedModel(authenticator: authenticator)
+        let pairing = pairedRecord(permission: .control)
+        await model.connectPairedDevice(pairing)
+        await assertScopedError(.unsupported(.gitWorktreeReads)) { try await model.beginScopedGitRead() }
+        XCTAssertEqual(authenticator.prompts, 0)
+
+        stubScopedGit(summaries: false)
+        await model.rediscover()
+        XCTAssertTrue(model.advertisesScopedGitReads)
+        XCTAssertFalse(model.advertisesScopedGitSummaries)
+        XCTAssertTrue(model.applyPairedDeviceRecord(pairing.updating(permission: .observe)))
+        await assertScopedError(.accessDenied) { try await model.beginScopedGitRead() }
+        XCTAssertEqual(authenticator.prompts, 0)
+        XCTAssertTrue(model.applyPairedDeviceRecord(pairing))
+        await assertScopedError(.ownerCancelled) { try await model.beginScopedGitRead() }
+        XCTAssertEqual(authenticator.prompts, 1)
+        XCTAssertFalse(StubProtocol.requests.contains { $0.path.hasPrefix("/v2/git/") })
+
+        authenticator.set(approves: true)
+        let interaction = try await model.beginScopedGitRead()
+        let worktree = try await interaction.open(path: Self.scopedRoot)
+        await assertScopedError(.unsupported(.gitWorktreeSummaries)) {
+            try await interaction.summaries(for: [worktree])
+        }
+        XCTAssertFalse(StubProtocol.requests.contains { $0.path == "/v2/git/worktree/summaries" })
+    }
+
+    func testScopedInteractionReadsExactRootsMixedSummariesStatusAndDiffPagesWithOnePrompt() async throws {
+        stubScopedGit()
+        let authenticator = StubDeviceOwnerAuthenticator()
+        let model = makePairedModel(authenticator: authenticator)
+        await model.connectPairedDevice(pairedRecord(permission: .control))
+        let interaction = try await model.beginScopedGitRead()
+        let worktree = try await interaction.open(path: Self.scopedRoot)
+        let secondReference = String(repeating: "b", count: 64)
+        stubScopedOpen(reference: secondReference)
+        let second = try await interaction.open(path: Self.scopedRoot)
+        XCTAssertEqual(worktree.repository.kind, .linkedWorktree)
+        await assertScopedError(.invalidSummaryCount) { try await interaction.summaries(for: []) }
+        await assertScopedError(.invalidSummaryCount) {
+            try await interaction.summaries(for: Array(repeating: worktree, count: 9))
+        }
+        let results = try await interaction.summaries(for: [worktree, second])
+        XCTAssertEqual(results.first, .error(.staleWorktreeRef))
+        guard case .ok(let summary) = results.last else { return XCTFail("Expected a summary") }
+        XCTAssertNil(summary.ahead)
+        XCTAssertFalse(summary.changesComplete)
+        let status = try await interaction.status(for: second)
+        XCTAssertEqual(status.head.branch, "git-ui")
+        let diff = try await interaction.diff(for: second, fileKey: "77", area: .unstaged)
+        _ = try await interaction.diff(for: second, fileKey: "77", area: .unstaged, cursor: diff.nextCursor)
+        XCTAssertEqual(authenticator.prompts, 1)
+        let requests = StubProtocol.requests.filter { $0.path.hasPrefix("/v2/git/") }
+        XCTAssertTrue(requests.allSatisfy { $0.method == "GET" && $0.path.hasPrefix("/v2/git/worktree/") })
+        XCTAssertEqual(requests.filter { $0.path.hasSuffix("/summaries") }.count, 1)
+        XCTAssertEqual(requests.last?.query, "worktreeRef=\(secondReference)&file=77&area=unstaged&cursor=page-two")
+    }
+
+    func testScopedInteractionRejectsLateDiffAfterExplicitInvalidationOrGrantDowngrade() async throws {
+        stubScopedGit()
+        let model = makePairedModel()
+        let pairing = pairedRecord(permission: .control)
+        await model.connectPairedDevice(pairing)
+        for losesGrant in [false, true] {
+            let interaction = try await model.beginScopedGitRead()
+            let worktree = try await interaction.open(path: Self.scopedRoot)
+            let pending = try await holdScopedDiff(interaction, worktree)
+            if losesGrant {
+                XCTAssertTrue(model.applyPairedDeviceRecord(pairing.updating(permission: .interact)))
+                XCTAssertTrue(model.applyPairedDeviceRecord(pairing))
+            } else {
+                interaction.invalidate()
+            }
+            XCTAssertFalse(interaction.isValid)
+            pending.gate.release()
+            await assertScopedError(.invalidated) { try await pending.reply.value }
+        }
+    }
+
+    func testScopedInteractionRejectsLateDiffAfterReconnectAndAcrossSameNameHosts() async throws {
+        stubScopedGit()
+        let model = makePairedModel()
+        let pairing = pairedRecord(permission: .control)
+        await model.connectPairedDevice(pairing)
+        let first = try await model.beginScopedGitRead()
+        let worktree = try await first.open(path: Self.scopedRoot)
+        let pending = try await holdScopedDiff(first, worktree)
+        model.suspendPairedTransport()
+        await assertScopedError(.transportUnavailable) { try await model.beginScopedGitRead() }
+        await model.resumeAfterSuspension()
+        pending.gate.release()
+        await assertScopedError(.invalidated) { try await pending.reply.value }
+
+        let reconnected = try await model.beginScopedGitRead()
+        let reconnectedWorktree = try await reconnected.open(path: Self.scopedRoot)
+        let switched = try await holdScopedDiff(reconnected, reconnectedWorktree)
+        let otherHost = pairedRecord(permission: .control, macID: "mac-2", macKeyByte: "33")
+        XCTAssertEqual(otherHost.mac.displayName, pairing.mac.displayName)
+        await model.connectPairedDevice(otherHost)
+        switched.gate.release()
+        await assertScopedError(.invalidated) { try await switched.reply.value }
+        let second = try await model.beginScopedGitRead()
+        let readsBefore = StubProtocol.requests.count
+        await assertScopedError(.invalidWorktree) { try await second.status(for: worktree) }
+        XCTAssertEqual(StubProtocol.requests.count, readsBefore)
+
+        stubScopedOpen(reference: String(repeating: "c", count: 64))
+        StubProtocol.stub(path: "/v2/git/worktree/status", body: Self.status.replacingOccurrences(of: "git-ui", with: "other-host"))
+        let otherWorktree = try await second.open(path: Self.scopedRoot)
+        let otherStatus = try await second.status(for: otherWorktree)
+        XCTAssertEqual(otherStatus.head.branch, "other-host")
+        XCTAssertEqual(otherWorktree.repository.root, worktree.repository.root)
+        XCTAssertEqual(StubProtocol.requests.last?.headers["Authorization"], "Bearer mac-2")
+    }
+
+    func testScopedErrorsDistinguishStaleCursorAndWorktreeFromHostDenial() async throws {
+        stubScopedGit()
+        let model = makePairedModel()
+        await model.connectPairedDevice(pairedRecord(permission: .control))
+        let interaction = try await model.beginScopedGitRead()
+        let other = try await model.beginScopedGitRead()
+        let worktree = try await interaction.open(path: Self.scopedRoot)
+        StubProtocol.stub(path: "/v2/git/worktree/diff", status: 409, body: #"{"error":"stale_cursor"}"#)
+        await assertScopedError(.staleCursor) { try await interaction.diff(for: worktree, fileKey: "77", area: .unstaged) }
+        let path = "/v2/git/worktree/status"
+        StubProtocol.stub(path: path, status: 409, body: #"{"error":"stale_worktree_ref"}"#)
+        await assertScopedError(.staleWorktree) { try await interaction.status(for: worktree) }
+        XCTAssertTrue(interaction.isValid)
+        let otherWorktree = try await other.open(path: Self.scopedRoot)
+        StubProtocol.stub(path: "/v2/git/worktree/diff", body: Self.diffPage(hunks: [0], total: 1, next: nil))
+        let pending = try await holdScopedDiff(other, otherWorktree)
+        StubProtocol.stub(path: path, status: 403, body: #"{"error":"worktree_access_denied"}"#)
+        await assertScopedError(.accessDenied) { try await interaction.status(for: worktree) }
+        XCTAssertFalse(interaction.isValid)
+        XCTAssertFalse(other.isValid)
+        pending.gate.release()
+        await assertScopedError(.invalidated) { try await pending.reply.value }
+    }
+
+    func testScopedOwnerAuthorizationExpiresEvenIfAnotherInteractionRenewsIt() async throws {
+        stubScopedGit()
+        let clock = MutableClock()
+        let authenticator = StubDeviceOwnerAuthenticator()
+        let model = makePairedModel(authenticator: authenticator, ownerClock: { clock.now })
+        await model.connectPairedDevice(pairedRecord(permission: .control))
+        let old = try await model.beginScopedGitRead()
+        let worktree = try await old.open(path: Self.scopedRoot)
+        clock.advance(601)
+        let current = try await model.beginScopedGitRead()
+        XCTAssertTrue(current.isValid)
+        await assertScopedError(.ownerAuthorizationExpired) { try await old.status(for: worktree) }
+        XCTAssertFalse(old.isValid)
+        XCTAssertEqual(authenticator.prompts, 2)
+    }
+
+    func testScopedGitWritePersistsBeforeSendingAndRecoversAfterColdLaunch() async throws {
+        stubScopedGit()
+        StubProtocol.stub(path: "/v2/capabilities", body: Self.capabilities(git: true, scoped: true, writes: true))
+        let folder = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let file = folder.appending(path: "writes.json")
+        let pairing = pairedRecord(permission: .control)
+        let app = makePairedModel()
+        await app.connectPairedDevice(pairing)
+        XCTAssertTrue(app.advertisesScopedGitWrites)
+        let first = try await app.beginScopedGitWrite(store: PendingGitWriteStore(file: file))
+        let worktree = try await first.worktrees.open(path: Self.scopedRoot)
+        let expected = GitPreconditions(branch: "main", head: nil, index: "reviewed index", worktree: "reviewed worktree")
+        let requestID = UUID()
+        let action = GitMutationAction.commit(GitCommitRequest(
+            requestId: requestID.uuidString, path: Self.scopedRoot, expected: expected,
+            summary: "private commit message", description: nil
+        ))
+        // The mutation response is lost after the request crossed the adapter.
+        let route = "/v2/git/commit"
+        StubProtocol.stub(path: route, status: 502, body: #"{"error":"receipt_unavailable","message":"Lost response"}"#)
+        let gate = StubProtocol.holdNextResponse(path: route)
+        defer { gate.release() }
+        let response = Task { try await first.submit(action, for: worktree) }
+        for _ in 0..<100 {
+            if StubProtocol.requests.contains(where: { $0.path == route }) { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let written = try String(contentsOf: file, encoding: .utf8)
+        let reference = String(repeating: "a", count: 64)
+        XCTAssertTrue(written.contains(requestID.uuidString))
+        XCTAssertTrue(written.contains(reference))
+        XCTAssertFalse(written.contains("private commit message"))
+        XCTAssertFalse(written.contains("reviewed index"))
+        XCTAssertTrue(StubProtocol.requests.last?.body.contains("worktree:\(reference)") == true)
+        XCTAssertTrue(StubProtocol.requests.last?.body.contains("reviewed index") == true)
+        gate.release()
+        do {
+            _ = try await response.value
+            XCTFail("Expected a lost response")
+        } catch {}
+
+        let cold = makePairedModel()
+        await cold.connectPairedDevice(pairing)
+        let recovery = try await cold.beginScopedGitWrite(store: PendingGitWriteStore(file: file))
+        let entries = try await recovery.pendingWrites()
+        let pending = try XCTUnwrap(entries.first)
+        XCTAssertEqual(pending.requestID, requestID)
+        XCTAssertEqual(pending.operation, .commit)
+
+        let otherApp = makePairedModel()
+        await otherApp.connectPairedDevice(pairedRecord(permission: .control, macID: "mac-2", macKeyByte: "33"))
+        let otherScope = try await otherApp.beginScopedGitWrite(store: PendingGitWriteStore(file: file))
+        let otherWrites = try await otherScope.pendingWrites()
+        XCTAssertTrue(otherWrites.isEmpty)
+        do {
+            _ = try await otherScope.recover(pending)
+            XCTFail("A different authenticated Mac cannot recover this write")
+        } catch {
+            XCTAssertEqual(error as? ScopedGitWriteError, .unknownPendingWrite)
+        }
+
+        let receiptRoute = "/v2/git/receipts/\(requestID.uuidString)"
+        StubProtocol.stub(path: receiptRoute, status: 404, body: #"{"error":"receipt_not_found","message":"Unknown"}"#)
+        let missing = try await recovery.recover(pending)
+        XCTAssertNil(missing)
+        let stillPending = try await recovery.pendingWrites()
+        XCTAssertEqual(stillPending, [pending])
+        for state in ["pending", "uncertain", "completed"] {
+            StubProtocol.stub(path: receiptRoute, body: """
+            {"requestId":"\(requestID.uuidString)","root":"\(Self.scopedRoot)","operation":"commit",
+             "state":"\(state)","acceptedAt":"2026-11-27T12:00:00Z","finishedAt":null,"outcome":null}
+            """)
+            let receipt = try await recovery.recover(pending)
+            XCTAssertEqual(receipt?.state.rawValue, state)
+            let acknowledged = try await recovery.acknowledge(pending)
+            XCTAssertEqual(acknowledged, state == "completed")
+            XCTAssertEqual(StubProtocol.requests.last?.query, "worktreeRef=\(reference)")
+        }
+        let finished = try await recovery.pendingWrites()
+        XCTAssertTrue(finished.isEmpty)
+        XCTAssertEqual(StubProtocol.requests.filter { $0.method == "POST" && $0.path == route }.count, 1)
+    }
+
+    private static let scopedRoot = "/Users/person/src/latch"
+
+    private func stubScopedGit(summaries: Bool = true) {
+        StubProtocol.stub(path: "/v2/capabilities", body: Self.capabilities(git: true, scoped: true, summaries: summaries))
+        stubScopedOpen(reference: String(repeating: "a", count: 64))
+        StubProtocol.stub(path: "/v2/git/worktree/status", body: Self.status)
+        StubProtocol.stub(path: "/v2/git/worktree/diff", body: Self.diffPage(hunks: [0], total: 2, next: "page-two"))
+        StubProtocol.stub(path: "/v2/git/worktree/summaries", body: """
+        {"results":[{"outcome":"error","error":"stale_worktree_ref"},
+          {"outcome":"ok","summary":{"branch":"main","ahead":null,"behind":null,
+           "staged":1,"unstaged":1,"conflicted":0,"untracked":999,"changesComplete":false}}]}
+        """)
+    }
+
+    private func stubScopedOpen(reference: String) {
+        StubProtocol.stub(path: "/v2/git/worktree/open", body: """
+        {"worktreeRef":"\(reference)","repository":{"root":"\(Self.scopedRoot)","name":"latch","kind":"linked_worktree"}}
+        """)
+    }
+
+    private func assertScopedError<Value>(
+        _ expected: ScopedGitReadError, file: StaticString = #filePath, line: UInt = #line,
+        operation: () async throws -> Value
+    ) async {
+        do {
+            _ = try await operation()
+            XCTFail("Expected \(expected)", file: file, line: line)
+        } catch {
+            XCTAssertEqual(error as? ScopedGitReadError, expected, file: file, line: line)
+        }
+    }
+
+    private func holdScopedDiff(
+        _ interaction: ScopedGitReadInteraction, _ worktree: ScopedGitWorktree
+    ) async throws -> (gate: StubProtocol.ResponseGate, reply: Task<GitFileDiff, Error>) {
+        let path = "/v2/git/worktree/diff"
+        let count = StubProtocol.requests.filter { $0.path == path }.count
+        let gate = StubProtocol.holdNextResponse(path: path)
+        let reply = Task { try await interaction.diff(for: worktree, fileKey: "77", area: .unstaged) }
+        for _ in 0..<100 {
+            if StubProtocol.requests.filter({ $0.path == path }).count > count { return (gate, reply) }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        gate.release()
+        reply.cancel()
+        throw ScopedGitReadError.transportUnavailable
+    }
+
+    func testSharedFilesNegotiationPreviewOutcomesAndStaleCursor() async throws {
+        let authenticator = StubDeviceOwnerAuthenticator()
+        let model = makePairedModel(authenticator: authenticator)
+        await model.connectPairedDevice(pairedRecord(permission: .control))
+        do {
+            _ = try await model.beginSharedFilesRead()
+            XCTFail("Expected older gateway to be unavailable")
+        } catch {
+            XCTAssertEqual(error as? SharedFilesReadError, .unsupported)
+        }
+        XCTAssertEqual(authenticator.prompts, 0)
+        StubProtocol.stub(path: "/v2/capabilities", body: Self.capabilities(git: false, sharedFiles: true))
+        await model.rediscover()
+        let rootID = String(repeating: "a", count: 64)
+        StubProtocol.stub(path: "/v2/files/roots", body: """
+        {"roots":[{"rootId":"\(rootID)","name":"Project"}]}
+        """)
+        let interaction = try await model.beginSharedFilesRead()
+        let roots = try await interaction.roots()
+        XCTAssertEqual(roots.first?.id, rootID)
+        let preview = "/v2/files/preview"
+        StubProtocol.stub(path: preview, body: #"{"kind":"truncated","text":"hello"}"#)
+        let truncated = try await interaction.preview(rootID: rootID, path: "dir/a+b.txt")
+        XCTAssertEqual(truncated, .truncated("hello"))
+        XCTAssertTrue(StubProtocol.requestQueries.last?.1?.contains("a%2Bb.txt") == true)
+        StubProtocol.stub(path: preview, body: #"{"kind":"binary"}"#)
+        let binary = try await interaction.preview(rootID: rootID, path: "image")
+        XCTAssertEqual(binary, .binary)
+        let directory = "/v2/files/directory"
+        StubProtocol.stub(path: directory, status: 409, body: #"{"error":"stale_cursor"}"#)
+        do {
+            _ = try await interaction.directory(rootID: rootID, cursor: "opaque")
+            XCTFail("Expected stale cursor")
+        } catch {
+            XCTAssertEqual(error as? SharedFilesReadError, .staleCursor)
+        }
+        XCTAssertTrue(interaction.isValid)
+        XCTAssertEqual(authenticator.prompts, 1)
+    }
+
+    func testSharedFilesDiscardsPendingPreviewOnGrantDowngrade() async throws {
+        StubProtocol.stub(path: "/v2/capabilities", body: Self.capabilities(git: false, sharedFiles: true))
+        let model = makePairedModel()
+        let pairing = pairedRecord(permission: .control)
+        await model.connectPairedDevice(pairing)
+        let interaction = try await model.beginSharedFilesRead()
+        let path = "/v2/files/preview"
+        StubProtocol.stub(path: path, body: #"{"kind":"text","text":"Late file content"}"#)
+        let gate = StubProtocol.holdNextResponse(path: path)
+        let reply = Task { try await interaction.preview(rootID: "root", path: "README.md") }
+        for _ in 0..<100 {
+            if StubProtocol.requests.contains(where: { $0.path == path }) { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertTrue(StubProtocol.requests.contains { $0.path == path })
+        XCTAssertTrue(model.applyPairedDeviceRecord(pairing.updating(permission: .observe)))
+        gate.release()
+        do {
+            _ = try await reply.value
+            XCTFail("Expected preview to be discarded")
+        } catch {
+            XCTAssertEqual(error as? SharedFilesReadError, .invalidated)
+        }
+        XCTAssertFalse(interaction.isValid)
+    }
+
     // MARK: Folder picker
 
     func testChooseRepositoryResolvesTheCurrentFolder() async throws {
@@ -367,27 +801,30 @@ final class GitManagementTests: XCTestCase {
 
     private func makePairedModel(
         authenticator: StubDeviceOwnerAuthenticator = StubDeviceOwnerAuthenticator(),
-        terminalConnector: AppModel.TerminalConnecting? = nil
+        terminalConnector: AppModel.TerminalConnecting? = nil,
+        ownerClock: @escaping @Sendable () -> Date = { Date() }
     ) -> AppModel {
         AppModel(
-            pairedGatewayFactory: { _ in
+            pairedGatewayFactory: { record in
                 LatchGateway(
-                    link: try GatewayLink(address: "https://mac.local:8787", token: "token"),
+                    link: try GatewayLink(address: "https://mac.local:8787", token: record.mac.deviceId),
                     session: StubProtocol.session()
                 )
             },
             newSessionFolderStore: MemoryNewSessionFolderStore(),
             terminalConnector: terminalConnector,
-            terminalUnlock: TerminalUnlock(authenticator: authenticator, grace: 600)
+            terminalUnlock: TerminalUnlock(authenticator: authenticator, grace: 600, now: ownerClock)
         )
     }
 
-    private func pairedRecord(permission: DevicePermission) -> PairedDeviceRecord {
+    private func pairedRecord(
+        permission: DevicePermission, macID: String = "mac", macKeyByte: String = "22"
+    ) -> PairedDeviceRecord {
         PairedDeviceRecord(
             deviceId: "phone",
             name: "Phone",
             devicePublicKey: String(repeating: "11", count: 32),
-            mac: PairedMac(deviceId: "mac", publicKey: String(repeating: "22", count: 32), name: "Mac"),
+            mac: PairedMac(deviceId: macID, publicKey: String(repeating: macKeyByte, count: 32), name: "Mac"),
             permission: permission,
             comparison: "0123 4567 89ab cdef",
             controlPlane: URL(string: "https://control.example")!

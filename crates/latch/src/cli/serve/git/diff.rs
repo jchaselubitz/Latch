@@ -189,6 +189,22 @@ pub(crate) fn fingerprint(output: &[u8]) -> String {
     crate::hex::encode(&digest[..8])
 }
 
+pub(super) fn scoped_fingerprint(
+    reference: &str,
+    file: &[u8],
+    area: super::GitChangeArea,
+    output: &[u8],
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"scoped-git-diff\0");
+    digest.update(reference);
+    digest.update([area as u8]);
+    digest.update(file);
+    digest.update([0]);
+    digest.update(output);
+    crate::hex::encode(&digest.finalize()[..16])
+}
+
 pub(crate) fn cursor(fingerprint: &str, index: usize) -> String {
     format!("v1-{fingerprint}-{index}")
 }

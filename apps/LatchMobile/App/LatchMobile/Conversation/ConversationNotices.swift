@@ -56,6 +56,52 @@ struct ConversationOperationRows: View {
     }
 }
 
+/// Messages waiting on this phone until the host can take them. Each can be
+/// pulled back into the composer to edit, or removed; the rest go out by
+/// themselves, oldest first.
+struct ConversationQueuedRows: View {
+    let messages: [ConversationQueuedMessage]
+    let actions: ConversationScreenActions
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label(messages.count == 1 ? "1 queued message" : "\(messages.count) queued messages", systemImage: "clock")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .accessibilityAddTraits(.isHeader)
+            ForEach(messages) { message in
+                HStack(alignment: .center, spacing: 8) {
+                    Text(message.text)
+                        .font(.callout)
+                        .lineLimit(3)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Button("Edit") { actions.editQueued(message.id) }
+                        .buttonStyle(.bordered)
+                        .accessibilityHint("Moves this message back into the composer.")
+                        .accessibilityIdentifier("conversation.queued.edit")
+                    Button {
+                        actions.removeQueued(message.id)
+                    } label: {
+                        Image(systemName: "xmark")
+                    }
+                    .buttonStyle(.borderless)
+                    .frame(minWidth: 32, minHeight: 32)
+                    .accessibilityLabel("Remove queued message")
+                    .accessibilityIdentifier("conversation.queued.remove")
+                }
+                .controlSize(.small)
+                .padding(10)
+                .background(Color.secondary.opacity(0.1), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("conversation.queued.message")
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .accessibilityIdentifier("conversation.queued")
+    }
+}
+
 struct ConversationOperationRow: View {
     let operation: ConversationOperationPresentation
     let actions: ConversationScreenActions

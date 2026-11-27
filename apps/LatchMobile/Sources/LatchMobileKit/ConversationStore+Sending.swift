@@ -15,14 +15,60 @@ extension ConversationStore {
 
     public var sendReason: String? { state?.sendMessage.reason ?? (operationEpoch == nil ? "Waiting for conversation state" : nil) }
 
+    /// Sends now when the host can take a message and nothing is waiting
+    /// ahead of it; otherwise the message joins the queue, which empties by
+    /// itself as the host becomes ready. Files are never queued: they go out
+    /// only while sending is open.
     public func send(text: String) {
         guard attachments.isEmpty else {
             sendWithAttachments(text: text)
             return
         }
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, canSend, let operationEpoch else { return }
-        enqueue(text: text, operationEpoch: operationEpoch)
+        guard !text.isEmpty else { return }
+        if queuedMessages.isEmpty, canSend, socketCanCarry, let operationEpoch {
+            enqueue(text: text, operationEpoch: operationEpoch)
+            return
+        }
+        queuedMessages.append(ConversationQueuedMessage(text: text))
+        flushQueuedMessages()
+    }
+
+    /// Returns a queued message's text to the composer, after anything
+    /// already typed, and takes it out of the queue. Sending it again puts
+    /// it at the back.
+    public func editQueuedMessage(_ id: String) {
+        guard let index = queuedMessages.firstIndex(where: { $0.id == id }) else { return }
+        let message = queuedMessages.remove(at: index)
+        draft = draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? message.text
+            : draft + "\n\n" + message.text
+    }
+
+    public func removeQueuedMessage(_ id: String) {
+        queuedMessages.removeAll { $0.id == id }
+    }
+
+    /// Sends the oldest queued message once the host can take one. One at a
+    /// time: the next waits until the previous has reached the transcript
+    /// (or settled), so the agent sees them in order and a busy host is
+    /// asked again only after it has reported its new state.
+    func flushQueuedMessages() {
+        guard let next = queuedMessages.first,
+              canSend, socketCanCarry, let operationEpoch,
+              !operations.contains(where: { $0.status == .sending || $0.status == .queued })
+        else { return }
+        queuedMessages.removeFirst()
+        enqueue(text: next.text, operationEpoch: operationEpoch)
+    }
+
+    /// A reconnecting or stopped socket may still hold a state that says
+    /// sending is open; a queued message waits for the socket instead.
+    private var socketCanCarry: Bool {
+        switch socketState {
+        case .idle, .open: true
+        case .connecting, .reconnecting, .stopped: false
+        }
     }
 
     func enqueue(text: String, operationEpoch: String) {

@@ -447,6 +447,18 @@ enum RemoteAccessCommand {
         /// Opaque paired-device identifier.
         device_id: String,
     },
+    /// Share an absolute directory with a paired Control device.
+    ShareRoot {
+        device_id: String,
+        path: std::path::PathBuf,
+    },
+    /// List locally configured shares, including shares that are no longer usable.
+    SharedRoots {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Revoke a shared root immediately.
+    RevokeRoot { root_id: String },
     /// List content-free attention events the gateway spooled for paired phones.
     AttentionEvents {
         /// Emit machine-readable JSON.
@@ -971,6 +983,27 @@ fn dispatch(command: Option<Command>) -> Result<()> {
                 RemoteAccessCommand::Revoke { device_id } => {
                     remote_access::revoke(&home, &device_id)?;
                     println!("device revoked");
+                    Ok(())
+                }
+                RemoteAccessCommand::ShareRoot { device_id, path } => {
+                    let grant = remote_access::share_root(&home, &device_id, &path)?;
+                    println!("{}", grant.root_id);
+                    Ok(())
+                }
+                RemoteAccessCommand::SharedRoots { json } => {
+                    let grants = remote_access::list_shared_roots(&home)?;
+                    if json {
+                        print_json(&grants)?;
+                    } else {
+                        for grant in grants {
+                            println!("{} {} {:?}", grant.root_id, grant.device_id, grant.path);
+                        }
+                    }
+                    Ok(())
+                }
+                RemoteAccessCommand::RevokeRoot { root_id } => {
+                    remote_access::revoke_shared_root(&home, &root_id)?;
+                    println!("shared root revoked");
                     Ok(())
                 }
                 RemoteAccessCommand::AttentionEvents { json } => {

@@ -237,6 +237,38 @@ public actor LatchGateway {
 
     // MARK: Git (read-only)
 
+    public func sharedRoots() async throws -> SharedRoots {
+        try await require(.sharedFiles)
+        return try await get(path: "/v2/files/roots")
+    }
+
+    public func sharedDirectory(
+        rootID: String, path: String = "", cursor: String? = nil
+    ) async throws -> SharedDirectoryPage {
+        try await require(.sharedFiles)
+        return try await request(
+            method: "GET",
+            path: "/v2/files/directory",
+            queryItems: [
+                URLQueryItem(name: "rootId", value: rootID),
+                URLQueryItem(name: "path", value: path),
+                cursor.map { URLQueryItem(name: "cursor", value: $0) }
+            ].compactMap { $0 }
+        )
+    }
+
+    public func sharedFilePreview(rootID: String, path: String) async throws -> SharedFilePreview {
+        try await require(.sharedFiles)
+        return try await request(
+            method: "GET",
+            path: "/v2/files/preview",
+            queryItems: [
+                URLQueryItem(name: "rootId", value: rootID),
+                URLQueryItem(name: "path", value: path)
+            ]
+        )
+    }
+
     /// Repositories the Mac offers to open: the working trees of its running
     /// sessions, and the ones any paired phone opened recently. The Mac keeps
     /// that list; this phone stores none of it.
@@ -253,6 +285,54 @@ public actor LatchGateway {
             method: "GET",
             path: "/v2/git/resolve",
             queryItems: [URLQueryItem(name: "path", value: path)]
+        )
+    }
+
+    /// Opens only an exact worktree root using the current paired device's grant.
+    public func openGitWorktree(path: String) async throws -> GitWorktreeOpen {
+        try await require(.gitWorktreeReads)
+        return try await request(
+            method: "GET",
+            path: "/v2/git/worktree/open",
+            queryItems: [URLQueryItem(name: "path", value: path)]
+        )
+    }
+
+    public func gitStatus(worktreeRef: String) async throws -> GitStatus {
+        try await require(.gitWorktreeReads)
+        return try await request(
+            method: "GET",
+            path: "/v2/git/worktree/status",
+            queryItems: [URLQueryItem(name: "worktreeRef", value: worktreeRef)]
+        )
+    }
+
+    /// Reads one to eight exact worktree references. Results follow input order.
+    public func gitWorktreeSummaries(worktreeRefs: [String]) async throws -> GitWorktreeSummaries {
+        try await require(.gitWorktreeSummaries)
+        return try await request(
+            method: "GET",
+            path: "/v2/git/worktree/summaries",
+            queryItems: [URLQueryItem(name: "worktreeRefs", value: worktreeRefs.joined(separator: ","))]
+        )
+    }
+
+    public func gitDiff(
+        worktreeRef: String,
+        fileKey: String,
+        area: GitChangeArea,
+        cursor: String? = nil
+    ) async throws -> GitFileDiff {
+        try await require(.gitWorktreeReads)
+        return try await request(
+            method: "GET",
+            path: "/v2/git/worktree/diff",
+            queryItems: [
+                URLQueryItem(name: "worktreeRef", value: worktreeRef),
+                URLQueryItem(name: "file", value: fileKey),
+                URLQueryItem(name: "area", value: area.rawValue),
+                cursor.map { URLQueryItem(name: "cursor", value: $0) }
+            ].compactMap { $0 }
         )
     }
 
@@ -334,15 +414,49 @@ public actor LatchGateway {
         )
     }
 
+    func gitBranches(worktreeRef: String) async throws -> GitBranchList {
+        try await require(.gitBranches)
+        return try await request(method: "GET", path: "/v2/git/branches", queryItems: [
+            URLQueryItem(name: "worktreeRef", value: worktreeRef)
+        ])
+    }
+
+    func gitSync(worktreeRef: String, cursor: String?) async throws -> GitSyncPreview {
+        try await require(.gitSync)
+        return try await request(method: "GET", path: "/v2/git/sync", queryItems: [
+            URLQueryItem(name: "worktreeRef", value: worktreeRef),
+            cursor.map { URLQueryItem(name: "cursor", value: $0) }
+        ].compactMap { $0 })
+    }
+
+    func gitPushPreview(worktreeRef: String, selection: GitPushSuggestion?, cursor: String?) async throws -> GitPushPreview {
+        try await require(.gitPushPreview)
+        var items = [URLQueryItem(name: "worktreeRef", value: worktreeRef)]
+        if let selection {
+            items.append(URLQueryItem(name: "remote", value: selection.remote))
+            items.append(URLQueryItem(name: "destination", value: selection.destination))
+        }
+        if let cursor { items.append(URLQueryItem(name: "cursor", value: cursor)) }
+        return try await request(method: "GET", path: "/v2/git/push/preview", queryItems: items)
+    }
+
     /// Sends one Git change. The answer is always the Mac's receipt for it,
     /// pending when the Mac is still running it (a repeat of a request it is
     /// already working on, or a fetch, merge or rebase that outlasted the
     /// Mac's wait: `202` with Git's progress); a refusal before acceptance
     /// throws `.git`.
     public func gitMutation(_ action: GitMutationAction) async throws -> GitMutationReceipt {
+        try await gitMutation(action, worktreeRef: nil)
+    }
+
+    func gitMutation(
+        _ action: GitMutationAction, worktreeRef: String?,
+        beforeSend: (@MainActor @Sendable () throws -> Void)? = nil
+    ) async throws -> GitMutationReceipt {
         try await require(.gitReceipts)
+        if worktreeRef != nil { try await require(.gitWorktreeWrites) }
         let encoder = JSONEncoder()
-        let body: Data
+        var body: Data
         let route: String
         do {
             switch action {
@@ -405,12 +519,23 @@ public actor LatchGateway {
         } catch {
             throw LatchError.malformedResponse(String(describing: error))
         }
+        if let worktreeRef {
+            // Send a non-path address so even a gateway that predates scoped
+            // writes cannot interpret the request as a legacy path mutation.
+            guard var fields = try JSONSerialization.jsonObject(with: body) as? [String: Any] else {
+                throw LatchError.malformedResponse("Expected a Git mutation object.")
+            }
+            fields["path"] = "worktree:\(worktreeRef)"
+            body = try JSONSerialization.data(withJSONObject: fields)
+        }
         guard body.count <= Self.maximumGitMutationBodyBytes else {
             throw LatchError.git(
                 code: "request_too_large",
                 reason: "That is too many files to change at once from the phone. Use Stage all, or fewer files."
             )
         }
+        try Task.checkCancellation()
+        try await beforeSend?()
         return try await request(method: "POST", path: route, body: body)
     }
 
@@ -440,25 +565,42 @@ public actor LatchGateway {
     /// Asks the Mac to check the remote for a push it could not confirm.
     /// `.git("still_running")` while Git is still running that push.
     public func gitPushReconcile(requestId: String) async throws -> GitPushReconciliation {
+        try await gitPushReconcile(requestId: requestId, worktreeRef: nil)
+    }
+
+    func gitPushReconcile(requestId: String, worktreeRef: String?) async throws -> GitPushReconciliation {
         try await require(.gitReceipts)
         try await require(.gitPushReconcile)
+        if worktreeRef != nil { try await require(.gitWorktreeWrites) }
         let body: Data
         do {
             body = try JSONEncoder().encode(GitPushReconcileRequest(requestId: requestId))
         } catch {
             throw LatchError.malformedResponse(String(describing: error))
         }
-        return try await request(method: "POST", path: "/v2/git/push/reconcile", body: body)
+        return try await request(
+            method: "POST", path: "/v2/git/push/reconcile",
+            queryItems: worktreeRef.map { [URLQueryItem(name: "worktreeRef", value: $0)] } ?? [],
+            body: body
+        )
     }
 
     /// This device's receipt for one Git change. `.git("receipt_not_found")`
     /// means the Mac never accepted that request id.
     public func gitReceipt(requestID: String) async throws -> GitMutationReceipt {
+        try await gitReceipt(requestID: requestID, worktreeRef: nil)
+    }
+
+    func gitReceipt(requestID: String, worktreeRef: String?) async throws -> GitMutationReceipt {
         try await require(.gitReceipts)
+        if worktreeRef != nil { try await require(.gitWorktreeWrites) }
         guard let encoded = requestID.addingPercentEncoding(withAllowedCharacters: .alphanumerics.union(["-"])) else {
             throw LatchError.git(code: "invalid_request", reason: "That request id is malformed.")
         }
-        return try await get(path: "/v2/git/receipts/\(encoded)")
+        return try await request(
+            method: "GET", path: "/v2/git/receipts/\(encoded)",
+            queryItems: worktreeRef.map { [URLQueryItem(name: "worktreeRef", value: $0)] } ?? []
+        )
     }
 
     /// Tells the Mac which key to seal this device's attention alerts to.
@@ -599,6 +741,10 @@ public actor LatchGateway {
         }
         components.path = path
         components.queryItems = queryItems.isEmpty ? nil : queryItems
+        if path.hasPrefix("/v2/files/") || path.hasPrefix("/v2/git/") {
+            // Axum decodes URL-encoded query fields using form semantics.
+            components.percentEncodedQuery = components.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
+        }
         guard let url = components.url else {
             throw LatchError.invalidURL(link.url.absoluteString + path)
         }
@@ -627,6 +773,12 @@ public actor LatchGateway {
             if path == "/v2/git/commit-message",
                let failure = try? decoder.decode(GitCommitMessageFailure.self, from: data) {
                 throw GitCommitDraftError(failure: failure)
+            }
+            if path.hasPrefix("/v2/files/"),
+               let body = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let code = body["error"] as? String,
+               let failure = SharedFilesReadError(wireCode: code) {
+                throw failure
             }
             throw Self.error(status: http.statusCode, path: path, data: data)
         }

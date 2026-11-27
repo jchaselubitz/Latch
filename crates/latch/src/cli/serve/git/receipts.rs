@@ -35,6 +35,8 @@ pub(crate) struct Stored {
     /// Git was never started for this request.
     pub before: Option<Before>,
     pub receipt: GitMutationReceipt,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<super::scoped::ReceiptScope>,
 }
 
 /// The repository as the Mac found it immediately before running Git.
@@ -74,6 +76,7 @@ impl Stored {
             mutation,
             before: None,
             receipt,
+            scope: None,
         }
     }
 }
@@ -243,6 +246,37 @@ fn ensure_dir(dir: &Path) -> anyhow::Result<PathBuf> {
         .mode(crate::session::paths::DIR_MODE)
         .create(dir)?;
     Ok(dir.to_owned())
+}
+
+/// The open file description is also inherited by mutating Git. The kernel
+/// keeps the lock held if the gateway exits while Git or a hook is alive.
+pub(crate) fn try_worktree_lock(home: &LatchHome, root: &Path) -> std::io::Result<Option<File>> {
+    use sha2::{Digest, Sha256};
+    use std::os::unix::{ffi::OsStrExt, io::AsRawFd};
+
+    let dir = home.root().join("git").join("worktree-locks");
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(crate::session::paths::DIR_MODE)
+        .create(&dir)?;
+    let key = super::status::hex(&Sha256::digest(root.as_os_str().as_bytes()));
+    let lock = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(FILE_MODE)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(dir.join(key))?;
+    // SAFETY: the descriptor stays owned by the returned File.
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        return Ok(Some(lock));
+    }
+    let error = std::io::Error::last_os_error();
+    if error.kind() == std::io::ErrorKind::WouldBlock {
+        Ok(None)
+    } else {
+        Err(error)
+    }
 }
 
 fn write_temporary(dir: &Path, stored: &Stored) -> anyhow::Result<PathBuf> {

@@ -4,6 +4,7 @@ import test from 'node:test';
 import {
   createLatchClient,
   GATEWAY_ERROR_STOP_UNSUPPORTED,
+  GATEWAY_ERROR_SHARED_FILES_UNSUPPORTED,
   LatchGatewayError
 } from './client.ts';
 
@@ -127,4 +128,30 @@ test('an answer without a code falls back to request_failed and keeps its text',
     assert.match(error.message, /gateway is restarting/);
     return true;
   });
+});
+
+test('shared Files uses advertised routes and preserves relative paths and cursors', async () => {
+  const { calls, fetchImpl } = gateway({
+    'GET /v2/capabilities': () => json({ endpoints: { sharedFiles: true } }),
+    'GET /v2/files/roots': () => json({ roots: [{ rootId: 'root', name: 'Project' }] }),
+    'GET /v2/files/directory': () => json({ path: 'sub + #', entries: [], nextCursor: null }),
+    'GET /v2/files/preview': () => json({ kind: 'binary' })
+  });
+  const client = createLatchClient({ url: 'http://127.0.0.1:1', token: 't', fetch: fetchImpl });
+  assert.deepEqual(await client.sharedRoots(), { roots: [{ rootId: 'root', name: 'Project' }] });
+  await client.sharedDirectory({ rootId: 'root', path: 'sub + #', cursor: 'opaque' });
+  assert.deepEqual(await client.sharedFilePreview({ rootId: 'root', path: 'sub + #/image' }), { kind: 'binary' });
+  const urls = calls.map(call => new URL(call.url));
+  const directory = urls.find(url => url.pathname === '/v2/files/directory');
+  assert.equal(directory?.searchParams.get('rootId'), 'root');
+  assert.equal(directory?.searchParams.get('path'), 'sub + #');
+  assert.equal(directory?.searchParams.get('cursor'), 'opaque');
+  assert.equal(urls.at(-1)?.searchParams.get('path'), 'sub + #/image');
+});
+
+test('an older gateway never receives a shared Files request', async () => {
+  const { calls, fetchImpl } = gateway({ 'GET /v2/capabilities': advertisingStop });
+  const client = createLatchClient({ url: 'http://127.0.0.1:1', token: 't', fetch: fetchImpl });
+  await assert.rejects(client.sharedRoots(), { code: GATEWAY_ERROR_SHARED_FILES_UNSUPPORTED });
+  assert.equal(calls.length, 1);
 });

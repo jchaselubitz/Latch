@@ -238,7 +238,7 @@ fn pushes(counter: &Path) -> usize {
 }
 
 async fn check(fixture: &Fixture, request: u32) -> PushCheck {
-    check_push(&home(fixture), Some("phone-a"), &id(request))
+    check_push(&home(fixture), Some("phone-a"), &id(request), None)
         .await
         .expect("checked")
 }
@@ -751,7 +751,7 @@ async fn a_repeated_push_returns_the_first_receipt_and_pushes_once() {
         &home(&remote.fixture),
         Some("phone-a".to_owned()),
         &id(1),
-        remote.fixture.path(),
+        super::mutation::Target::Path(remote.fixture.path()),
         preview.preconditions.clone(),
         other,
     )
@@ -1024,24 +1024,24 @@ async fn push_checks_are_scoped_to_the_device_and_to_pushes() {
     );
     let home = home(&remote.fixture);
     assert_eq!(
-        check_push(&home, Some("phone-b"), &id(1))
+        check_push(&home, Some("phone-b"), &id(1), None)
             .await
             .unwrap_err(),
         PushCheckError::NotFound
     );
     assert_eq!(
-        check_push(&home, None, &id(1)).await.unwrap_err(),
+        check_push(&home, None, &id(1), None).await.unwrap_err(),
         PushCheckError::NotFound
     );
     assert_eq!(
-        check_push(&home, Some("phone-a"), &id(9))
+        check_push(&home, Some("phone-a"), &id(9), None)
             .await
             .unwrap_err(),
         PushCheckError::NotFound
     );
     fetch_now(&remote.fixture, 2).await;
     assert_eq!(
-        check_push(&home, Some("phone-a"), &id(2))
+        check_push(&home, Some("phone-a"), &id(2), None)
             .await
             .unwrap_err(),
         PushCheckError::NotAPush

@@ -18,6 +18,7 @@ mod authority;
 mod commit_message;
 mod git;
 mod readiness;
+mod shared_files;
 mod uploads;
 use super::attention::AttentionWatcher;
 use super::auth::selected_subprotocol;
@@ -57,6 +58,8 @@ struct AppState {
     conversation_hub: ConversationHub,
     /// Bounded resume grants for terminal surfaces handed to remote devices.
     terminal_resumes: ResumeRegistry,
+    worktrees: super::git::WorktreeReferences,
+    shared_cursors: super::shared_files::Cursors,
     /// Gateway-owned attention producer for watched sessions.
     attention: AttentionWatcher,
 }
@@ -130,6 +133,8 @@ pub async fn run(options: ServeOptions) -> anyhow::Result<()> {
         gateway_instance_id: gateway_instance_id.clone(),
         conversation_hub,
         terminal_resumes: ResumeRegistry::default(),
+        worktrees: super::git::WorktreeReferences::default(),
+        shared_cursors: super::shared_files::Cursors::default(),
         attention,
     };
     let app = router(state);
@@ -193,6 +198,8 @@ pub(crate) fn test_router(
         gateway_instance_id: "gw-test".to_owned(),
         conversation_hub,
         terminal_resumes: ResumeRegistry::default(),
+        worktrees: super::git::WorktreeReferences::default(),
+        shared_cursors: super::shared_files::Cursors::default(),
         attention,
     })
 }
@@ -206,6 +213,9 @@ fn register(router: Router<AppState>, spec: RouteSpec) -> Router<AppState> {
         RouteId::SavedChatStatus => router.route(spec.pattern, get(saved_chat_status)),
         RouteId::ResumeSavedChat => router.route(spec.pattern, post(resume_saved_chat)),
         RouteId::Directories => router.route(spec.pattern, get(browse_directories)),
+        RouteId::SharedRoots => router.route(spec.pattern, get(shared_files::roots)),
+        RouteId::SharedDirectory => router.route(spec.pattern, get(shared_files::directory)),
+        RouteId::SharedFilePreview => router.route(spec.pattern, get(shared_files::preview)),
         RouteId::Session => router.route(spec.pattern, get(inspect_session)),
         RouteId::Preview => router.route(spec.pattern, get(preview_session)),
         RouteId::StopSession => router.route(spec.pattern, post(stop_session)),
@@ -216,6 +226,12 @@ fn register(router: Router<AppState>, spec: RouteSpec) -> Router<AppState> {
         RouteId::NotificationKey => router.route(spec.pattern, put(set_notification_key)),
         RouteId::GitRepositories => router.route(spec.pattern, get(git::git_repositories)),
         RouteId::GitResolve => router.route(spec.pattern, get(git::git_resolve)),
+        RouteId::GitWorktreeOpen => router.route(spec.pattern, get(git::git_worktree_open)),
+        RouteId::GitWorktreeSummaries => {
+            router.route(spec.pattern, get(git::git_worktree_summaries))
+        }
+        RouteId::GitWorktreeStatus => router.route(spec.pattern, get(git::git_worktree_status)),
+        RouteId::GitWorktreeDiff => router.route(spec.pattern, get(git::git_worktree_diff)),
         RouteId::GitStatus => router.route(spec.pattern, get(git::git_status)),
         RouteId::GitDiff => router.route(spec.pattern, get(git::git_diff)),
         RouteId::GitBranches => router.route(spec.pattern, get(git::git_branches)),
@@ -275,6 +291,7 @@ struct GatewayEndpoints {
     terminal: bool,
     conversation: bool,
     browse_directories: bool,
+    shared_files: bool,
     create_session: bool,
     saved_chats: bool,
     saved_chat_resume: bool,
@@ -284,6 +301,10 @@ struct GatewayEndpoints {
     notification_key: bool,
     git_repositories: bool,
     git_resolve: bool,
+    git_worktree_reads: bool,
+    git_worktree_summaries: bool,
+    git_worktree_writes: bool,
+    git_worktree_previews: bool,
     git_status: bool,
     git_diff: bool,
     git_branches: bool,
@@ -316,6 +337,7 @@ async fn gateway_capabilities(State(state): State<AppState>) -> Response {
             terminal: true,
             conversation: true,
             browse_directories: true,
+            shared_files: super::shared_files::supported(),
             create_session: true,
             saved_chats: true,
             saved_chat_resume: true,
@@ -325,6 +347,10 @@ async fn gateway_capabilities(State(state): State<AppState>) -> Response {
             notification_key: true,
             git_repositories: true,
             git_resolve: true,
+            git_worktree_reads: true,
+            git_worktree_summaries: true,
+            git_worktree_writes: true,
+            git_worktree_previews: true,
             git_status: true,
             git_diff: true,
             git_branches: true,
