@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://latch.cooperativ.dev/schemas/remote-access/v2/git-worktree-summaries.schema.json",
   "title": "LatchGitWorktreeSummariesV2",
-  "description": "GET /v2/git/worktree/summaries?worktreeRefs= takes one to eight comma-separated worktree references. The response has one result per input in order, including duplicates. Empty or oversized batches return 400. An active paired device with Control is required for all results. A stale, foreign, or unknown reference produces stale_worktree_ref. A malformed individual reference produces invalid_request.",
+  "description": "GET /v2/git/worktree/summaries?worktreeRefs= takes one to eight comma-separated worktree references. The response has one result per input in order, including duplicates. Repeated references share one outcome within a request. Empty or oversized batches return 400. An active paired device with Control is required for all results. A stale, foreign, or unknown reference produces stale_worktree_ref. A malformed individual reference produces invalid_request.",
   "type": "object",
   "required": ["results"],
   "properties": {

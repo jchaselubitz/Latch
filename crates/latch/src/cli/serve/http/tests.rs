@@ -1747,7 +1747,7 @@ async fn git_worktree_summaries_keep_available_rows_and_leave_recents_unchanged(
     std::fs::remove_dir_all(&linked).unwrap();
 
     let target = format!(
-        "/v2/git/worktree/summaries?worktreeRefs={unavailable},{valid},bad,{foreign},{valid}"
+        "/v2/git/worktree/summaries?worktreeRefs={unavailable},{valid},bad,{foreign},{valid},{unavailable},bad"
     );
     let (status, reply) = send_as_device(&harness, "GET", &target, &device, "").await;
     assert_eq!(status, 200, "{reply}");
@@ -1759,7 +1759,8 @@ async fn git_worktree_summaries_keep_available_rows_and_leave_recents_unchanged(
     assert_eq!(
         reply["results"],
         serde_json::json!([
-            stale, ok, {"outcome": "error", "error": "invalid_request"}, stale, ok
+            stale, ok, {"outcome": "error", "error": "invalid_request"}, stale, ok, stale,
+            {"outcome": "error", "error": "invalid_request"}
         ])
     );
     assert_eq!(std::fs::read(&recent).unwrap(), saved);
@@ -1803,6 +1804,7 @@ async fn git_worktree_summaries_bound_the_batch_and_report_partial_change_counts
     let results = reply["results"].as_array().unwrap();
     assert_eq!(results.len(), 8);
     for result in results {
+        assert_eq!(result, &results[0]);
         assert_eq!(result["summary"]["changesComplete"], true);
         assert_eq!(result["summary"]["untracked"], 999);
     }

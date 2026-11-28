@@ -133,7 +133,7 @@ extension AppModel {
     }
 
     private var savedChatPairingID: String? {
-        guard linkedSupports(.savedChats), linkedSupports(.savedChatResume),
+        guard loadsSavedChatCatalog, linkedSupports(.savedChats), linkedSupports(.savedChatResume),
               let pairedDevice, pairedDevice.isActive, pairedDevice.permission.permits(.control) else { return nil }
         return pairedDevice.deviceId
     }
@@ -212,16 +212,27 @@ extension AppModel {
         savedChatCatalog = (gateway, pairingID, result?.chats ?? [])
     }
 
-    /// Reloads the session list.
+    /// Refreshes session state for views that show errors through `sessionsError`.
     public func refreshSessions() async {
-        guard let gateway, linkState.isUsable else { return }
+        guard gateway != nil, linkState.isUsable else { return }
+        _ = try? await reloadSessions()
+    }
+
+    /// Returns a fresh session list and updates the same list used by the
+    /// model's conversation stores. A request against an invalidated link
+    /// cannot supply a result to the caller.
+    @discardableResult
+    public func reloadSessions() async throws -> [SessionSummary] {
+        let unavailable = LatchError.transport("This phone is not connected to your Mac right now.")
+        guard let gateway, linkState.isUsable else { throw unavailable }
+        let isCurrent = { self.gateway === gateway && self.linkState.isUsable }
         do {
             let started = Date()
             let next = try await gateway.listSessions()
-            guard self.gateway === gateway else { return }
+            guard isCurrent() else { throw unavailable }
             sessions = next
             await refreshSavedChats(from: gateway)
-            guard self.gateway === gateway else { return }
+            guard isCurrent() else { throw unavailable }
             record(LinkStageSample(stage: .sessionList, milliseconds: Self.millis(since: started)))
             sessionsStale = false
             sessionsError = nil
@@ -232,10 +243,11 @@ extension AppModel {
                 requestedSessionID = nil
                 requestedSessionError = "Session \(requested) isn't on \(pairedDevice?.mac.displayName ?? "your Mac"). It may have been removed, or it may be running on a different computer."
             }
-        } catch let error as LatchError {
-            sessionsError = error.message
+            return next
         } catch {
-            sessionsError = error.localizedDescription
+            guard isCurrent() else { throw unavailable }
+            sessionsError = (error as? LatchError)?.message ?? error.localizedDescription
+            throw error
         }
     }
 }

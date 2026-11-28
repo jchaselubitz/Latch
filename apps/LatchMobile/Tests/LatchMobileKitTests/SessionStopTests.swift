@@ -193,8 +193,75 @@ final class SessionStopTests: XCTestCase {
         XCTAssertEqual(model.sessionBrowserSessions, model.sessions)
     }
 
-    private func makeModel() -> AppModel {
-        AppModel(
+    func testEmbeddedReloadReturnsAndPublishesOneSessionListWithoutLoadingTheCatalog() async throws {
+        StubProtocol.stub(path: "/v2/capabilities", body: Self.capabilities(savedChats: true))
+        let model = makeModel(loadsSavedChatCatalog: false)
+        try await connectAndWaitForSessions(model)
+        let requestsBefore = StubProtocol.requests.count
+        StubProtocol.stub(path: "/v2/sessions", body: Self.list(state: "exited"))
+
+        let returned = try await model.reloadSessions()
+
+        XCTAssertEqual(returned, model.sessions)
+        XCTAssertEqual(returned.first?.state, "exited")
+        XCTAssertEqual(model.sessionBrowserSessions, returned)
+        XCTAssertEqual(StubProtocol.requests.dropFirst(requestsBefore).map(\.path), ["/v2/sessions"])
+        XCTAssertFalse(StubProtocol.requests.contains { $0.path == "/v2/saved-chats" })
+    }
+
+    func testReloadPropagatesTheGatewayFailureAndKeepsThePreviousList() async throws {
+        let model = makeModel()
+        try await connectAndWaitForSessions(model)
+        let previous = model.sessions
+        XCTAssertEqual(previous.map(\.id), ["ses_1"])
+        StubProtocol.stub(path: "/v2/sessions", status: 503, body: #"{"reason":"unavailable"}"#)
+
+        do {
+            try await model.reloadSessions()
+            XCTFail("Expected the refresh to fail")
+        } catch let error as LatchError {
+            XCTAssertEqual(model.sessionsError, error.message)
+        }
+        XCTAssertEqual(model.sessions, previous)
+    }
+
+    func testReloadDiscardsAListThatArrivesAfterUnlink() async throws {
+        let model = makeModel(loadsSavedChatCatalog: false)
+        try await connectAndWaitForSessions(model)
+        let path = "/v2/sessions"
+        let listsBefore = StubProtocol.requests.filter { $0.path == path }.count
+        let gate = StubProtocol.holdNextResponse(path: path)
+        defer { gate.release() }
+
+        let pending = Task { try await model.reloadSessions() }
+        for _ in 0..<100 {
+            if StubProtocol.requests.filter({ $0.path == path }).count > listsBefore { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(StubProtocol.requests.filter { $0.path == path }.count, listsBefore + 1)
+        model.unlink()
+        gate.release()
+
+        do {
+            _ = try await pending.value
+            XCTFail("An unlinked model must reject the pending response")
+        } catch LatchError.transport {
+            XCTAssertTrue(model.sessions.isEmpty)
+            XCTAssertNil(model.sessionsError)
+        }
+    }
+
+    private func connectAndWaitForSessions(_ model: AppModel) async throws {
+        await model.connectPairedDevice(pairedRecord(permission: .control))
+        for _ in 0..<100 {
+            if model.recentStages.contains(where: { $0.stage == .sessionList }) { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTFail("The initial session refresh did not finish")
+    }
+
+    private func makeModel(loadsSavedChatCatalog: Bool = true) -> AppModel {
+        let model = AppModel(
             pairedGatewayFactory: { _ in
                 LatchGateway(
                     link: try GatewayLink(address: "https://mac.local:8787", token: "token"),
@@ -202,8 +269,11 @@ final class SessionStopTests: XCTestCase {
                 )
             },
             newSessionFolderStore: MemoryNewSessionFolderStore(),
-            terminalUnlock: TerminalUnlock(authenticator: StubDeviceOwnerAuthenticator(), grace: 600)
+            terminalUnlock: TerminalUnlock(authenticator: StubDeviceOwnerAuthenticator(), grace: 600),
+            loadsSavedChatCatalog: loadsSavedChatCatalog
         )
+        addTeardownBlock { await model.unlink() }
+        return model
     }
 
     private func pairedRecord(permission: DevicePermission) -> PairedDeviceRecord {
