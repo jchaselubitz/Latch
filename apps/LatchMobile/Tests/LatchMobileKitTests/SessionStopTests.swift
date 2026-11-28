@@ -196,7 +196,7 @@ final class SessionStopTests: XCTestCase {
     func testEmbeddedReloadReturnsAndPublishesOneSessionListWithoutLoadingTheCatalog() async throws {
         StubProtocol.stub(path: "/v2/capabilities", body: Self.capabilities(savedChats: true))
         let model = makeModel(loadsSavedChatCatalog: false)
-        await model.connectPairedDevice(pairedRecord(permission: .control))
+        try await connectAndWaitForSessions(model)
         let requestsBefore = StubProtocol.requests.count
         StubProtocol.stub(path: "/v2/sessions", body: Self.list(state: "exited"))
 
@@ -211,7 +211,7 @@ final class SessionStopTests: XCTestCase {
 
     func testReloadPropagatesTheGatewayFailureAndKeepsThePreviousList() async throws {
         let model = makeModel()
-        await model.connectPairedDevice(pairedRecord(permission: .control))
+        try await connectAndWaitForSessions(model)
         let previous = model.sessions
         XCTAssertEqual(previous.map(\.id), ["ses_1"])
         StubProtocol.stub(path: "/v2/sessions", status: 503, body: #"{"reason":"unavailable"}"#)
@@ -227,7 +227,7 @@ final class SessionStopTests: XCTestCase {
 
     func testReloadDiscardsAListThatArrivesAfterUnlink() async throws {
         let model = makeModel(loadsSavedChatCatalog: false)
-        await model.connectPairedDevice(pairedRecord(permission: .control))
+        try await connectAndWaitForSessions(model)
         let path = "/v2/sessions"
         let listsBefore = StubProtocol.requests.filter { $0.path == path }.count
         let gate = StubProtocol.holdNextResponse(path: path)
@@ -251,8 +251,17 @@ final class SessionStopTests: XCTestCase {
         }
     }
 
+    private func connectAndWaitForSessions(_ model: AppModel) async throws {
+        await model.connectPairedDevice(pairedRecord(permission: .control))
+        for _ in 0..<100 {
+            if model.recentStages.contains(where: { $0.stage == .sessionList }) { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTFail("The initial session refresh did not finish")
+    }
+
     private func makeModel(loadsSavedChatCatalog: Bool = true) -> AppModel {
-        AppModel(
+        let model = AppModel(
             pairedGatewayFactory: { _ in
                 LatchGateway(
                     link: try GatewayLink(address: "https://mac.local:8787", token: "token"),
@@ -263,6 +272,8 @@ final class SessionStopTests: XCTestCase {
             terminalUnlock: TerminalUnlock(authenticator: StubDeviceOwnerAuthenticator(), grace: 600),
             loadsSavedChatCatalog: loadsSavedChatCatalog
         )
+        addTeardownBlock { await model.unlink() }
+        return model
     }
 
     private func pairedRecord(permission: DevicePermission) -> PairedDeviceRecord {
