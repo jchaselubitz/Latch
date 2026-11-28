@@ -73,6 +73,14 @@ to the host. For conversation content that must stay in memory, pass
 can also supply their own account- and host-scoped cache. When using
 `ConversationStore` directly, pass the storage in its initializer.
 
+When the caller needs a fresh session list and also uses the model's
+conversation stores, call `try await model.reloadSessions()`. The result and
+the observable session list come from the same gateway response. Apps with
+their own saved-chat catalog can initialize the model with
+`loadsSavedChatCatalog: false` to skip fetching Latch's catalog during link
+startup and session refreshes. Per-chat status and resume remain available
+through `LatchGateway`.
+
 ## Pairing
 
 In Latch Desktop, configure the control plane, turn Remote Access on, and

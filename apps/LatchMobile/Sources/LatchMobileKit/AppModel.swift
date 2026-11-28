@@ -101,6 +101,7 @@ public final class AppModel {
     var hasPairedLink = false
 
     public internal(set) var sessions: [SessionSummary] = []
+    let loadsSavedChatCatalog: Bool
     var savedChatCatalog: (gateway: LatchGateway, pairingID: String, chats: [SavedChatSummary])?
     public internal(set) var resumingChatIDs: Set<UUID> = []
 
@@ -268,6 +269,8 @@ public final class AppModel {
 
     // MARK: - Initialization
 
+    /// Set `loadsSavedChatCatalog` to false when the embedding app owns its
+    /// own saved-chat catalog. It can still use per-chat gateway APIs.
     public init(
         linkConnector: (any RemoteLinkConnecting)? = nil,
         gatewayFactory: GatewayFactory? = nil,
@@ -281,6 +284,7 @@ public final class AppModel {
         terminalUnlock: TerminalUnlock? = nil,
         notificationKeys: NotificationKeyStore? = nil,
         coldOpen: ColdOpenRecorder? = nil,
+        loadsSavedChatCatalog: Bool = true,
         conversationStorage: @escaping @MainActor (PairedDeviceRecord, String) -> any ConversationStoreStorage = { _, _ in
             FileConversationStoreStorage()
         }
@@ -294,6 +298,7 @@ public final class AppModel {
         self.terminalSizeStore = terminalSizeStore
         self.newSessionFolderStore = newSessionFolderStore
         self.agentModelStore = agentModelStore
+        self.loadsSavedChatCatalog = loadsSavedChatCatalog
         self.conversationStorage = conversationStorage
         self.defaultNewSessionFolder = newSessionFolderStore.load()
         self.sessionPresentation = presentationStore.load()

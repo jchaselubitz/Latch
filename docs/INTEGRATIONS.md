@@ -349,13 +349,15 @@ diff using the same reference, file and area.
 For list rows, check the separate `endpoints.gitWorktreeSummaries` capability
 and call `GET /v2/git/worktree/summaries?worktreeRefs=` with one to eight
 comma-separated references. Results match input order, including duplicates.
-A stale or unavailable checkout has its own error result. A successful row
-includes branch, nullable ahead/behind counts against the locally known
-upstream, and counts by change area. The gateway tallies at most 1,000 status
-records from at most 256 KiB of Git output. When `changesComplete` is false, the counts are lower
-bounds. Untracked directories count as one entry and a tracked file can count
-in both staged and unstaged. The scan runs under a five-second deadline per
-row, performs no fetch, and leaves the host's recent repository list alone.
+Each distinct reference is checked and scanned once per request, and repeat
+positions receive the same outcome. A stale or unavailable checkout has its own
+error result. A successful row includes branch, nullable ahead/behind counts
+against the locally known upstream, and counts by change area. The gateway
+tallies at most 1,000 status records from at most 256 KiB of Git output. When
+`changesComplete` is false, the counts are lower bounds. Untracked directories
+count as one entry and a tracked file can count in both staged and unstaged.
+Each distinct reference has a five-second deadline. The scan performs no fetch
+and leaves the host's recent repository list alone.
 See the [summary schema](../schemas/remote-access/v2/git-worktree-summaries.schema.json).
 
 References belong to the issuing Mac gateway instance and pairing grant

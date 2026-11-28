@@ -1,5 +1,7 @@
 //! HTTP handlers for the Git routes.
 
+use std::collections::HashMap;
+
 use axum::extract::{Extension, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -253,11 +255,17 @@ pub(super) async fn git_worktree_summaries(
         };
         references.len()
     ];
-    let mut reads = tokio::task::JoinSet::new();
+    // Keep one outcome per input position while checking and scanning each
+    // distinct reference once. Different references can have different
+    // bindings even when they point to the same checkout.
+    let mut positions = HashMap::<_, Vec<_>>::new();
     for (index, reference) in references.into_iter().enumerate() {
-        if !is_hex(reference, 64..=64) {
-            continue;
+        if is_hex(reference, 64..=64) {
+            positions.entry(reference).or_default().push(index);
         }
+    }
+    let mut reads = tokio::task::JoinSet::new();
+    for (reference, indices) in positions {
         let reference = reference.to_owned();
         let device = device.to_owned();
         let home = state.home.clone();
@@ -282,12 +290,14 @@ pub(super) async fn git_worktree_summaries(
                     Outcome::Error { error }
                 }
             };
-            (index, result)
+            (indices, result)
         });
     }
     while let Some(result) = reads.join_next().await {
-        let (index, result) = result.map_err(|_| super::internal("read worktree summaries"))?;
-        results[index] = result;
+        let (indices, result) = result.map_err(|_| super::internal("read worktree summaries"))?;
+        for index in indices {
+            results[index] = result.clone();
+        }
     }
     // A grant change while any row is in flight invalidates the entire response.
     if git::control_revision(&state.home, device)

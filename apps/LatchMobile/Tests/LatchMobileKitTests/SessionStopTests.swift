@@ -193,7 +193,65 @@ final class SessionStopTests: XCTestCase {
         XCTAssertEqual(model.sessionBrowserSessions, model.sessions)
     }
 
-    private func makeModel() -> AppModel {
+    func testEmbeddedReloadReturnsAndPublishesOneSessionListWithoutLoadingTheCatalog() async throws {
+        StubProtocol.stub(path: "/v2/capabilities", body: Self.capabilities(savedChats: true))
+        let model = makeModel(loadsSavedChatCatalog: false)
+        await model.connectPairedDevice(pairedRecord(permission: .control))
+        let requestsBefore = StubProtocol.requests.count
+        StubProtocol.stub(path: "/v2/sessions", body: Self.list(state: "exited"))
+
+        let returned = try await model.reloadSessions()
+
+        XCTAssertEqual(returned, model.sessions)
+        XCTAssertEqual(returned.first?.state, "exited")
+        XCTAssertEqual(model.sessionBrowserSessions, returned)
+        XCTAssertEqual(StubProtocol.requests.dropFirst(requestsBefore).map(\.path), ["/v2/sessions"])
+        XCTAssertFalse(StubProtocol.requests.contains { $0.path == "/v2/saved-chats" })
+    }
+
+    func testReloadPropagatesTheGatewayFailureAndKeepsThePreviousList() async throws {
+        let model = makeModel()
+        await model.connectPairedDevice(pairedRecord(permission: .control))
+        let previous = model.sessions
+        XCTAssertEqual(previous.map(\.id), ["ses_1"])
+        StubProtocol.stub(path: "/v2/sessions", status: 503, body: #"{"reason":"unavailable"}"#)
+
+        do {
+            try await model.reloadSessions()
+            XCTFail("Expected the refresh to fail")
+        } catch let error as LatchError {
+            XCTAssertEqual(model.sessionsError, error.message)
+        }
+        XCTAssertEqual(model.sessions, previous)
+    }
+
+    func testReloadDiscardsAListThatArrivesAfterUnlink() async throws {
+        let model = makeModel(loadsSavedChatCatalog: false)
+        await model.connectPairedDevice(pairedRecord(permission: .control))
+        let path = "/v2/sessions"
+        let listsBefore = StubProtocol.requests.filter { $0.path == path }.count
+        let gate = StubProtocol.holdNextResponse(path: path)
+        defer { gate.release() }
+
+        let pending = Task { try await model.reloadSessions() }
+        for _ in 0..<100 {
+            if StubProtocol.requests.filter({ $0.path == path }).count > listsBefore { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(StubProtocol.requests.filter { $0.path == path }.count, listsBefore + 1)
+        model.unlink()
+        gate.release()
+
+        do {
+            _ = try await pending.value
+            XCTFail("An unlinked model must reject the pending response")
+        } catch LatchError.transport {
+            XCTAssertTrue(model.sessions.isEmpty)
+            XCTAssertNil(model.sessionsError)
+        }
+    }
+
+    private func makeModel(loadsSavedChatCatalog: Bool = true) -> AppModel {
         AppModel(
             pairedGatewayFactory: { _ in
                 LatchGateway(
@@ -202,7 +260,8 @@ final class SessionStopTests: XCTestCase {
                 )
             },
             newSessionFolderStore: MemoryNewSessionFolderStore(),
-            terminalUnlock: TerminalUnlock(authenticator: StubDeviceOwnerAuthenticator(), grace: 600)
+            terminalUnlock: TerminalUnlock(authenticator: StubDeviceOwnerAuthenticator(), grace: 600),
+            loadsSavedChatCatalog: loadsSavedChatCatalog
         )
     }
 
